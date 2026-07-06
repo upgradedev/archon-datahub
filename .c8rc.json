@@ -7,8 +7,8 @@
     "src/**/*.d.ts",
     "src/types.ts",
     "src/server.ts",
-    "src/datahub/mcp-client-live.ts",
-    "src/mcp/server.ts"
+    "src/config/env.ts",
+    "src/datahub/mcp-client-live.ts"
   ],
   "reporter": ["text", "lcov"],
   "report-dir": "coverage",

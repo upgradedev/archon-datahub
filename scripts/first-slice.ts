@@ -9,6 +9,7 @@
 //
 //   npm run slice:datahub
 
+import "../src/config/env.js"; // load .env first (honors the live path); no-op offline
 import { createDataHubClient, hasDataHubCreds } from "../src/datahub/mcp-client.js";
 import { auditConsistency } from "../src/audit/consistency.js";
 import { validateSnapshot } from "../src/governance/validator.js";

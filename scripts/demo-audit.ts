@@ -7,6 +7,7 @@
 //
 //   npm run audit:demo
 
+import "../src/config/env.js"; // load .env first (honors the live path); no-op offline
 import { createDataHubClient, hasDataHubCreds } from "../src/datahub/mcp-client.js";
 import { AuditPipeline } from "../src/pipeline/pipeline.js";
 import { hasLlmCreds } from "../src/llm/client.js";
