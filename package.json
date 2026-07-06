@@ -12,9 +12,9 @@
     "typecheck": "tsc --noEmit",
     "audit:demo": "tsx scripts/demo-audit.ts",
     "slice:datahub": "tsx scripts/first-slice.ts",
-    "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts",
-    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts",
-    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts"
+    "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts",
+    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts",
+    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
