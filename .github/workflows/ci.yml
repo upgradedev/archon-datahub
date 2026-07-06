@@ -1,0 +1,61 @@
+name: CI
+
+# Archon-DataHub CI — gitleaks-first, then typecheck → build → test → coverage gate.
+# Runs FULLY OFFLINE: with no DATAHUB_MCP_URL and no LLM_API_KEY the agent auto-falls
+# back to the deterministic Fakes (Fake DataHub MCP + Fake LLM), so the whole pipeline
+# is exercised end-to-end with zero secrets and zero network. The coverage gate
+# (c8, ≥80% lines/branches/functions/statements) is enforced by .c8rc.json.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1 — fail fast on any committed secret.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks detect (pinned v8.18.4, redacted)
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --no-banner
+
+  # Stage 2 — typecheck, test, and enforce the coverage gate.
+  build-test:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Coverage gate (c8 ≥80%)
+        run: npm run coverage
+
+  # Stage 3 — dependency vulnerability audit (non-blocking below high).
+  dep-audit:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: npm audit (fail on high/critical)
+        run: npm audit --audit-level=high
