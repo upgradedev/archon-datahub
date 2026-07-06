@@ -1,0 +1,4 @@
+# Shell scripts MUST stay LF-only — they run on Linux CI runners (bash chokes on
+# CRLF: `\r` becomes part of args/paths). Force LF in the working tree too, so a
+# Windows checkout never carries CRLF into CI.
+*.sh text eol=lf
