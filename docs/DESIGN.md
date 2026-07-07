@@ -64,7 +64,7 @@ The six hackathon criteria, and how each reused/new capability serves them.
 | **LLM narrator** (ported: MemoryAgent) | Narrator | **Submission Quality** (boardroom-ready summary), provider-agnostic |
 | **gitleaks-first CI + c8 ≥80% gate** (ported: conventions) | — | **Technical Execution**, **Submission Quality** |
 | **Read-only guarantee** (new framing) | pipeline + loop + server | **Real-World** (safe to point at production metadata), **Originality** |
-| **Bonus: OSS contribution** (planned) | — | **Bonus-OSS-contrib** (see roadmap) |
+| **Bonus: OSS contribution** (staged: `contrib/datahub-audit/` Skill) | — | **Bonus-OSS-contrib** — fills the `/datahub-audit` gap in `datahub-project/datahub-skills` |
 
 ## 4. Read-only + human-gate design
 
@@ -80,9 +80,10 @@ The six hackathon criteria, and how each reused/new capability serves them.
 DataHub OSS quickstart is ~14 containers — it belongs on a **cloud VM**, never the dev
 desktop (this repo is cloud-first). CI + tests + both demo scripts run entirely against
 the deterministic **Fake DataHub MCP** (fixtures), so nothing about proving the agent
-requires the heavy stack. When a real instance is available, the thin live adapter
-(`src/datahub/mcp-client-live.ts`) is pinned against captured MCP responses and the same
-pipeline runs unchanged.
+requires the heavy stack. The thin live adapter (`src/datahub/mcp-client-live.ts` +
+`src/datahub/live-mappers.ts`) is **pinned to the `acryldata/mcp-server-datahub` source**
+(tool schemas + cleaned response shapes), so the same pipeline runs unchanged the moment a
+real instance connects — no captured-response step needed first.
 
 ## 6. Phased plan to Aug 10
 
@@ -90,16 +91,37 @@ pipeline runs unchanged.
   coverage ≥80%). DataHub MCP client seam + Fake + fixtures + harvester. Self-audit +
   governance engines re-aimed. Four-agent pipeline + ReAct loop + our MCP server. First
   connected slice green offline (40 tests). Docs (README / NOTICE / this).
-- **Phase 2 — live proof.** Stand DataHub up on a cloud VM; run the live adapter against
-  it; pin the MCP response shapes; capture a real audit run (screenshots + a recorded
-  finding). Enable the real LLM narrator behind a key.
+- **Phase 2 — live proof (code DONE; live run user-only).**
+  - **Pinned the live adapter from SOURCE** (no running instance needed): the exact tool
+    names, argument schemas, and *cleaned* response shapes of `acryldata/mcp-server-datahub`
+    (`tools/{search,entities,lineage}.py` + `graphql_helpers.py`) now drive typed
+    request/response mappers in `src/datahub/live-mappers.ts` (pure, in-coverage, unit-tested
+    against captured cleaned payloads). `mcp-client-live.ts` is the transport shell only
+    (stdio via `uvx` + Streamable HTTP). Corrected every earlier guess — `search` uses the
+    `entity_type = dataset` filter DSL + `offset` paging (not a `entity_types` arg);
+    `get_entities` takes a URN array and reads the nested/flattened GraphQL entity;
+    `get_lineage` uses `upstream: true` and reads `upstreams.searchResults[].entity`.
+  - **Real LLM narrator** wired behind provider auto-detection (Anthropic / Qwen / Gemini /
+    OpenAI over one OpenAI-compatible seam; Fake in CI; injectable).
+  - **Honest live-surface scope (drives the design):** DataHub aspects are single-valued, so
+    the MCP read tools return one current view per URN. **Governance (G1–G6)** and schema
+    completeness survive live robustly; **lineage-gap** is instance-dependent; **cross-source
+    contradiction** detection *cannot fire from the read tools alone* (latest write wins) —
+    it needs aspect version history (systemMetadata / OpenAPI v3) or a cross-scan diff, a
+    Phase-3 item. The adapter tags provenance by scan time, never a fabricated source.
+  - **Remaining (user-only):** stand DataHub up on a cloud VM, point the agent at it, and
+    capture a real audit run (screenshots + a recorded finding). The adapter is correct so it
+    works the moment it connects.
 - **Phase 3 — depth.** Column-level lineage gaps (`get_lineage_paths_between`); multi-hop
   schema-break blast-radius; a findings history store (pgvector) so audits diff across
   runs; a small web view of the findings + trace.
-- **Phase 4 — submission + OSS bonus.** Demo video + write-up. **OSS contribution**: a
-  DataHub *Skill* (the skills registry) that packages "self-audit a catalog for
-  contradictions + lineage gaps" as an installable agent workflow, and/or an upstream
-  fix/example to `acryldata/mcp-server-datahub`.
+- **Phase 4 — submission + OSS bonus.** Demo video + write-up. **OSS contribution — STAGED
+  (Phase 2):** a DataHub *Skill*, `contrib/datahub-audit/`, in the official
+  `datahub-project/datahub-skills` format, packaging "audit a catalog for governance / schema
+  / sensitive-field / lineage-reachability gaps" as an installable agent workflow. It fills
+  the `/datahub-audit` slot the registry's own `datahub-search` skill references but does not
+  ship. Scoped to what the read tools can prove (no contradiction claim). The repo owner opens
+  the upstream PR when ready; nothing is auto-submitted.
 
 ## 7. Module map
 
@@ -110,7 +132,8 @@ src/
     models.ts                  DataHub entity/aspect/lineage view + sensitive-field heuristic
     fixtures.ts                deterministic catalog (baked-in contradiction/gap/violation)
     mcp-client.ts              DataHubClient seam + FakeDataHubMcpClient + factory   [NEW]
-    mcp-client-live.ts         thin live adapter over acryldata/mcp-server-datahub   [NEW, provisional]
+    mcp-client-live.ts         thin live transport shell (stdio + HTTP)               [NEW]
+    live-mappers.ts            pinned cleaned-response types + pure mappers (source)  [NEW]
   audit/
     harvest.ts                 metadata → neutral AuditFact stream (provenance-aware) [NEW]
     consistency.ts             self-audit contradiction + resolution engine  ★  [ported]
