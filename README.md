@@ -13,6 +13,10 @@ DataHub**:
   manifest, a manual edit) disagree about the same entity: different owners for one
   dataset, different types for one column. A plain catalog lookup silently returns
   whichever ranked higher; Archon flags the conflict and recommends which side to trust.
+  *This fires whenever the harvested fact stream carries multiple sources or scans* (the
+  offline fixtures today; a live catalog via a cross-scan diff — see the live-surface note
+  under "Running against a real DataHub", since a single live MCP read returns only the
+  current value per aspect).
 - **Lineage gaps** — a dataset declares an upstream that the catalog never ingested: a
   dangling lineage edge that hides schema-break risk to everything downstream.
 - **Governance violations** — ungoverned or unclassified assets (no owner, no domain, no
@@ -20,9 +24,12 @@ DataHub**:
   policy rules **G1–G6**.
 
 > **The differentiator:** a self-auditing contradiction/inconsistency engine. Most catalog
-> agents *retrieve* metadata; Archon *interrogates* it for internal disagreement, and does
-> so with a **pure, deterministic engine** that runs identically in tests and against a
-> live instance — the "self-auditing" claim is measured on the same code that ships.
+> agents *retrieve* metadata; Archon *interrogates* it for internal disagreement, with a
+> **pure, deterministic engine** that runs identically on offline fixtures and on any live
+> harvest — the "self-auditing" claim is measured on the same code that ships. (What that
+> engine *observes* depends on the fact stream it's fed: governance/schema findings fire on
+> a single live read; cross-source contradictions need a multi-source/multi-scan stream —
+> see the live-surface note below.)
 
 ## Architecture
 
