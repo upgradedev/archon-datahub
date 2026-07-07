@@ -16,6 +16,11 @@ import { callAuditTool, MCP_TOOLS } from "../../src/mcp/server.js";
 
 const SALES = "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
 
+// Always inject the Fake LLM into the pipeline's narrator so these tests are hermetic:
+// a real provider key in the ambient environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, …)
+// must not flip an offline test into a live, billable model call.
+const fakePipeline = () => new AuditPipeline({ narrator: new NarratorAgent(new FakeLlmClient()) });
+
 test("ClassifierAgent buckets the catalog by domain/platform, lineage, sensitivity", async () => {
   const snap = await new FakeDataHubMcpClient().harvestSnapshot();
   const c = new ClassifierAgent().classify(snap);
@@ -55,7 +60,7 @@ test("NarratorAgent (Fake LLM) writes a summary grounded in the finding counts",
 });
 
 test("AuditPipeline runs all four agents end-to-end and returns findings + narrative + trace", async () => {
-  const report = await new AuditPipeline().run(new FakeDataHubMcpClient());
+  const report = await fakePipeline().run(new FakeDataHubMcpClient());
   assert.ok(report.findings.length >= 5);
   // sorted highest severity first
   assert.equal(report.findings[0]!.severity, "high");
@@ -65,7 +70,7 @@ test("AuditPipeline runs all four agents end-to-end and returns findings + narra
 });
 
 test("AuditPipeline on a clean single-source catalog yields no contradictions", async () => {
-  const report = await new AuditPipeline().run(new FakeDataHubMcpClient(FIXTURE_CLEAN_REPORTS));
+  const report = await fakePipeline().run(new FakeDataHubMcpClient(FIXTURE_CLEAN_REPORTS));
   assert.equal(report.findings.filter((f) => f.type === "contradiction").length, 0);
 });
 
@@ -98,7 +103,7 @@ test("defaultAuditLoop + ALL_LOOP_TOOLS expose the read-only tool set", () => {
 });
 
 test("MCP audit_catalog tool returns the pipeline report", async () => {
-  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() };
+  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
   const res = await callAuditTool(deps, "audit_catalog", {});
   assert.ok(!res.isError);
   const report = JSON.parse((res.content[0] as { text: string }).text);
@@ -107,7 +112,7 @@ test("MCP audit_catalog tool returns the pipeline report", async () => {
 });
 
 test("MCP search_datasets + get_entity are read-only passthroughs", async () => {
-  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() };
+  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
   const search = await callAuditTool(deps, "search_datasets", { query: "sales" });
   assert.match((search.content[0] as { text: string }).text, /sales_orders/);
   const get = await callAuditTool(deps, "get_entity", { urn: SALES });
@@ -115,7 +120,7 @@ test("MCP search_datasets + get_entity are read-only passthroughs", async () => 
 });
 
 test("MCP get_entity errors on a missing urn, and unknown tools error", async () => {
-  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() };
+  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
   assert.equal((await callAuditTool(deps, "get_entity", { urn: "urn:ds:nope" })).isError, true);
   assert.equal((await callAuditTool(deps, "get_entity", {})).isError, true);
   assert.equal((await callAuditTool(deps, "bogus", {})).isError, true);
@@ -123,7 +128,7 @@ test("MCP get_entity errors on a missing urn, and unknown tools error", async ()
 });
 
 test("MCP run_audit_loop returns pending findings + trace", async () => {
-  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() };
+  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
   const res = await callAuditTool(deps, "run_audit_loop", {});
   const out = JSON.parse((res.content[0] as { text: string }).text);
   assert.equal(out.disposition, "pending");

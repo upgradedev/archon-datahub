@@ -4,7 +4,7 @@
 // narrate them. Injectable client (defaults to real LLM when LLM_API_KEY is set, else
 // the deterministic FakeLlmClient), so CI runs the narrator offline with zero spend.
 
-import { chatClient, hasLlmCreds, DEFAULT_MODEL, type LlmClient } from "../llm/client.js";
+import { chatClient, hasLlmCreds, resolveLlmProvider, DEFAULT_MODEL, type LlmClient } from "../llm/client.js";
 import { FakeLlmClient } from "../llm/fake.js";
 import type { Finding } from "../types.js";
 import type { Classification } from "./classifier.js";
@@ -19,7 +19,8 @@ const SYSTEM_PROMPT =
 
 export class NarratorAgent {
   constructor(private client: LlmClient = hasLlmCreds() ? chatClient() : new FakeLlmClient(),
-    private modelId: string = DEFAULT_MODEL) {}
+    // Default to the detected provider's model (resolved fresh), else the module default.
+    private modelId: string = resolveLlmProvider()?.model ?? DEFAULT_MODEL) {}
 
   async summarize(findings: Finding[], classification: Classification): Promise<string> {
     const counts = tally(findings);
