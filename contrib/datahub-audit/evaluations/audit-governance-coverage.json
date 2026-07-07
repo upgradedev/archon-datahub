@@ -1,0 +1,15 @@
+{
+  "skills": ["datahub-audit"],
+  "query": "Audit our catalog — how complete is our metadata governance?",
+  "expected_behavior": [
+    "Scopes the audit (platform/environment/domain) and states the denominator in the report header",
+    "Enumerates in-scope datasets read-only via search with filter=\"entity_type = dataset\", paging by offset to completion",
+    "Batches get_entities over dataset URNs and reads ownership, domain, description, deprecation, and schemaMetadata aspects",
+    "Reads get_lineage (upstream) for each dataset and records the returned upstream URNs",
+    "Evaluates the G1-G6 + L1 policy set, emitting a finding only where a rule fails",
+    "Never enables or calls mutation tools (no TOOLS_IS_MUTATION_ENABLED; no add_owners/set_domains/etc.)",
+    "Reports per-rule coverage percentages with raw counts, a ranked findings list with recommendations, and an executive summary",
+    "Does NOT claim to detect cross-source contradictions (single-valued aspects are not observable from the read tools)",
+    "Recommends a handoff to /datahub-enrich to apply accepted fixes rather than mutating from the audit"
+  ]
+}

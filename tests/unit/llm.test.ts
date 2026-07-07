@@ -46,10 +46,10 @@ test("no keys → offline (null provider, hasLlmCreds false)", () => {
 });
 
 test("ANTHROPIC_API_KEY → Anthropic OpenAI-compatible endpoint + claude-opus-4-8", () => {
-  withEnv({ ANTHROPIC_API_KEY: "sk-ant-xxx" }, () => {
+  withEnv({ ANTHROPIC_API_KEY: "test-anthropic-key" }, () => {
     const p = resolveLlmProvider()!;
     assert.equal(p.name, "anthropic");
-    assert.equal(p.apiKey, "sk-ant-xxx");
+    assert.equal(p.apiKey, "test-anthropic-key");
     assert.equal(p.baseURL, "https://api.anthropic.com/v1/");
     assert.equal(p.model, "claude-opus-4-8");
     assert.equal(hasLlmCreds(), true);
@@ -57,7 +57,7 @@ test("ANTHROPIC_API_KEY → Anthropic OpenAI-compatible endpoint + claude-opus-4
 });
 
 test("DASHSCOPE_API_KEY → Qwen via Alibaba Model Studio", () => {
-  withEnv({ DASHSCOPE_API_KEY: "sk-qwen" }, () => {
+  withEnv({ DASHSCOPE_API_KEY: "test-qwen-key" }, () => {
     const p = resolveLlmProvider()!;
     assert.equal(p.name, "qwen");
     assert.match(p.baseURL, /dashscope/);
@@ -74,7 +74,7 @@ test("GEMINI_API_KEY → Gemini OpenAI-compatible gateway", () => {
 });
 
 test("OPENAI_API_KEY → OpenAI", () => {
-  withEnv({ OPENAI_API_KEY: "sk-oa" }, () => {
+  withEnv({ OPENAI_API_KEY: "test-openai-key" }, () => {
     const p = resolveLlmProvider()!;
     assert.equal(p.name, "openai");
     assert.equal(p.baseURL, "https://api.openai.com/v1");
@@ -85,7 +85,7 @@ test("LLM_API_KEY override wins over named providers + honors LLM_BASE_URL/LLM_M
   withEnv(
     {
       LLM_API_KEY: "generic",
-      ANTHROPIC_API_KEY: "sk-ant",
+      ANTHROPIC_API_KEY: "test-anthropic-key",
       LLM_BASE_URL: "https://gateway.example/v1",
       LLM_MODEL: "custom-model",
     },
