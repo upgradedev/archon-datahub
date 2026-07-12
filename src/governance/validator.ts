@@ -1,10 +1,10 @@
 // GovernanceValidator — the deterministic governance-policy gate.
 //
 // PORTED from Archon MemoryAgent's ValidatorAgent (repos/qwen-memoryagent/src/
-// pipeline/validator.ts — the R1–R4 cross-document consistency checks) and
-// RE-AIMED from payroll-document rules (R1–R6) onto DATA-GOVERNANCE policy rules
-// (G1–G6) over DataHub catalog entities. The pattern is unchanged: one deterministic
-// ValidationResult per rule per entity, fixed thresholds, no LLM. See NOTICE.md.
+// pipeline/validator.ts — its deterministic per-rule cross-document consistency
+// checks) and RE-AIMED onto DATA-GOVERNANCE policy rules (G1–G6) over DataHub catalog
+// entities. The pattern is unchanged: one deterministic ValidationResult per rule per
+// entity, fixed thresholds, no LLM. Full origin disclosed in NOTICE.md.
 //
 // This is distinct from the self-audit consistency engine. The consistency engine
 // finds where the catalog CONTRADICTS ITSELF (two sources disagree) or has a
