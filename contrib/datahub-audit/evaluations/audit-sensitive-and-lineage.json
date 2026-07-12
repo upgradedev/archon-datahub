@@ -1,0 +1,12 @@
+{
+  "skills": ["datahub-audit"],
+  "query": "Find unclassified sensitive columns and any lineage upstreams that are missing from the catalog",
+  "expected_behavior": [
+    "Harvests dataset schema fields read-only (get_entities / list_schema_fields for wide schemas)",
+    "Flags G6 findings: schema fields whose path matches the sensitivity list but carry no tag or glossary term, listing the columns",
+    "Reads get_lineage upstream for each dataset and builds the set of catalogued URNs",
+    "Flags L1 findings: declared upstream URNs that are not in the catalogued set (unreachable/dangling lineage edges), naming the missing upstream",
+    "Ranks findings high -> low and attaches a steward-facing recommendation to each",
+    "Stays read-only and reminds the user a steward dispositions; suggests /datahub-enrich to apply fixes"
+  ]
+}
