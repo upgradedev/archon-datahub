@@ -14,9 +14,11 @@
     "slice:datahub": "tsx scripts/first-slice.ts",
     "readiness": "tsx scripts/readiness.ts",
     "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts",
-    "test:e2e": "node --import tsx --test tests/e2e/readiness.e2e.test.ts",
-    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/e2e/readiness.e2e.test.ts",
-    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/e2e/readiness.e2e.test.ts"
+    "test:security": "node --import tsx --test tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts",
+    "test:e2e": "node --import tsx --test tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts",
+    "load": "node --import tsx load/audit.js",
+    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts",
+    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

@@ -54,6 +54,13 @@ proprietary/organizational (non-Archon) code is included. This is a clean-room b
   Thin agents that wrap the ported engines in the Finding vocabulary.
 - `scripts/readiness.ts` — **NEW.** The machine-checkable readiness gate (weighted,
   evidence-based, CI-enforced) + its cassette (`tests/cassettes/`) and e2e.
+- `tests/security/*.test.ts` — **NEW.** The application-security pen-test suite (AuthZ /
+  tool-boundary, prompt-injection, governance/contradiction-engine injection, sensitive-
+  data-exposure), driving the real pipeline / loop / MCP surface offline.
+- `load/audit.js` — **NEW.** The offline, in-process k6-equivalent load harness (SLO-gated:
+  error-rate + p95) over the audit/recall hot path against the Fake backend.
+- `tests/e2e/journeys.e2e.test.ts` — **NEW.** The extensive end-to-end journey suite
+  (9 journeys) exercising scan → audit → recovery → dual-face MCP → quantified report offline.
 
 The self-audit contradiction engine (`src/audit/consistency.ts`) gained one **new option**,
 `requireDistinctSources`, used by the version-history path so a single-run edit is treated as
