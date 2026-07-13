@@ -196,16 +196,22 @@ export class LiveDataHubMcpClient implements DataHubClient {
     return histories;
   }
 
-  // Read up to MAX_VERSIONS stored versions of ONE aspect on ONE entity from GMS OpenAPI v3.
-  // version=0 is the latest; its systemMetadata.version tells us how many exist, then we
-  // fetch each older version. Any read that 404s / errors simply ends the enumeration.
+  // Read the stored versions of ONE aspect on ONE entity from GMS OpenAPI v3.
+  //
+  // DataHub's aspect version numbering is deliberately NOT trusted here. `?version=0` is the
+  // latest, and historical rows are 1..N — but how `systemMetadata.version` reports its own
+  // ordinal is deployment-dependent, so deriving the count from it risks fetching too few
+  // versions and SILENTLY missing the middle write that carries the conflict. Instead we
+  // enumerate v = 1, 2, 3… until a read returns nothing, collecting every non-null version
+  // (bounded by MAX_VERSIONS). This captures the full history regardless of how `version`
+  // is reported. Falls back to the current view (version 0) if no historical rows exist.
   private async readAspectVersions(
     gms: string,
     token: string | undefined,
     urn: string,
     aspect: MutableAspectName
   ): Promise<DhVersionedAspect[]> {
-    const MAX_VERSIONS = 20;
+    const MAX_VERSIONS = 50;
     const base = gms.replace(/\/+$/, "");
     const headers: Record<string, string> = { Accept: "application/json" };
     if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -221,17 +227,16 @@ export class LiveDataHubMcpClient implements DataHubClient {
       return wrapped && typeof wrapped === "object" ? wrapped : null;
     };
 
-    const latest = await readOne(0);
-    if (!latest) return [];
-    const n = Number(latest.systemMetadata?.version ?? "1");
     const versions: DhVersionedAspect[] = [];
-    const top = Number.isFinite(n) && n > 0 ? Math.min(n, MAX_VERSIONS) : 1;
-    for (let v = 1; v <= top; v++) {
+    for (let v = 1; v <= MAX_VERSIONS; v++) {
       const entry = await readOne(v);
-      if (entry) versions.push(entry);
+      if (!entry) break; // no more historical rows
+      versions.push(entry);
     }
-    // Fall back to the latest read if per-version enumeration returned nothing usable.
-    return versions.length > 0 ? versions : [latest];
+    if (versions.length > 0) return versions;
+    // No historical rows enumerable → fall back to the current view (version 0).
+    const latest = await readOne(0);
+    return latest ? [latest] : [];
   }
 
   // Assemble provenance reports from the live catalog: search → get_entities → get_lineage.

@@ -176,6 +176,14 @@ single-run monotonic edit produces **zero** contradictions) is a first-class tes
 genuinely on-MCP-surface **cross-scan drift** detector (`detectDrift`) is also provided,
 labeled as *drift / candidate*, never as a confirmed cross-source contradiction.
 
+> **Seeding the live demo (important):** because the recovery is gated on **distinct
+> `runId`s**, `datahub docker ingest-sample-data` alone shows *nothing* — it is a single
+> bootstrap run, so every aspect shares one `runId` (correctly read as drift, not a conflict).
+> To reproduce a real recovered contradiction, ingest the conflict as **two separate runs**:
+> e.g. emit `owner=team-finance` in one ingestion, then re-emit `owner=team-ops` for the same
+> dataset in a second ingestion. The version history then flip-flops across two `runId`s and
+> the contradiction fires.
+
 Full DataHub + MCP integration research: [`docs/DATAHUB_RESEARCH.md`](docs/DATAHUB_RESEARCH.md).
 
 ## Read-only guarantee

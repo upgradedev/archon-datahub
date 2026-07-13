@@ -202,7 +202,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     check("D3", "datahub-depth", 7, "Recorded live-DataHub run (screenshots + captured finding)", () => ({
       gated: true,
       evidence:
-        "USER-GATED: stand up `datahub docker quickstart` on a cloud VM, point the agent at it (DATAHUB_GMS_URL + PAT), run `npm run audit:demo`, capture screenshots + one recorded finding. Also swap the replay cassette for a real captured batch.",
+        "USER-GATED: stand up `datahub docker quickstart` on a cloud VM, point the agent at it (DATAHUB_GMS_URL + PAT), run `npm run audit:demo`, capture screenshots + one recorded finding. To reproduce a recovered contradiction, seed the conflict as TWO separate ingestions (distinct runIds) — a single ingest-sample-data run shares one runId and is correctly read as drift. Also swap the replay cassette for a real captured batch.",
     }))
   );
 
