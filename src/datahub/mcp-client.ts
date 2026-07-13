@@ -17,7 +17,8 @@
 import type { AuditFact } from "../types.js";
 import type { CatalogEntity, CatalogSnapshot, LineageEdge, Urn } from "./models.js";
 import { reportsToFacts, type SourceReport } from "../audit/harvest.js";
-import { FIXTURE_REPORTS } from "./fixtures.js";
+import { FIXTURE_REPORTS, FIXTURE_VERSION_HISTORY } from "./fixtures.js";
+import type { AspectVersionHistory } from "./version-history.js";
 
 // The read surface the agent needs. Mirrors the DataHub MCP server's read tools, but
 // in OUR provider-neutral vocabulary so the agent never depends on acryldata shapes.
@@ -34,6 +35,12 @@ export interface DataHubClient {
   // Provenance-aware harvest: the FULL fact stream across every source/scan, which the
   // self-audit consistency engine needs to see cross-source disagreements.
   harvestFacts(query?: string): Promise<AuditFact[]>;
+  // OPTIONAL — aspect VERSION HISTORY for the catalog's mutable governance aspects, from a
+  // DIRECT GMS read (OpenAPI v3 / Timeline), NOT the MCP read tools. This is what recovers
+  // cross-source CONTRADICTIONS on a LIVE catalog, where latest-write-wins collapses the
+  // conflict on the current view (see src/datahub/version-history.ts). Optional so a client
+  // that only has the MCP read surface can omit it; the pipeline degrades gracefully.
+  harvestVersionHistories?(query?: string): Promise<AspectVersionHistory[]>;
 }
 
 // Reduce a provenance-aware report stream to the CURRENT view — the latest report per
@@ -69,7 +76,14 @@ export function snapshotFromReports(reports: SourceReport[]): CatalogSnapshot {
 // the live client implements. Injectable — tests pass their own reports; the default
 // is the shipped fixture catalog.
 export class FakeDataHubMcpClient implements DataHubClient {
-  constructor(private reports: SourceReport[] = FIXTURE_REPORTS) {}
+  private histories: AspectVersionHistory[];
+
+  // `histories` defaults to the shipped version-history fixtures ONLY for the default
+  // catalog; a caller that injects its own reports (e.g. a clean single-source catalog)
+  // gets no version history unless it passes one explicitly — so a "clean" Fake stays clean.
+  constructor(private reports: SourceReport[] = FIXTURE_REPORTS, histories?: AspectVersionHistory[]) {
+    this.histories = histories ?? (reports === FIXTURE_REPORTS ? FIXTURE_VERSION_HISTORY : []);
+  }
 
   private filter(query?: string): SourceReport[] {
     if (!query || query === "*" || query.trim().length === 0) return this.reports;
@@ -99,6 +113,16 @@ export class FakeDataHubMcpClient implements DataHubClient {
 
   async harvestFacts(query?: string): Promise<AuditFact[]> {
     return reportsToFacts(this.filter(query));
+  }
+
+  // Offline aspect version history: the deterministic fixture histories, filtered by the
+  // same query rule. Mirrors what a live direct-GMS read would assemble (the conflicting
+  // per-run values the current view collapsed), so the contradiction-recovery path fires
+  // identically offline and online.
+  async harvestVersionHistories(query?: string): Promise<AspectVersionHistory[]> {
+    if (!query || query === "*" || query.trim().length === 0) return this.histories;
+    const q = query.toLowerCase();
+    return this.histories.filter((h) => h.urn.toLowerCase().includes(q));
   }
 }
 

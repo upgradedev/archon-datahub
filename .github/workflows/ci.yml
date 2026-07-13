@@ -45,7 +45,25 @@ jobs:
       - name: Coverage gate (c8 ≥80%)
         run: npm run coverage
 
-  # Stage 3 — dependency vulnerability audit (non-blocking below high).
+  # Stage 3 — readiness gate. Encodes the hackathon criteria as machine-checkable checks
+  # with REAL evidence (runs the pipeline, ReAct loop, MCP round-trip, and the live
+  # contradiction-recovery path; statically verifies the read-only tool surface + docs/NOTICE
+  # consistency). Fails the build if the automatable completeness drops below 95%.
+  readiness:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Readiness gate (automatable ≥ 95%)
+        run: npm run readiness
+
+  # Stage 4 — dependency vulnerability audit (non-blocking below high).
   dep-audit:
     needs: secret-scan
     runs-on: ubuntu-latest

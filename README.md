@@ -13,10 +13,10 @@ DataHub**:
   manifest, a manual edit) disagree about the same entity: different owners for one
   dataset, different types for one column. A plain catalog lookup silently returns
   whichever ranked higher; Archon flags the conflict and recommends which side to trust.
-  *This fires whenever the harvested fact stream carries multiple sources or scans* (the
-  offline fixtures today; a live catalog via a cross-scan diff — see the live-surface note
-  under "Running against a real DataHub", since a single live MCP read returns only the
-  current value per aspect).
+  On a **live** catalog latest-write-wins hides the conflict on the current view — so Archon
+  recovers it from **aspect version history** (a direct GMS OpenAPI v3 read, gated on the
+  `systemMetadata.runId` that wrote each version), firing on real, live-shaped data and not
+  only on offline fixtures. See "Recovering contradictions on a live catalog" below.
 - **Lineage gaps** — a dataset declares an upstream that the catalog never ingested: a
   dangling lineage edge that hides schema-break risk to everything downstream.
 - **Governance violations** — ungoverned or unclassified assets (no owner, no domain, no
@@ -25,11 +25,12 @@ DataHub**:
 
 > **The differentiator:** a self-auditing contradiction/inconsistency engine. Most catalog
 > agents *retrieve* metadata; Archon *interrogates* it for internal disagreement, with a
-> **pure, deterministic engine** that runs identically on offline fixtures and on any live
-> harvest — the "self-auditing" claim is measured on the same code that ships. (What that
-> engine *observes* depends on the fact stream it's fed: governance/schema findings fire on
-> a single live read; cross-source contradictions need a multi-source/multi-scan stream —
-> see the live-surface note below.)
+> **pure, deterministic engine** that runs identically on offline fixtures and on live-shaped
+> data — the "self-auditing" claim is measured on the same code that ships. On a live catalog
+> it recovers cross-source contradictions from **aspect version history** (a direct GMS read),
+> so the differentiator fires on real data, not only fixtures — with an honest distinct-source
+> gate that never flags a benign single-run edit. See "Recovering contradictions on a live
+> catalog" below.
 
 ## Architecture
 
@@ -150,12 +151,30 @@ single-valued — a read returns one *current* value per aspect — so:
   about absence of aspects on the current view).
 - **Lineage-gap** detection depends on whether declared-but-uningested upstreams surface in
   the search/graph index; it is instance-dependent.
-- **Cross-source contradiction** detection (the offline differentiator) **cannot fire from
-  the MCP read tools alone** — two ingestion sources writing the same aspect overwrite each
-  other, so only the latest is queryable. Recovering it needs aspect **version history**
-  (systemMetadata / the GMS OpenAPI v3 aspect endpoints) or a cross-scan diff of stored
-  harvests — a Phase-3 item. The live adapter therefore tags provenance by **scan time**
-  (`scanId`), not a fabricated source.
+- **Cross-source contradiction** detection (the differentiator) **cannot fire from the MCP
+  read tools alone** — two ingestion sources writing the same aspect overwrite each other, so
+  only the latest is queryable through `search`/`get_entities`/`get_lineage`. Archon
+  **recovers** it (see below) from a complementary **direct GMS read**, never claiming the MCP
+  read tools expose what they don't.
+
+### Recovering contradictions on a live catalog (the differentiator, live)
+
+DataHub retains every prior write: each aspect version carries `systemMetadata` with the
+`runId` that produced it (GMS **OpenAPI v3** `…/entity/dataset/{urn}/{aspect}?systemMetadata=true`;
+the **Timeline API** `/openapi/v2/timeline/v1/{urn}` is the equivalent change-log surface).
+So `harvestVersionHistories()` does a **direct GMS read** of each mutable aspect's version
+list and feeds it to the *same* pure self-audit engine
+([`src/datahub/version-history.ts`](src/datahub/version-history.ts)). Two ingestion runs
+asserting conflicting values (owner=finance from the Snowflake connector, owner=ops from the
+dbt manifest) resurface as a real contradiction the current view had hidden.
+
+**Two honesty guards.** (1) This is a **direct GMS read, not an MCP tool** — we do not claim
+the MCP read tools do it. (2) A value that merely *changed* across writes from **one** run is
+benign **drift**, not a conflict; the engine runs with `requireDistinctSources: true`, so only
+histories that **flip-flop between distinct `runId`s** are flagged. The negative case (a
+single-run monotonic edit produces **zero** contradictions) is a first-class test. A
+genuinely on-MCP-surface **cross-scan drift** detector (`detectDrift`) is also provided,
+labeled as *drift / candidate*, never as a confirmed cross-source contradiction.
 
 Full DataHub + MCP integration research: [`docs/DATAHUB_RESEARCH.md`](docs/DATAHUB_RESEARCH.md).
 
@@ -171,8 +190,17 @@ nothing in the pipeline or the loop writes back to DataHub.
 - **Unit tests:** `node --test` over the consistency engine, governance validator, DataHub
   MCP client + harvester, and the pipeline / ReAct loop / MCP tools, the pinned live-MCP mappers, and LLM provider detection (62 tests).
 - **Coverage gate:** `c8` at **≥80%** lines/branches/functions/statements (`.c8rc.json`).
+- **Readiness gate** (`npm run readiness` · [`scripts/readiness.ts`](scripts/readiness.ts)):
+  a machine-checkable, weighted scorecard of the hackathon criteria computed from **real
+  evidence** — it runs the pipeline, the ReAct loop, the MCP round-trip, and the live
+  contradiction-recovery path, and statically verifies the read-only tool surface + the
+  docs/NOTICE consistency. It emits `readiness.json` and **fails CI if the automatable
+  completeness drops below 95%**. It reports a second number, **completeness (incl.
+  user-gated)**, which stays below 100 until the user-gated live proof (a recorded live
+  DataHub run, a real captured cassette, the demo video) lands — so "95% automatable" is
+  never mistaken for "95% ready".
 - **CI** (`.github/workflows/ci.yml`): gitleaks (secret scan, fail-fast) → typecheck →
-  test → coverage gate → dependency audit. Fully offline via the Fakes.
+  test → coverage gate → **readiness gate** → dependency audit. Fully offline via the Fakes.
 
 ## Pre-existing code disclosure
 

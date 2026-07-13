@@ -37,15 +37,27 @@ proprietary/organizational (non-Archon) code is included. This is a clean-room b
   official `acryldata/mcp-server-datahub`. There was **no MCP client** in the source
   projects (they only had an MCP *server*), so this is original code: the `DataHubClient`
   interface, the `FakeDataHubMcpClient`, and the current-view merge.
-- `src/datahub/mcp-client-live.ts` — **NEW.** The thin, provisional live adapter over the
-  real DataHub MCP server (HTTP transport).
+- `src/datahub/mcp-client-live.ts` — **NEW.** The thin live adapter over the real DataHub
+  MCP server (stdio + Streamable HTTP), plus the direct-GMS OpenAPI v3 version-history read
+  that feeds the contradiction-recovery path.
+- `src/datahub/version-history.ts` — **NEW.** The aspect **version-history recovery**: pinned
+  OpenAPI v3 versioned-aspect types + pure mappers that turn an aspect's per-run history into
+  the neutral fact stream, and the distinct-source-gated audit that recovers cross-source
+  contradictions a live catalog's current view hid. Also the cross-scan drift detector.
 - `src/datahub/models.ts`, `src/datahub/fixtures.ts`, `src/audit/harvest.ts`,
-  `src/types.ts` — **NEW.** The DataHub domain model, deterministic fixtures, and the
-  harvest seam that turns catalog metadata into the neutral fact stream.
+  `src/types.ts` — **NEW.** The DataHub domain model, deterministic fixtures (incl. the
+  version-history fixtures), and the harvest seam that turns catalog metadata into the
+  neutral fact stream.
 - `src/pipeline/pipeline.ts` — **NEW.** The four-agent orchestration (classifier →
-  lineage-analyzer → governance-auditor → narrator).
+  lineage-analyzer → governance-auditor → narrator), incl. the version-history merge + dedupe.
 - `src/agents/classifier.ts`, `lineage-analyzer.ts`, `governance-auditor.ts` — **NEW.**
   Thin agents that wrap the ported engines in the Finding vocabulary.
+- `scripts/readiness.ts` — **NEW.** The machine-checkable readiness gate (weighted,
+  evidence-based, CI-enforced) + its cassette (`tests/cassettes/`) and e2e.
+
+The self-audit contradiction engine (`src/audit/consistency.ts`) gained one **new option**,
+`requireDistinctSources`, used by the version-history path so a single-run edit is treated as
+benign drift rather than a contradiction. The core algorithm is otherwise unchanged.
 
 ## Note on `repos/nebius`
 

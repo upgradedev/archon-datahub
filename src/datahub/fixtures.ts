@@ -21,6 +21,7 @@
 
 import type { SourceReport } from "../audit/harvest.js";
 import type { CatalogEntity } from "./models.js";
+import type { AspectVersionHistory } from "./version-history.js";
 
 const SALES_ORDERS = "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
 const RAW_ORDERS = "urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD)";
@@ -132,3 +133,74 @@ export const FIXTURE_REPORTS: SourceReport[] = [
 export const FIXTURE_CLEAN_REPORTS: SourceReport[] = FIXTURE_REPORTS.filter(
   (r) => r.source === "snowflake-ingest"
 );
+
+// ── Aspect version-history fixtures (the LIVE contradiction-recovery path) ──────
+// Shaped as the OpenAPI v3 versioned-aspect read returns them: each version wraps the raw
+// PDL aspect `value` with `systemMetadata` (version, lastObserved epoch-ms, runId). These
+// mirror what a direct GMS read of an aspect's history yields on a real DataHub — the
+// provenance the MCP read tools' current-view collapses. See version-history.ts.
+//
+// Two histories, each proving one half of the honest semantics:
+//   • sales_orders ownership FLIP-FLOPS between two ingestion runs (snowflake-connector
+//     asserts team-finance; dbt-manifest asserts team-ops) → a GENUINE cross-source
+//     contradiction that latest-write-wins hid. MUST fire.
+//   • sales_orders.amount field type flip-flops between the same two runs (number vs
+//     string) → the silent schema-break contradiction. MUST fire.
+//   • raw_orders ownership is edited monotonically within ONE run (a correction:
+//     team-data → team-dataeng, both from snowflake-connector) → benign DRIFT. MUST NOT
+//     fire — this is the negative case the distinct-source gate must respect.
+const RUN_SNOWFLAKE = "snowflake-connector-2026-06-01";
+const RUN_DBT = "dbt-manifest-2026-07-01";
+const T1 = new Date("2026-06-01T09:00:00.000Z").getTime();
+const T2 = new Date("2026-07-01T09:00:00.000Z").getTime();
+const T3 = new Date("2026-07-15T09:00:00.000Z").getTime();
+
+export const FIXTURE_VERSION_HISTORY: AspectVersionHistory[] = [
+  {
+    urn: SALES_ORDERS,
+    aspect: "ownership",
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:team-finance" }] },
+        systemMetadata: { version: "1", lastObserved: T1, runId: RUN_SNOWFLAKE },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:team-ops" }] },
+        systemMetadata: { version: "2", lastObserved: T2, runId: RUN_DBT },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:team-finance" }] },
+        systemMetadata: { version: "3", lastObserved: T3, runId: RUN_SNOWFLAKE },
+      },
+    ],
+  },
+  {
+    urn: SALES_ORDERS,
+    aspect: "schemaMetadata",
+    versions: [
+      {
+        value: { fields: [{ fieldPath: "amount", nativeDataType: "NUMBER" }] },
+        systemMetadata: { version: "1", lastObserved: T1, runId: RUN_SNOWFLAKE },
+      },
+      {
+        value: { fields: [{ fieldPath: "amount", nativeDataType: "STRING" }] },
+        systemMetadata: { version: "2", lastObserved: T2, runId: RUN_DBT },
+      },
+    ],
+  },
+  {
+    // Negative case: a single-run monotonic correction — DRIFT, not a contradiction.
+    urn: RAW_ORDERS,
+    aspect: "ownership",
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:team-data" }] },
+        systemMetadata: { version: "1", lastObserved: T1, runId: RUN_SNOWFLAKE },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:team-dataeng" }] },
+        systemMetadata: { version: "2", lastObserved: T2, runId: RUN_SNOWFLAKE },
+      },
+    ],
+  },
+];
