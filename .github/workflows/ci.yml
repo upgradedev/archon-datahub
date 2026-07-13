@@ -63,7 +63,7 @@ jobs:
       - name: Readiness gate (automatable ≥ 95%)
         run: npm run readiness
 
-  # Stage 4 — dependency vulnerability audit (non-blocking below high).
+  # Stage 4 — dependency vulnerability audit (fails on high/critical).
   dep-audit:
     needs: secret-scan
     runs-on: ubuntu-latest
@@ -77,3 +77,39 @@ jobs:
         run: npm ci
       - name: npm audit (fail on high/critical)
         run: npm audit --audit-level=high
+
+  # Stage 5 — application-security PEN-TEST gate. Runs the real security suite (authz /
+  # tool-boundary, prompt-injection, governance/contradiction-engine injection, sensitive-
+  # data-exposure) AND the SCA/CVE gate (npm audit). Fully offline — Fakes, no creds.
+  pen-test:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Security suite (authz · prompt-injection · engine-injection · data-exposure)
+        run: npm run test:security
+      - name: SCA / CVE gate (npm audit, fail on high/critical)
+        run: npm audit --audit-level=high
+
+  # Stage 6 — LOAD test. Drives the audit/recall hot path under concurrency against the
+  # offline Fake backend and asserts the SLO (hard gate: error_rate == 0; p95 under budget).
+  # Bounded iterations; a breach exits non-zero and reddens the build.
+  load:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Load test (offline, SLO-gated)
+        run: npm run load

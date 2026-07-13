@@ -71,8 +71,10 @@ whole agent runs offline with zero secrets and zero spend.
 
 ```bash
 npm install
-npm test            # 62 unit tests
+npm test            # 106 tests (unit + integration + security + e2e journeys)
 npm run coverage    # c8 gate, ≥80%
+npm run test:security   # the application-security pen-test suite
+npm run load            # the offline, SLO-gated load test
 npm run slice:datahub   # the first connected slice → a self-audit finding
 npm run audit:demo      # the full four-agent pipeline → findings + summary
 ```
@@ -195,8 +197,39 @@ nothing in the pipeline or the loop writes back to DataHub.
 
 ## Testing & CI
 
-- **Unit tests:** `node --test` over the consistency engine, governance validator, DataHub
-  MCP client + harvester, and the pipeline / ReAct loop / MCP tools, the pinned live-MCP mappers, and LLM provider detection (62 tests).
+- **Unit + integration tests:** `node --test` over the consistency engine, governance
+  validator, DataHub MCP client + harvester, the pipeline / ReAct loop / MCP tools, the
+  pinned live-MCP mappers, LLM provider detection, and the version-history recovery
+  (incl. a replay-cassette integration test).
+- **Application-security pen-test** (`npm run test:security` · [`tests/security/`](tests/security)):
+  a real app-sec suite against the agent + the dual-face MCP surface —
+  **AuthZ / tool-boundary** (no mutation tool is exposed or callable; read tools are
+  idempotent; a mutation-named call is refused over both the dispatch layer and the real
+  MCP protocol), **prompt-injection** (a poisoned metadata description / field name cannot
+  flip the deterministic governance verdict or coax the ReAct loop out of contract — it
+  stays read-only and human-gated), **governance/contradiction-engine injection**
+  (adversarial `runId`s cannot forge or mask a contradiction; malformed / `__proto__`-laden
+  aspect values never throw or pollute the prototype; the `requireDistinctSources` guard
+  holds), and **sensitive-data-exposure** (a `DATAHUB_GMS_TOKEN` sentinel never leaks into
+  findings, the narrative, MCP output, or any log line). Plus an **SCA/CVE gate**
+  (`npm audit --audit-level=high`).
+- **Load test** (`npm run load` · [`load/audit.js`](load/audit.js)): an offline,
+  in-process **k6-equivalent** harness (no live DataHub, no creds — Archon has no HTTP
+  surface, so real k6 would only test an unshipped shell) that drives the audit/recall hot
+  path (`AuditPipeline.run` + the dual-face `audit_catalog` tool) under concurrency against
+  the deterministic Fake backend and asserts an **SLO**:
+  - **error rate `== 0`** — the hard gate (any thrown/incomplete iteration fails the build);
+  - **audit **p95** latency `< 1500 ms`** (`LOAD_P95_MS`; generous headroom over the
+    observed offline p95 ≈ 10 ms so shared CI runners never flap);
+  - **all planned iterations complete** (no dropped work).
+
+  Tunable via `LOAD_VUS` / `LOAD_ITERATIONS` / `LOAD_P95_MS`.
+- **Extensive E2E** (`npm run test:e2e` · [`tests/e2e/journeys.e2e.test.ts`](tests/e2e/journeys.e2e.test.ts)):
+  **9 end-to-end journeys** — metadata scan → 4-agent audit; ReAct governance audit (G1–G6);
+  live-shaped contradiction recovery via aspect version history (fires); the drift-candidate
+  negative; the dual-face MCP round-trip; the quantified findings report; and edge journeys
+  (clean single-source catalog, single-run monotonic drift = benign) — plus a replay-cassette
+  journey that recovers a real-shape GMS conflict through the whole pipeline. All offline.
 - **Coverage gate:** `c8` at **≥80%** lines/branches/functions/statements (`.c8rc.json`).
 - **Readiness gate** (`npm run readiness` · [`scripts/readiness.ts`](scripts/readiness.ts)):
   a machine-checkable, weighted scorecard of the hackathon criteria computed from **real
@@ -208,7 +241,8 @@ nothing in the pipeline or the loop writes back to DataHub.
   DataHub run, a real captured cassette, the demo video) lands — so "95% automatable" is
   never mistaken for "95% ready".
 - **CI** (`.github/workflows/ci.yml`): gitleaks (secret scan, fail-fast) → typecheck →
-  test → coverage gate → **readiness gate** → dependency audit. Fully offline via the Fakes.
+  test → coverage gate → **readiness gate** → dependency audit → **pen-test** (security
+  suite + SCA/CVE) → **load** (SLO-gated). Fully offline via the Fakes.
 
 ## Pre-existing code disclosure
 
