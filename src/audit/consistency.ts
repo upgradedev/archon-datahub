@@ -95,6 +95,16 @@ export interface AuditOptions {
   // more authoritative for a RAW attribute value. Anything not in the map falls
   // back to the neutral/structured rank; see DEFAULT_KIND_AUTHORITY.
   kindAuthority?: Record<string, number>;
+  // When true, a disagreement is only reported as a CONTRADICTION when the
+  // conflicting facts span AT LEAST TWO DISTINCT `source`s. This is the honest gate
+  // for the version-history recovery path (src/datahub/version-history.ts): an aspect
+  // whose value merely CHANGED over successive writes from the SAME ingestion run is
+  // benign drift (a correction), not a cross-source conflict. Only when two DIFFERENT
+  // ingestion runs (`systemMetadata.runId`) assert conflicting values — the history
+  // flip-flops between sources — has latest-write-wins actually hidden a real
+  // disagreement. Default false (backward-compatible: fixtures already carry distinct
+  // sources, so the offline behavior is unchanged).
+  requireDistinctSources?: boolean;
 }
 
 // Metadata keys that name the entity itself or its cross-references — they are
@@ -292,6 +302,7 @@ function fmt(v: unknown): string {
 // lineage references. Pure — no I/O. The caller supplies the facts in scope.
 export function auditConsistency(facts: AuditFact[], opts: AuditOptions = {}): ConsistencyReport {
   const tol = opts.numericTolerance ?? 0.5;
+  const requireDistinctSources = opts.requireDistinctSources ?? false;
 
   // Group facts by the entity they describe.
   const bySubject = new Map<string, AuditFact[]>();
@@ -324,6 +335,14 @@ export function auditConsistency(facts: AuditFact[], opts: AuditOptions = {}): C
         else distinct.push({ value: c.value, carriers: [c] });
       }
       if (distinct.length < 2) continue; // all agree → consistent
+
+      // Honest gate for the version-history path: a value that merely changed across
+      // writes from ONE source is drift, not a contradiction. Require the conflicting
+      // facts to come from ≥2 distinct sources before flagging a cross-source conflict.
+      if (requireDistinctSources) {
+        const sources = new Set(carriers.map((c) => c.m.source));
+        if (sources.size < 2) continue;
+      }
 
       const resolution = resolveContradiction(
         distinct.map((d) => ({ value: d.value, facts: d.carriers.map((c) => c.m) })),

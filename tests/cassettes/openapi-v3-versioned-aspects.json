@@ -1,0 +1,59 @@
+{
+  "_about": "Replay cassette of DataHub GMS OpenAPI v3 versioned-aspect responses (GET /openapi/v3/entity/dataset/{urn}/{aspect}?systemMetadata=true&version=N). Each `response` is exactly the JSON body the live client's readAspectVersions() parses. Replaying these through the pinned mappers proves the version-history recovery works against the REAL response shape without a running instance.",
+  "_provenance": {
+    "shape_source": "The systemMetadata envelope { value, systemMetadata: { properties, version, lastObserved, lastRunId, runId } } and the verbatim globalTags entry below are taken from the published DataHub OpenAPI guide (docs.datahub.com/docs/api/openapi/openapi-usage-guide). This is REAL-SHAPE (pinned from DataHub's own docs), not our interpretation of source code.",
+    "pending_real_capture": "A capture from a running GMS on a cloud VM is USER-GATED (no live instance in CI). Replace the ownership/schema history entries below with a real captured batch when the demo VM is stood up; the docs-verbatim globalTags entry already anchors the envelope shape.",
+    "captured_at": null
+  },
+  "entries": [
+    {
+      "_note": "VERBATIM from docs.datahub.com OpenAPI guide — anchors the { value, systemMetadata } envelope + the systemMetadata field names/types.",
+      "request": "GET /openapi/v3/entity/dataset/urn:li:dataset:(urn:li:dataPlatform:hive,fct_users_created,PROD)/globalTags?systemMetadata=true",
+      "response": {
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:hive,fct_users_created,PROD)",
+        "globalTags": {
+          "value": { "tags": [{ "tag": "urn:li:tag:NeedsDocumentation" }] },
+          "systemMetadata": {
+            "properties": { "appSource": "ui" },
+            "version": "1",
+            "lastObserved": 0,
+            "lastRunId": "no-run-id-provided",
+            "runId": "no-run-id-provided"
+          }
+        }
+      }
+    },
+    {
+      "_note": "ownership version 1 — written by the Snowflake connector ingestion run.",
+      "request": "GET /openapi/v3/entity/dataset/urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)/ownership?systemMetadata=true&version=1",
+      "response": {
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+        "ownership": {
+          "value": { "owners": [{ "owner": "urn:li:corpGroup:team-finance", "type": "DATAOWNER" }] },
+          "systemMetadata": {
+            "version": "1",
+            "lastObserved": 1748854800000,
+            "lastRunId": "snowflake-connector-2026-06-01",
+            "runId": "snowflake-connector-2026-06-01"
+          }
+        }
+      }
+    },
+    {
+      "_note": "ownership version 2 — the dbt manifest ingestion run overwrote the owner. Latest-write-wins hides this on the current view; the version history recovers it.",
+      "request": "GET /openapi/v3/entity/dataset/urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)/ownership?systemMetadata=true&version=2",
+      "response": {
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+        "ownership": {
+          "value": { "owners": [{ "owner": "urn:li:corpGroup:team-ops", "type": "DATAOWNER" }] },
+          "systemMetadata": {
+            "version": "2",
+            "lastObserved": 1751360400000,
+            "lastRunId": "dbt-manifest-2026-07-01",
+            "runId": "dbt-manifest-2026-07-01"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -106,15 +106,26 @@ real instance connects — no captured-response step needed first.
   - **Honest live-surface scope (drives the design):** DataHub aspects are single-valued, so
     the MCP read tools return one current view per URN. **Governance (G1–G6)** and schema
     completeness survive live robustly; **lineage-gap** is instance-dependent; **cross-source
-    contradiction** detection *cannot fire from the read tools alone* (latest write wins) —
-    it needs aspect version history (systemMetadata / OpenAPI v3) or a cross-scan diff, a
-    Phase-3 item. The adapter tags provenance by scan time, never a fabricated source.
+    contradiction** detection *cannot fire from the read tools alone* (latest write wins).
+    **Recovered in Phase 3 (below):** a direct GMS read of aspect **version history**
+    (systemMetadata `runId` / OpenAPI v3 / Timeline) resurfaces the conflicting per-run
+    values. The adapter tags provenance by the version's `runId`, never a fabricated source.
   - **Remaining (user-only):** stand DataHub up on a cloud VM, point the agent at it, and
     capture a real audit run (screenshots + a recorded finding). The adapter is correct so it
     works the moment it connects.
-- **Phase 3 — depth.** Column-level lineage gaps (`get_lineage_paths_between`); multi-hop
-  schema-break blast-radius; a findings history store (pgvector) so audits diff across
-  runs; a small web view of the findings + trace.
+- **Phase 3 — depth + LIVE contradiction recovery (DONE for the flagship).**
+  - **Version-history contradiction recovery (DONE).** `src/datahub/version-history.ts` +
+    `LineageAnalyzerAgent.analyzeVersionHistory` + `harvestVersionHistories()` on the live
+    adapter: a **direct GMS OpenAPI v3 read** of each mutable aspect's version list (each
+    version carrying `systemMetadata.runId`) feeds the *same* self-audit engine, so the
+    flagship cross-source contradiction fires on **live-shaped** data — gated on
+    `requireDistinctSources` so a single-run edit is drift, not a conflict. Proven by
+    `tests/unit/version-history.test.ts` (positive + negative) and a replay-cassette
+    integration test against DataHub's real OpenAPI v3 response shape.
+  - **Readiness gate (DONE).** `scripts/readiness.ts` — weighted, evidence-based, CI-enforced
+    (≥95% automatable), with a separate honest completeness number for the user-gated live proof.
+  - **Still open:** column-level lineage gaps (`get_lineage_paths_between`); multi-hop
+    schema-break blast-radius; a persistent findings store; a small web view of findings + trace.
 - **Phase 4 — submission + OSS bonus.** Demo video + write-up. **OSS contribution — STAGED
   (Phase 2):** a DataHub *Skill*, `contrib/datahub-audit/`, in the official
   `datahub-project/datahub-skills` format, packaging "audit a catalog for governance / schema

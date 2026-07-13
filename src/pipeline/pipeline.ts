@@ -45,7 +45,19 @@ export class AuditPipeline {
     const facts = await client.harvestFacts(query);
 
     const classification = this.classifier.classify(snapshot);
-    const lineageFindings = this.lineage.analyze(facts);
+    const factFindings = this.lineage.analyze(facts);
+
+    // Version-history recovery (the LIVE contradiction path): if the client can supply
+    // aspect version history (a direct GMS read — OpenAPI v3 / Timeline), run the self-audit
+    // over it too. On a live catalog latest-write-wins hides cross-source contradictions on
+    // the current view, so THIS is where they resurface; offline it re-derives the same
+    // fixture contradictions, which we DEDUPE against the fact-based ones below.
+    const historyFindings = client.harvestVersionHistories
+      ? this.lineage.analyzeVersionHistory(await client.harvestVersionHistories(query))
+      : [];
+    const lineageFindings = dedupeFindings([...factFindings, ...historyFindings]);
+    const versionHistoryContradictions = historyFindings.filter((f) => f.type === "contradiction").length;
+
     const governanceFindings = this.governance.audit(snapshot);
 
     // Deterministic ordering: highest severity first, then by type + subject.
@@ -65,7 +77,12 @@ export class AuditPipeline {
       narrative,
       trace: [
         { agent: "classifier", produced: `${classification.totalEntities} entities classified` },
-        { agent: "lineage-analyzer", produced: `${lineageFindings.length} contradiction/lineage finding(s)` },
+        {
+          agent: "lineage-analyzer",
+          produced:
+            `${lineageFindings.length} contradiction/lineage finding(s)` +
+            ` (${versionHistoryContradictions} recovered from aspect version history)`,
+        },
         { agent: "governance-auditor", produced: `${governanceFindings.length} governance finding(s)` },
         { agent: "narrator", produced: "executive summary" },
       ],
@@ -75,4 +92,20 @@ export class AuditPipeline {
 
 function sev(s: Finding["severity"]): number {
   return s === "high" ? 3 : s === "medium" ? 2 : 1;
+}
+
+// Dedupe findings by their identity (type + subject + attribute). The fact-based path and
+// the version-history path can independently derive the SAME contradiction (offline they
+// both see the fixture conflict); we keep one. First occurrence wins (fact-based first).
+function dedupeFindings(findings: Finding[]): Finding[] {
+  const seen = new Set<string>();
+  const out: Finding[] = [];
+  for (const f of findings) {
+    const attr = (f.detail as { attribute?: unknown } | undefined)?.attribute;
+    const key = `${f.type}␟${f.subject}␟${typeof attr === "string" ? attr : ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(f);
+  }
+  return out;
 }

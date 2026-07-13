@@ -12,9 +12,11 @@
     "typecheck": "tsc --noEmit",
     "audit:demo": "tsx scripts/demo-audit.ts",
     "slice:datahub": "tsx scripts/first-slice.ts",
-    "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/integration/mcp-transport.test.ts",
-    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/integration/mcp-transport.test.ts",
-    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/integration/mcp-transport.test.ts"
+    "readiness": "tsx scripts/readiness.ts",
+    "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts",
+    "test:e2e": "node --import tsx --test tests/e2e/readiness.e2e.test.ts",
+    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/e2e/readiness.e2e.test.ts",
+    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/e2e/readiness.e2e.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

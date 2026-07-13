@@ -36,6 +36,11 @@ import {
   type DhLineageResponse,
   type DhSearchResponse,
 } from "./live-mappers.js";
+import type {
+  AspectVersionHistory,
+  DhVersionedAspect,
+  MutableAspectName,
+} from "./version-history.js";
 
 // The DataHub MCP server tags every catalogued asset with its dataPlatform, but its READ
 // tools return a single current view per URN (aspects are single-valued). So a live harvest
@@ -162,6 +167,76 @@ export class LiveDataHubMcpClient implements DataHubClient {
 
   async harvestFacts(query?: string): Promise<AuditFact[]> {
     return reportsToFacts(await this.reports(query));
+  }
+
+  // Aspect VERSION HISTORY — the contradiction-recovery read. This is a DIRECT GMS read
+  // over the OpenAPI v3 versioned-aspect endpoints (systemMetadata=true), NOT one of the
+  // DataHub MCP read tools: the MCP tools return only the current view, so the cross-source
+  // conflict that latest-write-wins collapsed is invisible to them. GMS still retains every
+  // prior write with the `runId` that produced it, so reading an aspect's version list
+  // resurfaces the conflicting per-run values that `version-history.ts` audits.
+  //
+  // Requires DATAHUB_GMS_URL (+ a PAT). Bounded per aspect. Exercised against a live GMS on
+  // a cloud VM (user-gated) — version-enumeration semantics are instance/version-dependent,
+  // so this transport is deliberately outside the coverage gate; the PURE mapping + audit it
+  // feeds (version-history.ts) is fully unit-tested.
+  async harvestVersionHistories(query?: string): Promise<AspectVersionHistory[]> {
+    const gms = process.env.DATAHUB_GMS_URL;
+    if (!gms) return [];
+    const token = process.env.DATAHUB_GMS_TOKEN;
+    const urns = await this.search(query);
+    const aspects: MutableAspectName[] = ["ownership", "schemaMetadata", "domains", "deprecation"];
+    const histories: AspectVersionHistory[] = [];
+    for (const urn of urns) {
+      for (const aspect of aspects) {
+        const versions = await this.readAspectVersions(gms, token, urn, aspect);
+        if (versions.length > 0) histories.push({ urn, aspect, versions });
+      }
+    }
+    return histories;
+  }
+
+  // Read the stored versions of ONE aspect on ONE entity from GMS OpenAPI v3.
+  //
+  // DataHub's aspect version numbering is deliberately NOT trusted here. `?version=0` is the
+  // latest, and historical rows are 1..N — but how `systemMetadata.version` reports its own
+  // ordinal is deployment-dependent, so deriving the count from it risks fetching too few
+  // versions and SILENTLY missing the middle write that carries the conflict. Instead we
+  // enumerate v = 1, 2, 3… until a read returns nothing, collecting every non-null version
+  // (bounded by MAX_VERSIONS). This captures the full history regardless of how `version`
+  // is reported. Falls back to the current view (version 0) if no historical rows exist.
+  private async readAspectVersions(
+    gms: string,
+    token: string | undefined,
+    urn: string,
+    aspect: MutableAspectName
+  ): Promise<DhVersionedAspect[]> {
+    const MAX_VERSIONS = 50;
+    const base = gms.replace(/\/+$/, "");
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const readOne = async (version: number): Promise<DhVersionedAspect | null> => {
+      const url =
+        `${base}/openapi/v3/entity/dataset/${encodeURIComponent(urn)}/${aspect}` +
+        `?systemMetadata=true&version=${version}`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) return null;
+      const body = (await res.json()) as Record<string, unknown> | null;
+      const wrapped = body?.[aspect] as DhVersionedAspect | undefined;
+      return wrapped && typeof wrapped === "object" ? wrapped : null;
+    };
+
+    const versions: DhVersionedAspect[] = [];
+    for (let v = 1; v <= MAX_VERSIONS; v++) {
+      const entry = await readOne(v);
+      if (!entry) break; // no more historical rows
+      versions.push(entry);
+    }
+    if (versions.length > 0) return versions;
+    // No historical rows enumerable → fall back to the current view (version 0).
+    const latest = await readOne(0);
+    return latest ? [latest] : [];
   }
 
   // Assemble provenance reports from the live catalog: search → get_entities → get_lineage.
