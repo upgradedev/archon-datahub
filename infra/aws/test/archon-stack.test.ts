@@ -183,7 +183,7 @@ describe("Archon AWS reference architecture", () => {
         DefaultRootObject: "index.html",
         HttpVersion: "http2and3",
         Enabled: true,
-        Aliases: Match.arrayWith([Match.anyValue()]),
+        Aliases: [{ Ref: "CloudFrontDomainName" }],
         ViewerCertificate: Match.objectLike({
           AcmCertificateArn: Match.anyValue(),
           SslSupportMethod: "sni-only",
