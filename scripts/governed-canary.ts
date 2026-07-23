@@ -692,7 +692,7 @@ export function createRecoveryManifest(input: {
   ) {
     fail("the audit execution identity is not bound to its public audit ID.");
   }
-  const unsigned = {
+  const unsigned: Omit<RecoveryManifest, "recoveryDigest"> = {
     schemaVersion: RECOVERY_SCHEMA,
     repository: identity.repository,
     workflowRunId: identity.workflowRunId,
@@ -977,8 +977,11 @@ async function loadRuntimeConfig(
       `${identity.applicationUrl}/runtime-config.json`,
       {
         method: "GET",
-        headers: { Accept: "application/json" },
-        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Cache-Control": "no-store",
+          Pragma: "no-cache",
+        },
       },
       "runtime config",
       [200]
@@ -1298,7 +1301,7 @@ function createBoundRollbackManifest(input: {
   ) {
     fail("a fresh, exact rollback proposal could not be derived.");
   }
-  const unsigned = {
+  const unsigned: Omit<RollbackManifest, "digest"> = {
     schemaVersion: ROLLBACK_SCHEMA,
     recoveryDigest: recovery.recoveryDigest,
     receiptDigest: receipt.digest,

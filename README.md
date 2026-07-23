@@ -79,6 +79,8 @@ Important trust boundaries:
 
 - DataHub MCP supplies the supported read tools. A complementary direct GMS read recovers
   retained aspect history because the current MCP view is latest-write-wins.
+- Cross-source contradictions cannot fire from the MCP read tools alone: they require the
+  bounded direct GMS version-history recovery path and distinct stable pipeline identities.
 - Unknown or unstable provenance fails closed. It may produce a drift candidate, never a
   confirmed cross-source contradiction.
 - The approval service has no DataHub or LLM secrets. It rehydrates server-owned state by
@@ -272,6 +274,12 @@ Workflows:
   [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
 - [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
   exact-parent `workflow_run` compensation for failed or cancelled canaries.
+
+CI also enforces an intentionally offline core-path SLO through `load/audit.js`: ten
+concurrent virtual users complete 200 deterministic pipeline/MCP iterations with zero
+errors, no dropped work, and audit p95 latency at or below the default 1,500 ms budget.
+This is a reproducible regression gate for Archon's core audit path, not a claim about
+hosted DataHub or internet latency.
 
 Action dependencies are commit-SHA pinned. A workflow definition is not called “green”
 until its remote run succeeds, and a deployment definition is not called “deployed” until

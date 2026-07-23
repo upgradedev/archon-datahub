@@ -462,7 +462,10 @@ describe("Archon AWS reference architecture", () => {
         }
       }
     });
-    const policies = JSON.stringify(platform.findResources("AWS::IAM::Policy"));
+    const iamPolicies = Object.values(
+      platform.findResources("AWS::IAM::Policy")
+    ) as any[];
+    const policies = JSON.stringify(iamPolicies);
     expect(policies).toContain("CheckpointOnlyAuditExecutions");
     expect(policies).toContain("JournalOnlyGovernedExecutions");
     expect(policies).toContain("NeverDeleteOrBypassEvidenceRetention");

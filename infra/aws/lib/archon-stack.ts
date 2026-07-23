@@ -1110,7 +1110,7 @@ export class ArchonPlatformStack extends Stack {
       },
       cloudWatchRole: true,
       binaryMediaTypes: [],
-      minimumCompressionSize: Size.kibibytes(1),
+      minimumCompressionSize: 1024,
       retainDeployments: true
     });
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "Authorizer", {

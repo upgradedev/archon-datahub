@@ -26,8 +26,6 @@ on:
 permissions:
   actions: read
   contents: read
-  deployments: write
-  id-token: write
 
 concurrency:
   group: archon-governed-canary
@@ -55,6 +53,10 @@ jobs:
       github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     outputs:
       recovery_digest: ${{ steps.prepare.outputs.recovery_digest }}
       plan_digest: ${{ steps.prepare.outputs.plan_digest }}

@@ -12,6 +12,11 @@ updates:
     open-pull-requests-limit: 5
     rebase-strategy: auto
     versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     commit-message:
       prefix: deps(root)
     groups:
@@ -33,6 +38,11 @@ updates:
     open-pull-requests-limit: 5
     rebase-strategy: auto
     versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     commit-message:
       prefix: deps(web)
     groups:
@@ -53,6 +63,8 @@ updates:
       timezone: Europe/Athens
     open-pull-requests-limit: 5
     rebase-strategy: auto
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci(deps)
     groups:
@@ -71,6 +83,11 @@ updates:
     open-pull-requests-limit: 5
     rebase-strategy: auto
     versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     commit-message:
       prefix: deps(infra)
     groups:
@@ -92,6 +109,11 @@ updates:
     open-pull-requests-limit: 3
     rebase-strategy: auto
     versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     commit-message:
       prefix: deps(approval-lambda)
     groups:
@@ -110,6 +132,11 @@ updates:
     open-pull-requests-limit: 3
     rebase-strategy: auto
     versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     commit-message:
       prefix: deps(control-lambda)
     groups:

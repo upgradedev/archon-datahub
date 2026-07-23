@@ -118,6 +118,8 @@ degrees, and unique URNs agree. Hosted live audits also require the direct GMS
 version-history capability; MCP-only connectivity may serve standalone reads but cannot
 produce an audit or governed plan. Consequently no
 partial harvest can reach the G6 planner as `ACTIONABLE`.
+The version-history recovery is therefore a separate bounded GMS read capability, not an
+inferred feature of the MCP latest-state surface.
 
 ## 5. Governed G6 control loop
 

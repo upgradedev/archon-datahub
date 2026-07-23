@@ -349,6 +349,12 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   const writeClient = read("src/datahub/mutation-client-live.ts");
+  const readsSharedWriteCredential =
+    /process\.env\.DATAHUB_GMS_TOKEN\b/.test(writeClient);
+  const readsSharedWriteEndpoint =
+    /process\.env\.(?:DATAHUB_MCP_URL|DATAHUB_GMS_URL)\b/.test(writeClient);
+  const mapsIsolatedTokenForOfficialStdioServer =
+    /DATAHUB_GMS_TOKEN:\s*writeToken\b/.test(writeClient);
   checks.push(
     check("D3", "datahub-depth", 7, "Optional writeback uses isolated official mutation tools", () => ({
       ok:
@@ -356,9 +362,11 @@ export async function computeReadiness(): Promise<ReadinessReport> {
         writeClient.includes('"remove_tags"') &&
         writeClient.includes("DATAHUB_WRITE_MCP_URL") &&
         writeClient.includes("DATAHUB_WRITE_GMS_TOKEN") &&
-        !writeClient.includes("DATAHUB_GMS_TOKEN"),
+        mapsIsolatedTokenForOfficialStdioServer &&
+        !readsSharedWriteCredential &&
+        !readsSharedWriteEndpoint,
       evidence:
-        "separate write endpoint/token names detected; typed add_tags/remove_tags capability does not fall back to the read token",
+        `separate write endpoint/token names detected; official stdio env receives the isolated write token=${mapsIsolatedTokenForOfficialStdioServer}; reads shared credential=${readsSharedWriteCredential}; reads shared endpoint=${readsSharedWriteEndpoint}`,
     }))
   );
 

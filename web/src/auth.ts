@@ -281,7 +281,11 @@ function defaultEnvironment(): AuthEnvironment {
       globalThis.crypto.getRandomValues(value);
       return value;
     },
-    sha256: (value) => globalThis.crypto.subtle.digest("SHA-256", value),
+    sha256: (value) => {
+      const input = new Uint8Array(value.byteLength);
+      input.set(value);
+      return globalThis.crypto.subtle.digest("SHA-256", input.buffer);
+    },
     sessionStorage: window.sessionStorage,
     now: () => Date.now(),
     setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
