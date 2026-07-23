@@ -1349,6 +1349,7 @@ jobs:
 
           control_terminal="false"
           for attempt in $(seq 1 90); do
+            echo "Polling read-only control loop (attempt ${attempt}/90)"
             curl --fail --silent --show-error \
               --proto '=https' --tlsv1.2 \
               --connect-timeout 10 --max-time 35 \
