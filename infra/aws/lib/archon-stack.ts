@@ -88,6 +88,17 @@ export interface ArchonPlatformStackProps extends StackProps {
 }
 
 export class ArchonPlatformStack extends Stack {
+  public override get availabilityZones(): string[] {
+    // The base Stack getter performs an account/region context lookup for
+    // concrete environments. This stack intentionally selects two AZs at
+    // deploy time so credential-free CI and real deployments synthesize the
+    // same template without cached environmental context.
+    return [
+      Fn.select(0, Fn.getAzs()),
+      Fn.select(1, Fn.getAzs())
+    ];
+  }
+
   constructor(scope: Construct, id: string, props: ArchonPlatformStackProps) {
     super(scope, id, props);
 
@@ -160,12 +171,7 @@ export class ArchonPlatformStack extends Stack {
 
     const vpc = new ec2.Vpc(this, "Vpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.42.0.0/16"),
-      // Give the construct a known list length without a context-provider
-      // lookup; CloudFormation resolves the account's actual AZ names.
-      availabilityZones: [
-        Fn.select(0, Fn.getAzs()),
-        Fn.select(1, Fn.getAzs())
-      ],
+      maxAzs: 2,
       natGateways: isProduction ? 2 : 1,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [
