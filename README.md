@@ -203,7 +203,8 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 [infra/aws](infra/aws) contains the deployment-grade reference:
 
-- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC;
+- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC, Route 53
+  dual-stack aliases, and a custom ACM certificate enforcing `TLSv1.3_2025`;
 - same-origin API Gateway with WAF, throttling, strict schemas, access logs, and tracing;
 - private ECS Fargate API/worker services behind an internal NLB and VPC Link;
 - separate read/write/LLM secrets, KMS keys, IAM roles, and network paths;
@@ -228,10 +229,11 @@ staging via GitHub OIDC, runs security/smoke contracts, then waits at the protec
 an older retained CI run is the rollback path; no application artifact is rebuilt during
 deploy.
 
-AWS deployment is user-gated until environment roles, URLs, secrets, and a narrow
-`DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. Staging and production
-smoke evidence bind the query digest and reject `{}` / wildcard catalog sweeps. Source code
-does not imply that a public endpoint has already been deployed.
+AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
+DNS names, validated `us-east-1` ACM certificates, Route 53 public hosted zones, and a
+narrow `DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. Staging and
+production smoke evidence bind the query digest and reject `{}` / wildcard catalog
+sweeps. Source code does not imply that a public endpoint has already been deployed.
 
 ## Pipeline-only security and CI/CD
 

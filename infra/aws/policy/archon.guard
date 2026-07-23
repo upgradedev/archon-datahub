@@ -196,7 +196,24 @@ rule cloudfront_distributions_enforce_tls_logging_and_oac
   %cloudfront_distributions.Properties.DistributionConfig {
     Enabled == true
     Logging.Bucket exists
-    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.2_2021'
+    Aliases exists
+    Aliases !empty
+    ViewerCertificate.AcmCertificateArn exists
+    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.3_2025'
+    ViewerCertificate.SslSupportMethod == 'sni-only'
+    DefaultCacheBehavior.FunctionAssociations !empty
+    DefaultCacheBehavior.FunctionAssociations[*] {
+      EventType == 'viewer-request'
+      FunctionARN exists
+    }
+    CacheBehaviors[*] {
+      ViewerProtocolPolicy == 'https-only'
+      FunctionAssociations !empty
+      FunctionAssociations[*] {
+        EventType == 'viewer-request'
+        FunctionARN exists
+      }
+    }
     DefaultCacheBehavior.ViewerProtocolPolicy IN [
       'https-only',
       'redirect-to-https'

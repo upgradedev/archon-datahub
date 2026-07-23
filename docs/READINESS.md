@@ -116,6 +116,9 @@ The five official Stage Two criteria are equally weighted.
 
 - Configure an AWS account, GitHub OIDC trust, protected environments, budgets, and
   deployment secrets.
+- Configure `ARCHON_CLOUDFRONT_DOMAIN_NAME`, a matching validated
+  `ARCHON_CLOUDFRONT_CERTIFICATE_ARN` from `us-east-1`, and the owning public
+  `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` in both protected GitHub environments.
 - Configure a trimmed, non-wildcard `DATAHUB_DEMO_QUERY` in staging and production that
   resolves to exactly one safe demo dataset; retain its digest-bound smoke evidence.
 - Allow deployment only from a successful default-branch CI run and matching full SHA.

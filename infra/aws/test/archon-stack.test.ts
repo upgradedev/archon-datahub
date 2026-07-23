@@ -65,6 +65,24 @@ describe("Archon AWS reference architecture", () => {
         AllowedPattern: "^[a-f0-9]{64}$"
       })
     );
+    expect(json.Parameters.CloudFrontDomainName).toEqual(
+      expect.objectContaining({
+        MaxLength: 253,
+        AllowedPattern:
+          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+      })
+    );
+    expect(json.Parameters.CloudFrontCertificateArn).toEqual(
+      expect.objectContaining({
+        AllowedPattern:
+          "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      })
+    );
+    expect(json.Parameters.CloudFrontHostedZoneId).toEqual(
+      expect.objectContaining({
+        AllowedPattern: "^Z[A-Z0-9]{1,31}$"
+      })
+    );
     expect(json.Parameters.DataHubReadMcpUrl).toEqual(
       expect.objectContaining({
         AllowedPattern: "^https://[^\\s]+$"
@@ -143,11 +161,44 @@ describe("Archon AWS reference architecture", () => {
   test("serves the private SPA through CloudFront OAC and routes same-origin API", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::CloudFront::OriginAccessControl", 1);
+    platform.resourceCountIs("AWS::CloudFront::Function", 1);
+    platform.resourceCountIs("AWS::Route53::RecordSet", 2);
+    platform.hasResourceProperties("AWS::CloudFront::Function", {
+      AutoPublish: true,
+      FunctionConfig: Match.objectLike({
+        Runtime: "cloudfront-js-2.0"
+      })
+    });
+    const canonicalHostFunction = Object.values(
+      platform.findResources("AWS::CloudFront::Function")
+    )[0] as any;
+    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
+      "CloudFrontDomainName"
+    );
+    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
+      "421"
+    );
     platform.hasResourceProperties("AWS::CloudFront::Distribution", {
       DistributionConfig: Match.objectLike({
         DefaultRootObject: "index.html",
         HttpVersion: "http2and3",
         Enabled: true,
+        Aliases: Match.arrayWith([Match.anyValue()]),
+        ViewerCertificate: Match.objectLike({
+          AcmCertificateArn: Match.anyValue(),
+          SslSupportMethod: "sni-only",
+          MinimumProtocolVersion: "TLSv1.3_2025",
+          CloudFrontDefaultCertificate: Match.absent()
+        }),
+        DefaultCacheBehavior: Match.objectLike({
+          ViewerProtocolPolicy: "redirect-to-https",
+          FunctionAssociations: Match.arrayWith([
+            Match.objectLike({
+              EventType: "viewer-request",
+              FunctionARN: Match.anyValue()
+            })
+          ])
+        }),
         Origins: Match.arrayWith([
           Match.objectLike({
             S3OriginConfig: Match.anyValue(),
@@ -164,6 +215,17 @@ describe("Archon AWS reference architecture", () => {
         CustomErrorResponses: Match.absent()
       })
     });
+    for (const recordType of ["A", "AAAA"]) {
+      platform.hasResourceProperties("AWS::Route53::RecordSet", {
+        Type: recordType,
+        Name: { Ref: "CloudFrontDomainName" },
+        HostedZoneId: { Ref: "CloudFrontHostedZoneId" },
+        AliasTarget: Match.objectLike({
+          HostedZoneId: "Z2FDTNDATAQYW2",
+          EvaluateTargetHealth: false
+        })
+      });
+    }
     const distribution = Object.values(
       platform.findResources("AWS::CloudFront::Distribution")
     )[0] as any;
@@ -171,6 +233,13 @@ describe("Archon AWS reference architecture", () => {
       distribution.Properties.DistributionConfig.CacheBehaviors.find(
         (behavior: any) => behavior.PathPattern === "runtime-config.json"
       );
+    expect(
+      distribution.Properties.DistributionConfig.CacheBehaviors.every(
+        (behavior: any) =>
+          behavior.FunctionAssociations?.length === 1 &&
+          behavior.FunctionAssociations[0].EventType === "viewer-request"
+      )
+    ).toBe(true);
     expect(runtimeConfigBehavior).toEqual(
       expect.objectContaining({
         CachePolicyId: cloudfront.CachePolicy.CACHING_DISABLED.cachePolicyId,
@@ -348,9 +417,14 @@ describe("Archon AWS reference architecture", () => {
         "Fn::Join": ["", [{ Ref: resourceServerLogicalId }, "/approve"]]
       }
     ]);
-    expect(JSON.stringify(client.Properties.CallbackURLs)).toContain(
-      "Distribution"
-    );
+    expect(client.Properties.CallbackURLs).toEqual([
+      {
+        "Fn::Join": [
+          "",
+          ["https://", { Ref: "CloudFrontDomainName" }, "/"]
+        ]
+      }
+    ]);
     expect(client.Properties.CallbackURLs).toEqual(
       client.Properties.LogoutURLs
     );
@@ -368,9 +442,12 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonAuthRedirectUri.Value).toEqual(
       outputs.ArchonAuthLogoutUri.Value
     );
-    expect(JSON.stringify(outputs.ArchonAuthRedirectUri.Value)).toContain(
-      "Distribution"
-    );
+    expect(outputs.ArchonAuthRedirectUri.Value).toEqual({
+      "Fn::Join": [
+        "",
+        ["https://", { Ref: "CloudFrontDomainName" }, "/"]
+      ]
+    });
     expect(outputs.ArchonApprovalOAuthScope.Value).toBe("archon/approve");
   });
 

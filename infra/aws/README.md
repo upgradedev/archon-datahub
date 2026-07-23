@@ -3,7 +3,9 @@
 This CDK app implements a secure hosted-demo baseline without coupling release
 artifacts to an environment:
 
-- a private, versioned S3 SPA behind CloudFront Origin Access Control;
+- a private, versioned S3 SPA behind CloudFront Origin Access Control, a
+  Route 53 IPv4/IPv6 alias, and an environment-owned ACM certificate with the
+  `TLSv1.3_2025` viewer policy;
 - same-origin `/api/*` routing to a regional, WAF-protected API Gateway;
 - a public, bounded durable audit start/status API plus an explicitly read-only synchronous
   preview route and a scope-protected approval route;
@@ -125,6 +127,20 @@ are mandatory. `LlmBaseUrl`, `LlmModel`, and `WorkerDesiredCount` are configurab
 either process. Set the parameter to one only after all live endpoint values and distinct
 tokens are installed. The isolated services autoscale from their own queues.
 
+Each environment also supplies three non-secret edge parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `CloudFrontDomainName` | Concrete public DNS name for that environment |
+| `CloudFrontCertificateArn` | Validated ACM certificate in `us-east-1` covering that exact name |
+| `CloudFrontHostedZoneId` | Route 53 public hosted-zone ID, without the `/hostedzone/` prefix |
+
+The stack creates both A and AAAA aliases to CloudFront and enforces SNI with
+`TLSv1.3_2025`. It intentionally has no legacy `*.cloudfront.net` fallback because AWS
+fixes that default certificate to the legacy `TLSv1` security policy. A viewer-request
+CloudFront Function on every cache behavior rejects any non-canonical `Host` with `421`
+before a static object or API response can be returned.
+
 The deployment pipeline must build once and promote the same image digest, SPA archive,
 and Lambda archive. It must not rebuild application code for staging or production.
 
@@ -219,6 +235,9 @@ Do not pipe an unpinned installer from the default branch into a shell.
        --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
        --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA256}" \
        --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+       --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+       --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+       --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
        --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
        --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
        --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -288,9 +307,11 @@ This stack keeps environment-dependent claims explicit:
 - enforced standard Cognito threat protection explicitly selects the billable
   `PLUS` feature plan; approve that environment cost and attach budget alerts
   before enabling a long-lived hosted environment;
-- custom Route 53/ACM names, a branded Cognito custom domain, cross-account ECR
-  replication, and private DataHub connectivity depend on the target
-  organization and belong in environment-specific stacks;
+- domain registration, creation and DNS validation of each `us-east-1` ACM
+  certificate, a branded Cognito custom domain, cross-account ECR replication,
+  and private DataHub connectivity remain explicit environment prerequisites;
+  this stack owns the CloudFront aliases and refuses to deploy without the
+  hostname, certificate ARN, and public hosted-zone ID;
 - CloudFront protects a read-only static origin; the regional WAF is attached to
   API Gateway so it also protects callers that bypass CloudFront.
 

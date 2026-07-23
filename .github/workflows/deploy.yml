@@ -21,6 +21,8 @@ on:
 #
 # Configure these values in BOTH `staging` and `production` GitHub environments:
 #   vars:    AWS_DEPLOY_ROLE_ARN, AWS_ACCOUNT_ID, AWS_REGION,
+#            ARCHON_CLOUDFRONT_DOMAIN_NAME, ARCHON_CLOUDFRONT_CERTIFICATE_ARN,
+#            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID,
 #            DATAHUB_READ_GMS_URL, DATAHUB_READ_MCP_URL, DATAHUB_WRITE_GMS_URL,
 #            DATAHUB_WRITE_MCP_URL, DATAHUB_DEMO_QUERY, LLM_BASE_URL, LLM_MODEL
 #   secrets: DATAHUB_READ_GMS_TOKEN, DATAHUB_WRITE_GMS_TOKEN, LLM_API_KEY
@@ -779,6 +781,10 @@ jobs:
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ vars.ARCHON_CLOUDFRONT_CERTIFICATE_ARN }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
         run: |
           set -euo pipefail
           : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
@@ -788,6 +794,84 @@ jobs:
           : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?staging LLM_BASE_URL is required}"
           : "${LLM_MODEL:?staging LLM_MODEL is required}"
+          : "${EXPECTED_ACCOUNT_ID:?staging AWS_ACCOUNT_ID is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
+            ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
+            [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error::staging ARCHON_CLOUDFRONT_DOMAIN_NAME must be a lowercase concrete DNS hostname"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN must identify an ACM certificate in us-east-1"
+            exit 1
+          fi
+          if [[ "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" !=
+            "arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/"* ]]; then
+            echo "::error::staging CloudFront certificate must belong to AWS_ACCOUNT_ID"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
+            echo "::error::staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID must be a raw Route 53 hosted-zone ID"
+            exit 1
+          fi
+          hosted_zone_json="$(
+            aws route53 get-hosted-zone \
+              --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e '.HostedZone.Config.PrivateZone == false' \
+            <<<"${hosted_zone_json}" >/dev/null || {
+            echo "::error::staging CloudFront alias requires a public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zone_name="$(
+            jq -er '.HostedZone.Name | rtrimstr(".")' \
+              <<<"${hosted_zone_json}"
+          )"
+          if [[ "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != "${hosted_zone_name}" &&
+            "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != *".${hosted_zone_name}" ]]; then
+            echo "::error::staging CloudFront domain is outside the configured hosted zone"
+            exit 1
+          fi
+          certificate_json="$(
+            aws acm describe-certificate \
+              --region us-east-1 \
+              --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --output json
+          )"
+          wildcard_name="*.${ARCHON_CLOUDFRONT_DOMAIN_NAME#*.}"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg wildcard "${wildcard_name}" \
+            '
+              .Certificate.Status == "ISSUED" and
+              (
+                .Certificate.KeyAlgorithm == "RSA_2048" or
+                .Certificate.KeyAlgorithm ==
+                  (["EC", "prime256v1"] | join("_"))
+              ) and
+              (
+                ([.Certificate.DomainName] +
+                  (.Certificate.SubjectAlternativeNames // [])) |
+                any(. == $domain or . == $wildcard)
+              )
+            ' <<<"${certificate_json}" >/dev/null || {
+            echo "::error::staging certificate must be issued, CloudFront-compatible, and cover the exact domain"
+            exit 1
+          }
+          certificate_expiry_epoch="$(
+            date --date="$(jq -er '.Certificate.NotAfter' \
+              <<<"${certificate_json}")" +%s
+          )"
+          current_epoch="$(date +%s)"
+          minimum_expiry_epoch="$((current_epoch + 2592000))"
+          if (( certificate_expiry_epoch < minimum_expiry_epoch )); then
+            echo "::error::staging CloudFront certificate expires within 30 days"
+            exit 1
+          fi
           stack_name="Archon-staging"
           registry_outputs="${RUNNER_TEMP}/staging-registry-outputs.json"
           stack_outputs="${RUNNER_TEMP}/staging-stack-outputs.json"
@@ -882,6 +966,9 @@ jobs:
               --parameters "${stack_name}:ImageDigest=${image_digest}" \
               --parameters "${stack_name}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -892,16 +979,96 @@ jobs:
               --outputs-file "${stack_outputs}"
           )
 
+          distribution_id="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
+          deployed_distribution="$(
+            aws cloudfront get-distribution-config \
+              --id "${distribution_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            '
+              .DistributionConfig |
+              .Enabled == true and
+              .IsIPV6Enabled == true and
+              .HttpVersion == "http2and3" and
+              .Aliases.Quantity == 1 and
+              ((.Aliases.Items // []) == [$domain]) and
+              .ViewerCertificate.ACMCertificateArn == $certificate and
+              .ViewerCertificate.SSLSupportMethod == "sni-only" and
+              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
+              .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
+              .DefaultCacheBehavior.FunctionAssociations.Quantity == 1 and
+              any(
+                .DefaultCacheBehavior.FunctionAssociations.Items[]?;
+                .EventType == "viewer-request"
+              ) and
+              all(
+                .CacheBehaviors.Items[]?;
+                .ViewerProtocolPolicy == "https-only" and
+                .FunctionAssociations.Quantity == 1 and
+                any(
+                  .FunctionAssociations.Items[]?;
+                  .EventType == "viewer-request"
+                )
+              ) and
+              .Logging.Enabled == true and
+              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
+            ' <<<"${deployed_distribution}" >/dev/null || {
+            echo "::error::staging CloudFront runtime configuration violates the edge security contract"
+            exit 1
+          }
+
           application_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
           api_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApiUrl' "${stack_outputs}")"
+          distribution_domain="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDomainName' "${stack_outputs}")"
+          test "${application_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+          test "${api_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}/api"
+          route53_records="$(
+            aws route53 list-resource-record-sets \
+              --hosted-zone-id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg target "${distribution_domain}" \
+            '
+              [
+                .ResourceRecordSets[] |
+                select(
+                  (.Name | rtrimstr(".")) == $domain and
+                  (.Type == "A" or .Type == "AAAA")
+                )
+              ] as $aliases |
+              ($aliases | length) == 2 and
+              (([$aliases[].Type] | sort) == ["A", "AAAA"]) and
+              all(
+                $aliases[];
+                (has("SetIdentifier") | not) and
+                .AliasTarget.HostedZoneId == "Z2FDTNDATAQYW2" and
+                (.AliasTarget.DNSName | rtrimstr(".")) == $target and
+                .AliasTarget.EvaluateTargetHealth == false
+              )
+            ' <<<"${route53_records}" >/dev/null || {
+            echo "::error::staging Route 53 dual-stack aliases violate the edge contract"
+            exit 1
+          }
           {
             echo "image_digest=${image_digest}"
             echo "application_url=${application_url}"
             echo "api_url=${api_url}"
             echo "stack_name=${stack_name}"
             echo "stack_outputs=${stack_outputs}"
+            echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+            echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
+            echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Update environment-scoped secrets without logging values
@@ -1030,6 +1197,9 @@ jobs:
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
         run: |
           set -euo pipefail
           : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
@@ -1038,6 +1208,9 @@ jobs:
           : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?staging LLM_BASE_URL is required}"
           : "${LLM_MODEL:?staging LLM_MODEL is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
 
           # Reconcile desired count through CloudFormation so activation creates
           # no drift, then force all services to consume the rotated secrets.
@@ -1051,6 +1224,9 @@ jobs:
               --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
               --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -1212,7 +1388,7 @@ jobs:
           control_response="${RUNNER_TEMP}/staging-control-loop-status.json"
 
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --retry 12 --retry-all-errors --retry-delay 10 \
             --dump-header "${headers}" \
             --output "${index_body}" \
@@ -1225,7 +1401,7 @@ jobs:
           grep -Fqi "connect-src 'self' ${COGNITO_ORIGIN}" "${headers}"
 
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --dump-header "${runtime_headers}" \
             --output "${runtime_body}" \
             "${APPLICATION_URL}/runtime-config.json"
@@ -1246,7 +1422,7 @@ jobs:
             relative_asset="${asset#"${WEB_DIR}/"}"
             asset_body="${RUNNER_TEMP}/staging-asset"
             curl --fail --silent --show-error \
-              --proto '=https' --tlsv1.2 \
+              --proto '=https' --tlsv1.3 \
               --dump-header "${RUNNER_TEMP}/staging-asset-headers.txt" \
               --output "${asset_body}" \
               "${APPLICATION_URL}/${relative_asset}"
@@ -1256,7 +1432,7 @@ jobs:
           fi
 
           approval_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -1265,7 +1441,7 @@ jobs:
           test "${approval_status}" = "401"
 
           mutation_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -1274,7 +1450,7 @@ jobs:
           test "${mutation_status}" = "400"
 
           control_mutation_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -1282,13 +1458,13 @@ jobs:
             "${APPLICATION_URL}/api/control-loops")"
           test "${control_mutation_status}" = "400"
           control_missing_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             "${APPLICATION_URL}/api/control-loops/0000000000000000000000000000000000000000000000000000000000000000")"
           test "${control_missing_status}" = "404"
 
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --connect-timeout 10 --max-time 35 \
             --request POST \
             --header 'content-type: application/json' \
@@ -1331,7 +1507,7 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
 
           control_start_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --connect-timeout 10 --max-time 35 \
             --request POST \
             --header 'content-type: application/json' \
@@ -1355,7 +1531,7 @@ jobs:
           for attempt in $(seq 1 90); do
             echo "Polling read-only control loop (attempt ${attempt}/90)"
             curl --fail --silent --show-error \
-              --proto '=https' --tlsv1.2 \
+              --proto '=https' --tlsv1.3 \
               --connect-timeout 10 --max-time 35 \
               --output "${control_response}" \
               "${APPLICATION_URL}/api/control-loops/${control_audit_id}"
@@ -2267,6 +2443,7 @@ jobs:
           IMAGE_INSPECT: ${{ steps.artifacts.outputs.image_inspect }}
           SPA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
           STAGING_IMAGE_DIGEST: ${{ needs.staging.outputs.image_digest }}
+          STAGING_APPLICATION_URL: ${{ needs.staging.outputs.application_url }}
           DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
           DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
           DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
@@ -2274,6 +2451,10 @@ jobs:
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ vars.ARCHON_CLOUDFRONT_CERTIFICATE_ARN }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
         run: |
           set -euo pipefail
           : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
@@ -2283,6 +2464,90 @@ jobs:
           : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?production LLM_BASE_URL is required}"
           : "${LLM_MODEL:?production LLM_MODEL is required}"
+          : "${EXPECTED_ACCOUNT_ID:?production AWS_ACCOUNT_ID is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?production ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${STAGING_APPLICATION_URL:?verified staging application URL is required}"
+          if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
+            ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
+            [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error::production ARCHON_CLOUDFRONT_DOMAIN_NAME must be a lowercase concrete DNS hostname"
+            exit 1
+          fi
+          if [[ "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}" ==
+            "${STAGING_APPLICATION_URL}" ]]; then
+            echo "::error::production and staging must use distinct CloudFront hostnames"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::production ARCHON_CLOUDFRONT_CERTIFICATE_ARN must identify an ACM certificate in us-east-1"
+            exit 1
+          fi
+          if [[ "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" !=
+            "arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/"* ]]; then
+            echo "::error::production CloudFront certificate must belong to AWS_ACCOUNT_ID"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
+            echo "::error::production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID must be a raw Route 53 hosted-zone ID"
+            exit 1
+          fi
+          hosted_zone_json="$(
+            aws route53 get-hosted-zone \
+              --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e '.HostedZone.Config.PrivateZone == false' \
+            <<<"${hosted_zone_json}" >/dev/null || {
+            echo "::error::production CloudFront alias requires a public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zone_name="$(
+            jq -er '.HostedZone.Name | rtrimstr(".")' \
+              <<<"${hosted_zone_json}"
+          )"
+          if [[ "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != "${hosted_zone_name}" &&
+            "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != *".${hosted_zone_name}" ]]; then
+            echo "::error::production CloudFront domain is outside the configured hosted zone"
+            exit 1
+          fi
+          certificate_json="$(
+            aws acm describe-certificate \
+              --region us-east-1 \
+              --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --output json
+          )"
+          wildcard_name="*.${ARCHON_CLOUDFRONT_DOMAIN_NAME#*.}"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg wildcard "${wildcard_name}" \
+            '
+              .Certificate.Status == "ISSUED" and
+              (
+                .Certificate.KeyAlgorithm == "RSA_2048" or
+                .Certificate.KeyAlgorithm ==
+                  (["EC", "prime256v1"] | join("_"))
+              ) and
+              (
+                ([.Certificate.DomainName] +
+                  (.Certificate.SubjectAlternativeNames // [])) |
+                any(. == $domain or . == $wildcard)
+              )
+            ' <<<"${certificate_json}" >/dev/null || {
+            echo "::error::production certificate must be issued, CloudFront-compatible, and cover the exact domain"
+            exit 1
+          }
+          certificate_expiry_epoch="$(
+            date --date="$(jq -er '.Certificate.NotAfter' \
+              <<<"${certificate_json}")" +%s
+          )"
+          current_epoch="$(date +%s)"
+          minimum_expiry_epoch="$((current_epoch + 2592000))"
+          if (( certificate_expiry_epoch < minimum_expiry_epoch )); then
+            echo "::error::production CloudFront certificate expires within 30 days"
+            exit 1
+          fi
           stack_name="Archon-production"
           registry_outputs="${RUNNER_TEMP}/production-registry-outputs.json"
           stack_outputs="${RUNNER_TEMP}/production-stack-outputs.json"
@@ -2376,6 +2641,9 @@ jobs:
               --parameters "${stack_name}:ImageDigest=${image_digest}" \
               --parameters "${stack_name}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -2386,16 +2654,96 @@ jobs:
               --outputs-file "${stack_outputs}"
           )
 
+          distribution_id="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
+          deployed_distribution="$(
+            aws cloudfront get-distribution-config \
+              --id "${distribution_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            '
+              .DistributionConfig |
+              .Enabled == true and
+              .IsIPV6Enabled == true and
+              .HttpVersion == "http2and3" and
+              .Aliases.Quantity == 1 and
+              ((.Aliases.Items // []) == [$domain]) and
+              .ViewerCertificate.ACMCertificateArn == $certificate and
+              .ViewerCertificate.SSLSupportMethod == "sni-only" and
+              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
+              .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
+              .DefaultCacheBehavior.FunctionAssociations.Quantity == 1 and
+              any(
+                .DefaultCacheBehavior.FunctionAssociations.Items[]?;
+                .EventType == "viewer-request"
+              ) and
+              all(
+                .CacheBehaviors.Items[]?;
+                .ViewerProtocolPolicy == "https-only" and
+                .FunctionAssociations.Quantity == 1 and
+                any(
+                  .FunctionAssociations.Items[]?;
+                  .EventType == "viewer-request"
+                )
+              ) and
+              .Logging.Enabled == true and
+              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
+            ' <<<"${deployed_distribution}" >/dev/null || {
+            echo "::error::production CloudFront runtime configuration violates the edge security contract"
+            exit 1
+          }
+
           application_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
           api_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApiUrl' "${stack_outputs}")"
+          distribution_domain="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDomainName' "${stack_outputs}")"
+          test "${application_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+          test "${api_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}/api"
+          route53_records="$(
+            aws route53 list-resource-record-sets \
+              --hosted-zone-id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg target "${distribution_domain}" \
+            '
+              [
+                .ResourceRecordSets[] |
+                select(
+                  (.Name | rtrimstr(".")) == $domain and
+                  (.Type == "A" or .Type == "AAAA")
+                )
+              ] as $aliases |
+              ($aliases | length) == 2 and
+              (([$aliases[].Type] | sort) == ["A", "AAAA"]) and
+              all(
+                $aliases[];
+                (has("SetIdentifier") | not) and
+                .AliasTarget.HostedZoneId == "Z2FDTNDATAQYW2" and
+                (.AliasTarget.DNSName | rtrimstr(".")) == $target and
+                .AliasTarget.EvaluateTargetHealth == false
+              )
+            ' <<<"${route53_records}" >/dev/null || {
+            echo "::error::production Route 53 dual-stack aliases violate the edge contract"
+            exit 1
+          }
           {
             echo "image_digest=${image_digest}"
             echo "application_url=${application_url}"
             echo "api_url=${api_url}"
             echo "stack_name=${stack_name}"
             echo "stack_outputs=${stack_outputs}"
+            echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+            echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
+            echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Update production-scoped secrets without logging values
@@ -2521,6 +2869,9 @@ jobs:
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
         run: |
           set -euo pipefail
           : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
@@ -2529,6 +2880,9 @@ jobs:
           : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?production LLM_BASE_URL is required}"
           : "${LLM_MODEL:?production LLM_MODEL is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?production ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
 
           # Reconcile desired count through CloudFormation so activation creates
           # no drift, then force all services to consume the rotated secrets.
@@ -2542,6 +2896,9 @@ jobs:
               --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
               --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -2698,7 +3055,7 @@ jobs:
           runtime_body="${RUNNER_TEMP}/production-runtime-config.json"
           audit_response="${RUNNER_TEMP}/production-audit-response.json"
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --retry 12 --retry-all-errors --retry-delay 10 \
             --dump-header "${headers}" \
             --output "${index_body}" \
@@ -2711,7 +3068,7 @@ jobs:
           grep -Fqi "connect-src 'self' ${COGNITO_ORIGIN}" "${headers}"
 
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --dump-header "${runtime_headers}" \
             --output "${runtime_body}" \
             "${APPLICATION_URL}/runtime-config.json"
@@ -2732,7 +3089,7 @@ jobs:
             relative_asset="${asset#"${WEB_DIR}/"}"
             asset_body="${RUNNER_TEMP}/production-asset"
             curl --fail --silent --show-error \
-              --proto '=https' --tlsv1.2 \
+              --proto '=https' --tlsv1.3 \
               --dump-header "${RUNNER_TEMP}/production-asset-headers.txt" \
               --output "${asset_body}" \
               "${APPLICATION_URL}/${relative_asset}"
@@ -2742,7 +3099,7 @@ jobs:
           fi
 
           approval_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -2750,7 +3107,7 @@ jobs:
             "${APPLICATION_URL}/api/approvals/approval-smoke/decisions")"
           test "${approval_status}" = "401"
           mutation_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -2758,7 +3115,7 @@ jobs:
             "${APPLICATION_URL}/api/audits")"
           test "${mutation_status}" = "400"
           control_mutation_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             --request POST \
             --header 'content-type: application/json' \
@@ -2766,12 +3123,12 @@ jobs:
             "${APPLICATION_URL}/api/control-loops")"
           test "${control_mutation_status}" = "400"
           control_missing_status="$(curl --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --output /dev/null --write-out '%{http_code}' \
             "${APPLICATION_URL}/api/control-loops/0000000000000000000000000000000000000000000000000000000000000000")"
           test "${control_missing_status}" = "404"
           curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.2 \
+            --proto '=https' --tlsv1.3 \
             --connect-timeout 10 --max-time 35 \
             --request POST \
             --header 'content-type: application/json' \

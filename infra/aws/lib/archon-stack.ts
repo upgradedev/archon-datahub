@@ -10,6 +10,7 @@ import {
   type StackProps,
   Tags
 } from "aws-cdk-lib";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as appscaling from "aws-cdk-lib/aws-applicationautoscaling";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
@@ -27,6 +28,7 @@ import * as kms from "aws-cdk-lib/aws-kms";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as route53 from "aws-cdk-lib/aws-route53";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sns from "aws-cdk-lib/aws-sns";
@@ -121,6 +123,45 @@ export class ArchonPlatformStack extends Stack {
       description: "Source commit represented by ImageDigest and SpaArtifactSha256",
       allowedPattern: "^[a-f0-9]{7,64}$"
     });
+    const cloudFrontDomainName = new CfnParameter(
+      this,
+      "CloudFrontDomainName",
+      {
+        type: "String",
+        description:
+          "Environment-specific DNS name covered by the CloudFront ACM certificate",
+        minLength: 4,
+        maxLength: 253,
+        allowedPattern:
+          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+        constraintDescription: "must be a valid fully qualified DNS name"
+      }
+    );
+    const cloudFrontCertificateArn = new CfnParameter(
+      this,
+      "CloudFrontCertificateArn",
+      {
+        type: "String",
+        description:
+          "ACM certificate ARN in us-east-1 covering CloudFrontDomainName",
+        allowedPattern:
+          "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        constraintDescription:
+          "must be an ACM certificate ARN from us-east-1 in the standard AWS partition"
+      }
+    );
+    const cloudFrontHostedZoneId = new CfnParameter(
+      this,
+      "CloudFrontHostedZoneId",
+      {
+        type: "String",
+        description:
+          "Route 53 public hosted-zone ID that owns CloudFrontDomainName",
+        allowedPattern: "^Z[A-Z0-9]{1,31}$",
+        constraintDescription:
+          "must be a Route 53 hosted-zone ID without the /hostedzone/ prefix"
+      }
+    );
     const dataHubReadUrl = httpsUrlParameter(
       this,
       "DataHubReadGmsUrl",
@@ -1378,10 +1419,48 @@ export class ArchonPlatformStack extends Stack {
       }
     );
     const spaOrigin = origins.S3BucketOrigin.withOriginAccessControl(spaBucket);
+    const canonicalHostFunction = new cloudfront.Function(
+      this,
+      "CanonicalHost",
+      {
+        comment: `Reject non-canonical Archon ${stage} viewer hosts`,
+        runtime: cloudfront.FunctionRuntime.JS_2_0,
+        code: cloudfront.FunctionCode.fromInline(
+          [
+            "function handler(event) {",
+            "  var request = event.request;",
+            '  var host = (request.headers.host && request.headers.host.value || "").toLowerCase();',
+            `  if (host !== "${cloudFrontDomainName.valueAsString}") {`,
+            "    return {",
+            "      statusCode: 421,",
+            '      statusDescription: "Misdirected Request",',
+            "      headers: {",
+            '        "cache-control": { value: "no-store" },',
+            '        "content-type": { value: "text/plain; charset=utf-8" }',
+            "      }",
+            "    };",
+            "  }",
+            "  return request;",
+            "}"
+          ].join("\n")
+        )
+      }
+    );
+    const canonicalHostAssociation = {
+      function: canonicalHostFunction,
+      eventType: cloudfront.FunctionEventType.VIEWER_REQUEST
+    };
+    const viewerCertificate = acm.Certificate.fromCertificateArn(
+      this,
+      "ViewerCertificate",
+      cloudFrontCertificateArn.valueAsString
+    );
     const distribution = new cloudfront.Distribution(this, "Distribution", {
       comment: `Archon ${stage}: private SPA plus same-origin authenticated API`,
       defaultRootObject: "index.html",
-      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      certificate: viewerCertificate,
+      domainNames: [cloudFrontDomainName.valueAsString],
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_3_2025,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
       enableLogging: true,
@@ -1393,6 +1472,7 @@ export class ArchonPlatformStack extends Stack {
         cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         compress: true,
+        functionAssociations: [canonicalHostAssociation],
         responseHeadersPolicy,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS
       },
@@ -1403,6 +1483,7 @@ export class ArchonPlatformStack extends Stack {
           cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           compress: true,
+          functionAssociations: [canonicalHostAssociation],
           responseHeadersPolicy,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY
         },
@@ -1412,6 +1493,7 @@ export class ArchonPlatformStack extends Stack {
           cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           compress: true,
+          functionAssociations: [canonicalHostAssociation],
           originRequestPolicy:
             cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
           responseHeadersPolicy,
@@ -1420,7 +1502,21 @@ export class ArchonPlatformStack extends Stack {
       },
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100
     });
-    const applicationRootUrl = `https://${distribution.distributionDomainName}/`;
+    const cloudFrontAliasTarget = {
+      dnsName: distribution.distributionDomainName,
+      // CloudFront's canonical hosted-zone ID is global for Route 53 aliases.
+      hostedZoneId: "Z2FDTNDATAQYW2",
+      evaluateTargetHealth: false
+    };
+    for (const recordType of ["A", "AAAA"]) {
+      new route53.CfnRecordSet(this, `CloudFrontAlias${recordType}`, {
+        name: cloudFrontDomainName.valueAsString,
+        type: recordType,
+        hostedZoneId: cloudFrontHostedZoneId.valueAsString,
+        aliasTarget: cloudFrontAliasTarget
+      });
+    }
+    const applicationRootUrl = `https://${cloudFrontDomainName.valueAsString}/`;
     const userPoolClient = userPool.addClient("SpaClient", {
       userPoolClientName: `archon-${stage}-spa`,
       // Supplying a non-empty AuthFlow object prevents Cognito's default
@@ -1638,12 +1734,12 @@ export class ArchonPlatformStack extends Stack {
       ]
     });
 
-    const preferredApiUrl = `https://${distribution.distributionDomainName}/api`;
+    const preferredApiUrl = `https://${cloudFrontDomainName.valueAsString}/api`;
     output(this, "ArchonSpaBucketName", spaBucket.bucketName);
     output(this, "ArchonEvidenceBucketName", evidenceBucket.bucketName);
     output(this, "ArchonCloudFrontDistributionId", distribution.distributionId);
     output(this, "ArchonCloudFrontDomainName", distribution.distributionDomainName);
-    output(this, "ArchonApplicationUrl", `https://${distribution.distributionDomainName}`);
+    output(this, "ArchonApplicationUrl", `https://${cloudFrontDomainName.valueAsString}`);
     output(this, "ArchonApiUrl", preferredApiUrl);
     output(this, "ArchonApiInvokeUrl", api.url);
     output(this, "ArchonUserPoolId", userPool.userPoolId);

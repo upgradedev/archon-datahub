@@ -194,7 +194,8 @@ hard deployment boundaries. The source is not evidence of a running deployment.
 The AWS CDK app separates a retained shared registry from each environment:
 
 - immutable KMS ECR repository;
-- private versioned KMS S3 SPA with CloudFront OAC;
+- private versioned KMS S3 SPA with CloudFront OAC, Route 53 A/AAAA aliases,
+  and an environment-owned ACM certificate enforcing `TLSv1.3_2025`;
 - same-origin API Gateway, WAF, strict request models, throttling, logs, and X-Ray;
 - private Fargate services through an internal NLB/VPC Link;
 - Cognito Hosted UI, public PKCE code client, scoped approval boundary, and Node.js 24
@@ -213,6 +214,14 @@ CloudFront never rewrites API authorization/errors into SPA success responses. S
 headers apply to static and API behaviors. `/runtime-config.json` is generated only after
 the stack exists, contains public OAuth coordinates, is served by a caching-disabled
 behavior with `no-store`, and is smoke-verified byte for byte.
+
+The distribution has no default-certificate fallback: AWS fixes the generated
+`*.cloudfront.net` certificate to the legacy `TLSv1` policy. Each environment therefore
+provides its exact hostname, a matching validated ACM certificate from `us-east-1`, and
+the owning Route 53 public hosted-zone ID; CDK creates both IPv4 and IPv6 aliases. Every
+cache behavior also runs the same viewer-request function, which returns `421` for a
+non-canonical Host before CloudFront can expose an origin response through its generated
+distribution hostname.
 
 ## 7. Build-once promotion
 
