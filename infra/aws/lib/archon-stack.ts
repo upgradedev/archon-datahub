@@ -153,6 +153,7 @@ export class ArchonPlatformStack extends Stack {
     });
 
     const dataKey = retainedKey(this, "DataKey", `alias/archon/${stage}/data`);
+    const spaKey = retainedKey(this, "SpaKey", `alias/archon/${stage}/spa`);
     const logsKey = retainedKey(this, "LogsKey", `alias/archon/${stage}/logs`);
     const queueKey = retainedKey(this, "QueueKey", `alias/archon/${stage}/queues`);
     const secretsKey = retainedKey(this, "SecretsKey", `alias/archon/${stage}/secrets`);
@@ -216,7 +217,7 @@ export class ArchonPlatformStack extends Stack {
     const spaBucket = new s3.Bucket(this, "SpaBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.KMS,
-      encryptionKey: dataKey,
+      encryptionKey: spaKey,
       bucketKeyEnabled: true,
       enforceSSL: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
@@ -1437,15 +1438,19 @@ export class ArchonPlatformStack extends Stack {
         ]
       }
     });
-    dataKey.addToResourcePolicy(
+    // Keep the CloudFront grant on a key dedicated to SPA objects. An exact
+    // distribution reference here would create SpaBucket -> SpaKey ->
+    // Distribution -> SpaBucket; the OAC bucket policy still binds reads to
+    // this stack's exact distribution.
+    spaKey.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: "AllowCloudFrontOacToDecryptSpaObjects",
         principals: [new iam.ServicePrincipal("cloudfront.amazonaws.com")],
         actions: ["kms:Decrypt"],
         resources: ["*"],
         conditions: {
-          StringEquals: {
-            "AWS:SourceArn": distribution.distributionArn
+          ArnLike: {
+            "AWS:SourceArn": `arn:${Aws.PARTITION}:cloudfront::${Aws.ACCOUNT_ID}:distribution/*`
           }
         }
       })

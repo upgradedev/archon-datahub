@@ -1,3 +1,5 @@
+export {};
+
 const mockDdbSend = jest.fn();
 const mockSfnSend = jest.fn();
 
