@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_IMAGE=node:22-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8
+ARG NODE_IMAGE=node:22.23.1-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e
 
 FROM ${NODE_IMAGE} AS dependencies
 WORKDIR /app
@@ -25,6 +25,17 @@ ENV ARCHON_RELEASE_SHA=${ARCHON_RELEASE_SHA}
 LABEL org.opencontainers.image.source="https://github.com/upgradedev/archon-datahub"
 LABEL org.opencontainers.image.revision="${ARCHON_RELEASE_SHA}"
 WORKDIR /app
+RUN rm -rf \
+      /usr/local/lib/node_modules/npm \
+      /usr/local/lib/node_modules/corepack \
+      /opt/yarn-v* \
+    && rm -f \
+      /usr/local/bin/npm \
+      /usr/local/bin/npx \
+      /usr/local/bin/corepack \
+      /usr/local/bin/yarn \
+      /usr/local/bin/yarnpkg \
+    && test ! -e /usr/local/lib/node_modules/npm
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json LICENSE NOTICE.md ./

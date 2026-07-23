@@ -1,5 +1,6 @@
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import { ArchonPlatformStack, ArchonRegistryStack } from "../lib/archon-stack";
 
 function templates(): { registry: Template; platform: Template } {
@@ -15,6 +16,22 @@ function templates(): { registry: Template; platform: Template } {
     registry: Template.fromStack(registryStack),
     platform: Template.fromStack(platformStack)
   };
+}
+
+function platformTemplate(stage: string): Template {
+  const app = new App();
+  const env = { account: "111111111111", region: "eu-west-1" };
+  const registryStack = new ArchonRegistryStack(
+    app,
+    `TestRegistry-${stage}`,
+    { env }
+  );
+  const platformStack = new ArchonPlatformStack(app, `TestPlatform-${stage}`, {
+    env,
+    stage,
+    repository: registryStack.repository
+  });
+  return Template.fromStack(platformStack);
 }
 
 describe("Archon AWS reference architecture", () => {
@@ -137,7 +154,7 @@ describe("Archon AWS reference architecture", () => {
       );
     expect(runtimeConfigBehavior).toEqual(
       expect.objectContaining({
-        CachePolicyId: "413f1605-6b67-4c00-958e-290d4c248f7f",
+        CachePolicyId: cloudfront.CachePolicy.CACHING_DISABLED.cachePolicyId,
         ViewerProtocolPolicy: "https-only",
         Compress: true
       })
@@ -288,7 +305,6 @@ describe("Archon AWS reference architecture", () => {
       ExplicitAuthFlows: ["ALLOW_REFRESH_TOKEN_AUTH"],
       AllowedOAuthFlows: ["code"],
       AllowedOAuthFlowsUserPoolClient: true,
-      AllowedOAuthScopes: ["openid", "email", "archon/approve"],
       CallbackURLs: [Match.anyValue()],
       LogoutURLs: [Match.anyValue()],
       SupportedIdentityProviders: ["COGNITO"]
@@ -297,6 +313,16 @@ describe("Archon AWS reference architecture", () => {
     const client = Object.values(
       platform.findResources("AWS::Cognito::UserPoolClient")
     )[0] as any;
+    const resourceServerLogicalId = Object.keys(
+      platform.findResources("AWS::Cognito::UserPoolResourceServer")
+    )[0]!;
+    expect(client.Properties.AllowedOAuthScopes).toEqual([
+      "openid",
+      "email",
+      {
+        "Fn::Join": ["", [{ Ref: resourceServerLogicalId }, "/approve"]]
+      }
+    ]);
     expect(JSON.stringify(client.Properties.CallbackURLs)).toContain(
       "Distribution"
     );
@@ -495,16 +521,13 @@ describe("Archon AWS reference architecture", () => {
     const lambdaFunctions = Object.values(
       platform.findResources("AWS::Lambda::Function")
     ) as any[];
-    for (const functionName of [
-      "archon-staging-approval-handoff",
-      "archon-staging-approval"
-    ]) {
+    const roleStatementsFor = (functionName: string): any[] => {
       const lambdaFunction = lambdaFunctions.find(
         (resource) => resource.Properties.FunctionName === functionName
       );
       expect(lambdaFunction).toBeDefined();
       const roleLogicalId = lambdaFunction.Properties.Role["Fn::GetAtt"][0];
-      const roleActions = iamPolicies
+      return iamPolicies
         .filter((policy) =>
           (policy.Properties.Roles ?? []).some(
             (role: any) => role.Ref === roleLogicalId
@@ -512,15 +535,42 @@ describe("Archon AWS reference architecture", () => {
         )
         .flatMap((policy) => {
           const statements = policy.Properties.PolicyDocument.Statement;
-          return (Array.isArray(statements) ? statements : [statements]).flatMap(
-            (statement: any) =>
-              Array.isArray(statement.Action)
-                ? statement.Action
-                : [statement.Action]
-          );
+          return Array.isArray(statements) ? statements : [statements];
         });
-      expect(roleActions.filter((action) => action?.startsWith("kms:"))).toEqual([]);
-    }
+    };
+    const actionsFor = (statement: any): string[] =>
+      (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).filter(
+        (action: unknown): action is string => typeof action === "string"
+      );
+    const isKmsStatement = (statement: any): boolean =>
+      actionsFor(statement).some((action) => action.startsWith("kms:"));
+
+    const approvalKmsStatements = roleStatementsFor(
+      "archon-staging-approval"
+    ).filter(isKmsStatement);
+    expect(approvalKmsStatements).toEqual([]);
+
+    // Lambda's SQS event-source poller must decrypt the CMK-encrypted approval
+    // queue. Keep that sole exception bound to QueueKey and decrypt-only.
+    const handoffKmsStatements = roleStatementsFor(
+      "archon-staging-approval-handoff"
+    ).filter(isKmsStatement);
+    expect(handoffKmsStatements).toHaveLength(1);
+    expect(actionsFor(handoffKmsStatements[0])).toEqual(["kms:Decrypt"]);
+    const queueKeyAlias = Object.values(
+      platform.findResources("AWS::KMS::Alias")
+    ).find(
+      (resource: any) =>
+        resource.Properties.AliasName === "alias/archon/staging/queues"
+    ) as any;
+    expect(queueKeyAlias).toBeDefined();
+    const queueKeyTarget = queueKeyAlias.Properties.TargetKeyId;
+    const queueKeyLogicalId =
+      queueKeyTarget.Ref ?? queueKeyTarget["Fn::GetAtt"]?.[0];
+    expect(queueKeyLogicalId).toEqual(expect.any(String));
+    expect(handoffKmsStatements[0].Resource).toEqual({
+      "Fn::GetAtt": [queueKeyLogicalId, "Arn"]
+    });
   });
 
   test("has private Fargate services, WAF, observability, and stable outputs", () => {
@@ -533,7 +583,9 @@ describe("Archon AWS reference architecture", () => {
       ).toBe("DISABLED");
     }
     platform.resourceCountIs("AWS::WAFv2::WebACL", 1);
-    platform.resourceCountIs("AWS::CloudWatch::Alarm", 10);
+    // Ten explicit operational alarms plus upper/lower alarms generated by
+    // each of the two worker step-scaling policies.
+    platform.resourceCountIs("AWS::CloudWatch::Alarm", 14);
     platform.resourceCountIs("AWS::CloudWatch::Dashboard", 1);
 
     for (const outputName of [
@@ -573,5 +625,67 @@ describe("Archon AWS reference architecture", () => {
     ]) {
       platform.hasOutput(outputName, {});
     }
+  });
+
+  test("applies production capacity, availability, and edge hardening", () => {
+    const production = platformTemplate("production");
+
+    production.resourceCountIs("AWS::EC2::NatGateway", 2);
+    production.hasResourceProperties("AWS::ECS::Service", {
+      DesiredCount: 2,
+      DeploymentConfiguration: Match.objectLike({
+        MinimumHealthyPercent: 100,
+        MaximumPercent: 200
+      })
+    });
+
+    const scalableTargets = Object.values(
+      production.findResources("AWS::ApplicationAutoScaling::ScalableTarget")
+    ) as any[];
+    expect(
+      scalableTargets.some(
+        (target) =>
+          target.Properties.MinCapacity === 2 &&
+          target.Properties.MaxCapacity === 20
+      )
+    ).toBe(true);
+    const workerTargets = scalableTargets.filter(
+      (target) => target.Properties.MinCapacity?.Ref === "WorkerDesiredCount"
+    );
+    expect(
+      workerTargets.map((target) => target.Properties.MaxCapacity).sort()
+    ).toEqual([10, 20]);
+
+    production.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      {
+        LoadBalancerAttributes: Match.arrayWith([
+          {
+            Key: "deletion_protection.enabled",
+            Value: "true"
+          }
+        ])
+      }
+    );
+    production.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "archon-production-control",
+      ReservedConcurrentExecutions: 50
+    });
+    production.hasResourceProperties("AWS::ApiGateway::Stage", {
+      MethodSettings: Match.arrayWith([
+        Match.objectLike({
+          ThrottlingBurstLimit: 100,
+          ThrottlingRateLimit: 50
+        })
+      ])
+    });
+
+    const webAcl = Object.values(
+      production.findResources("AWS::WAFv2::WebACL")
+    )[0] as any;
+    const rateLimitRule = webAcl.Properties.Rules.find(
+      (rule: any) => rule.Name === "PerIpRateLimit"
+    );
+    expect(rateLimitRule.Statement.RateBasedStatement.Limit).toBe(1_000);
   });
 });
