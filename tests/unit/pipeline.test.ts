@@ -3,7 +3,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
+import {
+  FakeDataHubMcpClient,
+  type AuditHarvest,
+  type AuditHarvestOptions,
+} from "../../src/datahub/mcp-client.js";
 import { FIXTURE_CLEAN_REPORTS, UNCATALOGUED_UPSTREAM } from "../../src/datahub/fixtures.js";
 import { ClassifierAgent } from "../../src/agents/classifier.js";
 import { LineageAnalyzerAgent } from "../../src/agents/lineage-analyzer.js";
@@ -67,6 +71,41 @@ test("AuditPipeline runs all four agents end-to-end and returns findings + narra
   assert.match(report.narrative, /governance|finding/i);
   assert.equal(report.trace.length, 4);
   assert.equal(report.trace[0]!.agent, "classifier");
+});
+
+test("AuditPipeline derives snapshot, facts, and history from one fresh harvest bundle", async () => {
+  class BundleOnlyClient extends FakeDataHubMcpClient {
+    bundleCalls = 0;
+
+    override async harvestAudit(
+      query: string | undefined,
+      options: AuditHarvestOptions
+    ): Promise<AuditHarvest> {
+      this.bundleCalls += 1;
+      return super.harvestAudit(query, options);
+    }
+
+    override async harvestSnapshot(): Promise<never> {
+      throw new Error("pipeline must not run a second snapshot harvest");
+    }
+
+    override async harvestFacts(): Promise<never> {
+      throw new Error("pipeline must not run a second fact harvest");
+    }
+
+    override async harvestVersionHistories(): Promise<never> {
+      throw new Error("pipeline must not run a second history harvest");
+    }
+  }
+
+  const client = new BundleOnlyClient();
+  const report = await fakePipeline().run(client, "sales");
+  assert.equal(client.bundleCalls, 1);
+  assert.equal(report.classification.totalEntities, 1);
+  assert.match(
+    report.trace[1]!.produced,
+    /recovered from aspect version history/
+  );
 });
 
 test("AuditPipeline on a clean single-source catalog yields no contradictions", async () => {

@@ -1,0 +1,49 @@
+name: Live DataHub proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: Narrow demo dataset query (optional)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-datahub-proof
+  cancel-in-progress: false
+
+jobs:
+  prove-live-path:
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: datahub-demo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck live-proof code
+        run: npm run typecheck
+      - name: Verify MCP + retention + stable provenance + recovered contradiction
+        env:
+          DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
+          DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_GMS_TOKEN }}
+          DATAHUB_MCP_URL: ${{ secrets.DATAHUB_MCP_URL }}
+          DATAHUB_MCP_ARGS: mcp-server-datahub@0.6.0
+          ARCHON_DEMO_QUERY: ${{ inputs.query }}
+        run: npm run verify:live

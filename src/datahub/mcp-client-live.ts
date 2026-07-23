@@ -10,7 +10,7 @@
 // transport client should be.
 //
 // TWO TRANSPORTS, one mapping:
-//   • stdio (default, the reliable OSS path): spawns `uvx mcp-server-datahub@latest` with
+//   • stdio (default, the reliable OSS path): spawns the pinned `mcp-server-datahub@0.6.0`
 //     DATAHUB_GMS_URL + DATAHUB_GMS_TOKEN in its env. This is the transport DataHub itself
 //     documents for Claude Desktop / Cursor / Claude Code.
 //   • HTTP (Streamable): when DATAHUB_MCP_URL is set, connect to a hosted MCP endpoint
@@ -26,44 +26,53 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { AuditFact } from "../types.js";
 import type { CatalogEntity, CatalogSnapshot, LineageEdge, Urn } from "./models.js";
 import { reportsToFacts, type SourceReport } from "../audit/harvest.js";
-import type { DataHubClient } from "./mcp-client.js";
+import type {
+  AuditHarvest,
+  AuditHarvestOptions,
+  DataHubClient,
+} from "./mcp-client.js";
 import { snapshotFromReports } from "./mcp-client.js";
 import {
-  mapEntities,
-  mapSearchUrns,
-  mapUpstreamEdges,
+  mapEntitiesStrict,
+  mapSearchPageStrict,
+  mapUpstreamEdgesStrict,
+  parseMcpReadToolResult,
   type DhCleanedEntity,
   type DhLineageResponse,
   type DhSearchResponse,
 } from "./live-mappers.js";
 import type {
   AspectVersionHistory,
-  DhVersionedAspect,
   MutableAspectName,
 } from "./version-history.js";
+import { readAspectVersionHistory } from "./version-history-reader.js";
+import {
+  DataHubHarvestError,
+  deadlineSignal,
+  harvestPolicy,
+  mapWithConcurrency,
+  requireDirectHistoryCapability,
+  waitWithinDeadline,
+  type LiveHarvestPolicy,
+} from "./harvest-policy.js";
 
 // The DataHub MCP server tags every catalogued asset with its dataPlatform, but its READ
 // tools return a single current view per URN (aspects are single-valued). So a live harvest
 // is one logical source at one scan; we label it with a stable id and let TIME (scanId) be
 // the provenance axis. See DESIGN.md §Phase-2 and the README limits note.
 const LIVE_SOURCE = "datahub";
+const SEARCH_PAGE_SIZE = 50;
+const MAX_LINEAGE_RESULTS = 50;
+const MUTABLE_ASPECTS: readonly MutableAspectName[] = [
+  "ownership",
+  "schemaMetadata",
+  "domains",
+  "deprecation",
+];
 
 function httpMcpUrl(): string | null {
   const explicit = process.env.DATAHUB_MCP_URL;
   return explicit && explicit.trim().length > 0 ? explicit : null;
-}
-
-// Parse the MCP text-content contract into a JS value (tools return their JSON as a text
-// block, per the MCP content spec: result.content = [{ type: "text", text: "<json>" }]).
-function parseToolResult(result: unknown): unknown {
-  const content = (result as { content?: Array<{ type: string; text?: string }> })?.content ?? [];
-  const text = content.find((c) => c.type === "text")?.text;
-  if (text === undefined) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
 }
 
 export class LiveDataHubMcpClient implements DataHubClient {
@@ -90,7 +99,7 @@ export class LiveDataHubMcpClient implements DataHubClient {
       // stdio: the standard OSS path — run the published server against the local/remote GMS.
       const transport = new StdioClientTransport({
         command: process.env.DATAHUB_MCP_COMMAND ?? "uvx",
-        args: (process.env.DATAHUB_MCP_ARGS ?? "mcp-server-datahub@latest").split(/\s+/),
+        args: (process.env.DATAHUB_MCP_ARGS ?? "mcp-server-datahub@0.6.0").split(/\s+/),
         env: {
           ...process.env,
           DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
@@ -102,141 +111,90 @@ export class LiveDataHubMcpClient implements DataHubClient {
     this.connected = true;
   }
 
-  private async call(name: string, args: Record<string, unknown>): Promise<unknown> {
-    await this.connect();
-    const res = await this.client.callTool({ name, arguments: args });
-    return parseToolResult(res);
+  private async call(
+    name: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs: number
+  ): Promise<unknown> {
+    await waitWithinDeadline(
+      this.connect(),
+      signal,
+      "HARVEST_DEADLINE_EXCEEDED"
+    );
+    const res = await this.client.callTool(
+      { name, arguments: args },
+      undefined,
+      { signal, timeout: timeoutMs }
+    );
+    return parseMcpReadToolResult(res);
   }
 
-  // `search` — DataHub /q keyword search. Datasets only, via the documented filter DSL
-  // (`entity_type = dataset`). num_results is capped at 50 by the server; we page by offset.
+  // Standalone read methods use the strict synchronous budget. Full pipeline callers use
+  // harvestAudit so snapshot + facts + history share one exact live harvest.
   async search(query?: string): Promise<Urn[]> {
-    const q = query && query.trim().length > 0 ? query : "*";
-    const urns: Urn[] = [];
-    const seen = new Set<Urn>();
-    let offset = 0;
-    const page = 50; // the server's hard cap
-    // Bounded paging: stop at total, at an empty page, or a safety ceiling.
-    for (let i = 0; i < 40; i++) {
-      const res = (await this.call("search", {
-        query: q,
-        filter: "entity_type = dataset",
-        num_results: page,
-        offset,
-      })) as DhSearchResponse | null;
-      const pageUrns = mapSearchUrns(res);
-      for (const u of pageUrns) {
-        if (!seen.has(u)) {
-          seen.add(u);
-          urns.push(u);
-        }
-      }
-      const total = res?.total ?? pageUrns.length;
-      offset += page;
-      if (pageUrns.length === 0 || offset >= total) break;
-    }
-    return urns;
+    const policy = harvestPolicy("synchronous-preview");
+    const signal = deadlineSignal(policy.harvestDeadlineMs);
+    return this.searchWithinPolicy(query, policy, signal);
   }
 
-  // `get_entities` — batch metadata by URN. Passing an ARRAY returns a list of cleaned
-  // entities (per-URN { error, urn } objects for any that fail, which the mapper skips).
   async getEntities(urns: Urn[]): Promise<CatalogEntity[]> {
-    if (urns.length === 0) return [];
-    const res = (await this.call("get_entities", { urns })) as
-      | DhCleanedEntity[]
-      | { entities?: DhCleanedEntity[] }
-      | null;
-    return mapEntities(res, LIVE_SOURCE);
+    const policy = harvestPolicy("synchronous-preview");
+    const signal = deadlineSignal(policy.harvestDeadlineMs);
+    return this.getEntitiesWithinPolicy(urns, policy, signal);
   }
 
-  // `get_lineage` — upstream lineage for one entity. `upstream: true` (bool) → the response's
-  // `upstreams.searchResults[].entity`. Resolution against the harvested URN set is decided
-  // by the caller via `harvestSnapshot`/`reports`; standalone calls resolve optimistically.
-  async getLineage(urn: Urn, isKnown: (u: Urn) => boolean = () => true): Promise<LineageEdge[]> {
-    const res = (await this.call("get_lineage", {
-      urn,
-      upstream: true,
-      max_hops: 1,
-    })) as DhLineageResponse | null;
-    return mapUpstreamEdges(res, isKnown);
+  async getLineage(urn: Urn): Promise<LineageEdge[]> {
+    const policy = harvestPolicy("synchronous-preview");
+    const signal = deadlineSignal(policy.harvestDeadlineMs);
+    return this.getLineageWithinPolicy(urn, () => true, policy, signal);
   }
 
   async harvestSnapshot(query?: string): Promise<CatalogSnapshot> {
-    return snapshotFromReports(await this.reports(query));
+    return (
+      await this.harvestAudit(query, { profile: "async-worker" })
+    ).snapshot;
   }
 
   async harvestFacts(query?: string): Promise<AuditFact[]> {
-    return reportsToFacts(await this.reports(query));
+    return (
+      await this.harvestAudit(query, { profile: "async-worker" })
+    ).facts;
+  }
+
+  async harvestAudit(
+    query: string | undefined,
+    options: AuditHarvestOptions
+  ): Promise<AuditHarvest> {
+    // Hosted audit completeness depends on direct versioned-aspect reads. MCP-only
+    // connectivity remains useful for standalone search/get tools, but cannot produce
+    // an audit or governed plan that silently omits temporal contradictions.
+    requireDirectHistoryCapability(process.env.DATAHUB_GMS_URL);
+    const policy = harvestPolicy(options.profile);
+    const signal = deadlineSignal(policy.harvestDeadlineMs, options.signal);
+    return waitWithinDeadline(
+      this.harvestWithinPolicy(query, policy, signal),
+      signal,
+      "HARVEST_DEADLINE_EXCEEDED"
+    );
   }
 
   // Aspect VERSION HISTORY — the contradiction-recovery read. This is a DIRECT GMS read
   // over the OpenAPI v3 versioned-aspect endpoints (systemMetadata=true), NOT one of the
   // DataHub MCP read tools: the MCP tools return only the current view, so the cross-source
   // conflict that latest-write-wins collapsed is invisible to them. GMS still retains every
-  // prior write with the `runId` that produced it, so reading an aspect's version list
-  // resurfaces the conflicting per-run values that `version-history.ts` audits.
+  // prior write with the execution `runId` and, when configured by the ingestion source,
+  // stable `pipelineName`. `version-history.ts` fails closed unless a stable source
+  // identity is available; distinct run ids alone are never treated as distinct sources.
   //
   // Requires DATAHUB_GMS_URL (+ a PAT). Bounded per aspect. Exercised against a live GMS on
   // a cloud VM (user-gated) — version-enumeration semantics are instance/version-dependent,
   // so this transport is deliberately outside the coverage gate; the PURE mapping + audit it
   // feeds (version-history.ts) is fully unit-tested.
   async harvestVersionHistories(query?: string): Promise<AspectVersionHistory[]> {
-    const gms = process.env.DATAHUB_GMS_URL;
-    if (!gms) return [];
-    const token = process.env.DATAHUB_GMS_TOKEN;
-    const urns = await this.search(query);
-    const aspects: MutableAspectName[] = ["ownership", "schemaMetadata", "domains", "deprecation"];
-    const histories: AspectVersionHistory[] = [];
-    for (const urn of urns) {
-      for (const aspect of aspects) {
-        const versions = await this.readAspectVersions(gms, token, urn, aspect);
-        if (versions.length > 0) histories.push({ urn, aspect, versions });
-      }
-    }
-    return histories;
-  }
-
-  // Read the stored versions of ONE aspect on ONE entity from GMS OpenAPI v3.
-  //
-  // DataHub's aspect version numbering is deliberately NOT trusted here. `?version=0` is the
-  // latest, and historical rows are 1..N — but how `systemMetadata.version` reports its own
-  // ordinal is deployment-dependent, so deriving the count from it risks fetching too few
-  // versions and SILENTLY missing the middle write that carries the conflict. Instead we
-  // enumerate v = 1, 2, 3… until a read returns nothing, collecting every non-null version
-  // (bounded by MAX_VERSIONS). This captures the full history regardless of how `version`
-  // is reported. Falls back to the current view (version 0) if no historical rows exist.
-  private async readAspectVersions(
-    gms: string,
-    token: string | undefined,
-    urn: string,
-    aspect: MutableAspectName
-  ): Promise<DhVersionedAspect[]> {
-    const MAX_VERSIONS = 50;
-    const base = gms.replace(/\/+$/, "");
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
-    const readOne = async (version: number): Promise<DhVersionedAspect | null> => {
-      const url =
-        `${base}/openapi/v3/entity/dataset/${encodeURIComponent(urn)}/${aspect}` +
-        `?systemMetadata=true&version=${version}`;
-      const res = await fetch(url, { headers });
-      if (!res.ok) return null;
-      const body = (await res.json()) as Record<string, unknown> | null;
-      const wrapped = body?.[aspect] as DhVersionedAspect | undefined;
-      return wrapped && typeof wrapped === "object" ? wrapped : null;
-    };
-
-    const versions: DhVersionedAspect[] = [];
-    for (let v = 1; v <= MAX_VERSIONS; v++) {
-      const entry = await readOne(v);
-      if (!entry) break; // no more historical rows
-      versions.push(entry);
-    }
-    if (versions.length > 0) return versions;
-    // No historical rows enumerable → fall back to the current view (version 0).
-    const latest = await readOne(0);
-    return latest ? [latest] : [];
+    return (
+      await this.harvestAudit(query, { profile: "async-worker" })
+    ).versionHistories;
   }
 
   // Assemble provenance reports from the live catalog: search → get_entities → get_lineage.
@@ -245,23 +203,204 @@ export class LiveDataHubMcpClient implements DataHubClient {
   // therefore needs aspect version history (systemMetadata / OpenAPI v3) which the MCP tools
   // do not expose — it lights up across scans once a findings store diffs harvests
   // (Phase 3). Lineage-gap + governance findings work fully on this surface today.
-  private async reports(query?: string): Promise<SourceReport[]> {
-    const urns = await this.search(query);
-    const entities = await this.getEntities(urns);
+  private async harvestWithinPolicy(
+    query: string | undefined,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<AuditHarvest> {
+    const { reports, urns } = await this.reports(query, policy, signal);
+    return {
+      snapshot: snapshotFromReports(reports),
+      facts: reportsToFacts(reports),
+      versionHistories: await this.histories(urns, policy, signal),
+    };
+  }
+
+  private async reports(
+    query: string | undefined,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<{ reports: SourceReport[]; urns: Urn[] }> {
+    const urns = await this.searchWithinPolicy(query, policy, signal);
+    const entities = await this.getEntitiesWithinPolicy(urns, policy, signal);
     const known = new Set<Urn>(entities.map((e) => e.urn));
-    const withLineage = await Promise.all(
-      entities.map(async (e) => ({
+    const withLineage = await mapWithConcurrency(
+      entities,
+      policy.lineageConcurrency,
+      signal,
+      async (e) => ({
         ...e,
-        upstreams: await this.getLineage(e.urn, (u) => known.has(u)),
-      }))
+        upstreams: await this.getLineageWithinPolicy(
+          e.urn,
+          (u) => known.has(u),
+          policy,
+          signal
+        ),
+      })
     );
     const now = new Date().toISOString();
     const scanId = now.slice(0, 10);
-    return withLineage.map((e) => ({
-      source: e.source || LIVE_SOURCE,
-      scanId,
-      createdAt: now,
-      entity: e,
-    }));
+    return {
+      urns,
+      reports: withLineage.map((e) => ({
+        source: e.source || LIVE_SOURCE,
+        scanId,
+        createdAt: now,
+        entity: e,
+      })),
+    };
+  }
+
+  private async searchWithinPolicy(
+    query: string | undefined,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<Urn[]> {
+    const q = query && query.trim().length > 0 ? query : "*";
+    const urns: Urn[] = [];
+    const seen = new Set<Urn>();
+    let offset = 0;
+    let declaredTotal: number | undefined;
+    while (declaredTotal === undefined || offset < declaredTotal) {
+      const response = (await this.call(
+        "search",
+        {
+          query: q,
+          filter: "entity_type = dataset",
+          num_results: SEARCH_PAGE_SIZE,
+          offset,
+        },
+        signal,
+        policy.operationTimeoutMs
+      )) as DhSearchResponse | null;
+      const page = mapSearchPageStrict(
+        response,
+        offset,
+        policy.maxEntities
+      );
+      if (
+        declaredTotal !== undefined &&
+        page.total !== declaredTotal
+      ) {
+        throw new DataHubHarvestError(
+          "SEARCH_RESPONSE_INCOMPLETE",
+          "DataHub search total changed during the bounded harvest."
+        );
+      }
+      declaredTotal ??= page.total;
+      if (page.urns.length === 0 && offset < declaredTotal) {
+        throw new DataHubHarvestError(
+          "SEARCH_RESPONSE_INCOMPLETE",
+          "DataHub search ended before its declared total was returned."
+        );
+      }
+      for (const urn of page.urns) {
+        if (seen.has(urn)) {
+          throw new DataHubHarvestError(
+            "SEARCH_RESPONSE_INCOMPLETE",
+            "DataHub search returned a duplicate URN across pages."
+          );
+        }
+        seen.add(urn);
+        urns.push(urn);
+      }
+      offset += page.urns.length;
+    }
+    if (declaredTotal === undefined || urns.length !== declaredTotal) {
+      throw new DataHubHarvestError(
+        "SEARCH_RESPONSE_INCOMPLETE",
+        "DataHub search did not return its complete declared result set."
+      );
+    }
+    return urns;
+  }
+
+  private async getEntitiesWithinPolicy(
+    urns: Urn[],
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<CatalogEntity[]> {
+    if (urns.length === 0) return [];
+    if (urns.length > policy.maxEntities) {
+      throw new DataHubHarvestError(
+        "SEARCH_LIMIT_EXCEEDED",
+        `The entity request exceeds the ${policy.maxEntities}-entity hosted safety limit.`
+      );
+    }
+    const response = (await this.call(
+      "get_entities",
+      { urns },
+      signal,
+      policy.operationTimeoutMs
+    )) as DhCleanedEntity[] | { entities?: DhCleanedEntity[] } | null;
+    return mapEntitiesStrict(response, urns, LIVE_SOURCE);
+  }
+
+  private async getLineageWithinPolicy(
+    urn: Urn,
+    isKnown: (urn: Urn) => boolean,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<LineageEdge[]> {
+    const response = (await this.call(
+      "get_lineage",
+      {
+        urn,
+        upstream: true,
+        max_hops: 1,
+        max_results: MAX_LINEAGE_RESULTS,
+        offset: 0,
+      },
+      signal,
+      policy.operationTimeoutMs
+    )) as DhLineageResponse | null;
+    return mapUpstreamEdgesStrict(
+      response,
+      isKnown,
+      MAX_LINEAGE_RESULTS
+    );
+  }
+
+  private async histories(
+    urns: readonly Urn[],
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<AspectVersionHistory[]> {
+    const gms = requireDirectHistoryCapability(
+      process.env.DATAHUB_GMS_URL
+    );
+    if (urns.length === 0) return [];
+    if (urns.length > policy.maxEntities) {
+      throw new DataHubHarvestError(
+        "SEARCH_LIMIT_EXCEEDED",
+        `Version-history scope exceeds the ${policy.maxEntities}-URN hosted safety limit.`
+      );
+    }
+    const token = process.env.DATAHUB_GMS_TOKEN;
+    const work = urns.flatMap((urn) =>
+      MUTABLE_ASPECTS.map((aspect) => ({ urn, aspect }))
+    );
+    const results = await mapWithConcurrency(
+      work,
+      policy.historyConcurrency,
+      signal,
+      async ({ urn, aspect }): Promise<AspectVersionHistory | null> => {
+        const versions = await readAspectVersionHistory(
+          gms,
+          token,
+          urn,
+          aspect,
+          {
+            maxHistoricalVersions: policy.maxHistoricalVersions,
+            requestTimeoutMs: policy.operationTimeoutMs,
+            signal,
+          }
+        );
+        return versions.length > 0 ? { urn, aspect, versions } : null;
+      }
+    );
+    return results.filter(
+      (history): history is AspectVersionHistory => history !== null
+    );
   }
 }

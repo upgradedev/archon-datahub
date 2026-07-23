@@ -6,9 +6,14 @@
   "exclude": [
     "src/**/*.d.ts",
     "src/types.ts",
-    "src/server.ts",
     "src/config/env.ts",
-    "src/datahub/mcp-client-live.ts"
+    "src/datahub/mcp-client-live.ts",
+    "src/datahub/mutation-client-live.ts",
+    "src/datahub/tag-projection-reader-live.ts",
+    "src/audit-worker.ts",
+    "src/remediation-worker.ts",
+    "src/worker/configuration.ts",
+    "src/worker/aws-adapters.ts"
   ],
   "reporter": ["text", "lcov"],
   "report-dir": "coverage",

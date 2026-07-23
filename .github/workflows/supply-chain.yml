@@ -1,0 +1,930 @@
+name: Production Supply Chain
+
+# Trusted default-branch pushes arrive here through the completed CI workflow so this
+# workflow scans and attests the exact container and Lambda artifacts CI already built
+# against vulnerability intelligence refreshed and sealed during the attesting run.
+# Pull requests are gated inside CI itself, avoiding workflow_run merge-SHA ambiguity and
+# privileged processing of fork artifacts. The daily path resolves the latest successful
+# master CI run; manual rescans require an exact successful CI run ID and commit SHA.
+# Every path downloads the same retained container, SPA, and Lambda artifacts and never
+# rebuilds release subjects.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Exact successful master CI run containing all three retained subjects
+        required: true
+        type: string
+      release_sha:
+        description: Exact lowercase 40-character commit SHA for that CI run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: archon-datahub
+  SYFT_VERSION: "1.49.0"
+  SYFT_ARCHIVE_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
+  SYFT_BINARY_SHA256: 6368bf376b578991192e2e94f5e276e6c70d313d6368ad8c249866f020a86cb0
+  GRYPE_VERSION: "0.116.0"
+  GRYPE_ARCHIVE_SHA256: 40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5
+  GRYPE_BINARY_SHA256: 766fec22cd9eb84aa5efc854a8bd569305c7d96da4e1dbd7e2940b556c4d21ff
+  GRYPE_CHECK_FOR_APP_UPDATE: "false"
+  GRYPE_DB_AUTO_UPDATE: "true"
+  GRYPE_DB_REQUIRE_UPDATE_CHECK: "true"
+  GRYPE_DB_VALIDATE_BY_HASH_ON_START: "true"
+  GRYPE_DB_VALIDATE_AGE: "true"
+  GRYPE_DB_MAX_ALLOWED_BUILT_AGE: "24h"
+  GRYPE_EXTERNAL_SOURCES_ENABLE: "false"
+  SYFT_CHECK_FOR_APP_UPDATE: "false"
+
+jobs:
+  scan:
+    name: Exact release SBOM and vulnerability gate
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'master' &&
+        github.event.workflow_run.head_repository.full_name == github.repository
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      evidence_artifact: ${{ steps.subject.outputs.evidence_artifact }}
+      evidence_artifact_id: ${{ steps.evidence_upload.outputs.artifact-id }}
+      sarif_ready: ${{ steps.reports.outputs.sarif_ready }}
+      source_sha: ${{ steps.subject.outputs.source_sha }}
+      source_run_id: ${{ steps.source.outputs.run_id }}
+    env:
+      BASH_ENV: /dev/null
+    steps:
+      - name: Resolve and validate the exact successful master CI run
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUESTED_CI_RUN_ID: ${{ inputs.ci_run_id }}
+          REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_branch="master"
+          expected_path=".github/workflows/ci.yml"
+          requested_run_id=""
+          requested_release_sha=""
+
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_run)
+              requested_run_id="${EVENT_RUN_ID}"
+              requested_release_sha="${EVENT_RELEASE_SHA}"
+              ;;
+            schedule)
+              test "${GITHUB_REF}" = "refs/heads/${expected_branch}" || {
+                echo "::error::Scheduled rescans must execute from master"
+                exit 1
+              }
+              runs_json="$(gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                -f "branch=${expected_branch}" \
+                -f event=push \
+                -f status=success \
+                -f per_page=100)"
+              requested_run_id="$(jq -er \
+                --arg branch "${expected_branch}" \
+                --arg path "${expected_path}" \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .path == $path and
+                      .head_branch == $branch and
+                      .head_repository.full_name == $repository and
+                      .event == "push" and
+                      .status == "completed" and
+                      .conclusion == "success"
+                    )
+                  ] |
+                  max_by(.id) |
+                  .id
+                ' <<<"${runs_json}")"
+              ;;
+            workflow_dispatch)
+              test "${GITHUB_REF}" = "refs/heads/${expected_branch}" || {
+                echo "::error::Manual rescans must execute from master"
+                exit 1
+              }
+              requested_run_id="${REQUESTED_CI_RUN_ID}"
+              requested_release_sha="${REQUESTED_RELEASE_SHA}"
+              ;;
+            *)
+              echo "::error::Unsupported supply-chain event: ${GITHUB_EVENT_NAME}"
+              exit 1
+              ;;
+          esac
+
+          [[ "${requested_run_id}" =~ ^[0-9]+$ ]] || {
+            echo "::error::The resolved CI run ID must be numeric"
+            exit 1
+          }
+          if [[ -n "${requested_release_sha}" ]]; then
+            [[ "${requested_release_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::The requested release SHA must be a full lowercase commit SHA"
+              exit 1
+            }
+          fi
+
+          run_json="$(gh api \
+            --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${requested_run_id}")"
+          jq -e \
+            --arg branch "${expected_branch}" \
+            --arg path "${expected_path}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .status == "completed" and
+              .conclusion == "success" and
+              .event == "push" and
+              .head_branch == $branch and
+              .head_repository.full_name == $repository and
+              .path == $path
+            ' <<<"${run_json}" >/dev/null || {
+              echo "::error::The selected source is not a successful master CI push run"
+              exit 1
+            }
+
+          source_run_id="$(jq -er '.id | tostring' <<<"${run_json}")"
+          source_sha="$(jq -er '.head_sha' <<<"${run_json}")"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_run_id}" = "${requested_run_id}"
+          if [[ -n "${requested_release_sha}" ]]; then
+            test "${source_sha}" = "${requested_release_sha}" || {
+              echo "::error::The selected CI run does not match release_sha"
+              exit 1
+            }
+          fi
+
+          {
+            echo "run_id=${source_run_id}"
+            echo "source_sha=${source_sha}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "SOURCE_SHA=${source_sha}"
+            echo "SOURCE_EVENT=push"
+            echo "SOURCE_REPOSITORY=${GITHUB_REPOSITORY}"
+            echo "SOURCE_RUN_ID=${source_run_id}"
+          } >>"${GITHUB_ENV}"
+
+      - name: Prepare ephemeral directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/candidate"
+          web_candidate_dir="${RUNNER_TEMP}/web-candidate"
+          lambda_candidate_dir="${RUNNER_TEMP}/lambda-candidate"
+          lambda_content_dir="${RUNNER_TEMP}/lambda-content"
+          evidence_dir="${RUNNER_TEMP}/supply-chain-evidence"
+          tools_dir="${RUNNER_TEMP}/supply-chain-tools"
+          grype_db_cache_dir="${RUNNER_TEMP}/grype-db"
+          {
+            echo "CANDIDATE_DIR=${candidate_dir}"
+            echo "WEB_CANDIDATE_DIR=${web_candidate_dir}"
+            echo "LAMBDA_CANDIDATE_DIR=${lambda_candidate_dir}"
+            echo "LAMBDA_CONTENT_DIR=${lambda_content_dir}"
+            echo "EVIDENCE_DIR=${evidence_dir}"
+            echo "TOOLS_DIR=${tools_dir}"
+            echo "GRYPE_DB_CACHE_DIR=${grype_db_cache_dir}"
+          } >>"${GITHUB_ENV}"
+          mkdir -p \
+            "${candidate_dir}" \
+            "${web_candidate_dir}" \
+            "${lambda_candidate_dir}" \
+            "${lambda_content_dir}" \
+            "${evidence_dir}" \
+            "${tools_dir}" \
+            "${grype_db_cache_dir}"
+
+      - name: Download the exact CI-built container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Download the exact CI-built SPA candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/web-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Download the exact CI-built Lambda candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lambdas-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/lambda-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Verify and load immutable candidate
+        id: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$SOURCE_SHA" != ""
+          test -f "$CANDIDATE_DIR/archon-image.tar.gz"
+          test -f "$CANDIDATE_DIR/archon-image.tar.gz.sha256"
+
+          expected="$(awk 'NR == 1 { print $1 }' "$CANDIDATE_DIR/archon-image.tar.gz.sha256")"
+          actual="$(sha256sum "$CANDIDATE_DIR/archon-image.tar.gz" | cut -d ' ' -f 1)"
+          test "$expected" = "$actual"
+          test "${#actual}" -eq 64
+
+          gzip --decompress --stdout "$CANDIDATE_DIR/archon-image.tar.gz" | docker load
+          image_id="$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Id}}')"
+          test "$image_id" != ""
+          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Config.User}}')" = "node"
+          test "$(
+            docker image inspect "$IMAGE_NAME:$SOURCE_SHA" \
+              --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+          )" = "$SOURCE_SHA"
+
+          printf '%s  %s\n' "$actual" archon-image.tar.gz \
+            >"$EVIDENCE_DIR/container-subject.sha256"
+          cp "$EVIDENCE_DIR/container-subject.sha256" \
+            "$EVIDENCE_DIR/release-subjects.sha256"
+          test -f "$WEB_CANDIDATE_DIR/archon-web.tar.gz"
+          test -f "$WEB_CANDIDATE_DIR/archon-web.tar.gz.sha256"
+          expected_web="$(
+            awk 'NR == 1 { print $1 }' \
+              "$WEB_CANDIDATE_DIR/archon-web.tar.gz.sha256"
+          )"
+          actual_web="$(
+            sha256sum "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+              cut -d ' ' -f 1
+          )"
+          test "$expected_web" = "$actual_web"
+          test "${#actual_web}" -eq 64
+          printf '%s  %s\n' "$actual_web" archon-web.tar.gz \
+            >>"$EVIDENCE_DIR/release-subjects.sha256"
+
+          test -f "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz"
+          test -f "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz.sha256"
+          expected_lambda="$(
+            awk 'NR == 1 { print $1 }' \
+              "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz.sha256"
+          )"
+          actual_lambda="$(
+            sha256sum "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" |
+              cut -d ' ' -f 1
+          )"
+          test "$expected_lambda" = "$actual_lambda"
+          test "${#actual_lambda}" -eq 64
+
+          while IFS= read -r member; do
+            case "$member" in
+              approval|approval/*|control|control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda archive member: $member"
+                exit 1
+                ;;
+            esac
+            if [[ "$member" == /* || "$member" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe Lambda archive member: $member"
+              exit 1
+            fi
+          done < <(tar --list --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz")
+          if tar --list --verbose --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" |
+            awk '
+              substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" {
+                unsafe = 1
+              }
+              END { exit(unsafe ? 0 : 1) }
+            '
+          then
+            echo "::error::Lambda archive may contain only regular files and directories"
+            exit 1
+          fi
+          tar --extract --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" \
+            --directory "$LAMBDA_CONTENT_DIR" \
+            --no-same-owner \
+            --no-same-permissions
+          if find "$LAMBDA_CONTENT_DIR" \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Extracted Lambda candidate contains a special file"
+            exit 1
+          fi
+          for entry in \
+            approval/index.js approval/handoff.js approval/package.json \
+            approval/package-lock.json control/index.js control/package.json \
+            control/package-lock.json; do
+            test -f "$LAMBDA_CONTENT_DIR/$entry"
+          done
+          test -d "$LAMBDA_CONTENT_DIR/approval/node_modules"
+          test -d "$LAMBDA_CONTENT_DIR/control/node_modules"
+
+          printf '%s  %s\n' "$actual_lambda" archon-lambdas.tar.gz \
+            >"$EVIDENCE_DIR/lambda-subject.sha256"
+          cat "$EVIDENCE_DIR/lambda-subject.sha256" \
+            >>"$EVIDENCE_DIR/release-subjects.sha256"
+          printf '%s\n' "$image_id" > "$EVIDENCE_DIR/image-id.txt"
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "evidence_artifact=supply-chain-$SOURCE_SHA-$GITHUB_RUN_ID"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Install checksum-pinned Syft and Grype
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS_DIR/syft" "$TOOLS_DIR/grype"
+          syft_archive="$TOOLS_DIR/syft/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          grype_archive="$TOOLS_DIR/grype/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+
+          curl --fail --silent --show-error --location \
+            --output "$syft_archive" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "$grype_archive" \
+            "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+
+          echo "$SYFT_ARCHIVE_SHA256  $syft_archive" | sha256sum --check --strict
+          echo "$GRYPE_ARCHIVE_SHA256  $grype_archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$syft_archive" --directory "$TOOLS_DIR/syft" syft
+          tar --extract --gzip --file "$grype_archive" --directory "$TOOLS_DIR/grype" grype
+          chmod 0755 "$TOOLS_DIR/syft/syft" "$TOOLS_DIR/grype/grype"
+          test "$(sha256sum "$TOOLS_DIR/syft/syft" | cut -d ' ' -f 1)" = "$SYFT_BINARY_SHA256"
+          test "$(sha256sum "$TOOLS_DIR/grype/grype" | cut -d ' ' -f 1)" = "$GRYPE_BINARY_SHA256"
+          "$TOOLS_DIR/syft/syft" version > "$EVIDENCE_DIR/syft-version.txt"
+          "$TOOLS_DIR/grype/grype" version > "$EVIDENCE_DIR/grype-version.txt"
+
+      - name: Refresh and seal current vulnerability intelligence
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" db update
+          "$TOOLS_DIR/grype/grype" db check
+          "$TOOLS_DIR/grype/grype" db status > "$EVIDENCE_DIR/grype-db-status.txt"
+          retrieved_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "retrievedAt=${retrieved_at}"
+            echo "maxAllowedBuiltAge=${GRYPE_DB_MAX_ALLOWED_BUILT_AGE}"
+            echo "updateCheckRequired=${GRYPE_DB_REQUIRE_UPDATE_CHECK}"
+            echo "hashValidationRequired=${GRYPE_DB_VALIDATE_BY_HASH_ON_START}"
+            echo "ageValidationRequired=${GRYPE_DB_VALIDATE_AGE}"
+          } > "$EVIDENCE_DIR/grype-db-policy.txt"
+          find "$GRYPE_DB_CACHE_DIR" -type f -print -quit | grep -q . || {
+            echo "::error::Grype did not materialize a vulnerability database"
+            exit 1
+          }
+          (
+            cd "$GRYPE_DB_CACHE_DIR"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) > "$EVIDENCE_DIR/grype-db-files.sha256"
+          test -s "$EVIDENCE_DIR/grype-db-files.sha256"
+
+      - name: Generate SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "docker:$IMAGE_NAME:$SOURCE_SHA" --scope squashed \
+            --output "syft-json=$EVIDENCE_DIR/archon.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon.cyclonedx.json"
+          jq --exit-status '.artifacts | type == "array"' "$EVIDENCE_DIR/archon.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array"' "$EVIDENCE_DIR/archon.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array"' "$EVIDENCE_DIR/archon.cyclonedx.json" >/dev/null
+
+      - name: Generate Lambda SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "dir:$LAMBDA_CONTENT_DIR" \
+            --output "syft-json=$EVIDENCE_DIR/archon-lambda.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon-lambda.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon-lambda.cyclonedx.json"
+          jq --exit-status '.artifacts | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.cyclonedx.json" >/dev/null
+
+      - name: Produce vulnerability reports
+        id: reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" "sbom:$EVIDENCE_DIR/archon.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-report.txt"
+          jq --exit-status '.matches | type == "array"' "$EVIDENCE_DIR/grype-report.json" >/dev/null
+          jq --exit-status '.runs | type == "array"' "$EVIDENCE_DIR/grype-report.sarif" >/dev/null
+          echo "sarif_ready=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Produce Lambda vulnerability reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-lambda.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-lambda-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-lambda-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-lambda-report.txt"
+          jq --exit-status '.matches | type == "array"' \
+            "$EVIDENCE_DIR/grype-lambda-report.json" >/dev/null
+          jq --exit-status '.runs | type == "array"' \
+            "$EVIDENCE_DIR/grype-lambda-report.sarif" >/dev/null
+
+      - name: Bind source, image, SBOM, scanner, and CI provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_db_manifest="${RUNNER_TEMP}/grype-db-files.current.sha256"
+          (
+            cd "$GRYPE_DB_CACHE_DIR"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) >"${current_db_manifest}"
+          cmp --silent \
+            "$EVIDENCE_DIR/grype-db-files.sha256" \
+            "${current_db_manifest}" || {
+              echo "::error::The vulnerability database changed after it was sealed"
+              exit 1
+            }
+
+          archive_sha="$(
+            awk '$2 == "archon-image.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          web_archive_sha="$(
+            awk '$2 == "archon-web.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          lambda_archive_sha="$(
+            awk '$2 == "archon-lambdas.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          image_id="$(cat "$EVIDENCE_DIR/image-id.txt")"
+          syft_sha="$(sha256sum "$EVIDENCE_DIR/archon.syft.json" | cut -d ' ' -f 1)"
+          spdx_sha="$(sha256sum "$EVIDENCE_DIR/archon.spdx.json" | cut -d ' ' -f 1)"
+          cyclonedx_sha="$(sha256sum "$EVIDENCE_DIR/archon.cyclonedx.json" | cut -d ' ' -f 1)"
+          lambda_syft_sha=""
+          lambda_spdx_sha=""
+          lambda_cyclonedx_sha=""
+          grype_db_manifest_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-files.sha256" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_status_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-status.txt" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_policy_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-policy.txt" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_retrieved_at="$(
+            sed -n 's/^retrievedAt=//p' "$EVIDENCE_DIR/grype-db-policy.txt"
+          )"
+          [[ "${grype_db_retrieved_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          if [[ -f "$EVIDENCE_DIR/archon-lambda.syft.json" ]]; then
+            lambda_syft_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.syft.json" |
+                cut -d ' ' -f 1
+            )"
+            lambda_spdx_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.spdx.json" |
+                cut -d ' ' -f 1
+            )"
+            lambda_cyclonedx_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.cyclonedx.json" |
+                cut -d ' ' -f 1
+            )"
+          fi
+          source_run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID"
+
+          jq --null-input \
+            --arg schemaVersion "archon.verified-ci-artifact/v3" \
+            --arg sourceRepository "$SOURCE_REPOSITORY" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceEvent "$SOURCE_EVENT" \
+            --arg sourceRunUrl "$source_run_url" \
+            --arg imageId "$image_id" \
+            --arg archiveDigest "sha256:$archive_sha" \
+            --arg webArchiveDigest "${web_archive_sha:+sha256:$web_archive_sha}" \
+            --arg lambdaArchiveDigest "${lambda_archive_sha:+sha256:$lambda_archive_sha}" \
+            --arg syftDigest "sha256:$syft_sha" \
+            --arg spdxDigest "sha256:$spdx_sha" \
+            --arg cyclonedxDigest "sha256:$cyclonedx_sha" \
+            --arg lambdaSyftDigest "${lambda_syft_sha:+sha256:$lambda_syft_sha}" \
+            --arg lambdaSpdxDigest "${lambda_spdx_sha:+sha256:$lambda_spdx_sha}" \
+            --arg lambdaCyclonedxDigest "${lambda_cyclonedx_sha:+sha256:$lambda_cyclonedx_sha}" \
+            --arg syftVersion "$SYFT_VERSION" \
+            --arg grypeVersion "$GRYPE_VERSION" \
+            --arg grypeDbManifestDigest "sha256:$grype_db_manifest_sha" \
+            --arg grypeDbStatusDigest "sha256:$grype_db_status_sha" \
+            --arg grypeDbPolicyDigest "sha256:$grype_db_policy_sha" \
+            --arg grypeDbRetrievedAt "$grype_db_retrieved_at" \
+            --arg grypeDbMaxAge "$GRYPE_DB_MAX_ALLOWED_BUILT_AGE" \
+            '{
+              schemaVersion: $schemaVersion,
+              source: {
+                repository: $sourceRepository,
+                commit: $sourceSha,
+                event: $sourceEvent,
+                workflowRun: $sourceRunUrl
+              },
+              subjects: (
+                [
+                  {
+                    name: "archon-image.tar.gz",
+                    archiveDigest: $archiveDigest,
+                    imageId: $imageId
+                  }
+                ] +
+                if $webArchiveDigest == "" then
+                  []
+                else
+                  [
+                    {
+                      name: "archon-web.tar.gz",
+                      archiveDigest: $webArchiveDigest
+                    }
+                  ]
+                end +
+                if $lambdaArchiveDigest == "" then
+                  []
+                else
+                  [
+                    {
+                      name: "archon-lambdas.tar.gz",
+                      archiveDigest: $lambdaArchiveDigest
+                    }
+                  ]
+                end
+              ),
+              sbom: {
+                syft: $syftDigest,
+                spdx: $spdxDigest,
+                cyclonedx: $cyclonedxDigest,
+                lambda: (
+                  if $lambdaSyftDigest == "" then
+                    null
+                  else
+                    {
+                      syft: $lambdaSyftDigest,
+                      spdx: $lambdaSpdxDigest,
+                      cyclonedx: $lambdaCyclonedxDigest
+                    }
+                  end
+                )
+              },
+              scanners: {
+                syft: $syftVersion,
+                grype: {
+                  version: $grypeVersion,
+                  database: {
+                    retrievedAt: $grypeDbRetrievedAt,
+                    filesManifestDigest: $grypeDbManifestDigest,
+                    statusDigest: $grypeDbStatusDigest,
+                    policyDigest: $grypeDbPolicyDigest,
+                    maxAllowedBuiltAge: $grypeDbMaxAge,
+                    updateCheckRequired: true,
+                    validateByHashOnStart: true,
+                    validateAge: true
+                  }
+                }
+              }
+            }' > "$EVIDENCE_DIR/provenance.json"
+
+          (
+            cd "$EVIDENCE_DIR"
+            evidence_files=(
+              archon.cyclonedx.json
+              archon.spdx.json
+              archon.syft.json
+              grype-db-files.sha256
+              grype-db-policy.txt
+              grype-db-status.txt
+              grype-report.json
+              grype-report.sarif
+              grype-report.txt
+              grype-version.txt
+              image-id.txt
+              provenance.json
+              container-subject.sha256
+              release-subjects.sha256
+              syft-version.txt
+            )
+            if [[ -f archon-lambda.syft.json ]]; then
+              evidence_files+=(
+                archon-lambda.cyclonedx.json
+                archon-lambda.spdx.json
+                archon-lambda.syft.json
+                grype-lambda-report.json
+                grype-lambda-report.sarif
+                grype-lambda-report.txt
+                lambda-subject.sha256
+              )
+            fi
+            sha256sum "${evidence_files[@]}" > SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Retain CI-only supply-chain evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.subject.outputs.evidence_artifact || format('supply-chain-failed-{0}', github.run_id) }}
+          path: ${{ runner.temp }}/supply-chain-evidence/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 9
+
+      - name: Fail on high or critical production-image vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" "sbom:$EVIDENCE_DIR/archon.syft.json" \
+            --by-cve --fail-on high --output table
+
+      - name: Fail on high or critical Lambda vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-lambda.syft.json" \
+            --by-cve --fail-on high --output table
+
+  publish-sarif:
+    name: Publish trusted vulnerability results
+    needs: scan
+    if: >-
+      always() &&
+      needs.scan.outputs.evidence_artifact != '' &&
+      needs.scan.outputs.evidence_artifact_id != '' &&
+      needs.scan.outputs.sarif_ready == 'true' &&
+      (
+        github.event_name != 'workflow_run' ||
+        (
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download scan evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.scan.outputs.evidence_artifact }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Upload Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-report.sarif
+          category: grype-production-image
+
+      - name: Upload Lambda Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-lambda-report.sarif
+          category: grype-production-lambdas
+
+  attest:
+    name: Sign provenance and SBOM attestations
+    needs: scan
+    if: >-
+      needs.scan.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/master'
+        ) ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download verified evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.scan.outputs.evidence_artifact }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Verify the evidence envelope
+        shell: bash
+        working-directory: ${{ runner.temp }}/evidence
+        env:
+          SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS
+          test "$(jq --raw-output '.source.commit' provenance.json)" = "${SOURCE_SHA}"
+
+      - name: Bind independent security workflow gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/evidence
+          EXPECTED_BRANCH: master
+        run: |
+          set -euo pipefail
+          gate_ready=false
+          for _ in {1..30}; do
+            codeql_runs_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/codeql.yml/runs" \
+              -f "head_sha=${SOURCE_SHA}" \
+              -f "branch=${EXPECTED_BRANCH}" \
+              -f event=push \
+              -f status=success \
+              -f per_page=100)"
+            workflow_security_runs_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/workflow-security.yml/runs" \
+              -f "head_sha=${SOURCE_SHA}" \
+              -f "branch=${EXPECTED_BRANCH}" \
+              -f event=push \
+              -f status=success \
+              -f per_page=100)"
+            runs_json="$(
+              jq -cn \
+                --argjson codeql "${codeql_runs_json}" \
+                --argjson workflow_security "${workflow_security_runs_json}" \
+                '{
+                  workflow_runs:
+                    ($codeql.workflow_runs + $workflow_security.workflow_runs)
+                }'
+            )"
+            if jq -e \
+              --arg sha "${SOURCE_SHA}" \
+              --arg branch "${EXPECTED_BRANCH}" '
+              any(
+                .workflow_runs[];
+                .path == ".github/workflows/codeql.yml" and
+                .head_sha == $sha and
+                .head_branch == $branch and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              ) and
+              any(
+                .workflow_runs[];
+                .path == ".github/workflows/workflow-security.yml" and
+                .head_sha == $sha and
+                .head_branch == $branch and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' <<<"${runs_json}" >/dev/null; then
+              gate_ready=true
+              break
+            fi
+            sleep 15
+          done
+          test "${gate_ready}" = "true" || {
+            echo "::error::CodeQL and Workflow security must both succeed for the exact source SHA"
+            jq -r '
+              .workflow_runs[] |
+              [
+                .path,
+                .head_branch,
+                .head_sha,
+                .status,
+                (.conclusion // "pending"),
+                .html_url
+              ] |
+              @tsv
+            ' <<<"${runs_json}"
+            exit 1
+          }
+
+          jq -cS \
+            --arg sha "${SOURCE_SHA}" \
+            --arg branch "${EXPECTED_BRANCH}" '
+            {
+              schemaVersion: "archon.security-workflow-gates/v1",
+              sourceSha: $sha,
+              branch: $branch,
+              workflows: (
+                [
+                  .workflow_runs[] |
+                  select(
+                    (
+                      .path == ".github/workflows/codeql.yml" or
+                      .path == ".github/workflows/workflow-security.yml"
+                    ) and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .event == "push" and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  ) |
+                  {
+                    name,
+                    path,
+                    workflowId: .workflow_id,
+                    headBranch: .head_branch,
+                    headSha: .head_sha,
+                    event,
+                    runId: .id,
+                    runAttempt: .run_attempt,
+                    url: .html_url,
+                    conclusion
+                  }
+                ] |
+                sort_by(.path, .runId, .runAttempt) |
+                group_by(.path) |
+                map(last)
+              )
+            }
+          ' <<<"${runs_json}" >"${EVIDENCE_DIR}/security-workflow-gates.json"
+          jq --slurpfile gates "${EVIDENCE_DIR}/security-workflow-gates.json" \
+            '. + {securityWorkflowGates: $gates[0]}' \
+            "${EVIDENCE_DIR}/provenance.json" \
+            >"${EVIDENCE_DIR}/attested-provenance.json"
+          test "$(jq -r '.securityWorkflowGates.sourceSha' \
+            "${EVIDENCE_DIR}/attested-provenance.json")" = "${SOURCE_SHA}"
+
+      - name: Sign verified CI-artifact provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/release-subjects.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3
+          predicate-path: ${{ runner.temp }}/evidence/attested-provenance.json
+
+      - name: Sign container SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/container-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon.spdx.json
+
+      - name: Sign Lambda SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/lambda-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon-lambda.spdx.json
+
+      - name: Retain signed-gate projection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: attestation-gates-${{ needs.scan.outputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/evidence/security-workflow-gates.json
+            ${{ runner.temp }}/evidence/attested-provenance.json
+          if-no-files-found: error
+          retention-days: 90

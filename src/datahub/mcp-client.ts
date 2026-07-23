@@ -19,6 +19,18 @@ import type { CatalogEntity, CatalogSnapshot, LineageEdge, Urn } from "./models.
 import { reportsToFacts, type SourceReport } from "../audit/harvest.js";
 import { FIXTURE_REPORTS, FIXTURE_VERSION_HISTORY } from "./fixtures.js";
 import type { AspectVersionHistory } from "./version-history.js";
+import type { AuditExecutionProfile } from "./harvest-policy.js";
+
+export interface AuditHarvest {
+  snapshot: CatalogSnapshot;
+  facts: AuditFact[];
+  versionHistories: AspectVersionHistory[];
+}
+
+export interface AuditHarvestOptions {
+  profile: AuditExecutionProfile;
+  signal?: AbortSignal;
+}
 
 // The read surface the agent needs. Mirrors the DataHub MCP server's read tools, but
 // in OUR provider-neutral vocabulary so the agent never depends on acryldata shapes.
@@ -35,6 +47,14 @@ export interface DataHubClient {
   // Provenance-aware harvest: the FULL fact stream across every source/scan, which the
   // self-audit consistency engine needs to see cross-source disagreements.
   harvestFacts(query?: string): Promise<AuditFact[]>;
+  // One logical audit harvest. Snapshot and fact views MUST derive from the same
+  // report stream; live implementations also reuse the exact discovered URN set for
+  // bounded aspect-history work. This prevents time-of-check/time-of-use drift and
+  // duplicate network harvests inside one pipeline run.
+  harvestAudit(
+    query: string | undefined,
+    options: AuditHarvestOptions
+  ): Promise<AuditHarvest>;
   // OPTIONAL — aspect VERSION HISTORY for the catalog's mutable governance aspects, from a
   // DIRECT GMS read (OpenAPI v3 / Timeline), NOT the MCP read tools. This is what recovers
   // cross-source CONTRADICTIONS on a LIVE catalog, where latest-write-wins collapses the
@@ -115,11 +135,31 @@ export class FakeDataHubMcpClient implements DataHubClient {
     return reportsToFacts(this.filter(query));
   }
 
+  async harvestAudit(
+    query: string | undefined,
+    _options: AuditHarvestOptions
+  ): Promise<AuditHarvest> {
+    // The deterministic fixtures are trusted test data, so hosted network ceilings do
+    // not change Fake semantics. The filter is evaluated once and both projections are
+    // derived from that exact in-memory report bundle.
+    const reports = this.filter(query);
+    return {
+      snapshot: snapshotFromReports(reports),
+      facts: reportsToFacts(reports),
+      versionHistories: this.filterHistories(query),
+    };
+  }
+
   // Offline aspect version history: the deterministic fixture histories, filtered by the
   // same query rule. Mirrors what a live direct-GMS read would assemble (the conflicting
-  // per-run values the current view collapsed), so the contradiction-recovery path fires
+  // versioned values + stable pipeline identities the current view collapsed), so the
+  // contradiction-recovery path fires
   // identically offline and online.
   async harvestVersionHistories(query?: string): Promise<AspectVersionHistory[]> {
+    return this.filterHistories(query);
+  }
+
+  private filterHistories(query?: string): AspectVersionHistory[] {
     if (!query || query === "*" || query.trim().length === 0) return this.histories;
     const q = query.toLowerCase();
     return this.histories.filter((h) => h.urn.toLowerCase().includes(q));

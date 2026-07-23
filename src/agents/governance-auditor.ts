@@ -16,7 +16,7 @@ export class GovernanceAuditorAgent {
         severity: r.severity,
         subject: r.subject,
         summary: `${r.ruleId}: ${r.message}`,
-        detail: { rule: r.rule, ruleId: r.ruleId },
+        detail: { rule: r.rule, ruleId: r.ruleId, ...(r.evidence ?? {}) },
         recommendation: `Remediate ${r.ruleId} (${r.rule}). Read-only — a steward decides.`,
       }));
   }

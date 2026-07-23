@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "archon.remediation-policy-input/v1",
+  "policyId": "archon.g6.pii-classification.v1",
+  "enabled": true,
+  "classificationTagUrn": "urn:li:tag:PII",
+  "allowedEntityUrnPrefixes": [
+    "urn:li:dataset:"
+  ],
+  "scope": {
+    "findingRule": "G6",
+    "maxEntitiesPerAction": 1,
+    "maxColumnsPerAction": 1,
+    "maxTagsPerAction": 1,
+    "requiresHumanApproval": true,
+    "requiresFreshPrecondition": true,
+    "requiresPostconditionVerification": true,
+    "requiresFreshApprovalForRollback": true
+  }
+}

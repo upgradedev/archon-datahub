@@ -1,0 +1,2994 @@
+name: Deploy immutable AWS release
+
+run-name: Deploy ${{ inputs.release_sha }} from CI run ${{ inputs.ci_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful default-branch CI run containing the immutable candidates
+        required: true
+        type: string
+      release_sha:
+        description: Exact 40-character commit SHA used by that CI run
+        required: true
+        type: string
+
+# Selecting an older successful ci_run_id + its matching release_sha is the rollback
+# mechanism. The workflow always downloads those exact immutable CI artifacts and never
+# rebuilds the container, SPA, or Lambda artifact. Rollback remains possible while the
+# source CI artifacts are retained.
+#
+# Configure these values in BOTH `staging` and `production` GitHub environments:
+#   vars:    AWS_DEPLOY_ROLE_ARN, AWS_ACCOUNT_ID, AWS_REGION,
+#            DATAHUB_READ_GMS_URL, DATAHUB_READ_MCP_URL, DATAHUB_WRITE_GMS_URL,
+#            DATAHUB_WRITE_MCP_URL, DATAHUB_DEMO_QUERY, LLM_BASE_URL, LLM_MODEL
+#   secrets: DATAHUB_READ_GMS_TOKEN, DATAHUB_WRITE_GMS_TOKEN, LLM_API_KEY
+# The production environment must have required reviewers enabled; that environment gate
+# is the human approval between staging verification and production promotion.
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+  deployments: write
+  id-token: write
+
+concurrency:
+  group: archon-aws-promotion
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24.18.0"
+  AWS_PAGER: ""
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  staging:
+    name: Verify once and deploy staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.application_url }}
+    outputs:
+      image_digest: ${{ steps.deploy.outputs.image_digest }}
+      container_artifact_sha: ${{ steps.artifacts.outputs.container_artifact_sha }}
+      container_archive_sha: ${{ steps.artifacts.outputs.container_archive_sha }}
+      web_artifact_sha: ${{ steps.artifacts.outputs.web_artifact_sha }}
+      web_archive_sha: ${{ steps.artifacts.outputs.web_archive_sha }}
+      lambda_artifact_sha: ${{ steps.artifacts.outputs.lambda_artifact_sha }}
+      lambda_archive_sha: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+      application_url: ${{ steps.deploy.outputs.application_url }}
+      api_url: ${{ steps.deploy.outputs.api_url }}
+      stack_name: ${{ steps.deploy.outputs.stack_name }}
+      smoke_sha: ${{ steps.smoke.outputs.audit_response_sha }}
+      smoke_evidence_sha: ${{ steps.smoke.outputs.audit_evidence_sha }}
+      demo_query_sha: ${{ steps.smoke.outputs.demo_query_sha }}
+      control_loop_smoke_sha: ${{ steps.smoke.outputs.control_loop_response_sha }}
+      dast_report_sha: ${{ steps.dast.outputs.report_sha }}
+      attestation_sha: ${{ steps.attestation.outputs.sha }}
+      control_plane_gate_sha: ${{ steps.source.outputs.control_plane_gate_sha }}
+      runtime_config_sha: ${{ steps.spa.outputs.runtime_config_sha }}
+    steps:
+      - name: Validate immutable source run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "${CI_RUN_ID}" =~ ^[0-9]+$ ]] || {
+            echo "::error::ci_run_id must be numeric"
+            exit 1
+          }
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release_sha must be a full lowercase commit SHA"
+            exit 1
+          }
+
+          repository_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${GITHUB_REF}" = "refs/heads/${default_branch}" || {
+            echo "::error::The deployment workflow itself must run from the default branch"
+            exit 1
+          }
+          staging_environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/staging")"
+          jq -e '
+            .name == "staging" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true
+          ' <<<"${staging_environment_json}" >/dev/null || {
+            echo "::error::Staging requires a custom default-branch deployment policy"
+            exit 1
+          }
+          staging_branch_policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/staging/deployment-branch-policies?per_page=100")"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and
+            .branch_policies[0].name == $branch
+          ' <<<"${staging_branch_policies}" >/dev/null || {
+            echo "::error::Staging deployment policy must allow only the default branch"
+            exit 1
+          }
+
+          workflow_success() {
+            local workflow_file="$1"
+            local expected_path=".github/workflows/${workflow_file}"
+            local response
+            local match
+            response="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+              -f "head_sha=${CONTROL_PLANE_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f status=success \
+              -f per_page=100)" || return 1
+            match="$(jq -ce \
+              --arg path "${expected_path}" \
+              --arg sha "${CONTROL_PLANE_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .head_repository.full_name == $repository and
+                    .event == "push" and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ] |
+                sort_by(.run_attempt, .id) |
+                last
+              ' <<<"${response}")" || return 1
+            control_plane_runs="$(
+              jq -cn \
+                --argjson current "${control_plane_runs}" \
+                --argjson match "${match}" \
+                '$current + [{
+                  path: $match.path,
+                  workflowId: $match.workflow_id,
+                  runId: $match.id,
+                  runAttempt: $match.run_attempt,
+                  url: $match.html_url,
+                  conclusion: $match.conclusion
+                }]'
+            )"
+          }
+
+          control_plane_ready=false
+          control_plane_runs="[]"
+          for _ in {1..40}; do
+            control_plane_runs="[]"
+            if workflow_success ci.yml &&
+              workflow_success codeql.yml &&
+              workflow_success workflow-security.yml; then
+              control_plane_ready=true
+              break
+            fi
+            sleep 15
+          done
+          test "${control_plane_ready}" = "true" || {
+            echo "::error::The current deployment control plane requires successful CI, CodeQL, and Workflow security push runs"
+            exit 1
+          }
+          control_plane_gate_file="${RUNNER_TEMP}/control-plane-security-gates.json"
+          jq -cnS \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --arg branch "${default_branch}" \
+            --argjson workflows "${control_plane_runs}" '
+              {
+                schemaVersion: "archon.deployment-control-plane-gates/v1",
+                sourceSha: $sha,
+                branch: $branch,
+                workflows: ($workflows | sort_by(.path))
+              }
+            ' >"${control_plane_gate_file}"
+          control_plane_gate_sha="$(
+            sha256sum "${control_plane_gate_file}" | awk '{print $1}'
+          )"
+          run_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}")"
+
+          jq -e \
+            --arg sha "${RELEASE_SHA}" \
+            --arg branch "${default_branch}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            '
+              .status == "completed" and
+              .conclusion == "success" and
+              .event == "push" and
+              .head_sha == $sha and
+              .head_branch == $branch and
+              .head_repository.full_name == $repository and
+              .path == ".github/workflows/ci.yml"
+            ' <<<"${run_json}" >/dev/null || {
+              echo "::error::Source must be a successful push CI run on the default branch with the exact release_sha"
+              exit 1
+            }
+
+          {
+            echo "default_branch=${default_branch}"
+            echo "source_run_url=$(jq -er '.html_url' <<<"${run_json}")"
+            echo "control_plane_gate_sha=${control_plane_gate_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Check out the current deployment control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert current control-plane commit
+        env:
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+
+      - name: Download and verify exact CI artifacts
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          artifacts_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}/artifacts?per_page=100")"
+
+          fetch_verified_artifact() {
+            local name="$1"
+            local destination="$2"
+            local metadata count artifact_id recorded_digest recorded_sha archive actual_sha
+
+            count="$(jq --arg name "${name}" \
+              '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+              <<<"${artifacts_json}")"
+            test "${count}" = "1" || {
+              echo "::error::Expected exactly one non-expired ${name} artifact, found ${count}"
+              return 1
+            }
+            metadata="$(jq -c --arg name "${name}" \
+              '.artifacts[] | select(.name == $name and .expired == false)' \
+              <<<"${artifacts_json}")"
+            artifact_id="$(jq -er '.id' <<<"${metadata}")"
+            recorded_digest="$(jq -er '.digest' <<<"${metadata}")"
+            [[ "${recorded_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::${name} has no valid GitHub-recorded SHA-256"
+              return 1
+            }
+            recorded_sha="${recorded_digest#sha256:}"
+            archive="${RUNNER_TEMP}/${name}.zip"
+
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              >"${archive}"
+            actual_sha="$(sha256sum "${archive}" | awk '{print $1}')"
+            test "${actual_sha}" = "${recorded_sha}" || {
+              echo "::error::GitHub artifact digest mismatch for ${name}"
+              return 1
+            }
+
+            while IFS= read -r entry; do
+              if [[ "${entry}" == /* || "${entry}" == *\\* ||
+                "${entry}" =~ (^|/)\.\.(/|$) ]]; then
+                echo "::error::Unsafe path in GitHub artifact ${name}: ${entry}"
+                return 1
+              fi
+            done < <(unzip -Z1 "${archive}")
+            mkdir -p "${destination}"
+            unzip -q "${archive}" -d "${destination}"
+            if find "${destination}" -type l -print -quit | grep -q .; then
+              echo "::error::Symlinks are not permitted in promotion artifacts"
+              return 1
+            fi
+            printf '%s\n' "${recorded_sha}"
+          }
+
+          container_name="container-${RELEASE_SHA}"
+          web_name="web-${RELEASE_SHA}"
+          lambda_name="lambdas-${RELEASE_SHA}"
+          container_dir="${RUNNER_TEMP}/verified-container"
+          web_dir="${RUNNER_TEMP}/verified-web"
+          lambda_dir="${RUNNER_TEMP}/verified-lambdas"
+          container_artifact_sha="$(fetch_verified_artifact \
+            "${container_name}" "${container_dir}")"
+          web_artifact_sha="$(fetch_verified_artifact "${web_name}" "${web_dir}")"
+          lambda_artifact_sha="$(
+            fetch_verified_artifact "${lambda_name}" "${lambda_dir}"
+          )"
+
+          image_tar="$(find "${container_dir}" -type f \
+            -name 'archon-image.tar.gz' -print -quit)"
+          image_sha_file="$(find "${container_dir}" -type f \
+            -name 'archon-image.tar.gz.sha256' -print -quit)"
+          image_inspect="$(find "${container_dir}" -type f \
+            -name 'image-inspect.json' -print -quit)"
+          test -n "${image_tar}"
+          test -n "${image_sha_file}"
+          test -n "${image_inspect}"
+
+          recorded_archive_sha="$(awk 'NR == 1 {print $1}' "${image_sha_file}")"
+          [[ "${recorded_archive_sha}" =~ ^[0-9a-f]{64}$ ]]
+          actual_archive_sha="$(sha256sum "${image_tar}" | awk '{print $1}')"
+          test "${actual_archive_sha}" = "${recorded_archive_sha}" || {
+            echo "::error::Container archive does not match its CI-recorded SHA-256"
+            exit 1
+          }
+          jq -e --arg release "${RELEASE_SHA}" \
+            '.[0].Config.Labels["org.opencontainers.image.revision"] == $release' \
+            "${image_inspect}" >/dev/null
+
+          web_tar="$(find "${web_dir}" -type f \
+            -name 'archon-web.tar.gz' -print -quit)"
+          web_sha_file="$(find "${web_dir}" -type f \
+            -name 'archon-web.tar.gz.sha256' -print -quit)"
+          test -n "${web_tar}"
+          test -n "${web_sha_file}"
+          recorded_web_archive_sha="$(awk 'NR == 1 {print $1}' "${web_sha_file}")"
+          [[ "${recorded_web_archive_sha}" =~ ^[0-9a-f]{64}$ ]]
+          actual_web_archive_sha="$(sha256sum "${web_tar}" | awk '{print $1}')"
+          test "${actual_web_archive_sha}" = "${recorded_web_archive_sha}" || {
+            echo "::error::SPA archive does not match its CI-recorded SHA-256"
+            exit 1
+          }
+          if tar --list --gzip --file "${web_tar}" |
+            grep --extended-regexp '(^/|(^|/)\.\.(/|$))' >/dev/null; then
+            echo "::error::SPA archive contains an unsafe path"
+            exit 1
+          fi
+          if tar --list --verbose --gzip --file "${web_tar}" |
+            awk 'substr($1, 1, 1) !~ /^[-d]$/ { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::SPA archive may contain only regular files and directories"
+            exit 1
+          fi
+          web_content_dir="${RUNNER_TEMP}/verified-web-content"
+          mkdir -p "${web_content_dir}"
+          tar --extract --gzip --file "${web_tar}" \
+            --directory "${web_content_dir}" \
+            --no-same-owner --no-same-permissions
+          if find "${web_content_dir}" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::SPA content contains a non-regular member"
+            exit 1
+          fi
+          test -f "${web_content_dir}/index.html"
+
+          lambda_tar="$(find "${lambda_dir}" -type f \
+            -name 'archon-lambdas.tar.gz' -print -quit)"
+          lambda_sha_file="$(find "${lambda_dir}" -type f \
+            -name 'archon-lambdas.tar.gz.sha256' -print -quit)"
+          test -n "${lambda_tar}"
+          test -n "${lambda_sha_file}"
+          recorded_lambda_archive_sha="$(
+            awk 'NR == 1 {print $1}' "${lambda_sha_file}"
+          )"
+          [[ "${recorded_lambda_archive_sha}" =~ ^[0-9a-f]{64}$ ]]
+          actual_lambda_archive_sha="$(
+            sha256sum "${lambda_tar}" | awk '{print $1}'
+          )"
+          test "${actual_lambda_archive_sha}" = \
+            "${recorded_lambda_archive_sha}" || {
+            echo "::error::Lambda archive does not match its CI-recorded SHA-256"
+            exit 1
+          }
+          while IFS= read -r member; do
+            case "${member}" in
+              approval|approval/*|control|control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda archive member: ${member}"
+                exit 1
+                ;;
+            esac
+            if [[ "${member}" == /* || "${member}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Lambda archive contains an unsafe path: ${member}"
+              exit 1
+            fi
+          done < <(tar --list --gzip --file "${lambda_tar}")
+          if tar --list --verbose --gzip --file "${lambda_tar}" |
+            awk '
+              substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" {
+                unsafe = 1
+              }
+              END { exit(unsafe ? 0 : 1) }
+            '; then
+            echo "::error::Lambda archive may contain only regular files and directories"
+            exit 1
+          fi
+          lambda_content_dir="${RUNNER_TEMP}/verified-lambda-content"
+          mkdir -p "${lambda_content_dir}"
+          tar --extract --gzip --file "${lambda_tar}" \
+            --directory "${lambda_content_dir}" \
+            --no-same-owner --no-same-permissions
+          if find "${lambda_content_dir}" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::Lambda content contains a non-regular member"
+            exit 1
+          fi
+          for entry in \
+            approval/index.js approval/handoff.js approval/package.json \
+            approval/package-lock.json control/index.js control/package.json \
+            control/package-lock.json; do
+            test -f "${lambda_content_dir}/${entry}"
+          done
+          test -d "${lambda_content_dir}/approval/node_modules"
+          test -d "${lambda_content_dir}/control/node_modules"
+
+          {
+            echo "container_artifact_sha=${container_artifact_sha}"
+            echo "container_archive_sha=${actual_archive_sha}"
+            echo "web_artifact_sha=${web_artifact_sha}"
+            echo "web_archive_sha=${actual_web_archive_sha}"
+            echo "lambda_artifact_sha=${lambda_artifact_sha}"
+            echo "lambda_archive_sha=${actual_lambda_archive_sha}"
+            echo "image_tar=${image_tar}"
+            echo "image_inspect=${image_inspect}"
+            echo "web_tar=${web_tar}"
+            echo "web_dir=${web_content_dir}"
+            echo "lambda_tar=${lambda_tar}"
+            echo "lambda_dir=${lambda_content_dir}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Verify signed CI and supply-chain attestations
+        id: attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEFAULT_BRANCH: ${{ steps.source.outputs.default_branch }}
+          IMAGE_TAR: ${{ steps.artifacts.outputs.image_tar }}
+          WEB_TAR: ${{ steps.artifacts.outputs.web_tar }}
+          LAMBDA_TAR: ${{ steps.artifacts.outputs.lambda_tar }}
+          CONTAINER_ARCHIVE_SHA: ${{ steps.artifacts.outputs.container_archive_sha }}
+          WEB_ARCHIVE_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+        run: |
+          set -euo pipefail
+          verification_dir="${RUNNER_TEMP}/attestation-verification"
+          mkdir -p "${verification_dir}"
+          ci_predicate="https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1"
+          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3"
+          ci_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml"
+          security_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/supply-chain.yml"
+          source_ref="refs/heads/${DEFAULT_BRANCH}"
+
+          verify_ci_subject() {
+            local subject="$1"
+            local output="$2"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${ci_signer}" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref "${source_ref}" \
+              --predicate-type "${ci_predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${output}"
+          }
+
+          verify_security_subject() {
+            local subject="$1"
+            local output="$2"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${security_signer}" \
+              --source-ref "${source_ref}" \
+              --predicate-type "${security_predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${output}"
+          }
+
+          verify_ci_subject \
+            "${IMAGE_TAR}" "${verification_dir}/ci-container.json"
+          verify_ci_subject \
+            "${WEB_TAR}" "${verification_dir}/ci-web.json"
+          verify_ci_subject \
+            "${LAMBDA_TAR}" "${verification_dir}/ci-lambda.json"
+
+          security_ready=false
+          for _ in {1..80}; do
+            if verify_security_subject \
+              "${IMAGE_TAR}" "${verification_dir}/security-container.json" &&
+              verify_security_subject \
+                "${WEB_TAR}" "${verification_dir}/security-web.json" &&
+              verify_security_subject \
+                "${LAMBDA_TAR}" "${verification_dir}/security-lambda.json"; then
+              security_ready=true
+              break
+            fi
+            sleep 15
+          done
+          test "${security_ready}" = "true" || {
+            echo "::error::The exact release candidates require the signed Production Supply Chain attestation"
+            exit 1
+          }
+
+          for verification in \
+            "${verification_dir}/ci-container.json" \
+            "${verification_dir}/ci-web.json" \
+            "${verification_dir}/ci-lambda.json"; do
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg ref "${source_ref}" \
+              --arg predicate "${ci_predicate}" \
+              --arg container "sha256:${CONTAINER_ARCHIVE_SHA}" \
+              --arg web "sha256:${WEB_ARCHIVE_SHA}" \
+              --arg lambda "sha256:${LAMBDA_ARCHIVE_SHA}" '
+                any(.[];
+                  .verificationResult.statement.predicateType == $predicate and
+                  .verificationResult.statement.predicate.schemaVersion ==
+                    "archon.ci-release/v1" and
+                  .verificationResult.statement.predicate.source.repository ==
+                    $repository and
+                  .verificationResult.statement.predicate.source.commit == $sha and
+                  .verificationResult.statement.predicate.source.ref == $ref and
+                  .verificationResult.statement.predicate.source.event == "push" and
+                  (
+                    [.verificationResult.statement.predicate.gates[]] |
+                    all(. == "success")
+                  ) and
+                  any(
+                    .verificationResult.statement.subject[];
+                    .name == "archon-image.tar.gz" and
+                    .digest.sha256 == ($container | sub("^sha256:"; ""))
+                  ) and
+                  any(
+                    .verificationResult.statement.subject[];
+                    .name == "archon-web.tar.gz" and
+                    .digest.sha256 == ($web | sub("^sha256:"; ""))
+                  ) and
+                  any(
+                    .verificationResult.statement.subject[];
+                    .name == "archon-lambdas.tar.gz" and
+                    .digest.sha256 == ($lambda | sub("^sha256:"; ""))
+                  )
+                )
+              ' "${verification}" >/dev/null
+          done
+
+          for verification in \
+            "${verification_dir}/security-container.json" \
+            "${verification_dir}/security-web.json" \
+            "${verification_dir}/security-lambda.json"; do
+            verification_epoch="$(date --utc +%s)"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch "${DEFAULT_BRANCH}" \
+              --arg predicate "${security_predicate}" \
+              --arg container "sha256:${CONTAINER_ARCHIVE_SHA}" \
+              --arg web "sha256:${WEB_ARCHIVE_SHA}" \
+              --arg lambda "sha256:${LAMBDA_ARCHIVE_SHA}" \
+              --argjson verificationEpoch "${verification_epoch}" \
+              --argjson maximumAgeSeconds 86400 \
+              --argjson futureClockSkewSeconds 300 '
+                any(.[];
+                  (
+                    try (
+                      .verificationResult.statement.predicate.scanners.grype.database.retrievedAt |
+                      fromdateiso8601
+                    ) catch null
+                  ) as $retrievedAtEpoch |
+                  .verificationResult.statement.predicateType == $predicate and
+                  .verificationResult.statement.predicate.schemaVersion ==
+                    "archon.verified-ci-artifact/v3" and
+                  .verificationResult.statement.predicate.source.repository ==
+                    $repository and
+                  .verificationResult.statement.predicate.source.commit == $sha and
+                  .verificationResult.statement.predicate.source.event == "push" and
+                  .verificationResult.statement.predicate.scanners.grype.version ==
+                    "0.116.0" and
+                  .verificationResult.statement.predicate.scanners.grype.database.maxAllowedBuiltAge ==
+                    "24h" and
+                  .verificationResult.statement.predicate.scanners.grype.database.updateCheckRequired ==
+                    true and
+                  .verificationResult.statement.predicate.scanners.grype.database.validateByHashOnStart ==
+                    true and
+                  .verificationResult.statement.predicate.scanners.grype.database.validateAge ==
+                    true and
+                  $retrievedAtEpoch != null and
+                  $retrievedAtEpoch <=
+                    ($verificationEpoch + $futureClockSkewSeconds) and
+                  ($verificationEpoch - $retrievedAtEpoch) <=
+                    $maximumAgeSeconds and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.filesManifestDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.statusDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.policyDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-image.tar.gz" and
+                    .archiveDigest == $container
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-web.tar.gz" and
+                    .archiveDigest == $web
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-lambdas.tar.gz" and
+                    .archiveDigest == $lambda
+                  ) and
+                  .verificationResult.statement.predicate.securityWorkflowGates.sourceSha ==
+                    $sha and
+                  .verificationResult.statement.predicate.securityWorkflowGates.branch ==
+                    $branch and
+                  (
+                    .verificationResult.statement.predicate.securityWorkflowGates.workflows |
+                    length
+                  ) == 2 and
+                  all(
+                    .verificationResult.statement.predicate.securityWorkflowGates.workflows[];
+                    (
+                      .path == ".github/workflows/codeql.yml" or
+                      .path == ".github/workflows/workflow-security.yml"
+                    ) and
+                    .headSha == $sha and
+                    .headBranch == $branch and
+                    .event == "push" and
+                    .conclusion == "success"
+                  )
+                )
+              ' "${verification}" >/dev/null
+          done
+
+          verification_file="${RUNNER_TEMP}/release-attestation-verification.json"
+          jq -cnS \
+            --slurpfile ciContainer "${verification_dir}/ci-container.json" \
+            --slurpfile ciWeb "${verification_dir}/ci-web.json" \
+            --slurpfile ciLambda "${verification_dir}/ci-lambda.json" \
+            --slurpfile securityContainer \
+              "${verification_dir}/security-container.json" \
+            --slurpfile securityWeb "${verification_dir}/security-web.json" \
+            --slurpfile securityLambda \
+              "${verification_dir}/security-lambda.json" '
+              {
+                schemaVersion: "archon.release-attestation-verification/v1",
+                ci: {
+                  container: $ciContainer[0],
+                  web: $ciWeb[0],
+                  lambda: $ciLambda[0]
+                },
+                security: {
+                  container: $securityContainer[0],
+                  web: $securityWeb[0],
+                  lambda: $securityLambda[0]
+                }
+              }
+            ' >"${verification_file}"
+          verification_sha="$(
+            sha256sum "${verification_file}" | awk '{print $1}'
+          )"
+          {
+            echo "path=${verification_file}"
+            echo "sha=${verification_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Stage the exact attested Lambda release bytes
+        env:
+          LAMBDA_DIR: ${{ steps.artifacts.outputs.lambda_dir }}
+        run: |
+          set -euo pipefail
+          test -d "${LAMBDA_DIR}/approval"
+          test -d "${LAMBDA_DIR}/control"
+          test -f "${LAMBDA_DIR}/approval/index.js"
+          test -f "${LAMBDA_DIR}/approval/handoff.js"
+          test -f "${LAMBDA_DIR}/control/index.js"
+          test "$(realpath infra/aws/lambda)" = \
+            "$(realpath --canonicalize-missing "${GITHUB_WORKSPACE}/infra/aws/lambda")"
+          rm -rf -- infra/aws/lambda/approval infra/aws/lambda/control
+          cp -a -- "${LAMBDA_DIR}/approval" infra/aws/lambda/approval
+          cp -a -- "${LAMBDA_DIR}/control" infra/aws/lambda/control
+          if find infra/aws/lambda/approval infra/aws/lambda/control \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Staged Lambda sources contain a special file"
+            exit 1
+          fi
+
+      - name: Set up the pinned infrastructure runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/aws/package-lock.json
+
+      - name: Validate CDK source without rebuilding release artifacts
+        run: |
+          set -euo pipefail
+          npm ci --prefix infra/aws --ignore-scripts
+          npm --prefix infra/aws run build
+          npm --prefix infra/aws test
+
+      - name: Configure staging AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: archon-${{ github.run_id }}-staging
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Verify AWS identity and CDK bootstrap
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${EXPECTED_ACCOUNT_ID}"
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "${EXPECTED_ACCOUNT_ID}"
+          aws cloudformation describe-stacks --stack-name CDKToolkit >/dev/null
+
+      - name: Deploy registry, push verified image, and deploy staging
+        id: deploy
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          IMAGE_TAR: ${{ steps.artifacts.outputs.image_tar }}
+          IMAGE_INSPECT: ${{ steps.artifacts.outputs.image_inspect }}
+          SPA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+          DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
+          DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
+          : "${DATAHUB_READ_MCP_URL:?staging DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
+          : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
+          : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
+          : "${LLM_BASE_URL:?staging LLM_BASE_URL is required}"
+          : "${LLM_MODEL:?staging LLM_MODEL is required}"
+          stack_name="Archon-staging"
+          registry_outputs="${RUNNER_TEMP}/staging-registry-outputs.json"
+          stack_outputs="${RUNNER_TEMP}/staging-stack-outputs.json"
+
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy Archon-Registry \
+              -c stage=staging \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --outputs-file "${registry_outputs}"
+          )
+
+          ecr_uri="$(jq -er '.["Archon-Registry"].ArchonEcrRepositoryUri' \
+            "${registry_outputs}")"
+          ecr_name="$(jq -er '.["Archon-Registry"].ArchonEcrRepositoryName' \
+            "${registry_outputs}")"
+          registry_host="${ecr_uri%%/*}"
+          verify_tag=""
+          cleanup_verify_tag() {
+            if [[ -n "${verify_tag}" ]]; then
+              aws ecr batch-delete-image \
+                --repository-name "${ecr_name}" \
+                --image-ids "imageTag=${verify_tag}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_verify_tag EXIT
+
+          docker load --input "${IMAGE_TAR}" >/dev/null
+          expected_image_id="$(jq -er '.[0].Id' "${IMAGE_INSPECT}")"
+          actual_image_id="$(docker image inspect "archon-datahub:${RELEASE_SHA}" \
+            --format '{{.Id}}')"
+          test "${actual_image_id}" = "${expected_image_id}"
+          aws ecr get-login-password |
+            docker login --username AWS --password-stdin "${registry_host}" >/dev/null
+          docker tag "archon-datahub:${RELEASE_SHA}" "${ecr_uri}:${RELEASE_SHA}"
+
+          existing_digest="$(aws ecr describe-images \
+            --repository-name "${ecr_name}" \
+            --image-ids "imageTag=${RELEASE_SHA}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [[ -z "${existing_digest}" || "${existing_digest}" == "None" ]]; then
+            docker push "${ecr_uri}:${RELEASE_SHA}" >/dev/null
+            image_digest="$(aws ecr describe-images \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${RELEASE_SHA}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)"
+          else
+            verify_tag="verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-staging"
+            docker tag "archon-datahub:${RELEASE_SHA}" "${ecr_uri}:${verify_tag}"
+            docker push "${ecr_uri}:${verify_tag}" >/dev/null
+            verified_digest="$(aws ecr describe-images \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${verify_tag}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)"
+            test "${verified_digest}" = "${existing_digest}" || {
+              echo "::error::Existing immutable release tag does not match the CI artifact"
+              exit 1
+            }
+            aws ecr batch-delete-image \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${verify_tag}" >/dev/null
+            verify_tag=""
+            image_digest="${existing_digest}"
+          fi
+          docker logout "${registry_host}" >/dev/null
+          [[ "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          aws ecr wait image-scan-complete \
+            --repository-name "${ecr_name}" \
+            --image-id "imageDigest=${image_digest}"
+          scan_counts="$(aws ecr describe-image-scan-findings \
+            --repository-name "${ecr_name}" \
+            --image-id "imageDigest=${image_digest}" \
+            --query 'imageScanFindings.findingSeverityCounts' \
+            --output json)"
+          test "$(jq -r '.CRITICAL // 0' <<<"${scan_counts}")" = "0"
+          test "$(jq -r '.HIGH // 0' <<<"${scan_counts}")" = "0"
+
+          # Bootstrap with zero worker tasks: the generated Secrets Manager
+          # values are placeholders until the next pipeline step replaces them.
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${stack_name}" \
+              -c stage=staging \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${stack_name}:ImageDigest=${image_digest}" \
+              --parameters "${stack_name}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
+              --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
+              --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
+              --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
+              --parameters "${stack_name}:DataHubWriteMcpUrl=${DATAHUB_WRITE_MCP_URL}" \
+              --parameters "${stack_name}:LlmBaseUrl=${LLM_BASE_URL}" \
+              --parameters "${stack_name}:LlmModel=${LLM_MODEL}" \
+              --parameters "${stack_name}:WorkerDesiredCount=0" \
+              --outputs-file "${stack_outputs}"
+          )
+
+          application_url="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
+          api_url="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonApiUrl' "${stack_outputs}")"
+          {
+            echo "image_digest=${image_digest}"
+            echo "application_url=${application_url}"
+            echo "api_url=${api_url}"
+            echo "stack_name=${stack_name}"
+            echo "stack_outputs=${stack_outputs}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Update environment-scoped secrets without logging values
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          DATAHUB_READ_GMS_TOKEN: ${{ secrets.DATAHUB_READ_GMS_TOKEN }}
+          DATAHUB_WRITE_GMS_TOKEN: ${{ secrets.DATAHUB_WRITE_GMS_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_TOKEN:?staging read token is required}"
+          : "${DATAHUB_WRITE_GMS_TOKEN:?staging write token is required}"
+          : "${LLM_API_KEY:?staging LLM key is required}"
+          umask 077
+          secret_dir="${RUNNER_TEMP}/staging-secret-payloads"
+          mkdir -p "${secret_dir}"
+          trap 'find "${secret_dir}" -type f -exec shred -u {} + 2>/dev/null || true' EXIT
+
+          read_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonReadSecretArn' "${STACK_OUTPUTS}")"
+          write_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonWriteSecretArn' "${STACK_OUTPUTS}")"
+          llm_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonLlmSecretArn' "${STACK_OUTPUTS}")"
+
+          READ_TOKEN="${DATAHUB_READ_GMS_TOKEN}" jq -n \
+            '{token: env.READ_TOKEN}' >"${secret_dir}/read.json"
+          WRITE_TOKEN="${DATAHUB_WRITE_GMS_TOKEN}" jq -n \
+            '{token: env.WRITE_TOKEN}' >"${secret_dir}/write.json"
+          PROVIDER_KEY="${LLM_API_KEY}" jq -n \
+            '{apiKey: env.PROVIDER_KEY}' >"${secret_dir}/llm.json"
+
+          aws secretsmanager put-secret-value \
+            --secret-id "${read_secret_arn}" \
+            --secret-string "file://${secret_dir}/read.json" >/dev/null
+          aws secretsmanager put-secret-value \
+            --secret-id "${write_secret_arn}" \
+            --secret-string "file://${secret_dir}/write.json" >/dev/null
+          aws secretsmanager put-secret-value \
+            --secret-id "${llm_secret_arn}" \
+            --secret-string "file://${secret_dir}/llm.json" >/dev/null
+
+      - name: Prepare the exact staging runtime configuration
+        id: spa_config
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+        run: |
+          set -euo pipefail
+          bucket="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonSpaBucketName' "${STACK_OUTPUTS}")"
+          distribution_id="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${STACK_OUTPUTS}")"
+          application_url="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApplicationUrl' "${STACK_OUTPUTS}")"
+          client_id="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonUserPoolClientId' "${STACK_OUTPUTS}")"
+          cognito_origin="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoHostedUiOrigin' "${STACK_OUTPUTS}")"
+          authorization_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoAuthorizationEndpoint' "${STACK_OUTPUTS}")"
+          token_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoTokenEndpoint' "${STACK_OUTPUTS}")"
+          logout_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoLogoutEndpoint' "${STACK_OUTPUTS}")"
+          approval_scope="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApprovalOAuthScope' "${STACK_OUTPUTS}")"
+          redirect_uri="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuthRedirectUri' "${STACK_OUTPUTS}")"
+          logout_uri="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuthLogoutUri' "${STACK_OUTPUTS}")"
+          test -f "${WEB_DIR}/index.html"
+          test ! -e "${WEB_DIR}/runtime-config.json"
+          [[ "${client_id}" =~ ^[A-Za-z0-9]{8,128}$ ]]
+          [[ "${cognito_origin}" =~ ^https://[^/]+$ ]]
+          test "${authorization_endpoint}" = \
+            "${cognito_origin}/oauth2/authorize"
+          test "${token_endpoint}" = "${cognito_origin}/oauth2/token"
+          test "${logout_endpoint}" = "${cognito_origin}/logout"
+          test "${approval_scope}" = "archon/approve"
+          test "${redirect_uri}" = "${application_url}/"
+          test "${logout_uri}" = "${application_url}/"
+
+          runtime_config="${RUNNER_TEMP}/staging-runtime-config.json"
+          jq -n \
+            --arg clientId "${client_id}" \
+            --arg authorizationEndpoint "${authorization_endpoint}" \
+            --arg tokenEndpoint "${token_endpoint}" \
+            --arg logoutEndpoint "${logout_endpoint}" \
+            --arg redirectUri "${redirect_uri}" \
+            --arg logoutUri "${logout_uri}" \
+            --arg approvalScope "${approval_scope}" \
+            '{
+              schemaVersion: 1,
+              auth: {
+                clientId: $clientId,
+                authorizationEndpoint: $authorizationEndpoint,
+                tokenEndpoint: $tokenEndpoint,
+                logoutEndpoint: $logoutEndpoint,
+                redirectUri: $redirectUri,
+                logoutUri: $logoutUri,
+                scopes: ["openid", "email", $approvalScope]
+              }
+            }' >"${runtime_config}"
+          runtime_config_sha="$(sha256sum "${runtime_config}" | awk '{print $1}')"
+          {
+            echo "bucket=${bucket}"
+            echo "distribution_id=${distribution_id}"
+            echo "runtime_config=${runtime_config}"
+            echo "runtime_config_sha=${runtime_config_sha}"
+            echo "cognito_origin=${cognito_origin}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Restart private API and worker tasks after secret rotation
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          SPA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
+          DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
+          : "${DATAHUB_READ_MCP_URL:?staging DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
+          : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
+          : "${LLM_BASE_URL:?staging LLM_BASE_URL is required}"
+          : "${LLM_MODEL:?staging LLM_MODEL is required}"
+
+          # Reconcile desired count through CloudFormation so activation creates
+          # no drift, then force all services to consume the rotated secrets.
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${STACK_NAME}" \
+              -c stage=staging \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
+              --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
+              --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
+              --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
+              --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
+              --parameters "${STACK_NAME}:DataHubWriteMcpUrl=${DATAHUB_WRITE_MCP_URL}" \
+              --parameters "${STACK_NAME}:LlmBaseUrl=${LLM_BASE_URL}" \
+              --parameters "${STACK_NAME}:LlmModel=${LLM_MODEL}" \
+              --parameters "${STACK_NAME}:WorkerDesiredCount=1" \
+              --outputs-file "${STACK_OUTPUTS}"
+          )
+
+          cluster="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
+          api_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApiServiceName' "${STACK_OUTPUTS}")"
+          audit_worker_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuditWorkerServiceName' "${STACK_OUTPUTS}")"
+          remediation_worker_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonRemediationWorkerServiceName' "${STACK_OUTPUTS}")"
+          test -n "${cluster}"
+          test "${cluster}" != "None"
+          test -n "${api_service}"
+          test "${api_service}" != "None"
+          test -n "${audit_worker_service}"
+          test "${audit_worker_service}" != "None"
+          test -n "${remediation_worker_service}"
+          test "${remediation_worker_service}" != "None"
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${api_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${audit_worker_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${remediation_worker_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs wait services-stable \
+            --cluster "${cluster}" \
+            --services "${api_service}" "${audit_worker_service}" "${remediation_worker_service}"
+          api_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${api_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          audit_worker_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${audit_worker_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          remediation_worker_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${remediation_worker_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          jq -e '.[0] >= 1 and .[1] == .[0]' <<<"${api_counts}" >/dev/null
+          jq -e '.[0] >= 1 and .[1] == .[0]' \
+            <<<"${audit_worker_counts}" >/dev/null
+          jq -e '.[0] >= 1 and .[1] == .[0]' \
+            <<<"${remediation_worker_counts}" >/dev/null
+
+      - name: Publish the exact SPA after workload readiness
+        id: spa
+        env:
+          BUCKET: ${{ steps.spa_config.outputs.bucket }}
+          DISTRIBUTION_ID: ${{ steps.spa_config.outputs.distribution_id }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          RUNTIME_CONFIG: ${{ steps.spa_config.outputs.runtime_config }}
+          RUNTIME_CONFIG_SHA: ${{ steps.spa_config.outputs.runtime_config_sha }}
+          COGNITO_ORIGIN: ${{ steps.spa_config.outputs.cognito_origin }}
+        run: |
+          set -euo pipefail
+          test -f "${WEB_DIR}/index.html"
+          test -f "${RUNTIME_CONFIG}"
+          test "$(sha256sum "${RUNTIME_CONFIG}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA}"
+          aws s3 sync "${WEB_DIR}/" "s3://${BUCKET}/" \
+            --delete \
+            --exclude 'assets/*' \
+            --exclude 'index.html' \
+            --exclude 'runtime-config.json' \
+            --only-show-errors
+          aws s3 cp "${WEB_DIR}/" "s3://${BUCKET}/" \
+            --recursive \
+            --exclude 'assets/*' \
+            --exclude 'index.html' \
+            --exclude 'runtime-config.json' \
+            --cache-control 'public,max-age=0,must-revalidate' \
+            --only-show-errors
+          if [[ -d "${WEB_DIR}/assets" ]]; then
+            aws s3 cp "${WEB_DIR}/assets/" "s3://${BUCKET}/assets/" \
+              --recursive \
+              --cache-control 'public,max-age=31536000,immutable' \
+              --only-show-errors
+          fi
+          aws s3 cp "${RUNTIME_CONFIG}" "s3://${BUCKET}/runtime-config.json" \
+            --content-type 'application/json; charset=utf-8' \
+            --cache-control 'no-cache,no-store,must-revalidate' \
+            --only-show-errors
+          aws s3 cp "${WEB_DIR}/index.html" "s3://${BUCKET}/index.html" \
+            --content-type 'text/html; charset=utf-8' \
+            --cache-control 'no-cache,no-store,must-revalidate' \
+            --only-show-errors
+          invalidation_id="$(aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths '/' '/index.html' '/runtime-config.json' \
+            --query 'Invalidation.Id' \
+            --output text)"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --id "${invalidation_id}"
+          {
+            echo "runtime_config=${RUNTIME_CONFIG}"
+            echo "runtime_config_sha=${RUNTIME_CONFIG_SHA}"
+            echo "cognito_origin=${COGNITO_ORIGIN}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Staging smoke and security contracts
+        id: smoke
+        env:
+          APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          RUNTIME_CONFIG: ${{ steps.spa.outputs.runtime_config }}
+          RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
+          COGNITO_ORIGIN: ${{ steps.spa.outputs.cognito_origin }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            $query != "*" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
+          demo_query_sha="$(
+            printf '%s' "${DATAHUB_DEMO_QUERY}" | sha256sum | awk '{print $1}'
+          )"
+          audit_payload="$(
+            jq -cn --arg query "${DATAHUB_DEMO_QUERY}" '{query: $query}'
+          )"
+          control_payload="$(
+            jq -cn --arg query "${DATAHUB_DEMO_QUERY}" \
+              '{mode: "READ_ONLY", query: $query}'
+          )"
+          echo "demo_query_sha=${demo_query_sha}" >>"${GITHUB_OUTPUT}"
+          headers="${RUNNER_TEMP}/staging-index-headers.txt"
+          index_body="${RUNNER_TEMP}/staging-index.html"
+          runtime_headers="${RUNNER_TEMP}/staging-runtime-config-headers.txt"
+          runtime_body="${RUNNER_TEMP}/staging-runtime-config.json"
+          audit_response="${RUNNER_TEMP}/staging-audit-response.json"
+          control_start="${RUNNER_TEMP}/staging-control-loop-start.json"
+          control_response="${RUNNER_TEMP}/staging-control-loop-status.json"
+
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --retry 12 --retry-all-errors --retry-delay 10 \
+            --dump-header "${headers}" \
+            --output "${index_body}" \
+            "${APPLICATION_URL}/"
+          cmp --silent "${WEB_DIR}/index.html" "${index_body}"
+          grep -qi '^content-security-policy:' "${headers}"
+          grep -qi '^strict-transport-security:' "${headers}"
+          grep -qi '^x-content-type-options:[[:space:]]*nosniff' "${headers}"
+          grep -qi '^cache-control:.*no-cache' "${headers}"
+          grep -Fqi "connect-src 'self' ${COGNITO_ORIGIN}" "${headers}"
+
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --dump-header "${runtime_headers}" \
+            --output "${runtime_body}" \
+            "${APPLICATION_URL}/runtime-config.json"
+          cmp --silent "${RUNTIME_CONFIG}" "${runtime_body}"
+          test "$(sha256sum "${runtime_body}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA}"
+          grep -qi '^content-type:[[:space:]]*application/json' "${runtime_headers}"
+          grep -qi '^cache-control:.*no-store' "${runtime_headers}"
+          jq -e --arg root "${APPLICATION_URL}/" \
+            '.schemaVersion == 1
+             and .auth.redirectUri == $root
+             and .auth.logoutUri == $root
+             and .auth.scopes == ["openid", "email", "archon/approve"]' \
+            "${runtime_body}" >/dev/null
+
+          asset="$(find "${WEB_DIR}/assets" -type f -print -quit 2>/dev/null || true)"
+          if [[ -n "${asset}" ]]; then
+            relative_asset="${asset#"${WEB_DIR}/"}"
+            asset_body="${RUNNER_TEMP}/staging-asset"
+            curl --fail --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --dump-header "${RUNNER_TEMP}/staging-asset-headers.txt" \
+              --output "${asset_body}" \
+              "${APPLICATION_URL}/${relative_asset}"
+            cmp --silent "${asset}" "${asset_body}"
+            grep -qi '^cache-control:.*immutable' \
+              "${RUNNER_TEMP}/staging-asset-headers.txt"
+          fi
+
+          approval_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"decision":"APPROVE"}' \
+            "${APPLICATION_URL}/api/approvals/approval-smoke/decisions")"
+          test "${approval_status}" = "401"
+
+          mutation_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"tool":"add_tags","arguments":{"forbidden":true}}' \
+            "${APPLICATION_URL}/api/audits")"
+          test "${mutation_status}" = "400"
+
+          control_mutation_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"tool":"add_tags","arguments":{"forbidden":true}}' \
+            "${APPLICATION_URL}/api/control-loops")"
+          test "${control_mutation_status}" = "400"
+          control_missing_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            "${APPLICATION_URL}/api/control-loops/0000000000000000000000000000000000000000000000000000000000000000")"
+          test "${control_missing_status}" = "404"
+
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 35 \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data "${audit_payload}" \
+            --output "${audit_response}" \
+            "${APPLICATION_URL}/api/audits"
+          jq -e --arg release "${RELEASE_SHA}" \
+            '.releaseSha == $release
+             and (.report | type == "object")
+             and .report.classification.totalEntities == 1' \
+            "${audit_response}" >/dev/null
+          audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
+          audit_evidence="${RUNNER_TEMP}/staging-audit-smoke-evidence.json"
+          jq -cS \
+            --arg environment staging \
+            --arg querySha256 "${demo_query_sha}" \
+            --arg responseSha256 "${audit_response_sha}" \
+            '{
+              schemaVersion: "archon.audit-smoke-evidence/v1",
+              environment: $environment,
+              querySha256: $querySha256,
+              responseSha256: $responseSha256,
+              releaseSha: .releaseSha,
+              requestId: .requestId,
+              scanId: .report.scanId,
+              classification: {
+                totalEntities: .report.classification.totalEntities,
+                withLineage: .report.classification.withLineage,
+                sensitiveEntities: .report.classification.sensitiveEntities
+              },
+              findingCount: (.report.findings | length)
+            }' "${audit_response}" >"${audit_evidence}"
+          audit_evidence_sha="$(
+            sha256sum "${audit_evidence}" | awk '{print $1}'
+          )"
+          {
+            echo "audit_response_sha=${audit_response_sha}"
+            echo "audit_evidence=${audit_evidence}"
+            echo "audit_evidence_sha=${audit_evidence_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+          control_start_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 35 \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data "${control_payload}" \
+            --output "${control_start}" \
+            --write-out '%{http_code}' \
+            "${APPLICATION_URL}/api/control-loops")"
+          test "${control_start_status}" = "202"
+          control_audit_id="$(jq -er '
+            select(
+              .schemaVersion == "archon.control-loop-start/v1" and
+              .status == "RUNNING" and
+              (.auditId | test("^[a-f0-9]{64}$")) and
+              .pollUrl == ("/api/control-loops/" + .auditId) and
+              (has("executionArn") | not) and
+              (has("taskToken") | not)
+            ) | .auditId
+          ' "${control_start}")"
+
+          control_terminal="false"
+          for attempt in $(seq 1 90); do
+            curl --fail --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --connect-timeout 10 --max-time 35 \
+              --output "${control_response}" \
+              "${APPLICATION_URL}/api/control-loops/${control_audit_id}"
+            jq -e --arg auditId "${control_audit_id}" '
+              .schemaVersion == "archon.control-loop-status/v1" and
+              .auditId == $auditId and
+              (has("executionArn") | not) and
+              (has("taskToken") | not) and
+              (has("input") | not) and
+              (has("output") | not)
+            ' "${control_response}" >/dev/null
+            control_status="$(jq -er '.status' "${control_response}")"
+            case "${control_status}" in
+              RUNNING)
+                sleep 5
+                ;;
+              SUCCEEDED)
+                jq -e --arg release "${RELEASE_SHA}" '
+                  .releaseSha == $release and
+                  .manualOnlyReason == "READ_ONLY_REQUEST" and
+                  .result.outcome == "READ_ONLY_COMPLETE" and
+                  (.report | type == "object") and
+                  .report.classification.totalEntities == 1 and
+                  (has("approval") | not)
+                ' "${control_response}" >/dev/null
+                control_terminal="true"
+                break
+                ;;
+              *)
+                echo "::error::Read-only control-loop smoke ended in ${control_status}"
+                exit 1
+                ;;
+            esac
+          done
+          test "${control_terminal}" = "true"
+          control_loop_response_sha="$(
+            sha256sum "${control_response}" | awk '{print $1}'
+          )"
+          {
+            echo "control_loop_response=${control_response}"
+            echo "control_loop_response_sha=${control_loop_response_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: OWASP ZAP baseline DAST gate
+        id: dast
+        env:
+          APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/zap-staging"
+          mkdir -p "${report_dir}"
+          chmod 0777 "${report_dir}"
+          echo "report_dir=${report_dir}" >>"${GITHUB_OUTPUT}"
+
+          docker pull "${ZAP_IMAGE}"
+          set +e
+          docker run --rm \
+            --volume "${report_dir}:/zap/wrk:rw" \
+            "${ZAP_IMAGE}" \
+            zap-baseline.py \
+              -t "${APPLICATION_URL}" \
+              -m 2 \
+              -j \
+              -I \
+              -J report_json.json \
+              -r report_html.html \
+              -w report_md.md
+          scan_status="$?"
+          set -e
+
+          if (( scan_status >= 3 )); then
+            echo "::error::ZAP or its container could not complete the staging baseline scan (exit ${scan_status})"
+            exit 1
+          fi
+          test -s "${report_dir}/report_json.json"
+
+          ZAP_REPORT="${report_dir}/report_json.json" node <<'NODE'
+          const fs = require("node:fs");
+
+          const path = process.env.ZAP_REPORT;
+          const report = JSON.parse(fs.readFileSync(path, "utf8"));
+          const asArray = (value) =>
+            Array.isArray(value) ? value : value == null ? [] : [value];
+          const sites = asArray(report.site);
+          if (sites.length === 0) {
+            throw new Error("ZAP report contains no scanned site");
+          }
+          const expectedOrigin = new URL(process.env.APPLICATION_URL).origin;
+          const expectedSites = sites.filter((site) => {
+            try {
+              return new URL(String(site["@name"])).origin === expectedOrigin;
+            } catch {
+              return false;
+            }
+          });
+          if (expectedSites.length === 0) {
+            throw new Error(
+              `ZAP report is not bound to expected origin ${expectedOrigin}`,
+            );
+          }
+          if (
+            expectedSites.some(
+              (site) => !Object.prototype.hasOwnProperty.call(site, "alerts"),
+            )
+          ) {
+            throw new Error("ZAP report is missing the alerts collection");
+          }
+          const alerts = expectedSites.flatMap((site) =>
+            asArray(site.alerts),
+          );
+          const normalized = alerts.map((alert) => {
+            const risk = Number(alert.riskcode);
+            if (!Number.isInteger(risk) || risk < 0 || risk > 3) {
+              throw new Error(
+                `Invalid ZAP riskcode for plugin ${alert.pluginid ?? "unknown"}`,
+              );
+            }
+            return {
+              pluginId: String(alert.pluginid ?? "unknown"),
+              name: String(alert.name ?? alert.alert ?? "unnamed alert"),
+              risk,
+              riskDescription: String(alert.riskdesc ?? "unknown"),
+            };
+          });
+          const counts = Object.fromEntries(
+            [0, 1, 2, 3].map((risk) => [
+              risk,
+              normalized.filter((alert) => alert.risk === risk).length,
+            ]),
+          );
+          const blocking = normalized.filter((alert) => alert.risk >= 2);
+          fs.appendFileSync(
+            process.env.GITHUB_STEP_SUMMARY,
+            [
+              "## Staging OWASP ZAP baseline DAST",
+              "",
+              `- Informational: ${counts[0]}`,
+              `- Low: ${counts[1]}`,
+              `- Medium: ${counts[2]}`,
+              `- High: ${counts[3]}`,
+              `- Gate: ${blocking.length === 0 ? "passed" : "failed"}`,
+              "",
+            ].join("\n"),
+          );
+          if (blocking.length > 0) {
+            for (const alert of blocking) {
+              console.error(
+                `[${alert.riskDescription}] ${alert.name} (${alert.pluginId})`,
+              );
+            }
+            process.exitCode = 1;
+          }
+          NODE
+
+          report_sha="$(sha256sum "${report_dir}/report_json.json" | awk '{print $1}')"
+          echo "report_sha=${report_sha}" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate OWASP ZAP report artifact boundary
+        id: dast_artifacts
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/zap-staging"
+          echo "safe=false" >>"${GITHUB_OUTPUT}"
+          test -d "${report_dir}"
+          mapfile -t actual < <(
+            find "${report_dir}" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+          )
+          expected=(report_html.html report_json.json report_md.md)
+          test "${#actual[@]}" -eq "${#expected[@]}"
+          test "${actual[*]}" = "${expected[*]}"
+          for report in "${expected[@]}"; do
+            test -f "${report_dir}/${report}"
+            test ! -L "${report_dir}/${report}"
+          done
+          echo "safe=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload OWASP ZAP DAST evidence
+        if: ${{ always() && steps.dast_artifacts.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap-staging-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/zap-staging/report_html.html
+            ${{ runner.temp }}/zap-staging/report_json.json
+            ${{ runner.temp }}/zap-staging/report_md.md
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create staging deployment evidence
+        id: evidence
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          CONTROL_PLANE_GATE_SHA: ${{ steps.source.outputs.control_plane_gate_sha }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.source_run_url }}
+          CONTAINER_ARTIFACT_SHA: ${{ steps.artifacts.outputs.container_artifact_sha }}
+          CONTAINER_ARCHIVE_SHA: ${{ steps.artifacts.outputs.container_archive_sha }}
+          WEB_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_artifact_sha }}
+          WEB_ARCHIVE_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          LAMBDA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.lambda_artifact_sha }}
+          LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          API_URL: ${{ steps.deploy.outputs.api_url }}
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          DEMO_QUERY_SHA: ${{ steps.smoke.outputs.demo_query_sha }}
+          AUDIT_RESPONSE_SHA: ${{ steps.smoke.outputs.audit_response_sha }}
+          AUDIT_EVIDENCE_SHA: ${{ steps.smoke.outputs.audit_evidence_sha }}
+          AUDIT_EVIDENCE_PATH: ${{ steps.smoke.outputs.audit_evidence }}
+          CONTROL_LOOP_RESPONSE_SHA: ${{ steps.smoke.outputs.control_loop_response_sha }}
+          CONTROL_LOOP_RESPONSE_PATH: ${{ steps.smoke.outputs.control_loop_response }}
+          DAST_REPORT_SHA: ${{ steps.dast.outputs.report_sha }}
+          ATTESTATION_SHA: ${{ steps.attestation.outputs.sha }}
+          ATTESTATION_PATH: ${{ steps.attestation.outputs.path }}
+          RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
+          RUNTIME_CONFIG_PATH: ${{ steps.spa.outputs.runtime_config }}
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/staging-deployment-evidence"
+          mkdir -p "${evidence_dir}"
+          evidence="${evidence_dir}/staging-deployment-evidence.json"
+          jq -n \
+            --arg environment "staging" \
+            --arg ciRunId "${CI_RUN_ID}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg controlPlaneGateSha256 "${CONTROL_PLANE_GATE_SHA}" \
+            --arg sourceRunUrl "${SOURCE_RUN_URL}" \
+            --arg deploymentRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg containerArtifactSha256 "${CONTAINER_ARTIFACT_SHA}" \
+            --arg containerArchiveSha256 "${CONTAINER_ARCHIVE_SHA}" \
+            --arg webArtifactSha256 "${WEB_ARTIFACT_SHA}" \
+            --arg webArchiveSha256 "${WEB_ARCHIVE_SHA}" \
+            --arg lambdaArtifactSha256 "${LAMBDA_ARTIFACT_SHA}" \
+            --arg lambdaArchiveSha256 "${LAMBDA_ARCHIVE_SHA}" \
+            --arg imageDigest "${IMAGE_DIGEST}" \
+            --arg applicationUrl "${APPLICATION_URL}" \
+            --arg apiUrl "${API_URL}" \
+            --arg stackName "${STACK_NAME}" \
+            --arg demoQuerySha256 "${DEMO_QUERY_SHA}" \
+            --arg auditResponseSha256 "${AUDIT_RESPONSE_SHA}" \
+            --arg auditEvidenceSha256 "${AUDIT_EVIDENCE_SHA}" \
+            --arg controlLoopResponseSha256 "${CONTROL_LOOP_RESPONSE_SHA}" \
+            --arg dastReportSha256 "${DAST_REPORT_SHA}" \
+            --arg attestationVerificationSha256 "${ATTESTATION_SHA}" \
+            --arg runtimeConfigSha256 "${RUNTIME_CONFIG_SHA}" \
+            --arg zapImage "${ZAP_IMAGE}" \
+            --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{
+              schemaVersion: 1,
+              environment: $environment,
+              source: {
+                ciRunId: $ciRunId,
+                releaseSha: $releaseSha,
+                deploymentControlPlaneSha: $controlPlaneSha,
+                sourceRunUrl: $sourceRunUrl
+              },
+              deployment: {
+                deploymentRunUrl: $deploymentRunUrl,
+                actor: $actor,
+                deployedAt: $deployedAt,
+                stackName: $stackName,
+                applicationUrl: $applicationUrl,
+                apiUrl: $apiUrl
+              },
+              immutableArtifacts: {
+                containerArtifactSha256: $containerArtifactSha256,
+                containerArchiveSha256: $containerArchiveSha256,
+                webArtifactSha256: $webArtifactSha256,
+                webArchiveSha256: $webArchiveSha256,
+                lambdaArtifactSha256: $lambdaArtifactSha256,
+                lambdaArchiveSha256: $lambdaArchiveSha256,
+                ecrImageDigest: $imageDigest
+              },
+              verification: {
+                pipelineSecurity: {
+                  deploymentControlPlaneGatesSha256: $controlPlaneGateSha256,
+                  releaseAttestationVerificationSha256:
+                    $attestationVerificationSha256
+                },
+                demoQuerySha256: $demoQuerySha256,
+                auditResponseSha256: $auditResponseSha256,
+                sanitizedAuditEvidenceSha256: $auditEvidenceSha256,
+                readOnlyControlLoopResponseSha256: $controlLoopResponseSha256,
+                runtimeConfigSha256: $runtimeConfigSha256,
+                dast: {
+                  engineImage: $zapImage,
+                  reportSha256: $dastReportSha256,
+                  blockingThreshold: "medium",
+                  result: "passed"
+                },
+                result: "passed"
+              }
+            }' >"${evidence}"
+          test "$(sha256sum "${RUNNER_TEMP}/control-plane-security-gates.json" |
+            awk '{print $1}')" = "${CONTROL_PLANE_GATE_SHA}"
+          test "$(sha256sum "${ATTESTATION_PATH}" | awk '{print $1}')" = \
+            "${ATTESTATION_SHA}"
+          test "$(sha256sum "${RUNTIME_CONFIG_PATH}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA}"
+          test "$(sha256sum "${CONTROL_LOOP_RESPONSE_PATH}" | awk '{print $1}')" = \
+            "${CONTROL_LOOP_RESPONSE_SHA}"
+          test "$(sha256sum "${AUDIT_EVIDENCE_PATH}" | awk '{print $1}')" = \
+            "${AUDIT_EVIDENCE_SHA}"
+          cp "${RUNNER_TEMP}/control-plane-security-gates.json" \
+            "${evidence_dir}/control-plane-security-gates.json"
+          cp "${ATTESTATION_PATH}" \
+            "${evidence_dir}/release-attestation-verification.json"
+          cp "${RUNTIME_CONFIG_PATH}" \
+            "${evidence_dir}/runtime-config.json"
+          cp "${CONTROL_LOOP_RESPONSE_PATH}" \
+            "${evidence_dir}/read-only-control-loop-status.json"
+          cp "${AUDIT_EVIDENCE_PATH}" \
+            "${evidence_dir}/audit-smoke-evidence.json"
+          echo "path=${evidence_dir}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload staging deployment evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-deployment-evidence-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: ${{ steps.evidence.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+
+  production:
+    name: Approve and promote identical artifacts
+    needs: staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Required reviewers on this environment are the explicit production approval.
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.application_url }}
+    steps:
+      - name: Revalidate immutable source run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${CI_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          default_branch="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          test "${GITHUB_REF}" = "refs/heads/${default_branch}" || {
+            echo "::error::The deployment workflow itself must run from the default branch"
+            exit 1
+          }
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/production")"
+          jq -e '
+            .name == "production" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            any(
+              .protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              ((.reviewers // []) | length) > 0
+            )
+          ' <<<"${environment_json}" >/dev/null || {
+            echo "::error::Production requires a reviewer gate and custom default-branch policy"
+            exit 1
+          }
+          branch_policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies?per_page=100")"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and
+            .branch_policies[0].name == $branch
+          ' <<<"${branch_policies}" >/dev/null || {
+            echo "::error::Production deployment policy must allow only the default branch"
+            exit 1
+          }
+          approvals_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
+          approval_record="$(jq -cS '
+            [
+              .[] |
+              select(
+                .state == "approved" and
+                any(.environments[]?; .name == "production")
+              )
+            ] |
+            last // empty
+          ' <<<"${approvals_json}")"
+          test -n "${approval_record}" || {
+            echo "::error::No recorded production environment approval was found"
+            exit 1
+          }
+          production_reviewer="$(jq -er '.user.login' <<<"${approval_record}")"
+          test "${production_reviewer,,}" != "${GITHUB_ACTOR,,}" || {
+            echo "::error::The deployment initiator cannot approve their own production promotion"
+            exit 1
+          }
+          approval_record_sha="$(
+            printf '%s' "${approval_record}" | sha256sum | awk '{print $1}'
+          )"
+          run_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}")"
+          jq -e \
+            --arg sha "${RELEASE_SHA}" \
+            --arg branch "${default_branch}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            '
+              .status == "completed" and
+              .conclusion == "success" and
+              .event == "push" and
+              .head_sha == $sha and
+              .head_branch == $branch and
+              .head_repository.full_name == $repository and
+              .path == ".github/workflows/ci.yml"
+            ' <<<"${run_json}" >/dev/null
+          {
+            echo "source_run_url=$(jq -er '.html_url' <<<"${run_json}")"
+            echo "production_reviewer=${production_reviewer}"
+            echo "approval_record_sha=${approval_record_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Bind production demo scope to the verified staging scope
+        id: demo_scope
+        env:
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+          STAGING_DEMO_QUERY_SHA: ${{ needs.staging.outputs.demo_query_sha }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
+          [[ "${STAGING_DEMO_QUERY_SHA}" =~ ^[a-f0-9]{64}$ ]]
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            $query != "*" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
+          production_query_sha="$(
+            printf '%s' "${DATAHUB_DEMO_QUERY}" | sha256sum | awk '{print $1}'
+          )"
+          test "${production_query_sha}" = "${STAGING_DEMO_QUERY_SHA}" || {
+            echo "::error::Production demo scope differs from the verified staging scope"
+            exit 1
+          }
+          echo "demo_query_sha=${production_query_sha}" >>"${GITHUB_OUTPUT}"
+
+      - name: Check out the current deployment control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download, reverify, and compare the original CI artifacts
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          STAGING_CONTAINER_ARTIFACT_SHA: ${{ needs.staging.outputs.container_artifact_sha }}
+          STAGING_CONTAINER_ARCHIVE_SHA: ${{ needs.staging.outputs.container_archive_sha }}
+          STAGING_WEB_ARTIFACT_SHA: ${{ needs.staging.outputs.web_artifact_sha }}
+          STAGING_WEB_ARCHIVE_SHA: ${{ needs.staging.outputs.web_archive_sha }}
+          STAGING_LAMBDA_ARTIFACT_SHA: ${{ needs.staging.outputs.lambda_artifact_sha }}
+          STAGING_LAMBDA_ARCHIVE_SHA: ${{ needs.staging.outputs.lambda_archive_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          umask 077
+          artifacts_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}/artifacts?per_page=100")"
+
+          fetch_verified_artifact() {
+            local name="$1"
+            local destination="$2"
+            local metadata count artifact_id recorded_digest recorded_sha archive actual_sha
+            count="$(jq --arg name "${name}" \
+              '[.artifacts[] | select(.name == $name and .expired == false)] | length' \
+              <<<"${artifacts_json}")"
+            test "${count}" = "1"
+            metadata="$(jq -c --arg name "${name}" \
+              '.artifacts[] | select(.name == $name and .expired == false)' \
+              <<<"${artifacts_json}")"
+            artifact_id="$(jq -er '.id' <<<"${metadata}")"
+            recorded_digest="$(jq -er '.digest' <<<"${metadata}")"
+            [[ "${recorded_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            recorded_sha="${recorded_digest#sha256:}"
+            archive="${RUNNER_TEMP}/${name}.zip"
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              >"${archive}"
+            actual_sha="$(sha256sum "${archive}" | awk '{print $1}')"
+            test "${actual_sha}" = "${recorded_sha}"
+            while IFS= read -r entry; do
+              if [[ "${entry}" == /* || "${entry}" == *\\* ||
+                "${entry}" =~ (^|/)\.\.(/|$) ]]; then
+                echo "::error::Unsafe path in GitHub artifact ${name}: ${entry}"
+                return 1
+              fi
+            done < <(unzip -Z1 "${archive}")
+            mkdir -p "${destination}"
+            unzip -q "${archive}" -d "${destination}"
+            if find "${destination}" -type l -print -quit | grep -q .; then
+              echo "::error::Symlinks are not permitted in promotion artifacts"
+              return 1
+            fi
+            printf '%s\n' "${recorded_sha}"
+          }
+
+          container_dir="${RUNNER_TEMP}/verified-container"
+          web_dir="${RUNNER_TEMP}/verified-web"
+          lambda_dir="${RUNNER_TEMP}/verified-lambdas"
+          container_artifact_sha="$(fetch_verified_artifact \
+            "container-${RELEASE_SHA}" "${container_dir}")"
+          web_artifact_sha="$(fetch_verified_artifact \
+            "web-${RELEASE_SHA}" "${web_dir}")"
+          lambda_artifact_sha="$(fetch_verified_artifact \
+            "lambdas-${RELEASE_SHA}" "${lambda_dir}")"
+          test "${container_artifact_sha}" = "${STAGING_CONTAINER_ARTIFACT_SHA}"
+          test "${web_artifact_sha}" = "${STAGING_WEB_ARTIFACT_SHA}"
+          test "${lambda_artifact_sha}" = "${STAGING_LAMBDA_ARTIFACT_SHA}"
+
+          image_tar="$(find "${container_dir}" -type f \
+            -name 'archon-image.tar.gz' -print -quit)"
+          image_sha_file="$(find "${container_dir}" -type f \
+            -name 'archon-image.tar.gz.sha256' -print -quit)"
+          image_inspect="$(find "${container_dir}" -type f \
+            -name 'image-inspect.json' -print -quit)"
+          test -n "${image_tar}"
+          test -n "${image_sha_file}"
+          test -n "${image_inspect}"
+          recorded_archive_sha="$(awk 'NR == 1 {print $1}' "${image_sha_file}")"
+          actual_archive_sha="$(sha256sum "${image_tar}" | awk '{print $1}')"
+          test "${actual_archive_sha}" = "${recorded_archive_sha}"
+          test "${actual_archive_sha}" = "${STAGING_CONTAINER_ARCHIVE_SHA}"
+          jq -e --arg release "${RELEASE_SHA}" \
+            '.[0].Config.Labels["org.opencontainers.image.revision"] == $release' \
+            "${image_inspect}" >/dev/null
+
+          web_tar="$(find "${web_dir}" -type f \
+            -name 'archon-web.tar.gz' -print -quit)"
+          web_sha_file="$(find "${web_dir}" -type f \
+            -name 'archon-web.tar.gz.sha256' -print -quit)"
+          test -n "${web_tar}"
+          test -n "${web_sha_file}"
+          recorded_web_archive_sha="$(awk 'NR == 1 {print $1}' "${web_sha_file}")"
+          actual_web_archive_sha="$(sha256sum "${web_tar}" | awk '{print $1}')"
+          test "${actual_web_archive_sha}" = "${recorded_web_archive_sha}"
+          test "${actual_web_archive_sha}" = "${STAGING_WEB_ARCHIVE_SHA}"
+          if tar --list --gzip --file "${web_tar}" |
+            grep --extended-regexp '(^/|(^|/)\.\.(/|$))' >/dev/null; then
+            echo "::error::SPA archive contains an unsafe path"
+            exit 1
+          fi
+          if tar --list --verbose --gzip --file "${web_tar}" |
+            awk 'substr($1, 1, 1) !~ /^[-d]$/ { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::SPA archive may contain only regular files and directories"
+            exit 1
+          fi
+          web_content_dir="${RUNNER_TEMP}/verified-web-content"
+          mkdir -p "${web_content_dir}"
+          tar --extract --gzip --file "${web_tar}" \
+            --directory "${web_content_dir}" \
+            --no-same-owner --no-same-permissions
+          if find "${web_content_dir}" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::SPA content contains a non-regular member"
+            exit 1
+          fi
+          test -f "${web_content_dir}/index.html"
+
+          lambda_tar="$(find "${lambda_dir}" -type f \
+            -name 'archon-lambdas.tar.gz' -print -quit)"
+          lambda_sha_file="$(find "${lambda_dir}" -type f \
+            -name 'archon-lambdas.tar.gz.sha256' -print -quit)"
+          test -n "${lambda_tar}"
+          test -n "${lambda_sha_file}"
+          recorded_lambda_archive_sha="$(
+            awk 'NR == 1 {print $1}' "${lambda_sha_file}"
+          )"
+          [[ "${recorded_lambda_archive_sha}" =~ ^[0-9a-f]{64}$ ]]
+          actual_lambda_archive_sha="$(
+            sha256sum "${lambda_tar}" | awk '{print $1}'
+          )"
+          test "${actual_lambda_archive_sha}" = \
+            "${recorded_lambda_archive_sha}"
+          test "${actual_lambda_archive_sha}" = "${STAGING_LAMBDA_ARCHIVE_SHA}"
+          while IFS= read -r member; do
+            case "${member}" in
+              approval|approval/*|control|control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda archive member: ${member}"
+                exit 1
+                ;;
+            esac
+            if [[ "${member}" == /* || "${member}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Lambda archive contains an unsafe path: ${member}"
+              exit 1
+            fi
+          done < <(tar --list --gzip --file "${lambda_tar}")
+          if tar --list --verbose --gzip --file "${lambda_tar}" |
+            awk '
+              substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" {
+                unsafe = 1
+              }
+              END { exit(unsafe ? 0 : 1) }
+            '; then
+            echo "::error::Lambda archive may contain only regular files and directories"
+            exit 1
+          fi
+          lambda_content_dir="${RUNNER_TEMP}/verified-lambda-content"
+          mkdir -p "${lambda_content_dir}"
+          tar --extract --gzip --file "${lambda_tar}" \
+            --directory "${lambda_content_dir}" \
+            --no-same-owner --no-same-permissions
+          if find "${lambda_content_dir}" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::Lambda content contains a non-regular member"
+            exit 1
+          fi
+          for entry in \
+            approval/index.js approval/handoff.js approval/package.json \
+            approval/package-lock.json control/index.js control/package.json \
+            control/package-lock.json; do
+            test -f "${lambda_content_dir}/${entry}"
+          done
+          test -d "${lambda_content_dir}/approval/node_modules"
+          test -d "${lambda_content_dir}/control/node_modules"
+
+          {
+            echo "container_artifact_sha=${container_artifact_sha}"
+            echo "container_archive_sha=${actual_archive_sha}"
+            echo "web_artifact_sha=${web_artifact_sha}"
+            echo "web_archive_sha=${actual_web_archive_sha}"
+            echo "lambda_artifact_sha=${lambda_artifact_sha}"
+            echo "lambda_archive_sha=${actual_lambda_archive_sha}"
+            echo "image_tar=${image_tar}"
+            echo "image_inspect=${image_inspect}"
+            echo "web_tar=${web_tar}"
+            echo "web_dir=${web_content_dir}"
+            echo "lambda_tar=${lambda_tar}"
+            echo "lambda_dir=${lambda_content_dir}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Reverify signed release attestations before production
+        id: attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          IMAGE_TAR: ${{ steps.artifacts.outputs.image_tar }}
+          WEB_TAR: ${{ steps.artifacts.outputs.web_tar }}
+          LAMBDA_TAR: ${{ steps.artifacts.outputs.lambda_tar }}
+          CONTAINER_ARCHIVE_SHA: ${{ steps.artifacts.outputs.container_archive_sha }}
+          WEB_ARCHIVE_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+        run: |
+          set -euo pipefail
+          verification_dir="${RUNNER_TEMP}/production-attestation-verification"
+          mkdir -p "${verification_dir}"
+          source_ref="refs/heads/master"
+          ci_predicate="https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1"
+          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3"
+
+          for subject_name in image web lambda; do
+            if [[ "${subject_name}" == "image" ]]; then
+              subject="${IMAGE_TAR}"
+            elif [[ "${subject_name}" == "web" ]]; then
+              subject="${WEB_TAR}"
+            else
+              subject="${LAMBDA_TAR}"
+            fi
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow \
+                "github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref "${source_ref}" \
+              --predicate-type "${ci_predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${verification_dir}/ci-${subject_name}.json"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow \
+                "github.com/${GITHUB_REPOSITORY}/.github/workflows/supply-chain.yml" \
+              --source-ref "${source_ref}" \
+              --predicate-type "${security_predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${verification_dir}/security-${subject_name}.json"
+          done
+
+          for verification in \
+            "${verification_dir}/security-image.json" \
+            "${verification_dir}/security-web.json" \
+            "${verification_dir}/security-lambda.json"; do
+            verification_epoch="$(date --utc +%s)"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch master \
+              --arg predicate "${security_predicate}" \
+              --arg container "sha256:${CONTAINER_ARCHIVE_SHA}" \
+              --arg web "sha256:${WEB_ARCHIVE_SHA}" \
+              --arg lambda "sha256:${LAMBDA_ARCHIVE_SHA}" \
+              --argjson verificationEpoch "${verification_epoch}" \
+              --argjson maximumAgeSeconds 86400 \
+              --argjson futureClockSkewSeconds 300 '
+                any(.[];
+                  (
+                    try (
+                      .verificationResult.statement.predicate.scanners.grype.database.retrievedAt |
+                      fromdateiso8601
+                    ) catch null
+                  ) as $retrievedAtEpoch |
+                  .verificationResult.statement.predicateType == $predicate and
+                  .verificationResult.statement.predicate.schemaVersion ==
+                    "archon.verified-ci-artifact/v3" and
+                  .verificationResult.statement.predicate.source.repository ==
+                    $repository and
+                  .verificationResult.statement.predicate.source.commit == $sha and
+                  .verificationResult.statement.predicate.source.event == "push" and
+                  .verificationResult.statement.predicate.scanners.grype.version ==
+                    "0.116.0" and
+                  .verificationResult.statement.predicate.scanners.grype.database.maxAllowedBuiltAge ==
+                    "24h" and
+                  .verificationResult.statement.predicate.scanners.grype.database.updateCheckRequired ==
+                    true and
+                  .verificationResult.statement.predicate.scanners.grype.database.validateByHashOnStart ==
+                    true and
+                  .verificationResult.statement.predicate.scanners.grype.database.validateAge ==
+                    true and
+                  $retrievedAtEpoch != null and
+                  $retrievedAtEpoch <=
+                    ($verificationEpoch + $futureClockSkewSeconds) and
+                  ($verificationEpoch - $retrievedAtEpoch) <=
+                    $maximumAgeSeconds and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.filesManifestDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.statusDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.scanners.grype.database.policyDigest //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-image.tar.gz" and
+                    .archiveDigest == $container
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-web.tar.gz" and
+                    .archiveDigest == $web
+                  ) and
+                  any(
+                    .verificationResult.statement.predicate.subjects[];
+                    .name == "archon-lambdas.tar.gz" and
+                    .archiveDigest == $lambda
+                  ) and
+                  .verificationResult.statement.predicate.securityWorkflowGates.sourceSha ==
+                    $sha and
+                  .verificationResult.statement.predicate.securityWorkflowGates.branch ==
+                    $branch and
+                  (
+                    .verificationResult.statement.predicate.securityWorkflowGates.workflows |
+                    length
+                  ) == 2 and
+                  all(
+                    .verificationResult.statement.predicate.securityWorkflowGates.workflows[];
+                    (
+                      .path == ".github/workflows/codeql.yml" or
+                      .path == ".github/workflows/workflow-security.yml"
+                    ) and
+                    .headSha == $sha and
+                    .headBranch == $branch and
+                    .event == "push" and
+                    .conclusion == "success"
+                  )
+                )
+              ' "${verification}" >/dev/null
+          done
+
+          verification_file="${RUNNER_TEMP}/production-attestation-verification.json"
+          jq -cnS \
+            --slurpfile ciImage "${verification_dir}/ci-image.json" \
+            --slurpfile ciWeb "${verification_dir}/ci-web.json" \
+            --slurpfile ciLambda "${verification_dir}/ci-lambda.json" \
+            --slurpfile securityImage "${verification_dir}/security-image.json" \
+            --slurpfile securityWeb "${verification_dir}/security-web.json" \
+            --slurpfile securityLambda \
+              "${verification_dir}/security-lambda.json" '
+              {
+                schemaVersion:
+                  "archon.production-attestation-reverification/v1",
+                ci: {
+                  image: $ciImage[0],
+                  web: $ciWeb[0],
+                  lambda: $ciLambda[0]
+                },
+                security: {
+                  image: $securityImage[0],
+                  web: $securityWeb[0],
+                  lambda: $securityLambda[0]
+                }
+              }
+            ' >"${verification_file}"
+          verification_sha="$(
+            sha256sum "${verification_file}" | awk '{print $1}'
+          )"
+          {
+            echo "path=${verification_file}"
+            echo "sha=${verification_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Stage the exact attested Lambda release bytes
+        env:
+          LAMBDA_DIR: ${{ steps.artifacts.outputs.lambda_dir }}
+        run: |
+          set -euo pipefail
+          test -d "${LAMBDA_DIR}/approval"
+          test -d "${LAMBDA_DIR}/control"
+          test -f "${LAMBDA_DIR}/approval/index.js"
+          test -f "${LAMBDA_DIR}/approval/handoff.js"
+          test -f "${LAMBDA_DIR}/control/index.js"
+          test "$(realpath infra/aws/lambda)" = \
+            "$(realpath --canonicalize-missing "${GITHUB_WORKSPACE}/infra/aws/lambda")"
+          rm -rf -- infra/aws/lambda/approval infra/aws/lambda/control
+          cp -a -- "${LAMBDA_DIR}/approval" infra/aws/lambda/approval
+          cp -a -- "${LAMBDA_DIR}/control" infra/aws/lambda/control
+          if find infra/aws/lambda/approval infra/aws/lambda/control \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Staged Lambda sources contain a special file"
+            exit 1
+          fi
+
+      - name: Set up the pinned infrastructure runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/aws/package-lock.json
+
+      - name: Install locked CDK dependencies
+        run: |
+          set -euo pipefail
+          npm ci --prefix infra/aws --ignore-scripts
+
+      - name: Configure production AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: archon-${{ github.run_id }}-production
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Verify production AWS identity and CDK bootstrap
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${EXPECTED_ACCOUNT_ID}"
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "${EXPECTED_ACCOUNT_ID}"
+          aws cloudformation describe-stacks --stack-name CDKToolkit >/dev/null
+
+      - name: Deploy registry, verify identical image, and deploy production
+        id: deploy
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          IMAGE_TAR: ${{ steps.artifacts.outputs.image_tar }}
+          IMAGE_INSPECT: ${{ steps.artifacts.outputs.image_inspect }}
+          SPA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          STAGING_IMAGE_DIGEST: ${{ needs.staging.outputs.image_digest }}
+          DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+          DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
+          DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
+          : "${DATAHUB_READ_MCP_URL:?production DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
+          : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
+          : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
+          : "${LLM_BASE_URL:?production LLM_BASE_URL is required}"
+          : "${LLM_MODEL:?production LLM_MODEL is required}"
+          stack_name="Archon-production"
+          registry_outputs="${RUNNER_TEMP}/production-registry-outputs.json"
+          stack_outputs="${RUNNER_TEMP}/production-stack-outputs.json"
+
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy Archon-Registry \
+              -c stage=production \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --outputs-file "${registry_outputs}"
+          )
+          ecr_uri="$(jq -er '.["Archon-Registry"].ArchonEcrRepositoryUri' \
+            "${registry_outputs}")"
+          ecr_name="$(jq -er '.["Archon-Registry"].ArchonEcrRepositoryName' \
+            "${registry_outputs}")"
+          registry_host="${ecr_uri%%/*}"
+          verify_tag=""
+          cleanup_verify_tag() {
+            if [[ -n "${verify_tag}" ]]; then
+              aws ecr batch-delete-image \
+                --repository-name "${ecr_name}" \
+                --image-ids "imageTag=${verify_tag}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup_verify_tag EXIT
+
+          docker load --input "${IMAGE_TAR}" >/dev/null
+          expected_image_id="$(jq -er '.[0].Id' "${IMAGE_INSPECT}")"
+          actual_image_id="$(docker image inspect "archon-datahub:${RELEASE_SHA}" \
+            --format '{{.Id}}')"
+          test "${actual_image_id}" = "${expected_image_id}"
+          aws ecr get-login-password |
+            docker login --username AWS --password-stdin "${registry_host}" >/dev/null
+          docker tag "archon-datahub:${RELEASE_SHA}" "${ecr_uri}:${RELEASE_SHA}"
+
+          existing_digest="$(aws ecr describe-images \
+            --repository-name "${ecr_name}" \
+            --image-ids "imageTag=${RELEASE_SHA}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)"
+          if [[ -z "${existing_digest}" || "${existing_digest}" == "None" ]]; then
+            docker push "${ecr_uri}:${RELEASE_SHA}" >/dev/null
+            image_digest="$(aws ecr describe-images \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${RELEASE_SHA}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)"
+          else
+            verify_tag="verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-production"
+            docker tag "archon-datahub:${RELEASE_SHA}" "${ecr_uri}:${verify_tag}"
+            docker push "${ecr_uri}:${verify_tag}" >/dev/null
+            verified_digest="$(aws ecr describe-images \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${verify_tag}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)"
+            test "${verified_digest}" = "${existing_digest}"
+            aws ecr batch-delete-image \
+              --repository-name "${ecr_name}" \
+              --image-ids "imageTag=${verify_tag}" >/dev/null
+            verify_tag=""
+            image_digest="${existing_digest}"
+          fi
+          docker logout "${registry_host}" >/dev/null
+          test "${image_digest}" = "${STAGING_IMAGE_DIGEST}" || {
+            echo "::error::Production ECR digest differs from the staging digest"
+            exit 1
+          }
+          aws ecr wait image-scan-complete \
+            --repository-name "${ecr_name}" \
+            --image-id "imageDigest=${image_digest}"
+          scan_counts="$(aws ecr describe-image-scan-findings \
+            --repository-name "${ecr_name}" \
+            --image-id "imageDigest=${image_digest}" \
+            --query 'imageScanFindings.findingSeverityCounts' \
+            --output json)"
+          test "$(jq -r '.CRITICAL // 0' <<<"${scan_counts}")" = "0"
+          test "$(jq -r '.HIGH // 0' <<<"${scan_counts}")" = "0"
+
+          # Bootstrap with zero worker tasks: the generated Secrets Manager
+          # values are placeholders until the next pipeline step replaces them.
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${stack_name}" \
+              -c stage=production \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${stack_name}:ImageDigest=${image_digest}" \
+              --parameters "${stack_name}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
+              --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
+              --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
+              --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
+              --parameters "${stack_name}:DataHubWriteMcpUrl=${DATAHUB_WRITE_MCP_URL}" \
+              --parameters "${stack_name}:LlmBaseUrl=${LLM_BASE_URL}" \
+              --parameters "${stack_name}:LlmModel=${LLM_MODEL}" \
+              --parameters "${stack_name}:WorkerDesiredCount=0" \
+              --outputs-file "${stack_outputs}"
+          )
+
+          application_url="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
+          api_url="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonApiUrl' "${stack_outputs}")"
+          {
+            echo "image_digest=${image_digest}"
+            echo "application_url=${application_url}"
+            echo "api_url=${api_url}"
+            echo "stack_name=${stack_name}"
+            echo "stack_outputs=${stack_outputs}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Update production-scoped secrets without logging values
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          DATAHUB_READ_GMS_TOKEN: ${{ secrets.DATAHUB_READ_GMS_TOKEN }}
+          DATAHUB_WRITE_GMS_TOKEN: ${{ secrets.DATAHUB_WRITE_GMS_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_TOKEN:?production read token is required}"
+          : "${DATAHUB_WRITE_GMS_TOKEN:?production write token is required}"
+          : "${LLM_API_KEY:?production LLM key is required}"
+          umask 077
+          secret_dir="${RUNNER_TEMP}/production-secret-payloads"
+          mkdir -p "${secret_dir}"
+          trap 'find "${secret_dir}" -type f -exec shred -u {} + 2>/dev/null || true' EXIT
+          read_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonReadSecretArn' "${STACK_OUTPUTS}")"
+          write_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonWriteSecretArn' "${STACK_OUTPUTS}")"
+          llm_secret_arn="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonLlmSecretArn' "${STACK_OUTPUTS}")"
+          READ_TOKEN="${DATAHUB_READ_GMS_TOKEN}" jq -n \
+            '{token: env.READ_TOKEN}' >"${secret_dir}/read.json"
+          WRITE_TOKEN="${DATAHUB_WRITE_GMS_TOKEN}" jq -n \
+            '{token: env.WRITE_TOKEN}' >"${secret_dir}/write.json"
+          PROVIDER_KEY="${LLM_API_KEY}" jq -n \
+            '{apiKey: env.PROVIDER_KEY}' >"${secret_dir}/llm.json"
+          aws secretsmanager put-secret-value \
+            --secret-id "${read_secret_arn}" \
+            --secret-string "file://${secret_dir}/read.json" >/dev/null
+          aws secretsmanager put-secret-value \
+            --secret-id "${write_secret_arn}" \
+            --secret-string "file://${secret_dir}/write.json" >/dev/null
+          aws secretsmanager put-secret-value \
+            --secret-id "${llm_secret_arn}" \
+            --secret-string "file://${secret_dir}/llm.json" >/dev/null
+
+      - name: Prepare the exact production runtime configuration
+        id: spa_config
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+        run: |
+          set -euo pipefail
+          bucket="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonSpaBucketName' "${STACK_OUTPUTS}")"
+          distribution_id="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${STACK_OUTPUTS}")"
+          application_url="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApplicationUrl' "${STACK_OUTPUTS}")"
+          client_id="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonUserPoolClientId' "${STACK_OUTPUTS}")"
+          cognito_origin="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoHostedUiOrigin' "${STACK_OUTPUTS}")"
+          authorization_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoAuthorizationEndpoint' "${STACK_OUTPUTS}")"
+          token_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoTokenEndpoint' "${STACK_OUTPUTS}")"
+          logout_endpoint="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonCognitoLogoutEndpoint' "${STACK_OUTPUTS}")"
+          approval_scope="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApprovalOAuthScope' "${STACK_OUTPUTS}")"
+          redirect_uri="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuthRedirectUri' "${STACK_OUTPUTS}")"
+          logout_uri="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuthLogoutUri' "${STACK_OUTPUTS}")"
+          test -f "${WEB_DIR}/index.html"
+          test ! -e "${WEB_DIR}/runtime-config.json"
+          [[ "${client_id}" =~ ^[A-Za-z0-9]{8,128}$ ]]
+          [[ "${cognito_origin}" =~ ^https://[^/]+$ ]]
+          test "${authorization_endpoint}" = \
+            "${cognito_origin}/oauth2/authorize"
+          test "${token_endpoint}" = "${cognito_origin}/oauth2/token"
+          test "${logout_endpoint}" = "${cognito_origin}/logout"
+          test "${approval_scope}" = "archon/approve"
+          test "${redirect_uri}" = "${application_url}/"
+          test "${logout_uri}" = "${application_url}/"
+
+          runtime_config="${RUNNER_TEMP}/production-runtime-config.json"
+          jq -n \
+            --arg clientId "${client_id}" \
+            --arg authorizationEndpoint "${authorization_endpoint}" \
+            --arg tokenEndpoint "${token_endpoint}" \
+            --arg logoutEndpoint "${logout_endpoint}" \
+            --arg redirectUri "${redirect_uri}" \
+            --arg logoutUri "${logout_uri}" \
+            --arg approvalScope "${approval_scope}" \
+            '{
+              schemaVersion: 1,
+              auth: {
+                clientId: $clientId,
+                authorizationEndpoint: $authorizationEndpoint,
+                tokenEndpoint: $tokenEndpoint,
+                logoutEndpoint: $logoutEndpoint,
+                redirectUri: $redirectUri,
+                logoutUri: $logoutUri,
+                scopes: ["openid", "email", $approvalScope]
+              }
+            }' >"${runtime_config}"
+          runtime_config_sha="$(sha256sum "${runtime_config}" | awk '{print $1}')"
+          {
+            echo "bucket=${bucket}"
+            echo "distribution_id=${distribution_id}"
+            echo "runtime_config=${runtime_config}"
+            echo "runtime_config_sha=${runtime_config_sha}"
+            echo "cognito_origin=${cognito_origin}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Restart production API and worker tasks after secret rotation
+        env:
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          SPA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
+          DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
+          : "${DATAHUB_READ_MCP_URL:?production DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
+          : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
+          : "${LLM_BASE_URL:?production LLM_BASE_URL is required}"
+          : "${LLM_MODEL:?production LLM_MODEL is required}"
+
+          # Reconcile desired count through CloudFormation so activation creates
+          # no drift, then force all services to consume the rotated secrets.
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${STACK_NAME}" \
+              -c stage=production \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
+              --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA}" \
+              --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
+              --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
+              --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
+              --parameters "${STACK_NAME}:DataHubWriteMcpUrl=${DATAHUB_WRITE_MCP_URL}" \
+              --parameters "${STACK_NAME}:LlmBaseUrl=${LLM_BASE_URL}" \
+              --parameters "${STACK_NAME}:LlmModel=${LLM_MODEL}" \
+              --parameters "${STACK_NAME}:WorkerDesiredCount=1" \
+              --outputs-file "${STACK_OUTPUTS}"
+          )
+
+          cluster="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
+          api_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApiServiceName' "${STACK_OUTPUTS}")"
+          audit_worker_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonAuditWorkerServiceName' "${STACK_OUTPUTS}")"
+          remediation_worker_service="$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonRemediationWorkerServiceName' "${STACK_OUTPUTS}")"
+          test -n "${cluster}"
+          test "${cluster}" != "None"
+          test -n "${api_service}"
+          test "${api_service}" != "None"
+          test -n "${audit_worker_service}"
+          test "${audit_worker_service}" != "None"
+          test -n "${remediation_worker_service}"
+          test "${remediation_worker_service}" != "None"
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${api_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${audit_worker_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs update-service \
+            --cluster "${cluster}" \
+            --service "${remediation_worker_service}" \
+            --force-new-deployment >/dev/null
+          aws ecs wait services-stable \
+            --cluster "${cluster}" \
+            --services "${api_service}" "${audit_worker_service}" "${remediation_worker_service}"
+          api_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${api_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          audit_worker_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${audit_worker_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          remediation_worker_counts="$(aws ecs describe-services \
+            --cluster "${cluster}" \
+            --services "${remediation_worker_service}" \
+            --query 'services[0].[desiredCount,runningCount]' \
+            --output json)"
+          jq -e '.[0] >= 2 and .[1] == .[0]' <<<"${api_counts}" >/dev/null
+          jq -e '.[0] >= 1 and .[1] == .[0]' \
+            <<<"${audit_worker_counts}" >/dev/null
+          jq -e '.[0] >= 1 and .[1] == .[0]' \
+            <<<"${remediation_worker_counts}" >/dev/null
+
+      - name: Publish the identical SPA after workload readiness
+        id: spa
+        env:
+          BUCKET: ${{ steps.spa_config.outputs.bucket }}
+          DISTRIBUTION_ID: ${{ steps.spa_config.outputs.distribution_id }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          RUNTIME_CONFIG: ${{ steps.spa_config.outputs.runtime_config }}
+          RUNTIME_CONFIG_SHA: ${{ steps.spa_config.outputs.runtime_config_sha }}
+          COGNITO_ORIGIN: ${{ steps.spa_config.outputs.cognito_origin }}
+        run: |
+          set -euo pipefail
+          test -f "${WEB_DIR}/index.html"
+          test -f "${RUNTIME_CONFIG}"
+          test "$(sha256sum "${RUNTIME_CONFIG}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA}"
+          aws s3 sync "${WEB_DIR}/" "s3://${BUCKET}/" \
+            --delete \
+            --exclude 'assets/*' \
+            --exclude 'index.html' \
+            --exclude 'runtime-config.json' \
+            --only-show-errors
+          aws s3 cp "${WEB_DIR}/" "s3://${BUCKET}/" \
+            --recursive \
+            --exclude 'assets/*' \
+            --exclude 'index.html' \
+            --exclude 'runtime-config.json' \
+            --cache-control 'public,max-age=0,must-revalidate' \
+            --only-show-errors
+          if [[ -d "${WEB_DIR}/assets" ]]; then
+            aws s3 cp "${WEB_DIR}/assets/" "s3://${BUCKET}/assets/" \
+              --recursive \
+              --cache-control 'public,max-age=31536000,immutable' \
+              --only-show-errors
+          fi
+          aws s3 cp "${RUNTIME_CONFIG}" "s3://${BUCKET}/runtime-config.json" \
+            --content-type 'application/json; charset=utf-8' \
+            --cache-control 'no-cache,no-store,must-revalidate' \
+            --only-show-errors
+          aws s3 cp "${WEB_DIR}/index.html" "s3://${BUCKET}/index.html" \
+            --content-type 'text/html; charset=utf-8' \
+            --cache-control 'no-cache,no-store,must-revalidate' \
+            --only-show-errors
+          invalidation_id="$(aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths '/' '/index.html' '/runtime-config.json' \
+            --query 'Invalidation.Id' \
+            --output text)"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --id "${invalidation_id}"
+          {
+            echo "runtime_config=${RUNTIME_CONFIG}"
+            echo "runtime_config_sha=${RUNTIME_CONFIG_SHA}"
+            echo "cognito_origin=${COGNITO_ORIGIN}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Production smoke and security contracts
+        id: smoke
+        env:
+          APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          RUNTIME_CONFIG: ${{ steps.spa.outputs.runtime_config }}
+          RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
+          COGNITO_ORIGIN: ${{ steps.spa.outputs.cognito_origin }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+          EXPECTED_DEMO_QUERY_SHA: ${{ steps.demo_scope.outputs.demo_query_sha }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            $query != "*" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
+          demo_query_sha="$(
+            printf '%s' "${DATAHUB_DEMO_QUERY}" | sha256sum | awk '{print $1}'
+          )"
+          test "${demo_query_sha}" = "${EXPECTED_DEMO_QUERY_SHA}"
+          audit_payload="$(
+            jq -cn --arg query "${DATAHUB_DEMO_QUERY}" '{query: $query}'
+          )"
+          echo "demo_query_sha=${demo_query_sha}" >>"${GITHUB_OUTPUT}"
+          headers="${RUNNER_TEMP}/production-index-headers.txt"
+          index_body="${RUNNER_TEMP}/production-index.html"
+          runtime_headers="${RUNNER_TEMP}/production-runtime-config-headers.txt"
+          runtime_body="${RUNNER_TEMP}/production-runtime-config.json"
+          audit_response="${RUNNER_TEMP}/production-audit-response.json"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --retry 12 --retry-all-errors --retry-delay 10 \
+            --dump-header "${headers}" \
+            --output "${index_body}" \
+            "${APPLICATION_URL}/"
+          cmp --silent "${WEB_DIR}/index.html" "${index_body}"
+          grep -qi '^content-security-policy:' "${headers}"
+          grep -qi '^strict-transport-security:' "${headers}"
+          grep -qi '^x-content-type-options:[[:space:]]*nosniff' "${headers}"
+          grep -qi '^cache-control:.*no-cache' "${headers}"
+          grep -Fqi "connect-src 'self' ${COGNITO_ORIGIN}" "${headers}"
+
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --dump-header "${runtime_headers}" \
+            --output "${runtime_body}" \
+            "${APPLICATION_URL}/runtime-config.json"
+          cmp --silent "${RUNTIME_CONFIG}" "${runtime_body}"
+          test "$(sha256sum "${runtime_body}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA}"
+          grep -qi '^content-type:[[:space:]]*application/json' "${runtime_headers}"
+          grep -qi '^cache-control:.*no-store' "${runtime_headers}"
+          jq -e --arg root "${APPLICATION_URL}/" \
+            '.schemaVersion == 1
+             and .auth.redirectUri == $root
+             and .auth.logoutUri == $root
+             and .auth.scopes == ["openid", "email", "archon/approve"]' \
+            "${runtime_body}" >/dev/null
+
+          asset="$(find "${WEB_DIR}/assets" -type f -print -quit 2>/dev/null || true)"
+          if [[ -n "${asset}" ]]; then
+            relative_asset="${asset#"${WEB_DIR}/"}"
+            asset_body="${RUNNER_TEMP}/production-asset"
+            curl --fail --silent --show-error \
+              --proto '=https' --tlsv1.2 \
+              --dump-header "${RUNNER_TEMP}/production-asset-headers.txt" \
+              --output "${asset_body}" \
+              "${APPLICATION_URL}/${relative_asset}"
+            cmp --silent "${asset}" "${asset_body}"
+            grep -qi '^cache-control:.*immutable' \
+              "${RUNNER_TEMP}/production-asset-headers.txt"
+          fi
+
+          approval_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"decision":"APPROVE"}' \
+            "${APPLICATION_URL}/api/approvals/approval-smoke/decisions")"
+          test "${approval_status}" = "401"
+          mutation_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"tool":"add_tags","arguments":{"forbidden":true}}' \
+            "${APPLICATION_URL}/api/audits")"
+          test "${mutation_status}" = "400"
+          control_mutation_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data '{"tool":"add_tags","arguments":{"forbidden":true}}' \
+            "${APPLICATION_URL}/api/control-loops")"
+          test "${control_mutation_status}" = "400"
+          control_missing_status="$(curl --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --output /dev/null --write-out '%{http_code}' \
+            "${APPLICATION_URL}/api/control-loops/0000000000000000000000000000000000000000000000000000000000000000")"
+          test "${control_missing_status}" = "404"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 35 \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data "${audit_payload}" \
+            --output "${audit_response}" \
+            "${APPLICATION_URL}/api/audits"
+          jq -e --arg release "${RELEASE_SHA}" \
+            '.releaseSha == $release
+             and (.report | type == "object")
+             and .report.classification.totalEntities == 1' \
+            "${audit_response}" >/dev/null
+          audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
+          audit_evidence="${RUNNER_TEMP}/production-audit-smoke-evidence.json"
+          jq -cS \
+            --arg environment production \
+            --arg querySha256 "${demo_query_sha}" \
+            --arg responseSha256 "${audit_response_sha}" \
+            '{
+              schemaVersion: "archon.audit-smoke-evidence/v1",
+              environment: $environment,
+              querySha256: $querySha256,
+              responseSha256: $responseSha256,
+              releaseSha: .releaseSha,
+              requestId: .requestId,
+              scanId: .report.scanId,
+              classification: {
+                totalEntities: .report.classification.totalEntities,
+                withLineage: .report.classification.withLineage,
+                sensitiveEntities: .report.classification.sensitiveEntities
+              },
+              findingCount: (.report.findings | length)
+            }' "${audit_response}" >"${audit_evidence}"
+          audit_evidence_sha="$(
+            sha256sum "${audit_evidence}" | awk '{print $1}'
+          )"
+          {
+            echo "audit_response_sha=${audit_response_sha}"
+            echo "audit_evidence=${audit_evidence}"
+            echo "audit_evidence_sha=${audit_evidence_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Emit promotion evidence
+        id: evidence
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          CONTROL_PLANE_GATE_SHA: ${{ needs.staging.outputs.control_plane_gate_sha }}
+          SOURCE_RUN_URL: ${{ steps.source.outputs.source_run_url }}
+          CONTAINER_ARTIFACT_SHA: ${{ steps.artifacts.outputs.container_artifact_sha }}
+          CONTAINER_ARCHIVE_SHA: ${{ steps.artifacts.outputs.container_archive_sha }}
+          WEB_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_artifact_sha }}
+          WEB_ARCHIVE_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          LAMBDA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.lambda_artifact_sha }}
+          LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+          STAGING_IMAGE_DIGEST: ${{ needs.staging.outputs.image_digest }}
+          PRODUCTION_IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          STAGING_APPLICATION_URL: ${{ needs.staging.outputs.application_url }}
+          PRODUCTION_APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          PRODUCTION_API_URL: ${{ steps.deploy.outputs.api_url }}
+          STAGING_STACK_NAME: ${{ needs.staging.outputs.stack_name }}
+          PRODUCTION_STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STAGING_SMOKE_SHA: ${{ needs.staging.outputs.smoke_sha }}
+          STAGING_SMOKE_EVIDENCE_SHA: ${{ needs.staging.outputs.smoke_evidence_sha }}
+          STAGING_DEMO_QUERY_SHA: ${{ needs.staging.outputs.demo_query_sha }}
+          STAGING_CONTROL_LOOP_SMOKE_SHA: ${{ needs.staging.outputs.control_loop_smoke_sha }}
+          STAGING_DAST_REPORT_SHA: ${{ needs.staging.outputs.dast_report_sha }}
+          STAGING_ATTESTATION_SHA: ${{ needs.staging.outputs.attestation_sha }}
+          STAGING_RUNTIME_CONFIG_SHA: ${{ needs.staging.outputs.runtime_config_sha }}
+          PRODUCTION_SMOKE_SHA: ${{ steps.smoke.outputs.audit_response_sha }}
+          PRODUCTION_SMOKE_EVIDENCE_SHA: ${{ steps.smoke.outputs.audit_evidence_sha }}
+          PRODUCTION_SMOKE_EVIDENCE_PATH: ${{ steps.smoke.outputs.audit_evidence }}
+          PRODUCTION_DEMO_QUERY_SHA: ${{ steps.demo_scope.outputs.demo_query_sha }}
+          PRODUCTION_ATTESTATION_SHA: ${{ steps.attestation.outputs.sha }}
+          PRODUCTION_ATTESTATION_PATH: ${{ steps.attestation.outputs.path }}
+          PRODUCTION_RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
+          PRODUCTION_RUNTIME_CONFIG_PATH: ${{ steps.spa.outputs.runtime_config }}
+          PRODUCTION_REVIEWER: ${{ steps.source.outputs.production_reviewer }}
+          PRODUCTION_APPROVAL_RECORD_SHA: ${{ steps.source.outputs.approval_record_sha }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+        run: |
+          set -euo pipefail
+          test "${STAGING_IMAGE_DIGEST}" = "${PRODUCTION_IMAGE_DIGEST}"
+          test "${STAGING_DEMO_QUERY_SHA}" = "${PRODUCTION_DEMO_QUERY_SHA}"
+          evidence_dir="${RUNNER_TEMP}/deployment-evidence"
+          mkdir -p "${evidence_dir}"
+          evidence="${evidence_dir}/deployment-evidence.json"
+          jq -n \
+            --arg ciRunId "${CI_RUN_ID}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg controlPlaneGateSha256 "${CONTROL_PLANE_GATE_SHA}" \
+            --arg sourceRunUrl "${SOURCE_RUN_URL}" \
+            --arg deploymentRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg containerArtifactSha256 "${CONTAINER_ARTIFACT_SHA}" \
+            --arg containerArchiveSha256 "${CONTAINER_ARCHIVE_SHA}" \
+            --arg webArtifactSha256 "${WEB_ARTIFACT_SHA}" \
+            --arg webArchiveSha256 "${WEB_ARCHIVE_SHA}" \
+            --arg lambdaArtifactSha256 "${LAMBDA_ARTIFACT_SHA}" \
+            --arg lambdaArchiveSha256 "${LAMBDA_ARCHIVE_SHA}" \
+            --arg stagingImageDigest "${STAGING_IMAGE_DIGEST}" \
+            --arg productionImageDigest "${PRODUCTION_IMAGE_DIGEST}" \
+            --arg stagingApplicationUrl "${STAGING_APPLICATION_URL}" \
+            --arg productionApplicationUrl "${PRODUCTION_APPLICATION_URL}" \
+            --arg productionApiUrl "${PRODUCTION_API_URL}" \
+            --arg stagingStackName "${STAGING_STACK_NAME}" \
+            --arg productionStackName "${PRODUCTION_STACK_NAME}" \
+            --arg stagingSmokeSha256 "${STAGING_SMOKE_SHA}" \
+            --arg stagingSmokeEvidenceSha256 "${STAGING_SMOKE_EVIDENCE_SHA}" \
+            --arg stagingDemoQuerySha256 "${STAGING_DEMO_QUERY_SHA}" \
+            --arg stagingControlLoopSmokeSha256 "${STAGING_CONTROL_LOOP_SMOKE_SHA}" \
+            --arg stagingDastReportSha256 "${STAGING_DAST_REPORT_SHA}" \
+            --arg stagingAttestationSha256 "${STAGING_ATTESTATION_SHA}" \
+            --arg stagingRuntimeConfigSha256 "${STAGING_RUNTIME_CONFIG_SHA}" \
+            --arg productionSmokeSha256 "${PRODUCTION_SMOKE_SHA}" \
+            --arg productionSmokeEvidenceSha256 "${PRODUCTION_SMOKE_EVIDENCE_SHA}" \
+            --arg productionDemoQuerySha256 "${PRODUCTION_DEMO_QUERY_SHA}" \
+            --arg productionAttestationSha256 "${PRODUCTION_ATTESTATION_SHA}" \
+            --arg productionRuntimeConfigSha256 "${PRODUCTION_RUNTIME_CONFIG_SHA}" \
+            --arg productionReviewer "${PRODUCTION_REVIEWER}" \
+            --arg productionApprovalRecordSha256 "${PRODUCTION_APPROVAL_RECORD_SHA}" \
+            --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{
+              schemaVersion: 1,
+              promotionPolicy: "build-once-promote-same-artifacts",
+              rollbackSelector: {
+                ciRunId: $ciRunId,
+                releaseSha: $releaseSha
+              },
+              source: {
+                sourceRunUrl: $sourceRunUrl,
+                deploymentRunUrl: $deploymentRunUrl,
+                actor: $actor,
+                deployedAt: $deployedAt,
+                deploymentControlPlaneSha: $controlPlaneSha
+              },
+              immutableArtifacts: {
+                containerArtifactSha256: $containerArtifactSha256,
+                containerArchiveSha256: $containerArchiveSha256,
+                webArtifactSha256: $webArtifactSha256,
+                webArchiveSha256: $webArchiveSha256,
+                lambdaArtifactSha256: $lambdaArtifactSha256,
+                lambdaArchiveSha256: $lambdaArchiveSha256,
+                stagingEcrImageDigest: $stagingImageDigest,
+                productionEcrImageDigest: $productionImageDigest,
+                identicalImageDigest: ($stagingImageDigest == $productionImageDigest)
+              },
+              pipelineSecurity: {
+                deploymentControlPlaneGatesSha256: $controlPlaneGateSha256,
+                stagingAttestationVerificationSha256:
+                  $stagingAttestationSha256,
+                productionAttestationReverificationSha256:
+                  $productionAttestationSha256
+              },
+              staging: {
+                stackName: $stagingStackName,
+                applicationUrl: $stagingApplicationUrl,
+                demoQuerySha256: $stagingDemoQuerySha256,
+                smokeResponseSha256: $stagingSmokeSha256,
+                sanitizedSmokeEvidenceSha256:
+                  $stagingSmokeEvidenceSha256,
+                readOnlyControlLoopResponseSha256:
+                  $stagingControlLoopSmokeSha256,
+                runtimeConfigSha256: $stagingRuntimeConfigSha256,
+                dastReportSha256: $stagingDastReportSha256,
+                result: "passed"
+              },
+              production: {
+                stackName: $productionStackName,
+                applicationUrl: $productionApplicationUrl,
+                apiUrl: $productionApiUrl,
+                approval: {
+                  reviewer: $productionReviewer,
+                  recordSha256: $productionApprovalRecordSha256
+                },
+                demoQuerySha256: $productionDemoQuerySha256,
+                smokeResponseSha256: $productionSmokeSha256,
+                sanitizedSmokeEvidenceSha256:
+                  $productionSmokeEvidenceSha256,
+                runtimeConfigSha256: $productionRuntimeConfigSha256,
+                result: "passed"
+              }
+            }' >"${evidence}"
+          cp "${STACK_OUTPUTS}" \
+            "${evidence_dir}/production-cdk-outputs.json"
+          test "$(sha256sum "${PRODUCTION_ATTESTATION_PATH}" |
+            awk '{print $1}')" = "${PRODUCTION_ATTESTATION_SHA}"
+          test "$(sha256sum "${PRODUCTION_RUNTIME_CONFIG_PATH}" |
+            awk '{print $1}')" = "${PRODUCTION_RUNTIME_CONFIG_SHA}"
+          test "$(sha256sum "${PRODUCTION_SMOKE_EVIDENCE_PATH}" |
+            awk '{print $1}')" = "${PRODUCTION_SMOKE_EVIDENCE_SHA}"
+          cp "${PRODUCTION_ATTESTATION_PATH}" \
+            "${evidence_dir}/production-attestation-verification.json"
+          cp "${PRODUCTION_RUNTIME_CONFIG_PATH}" \
+            "${evidence_dir}/production-runtime-config.json"
+          cp "${PRODUCTION_SMOKE_EVIDENCE_PATH}" \
+            "${evidence_dir}/production-audit-smoke-evidence.json"
+          echo "path=${evidence_dir}" >>"${GITHUB_OUTPUT}"
+
+      - name: Upload immutable deployment evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-evidence-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: ${{ steps.evidence.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish deployment summary
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          STAGING_URL: ${{ needs.staging.outputs.application_url }}
+          PRODUCTION_URL: ${{ steps.deploy.outputs.application_url }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          WEB_ARTIFACT_SHA: ${{ steps.artifacts.outputs.web_artifact_sha }}
+          WEB_ARCHIVE_SHA: ${{ steps.artifacts.outputs.web_archive_sha }}
+          LAMBDA_ARTIFACT_SHA: ${{ steps.artifacts.outputs.lambda_artifact_sha }}
+          LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
+        run: |
+          {
+            echo "## Archon immutable promotion complete"
+            echo
+            echo "- Release: \`${RELEASE_SHA}\`"
+            echo "- ECR digest in both environments: \`${IMAGE_DIGEST}\`"
+            echo "- Exact SPA artifact SHA-256: \`${WEB_ARTIFACT_SHA}\`"
+            echo "- Exact inner SPA archive SHA-256: \`${WEB_ARCHIVE_SHA}\`"
+            echo "- Exact Lambda artifact SHA-256: \`${LAMBDA_ARTIFACT_SHA}\`"
+            echo "- Exact inner Lambda archive SHA-256: \`${LAMBDA_ARCHIVE_SHA}\`"
+            echo "- Staging: ${STAGING_URL}"
+            echo "- Production: ${PRODUCTION_URL}"
+          } >>"${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,372 @@
+name: Recover interrupted governed DataHub canary
+
+on:
+  workflow_run:
+    workflows:
+      - Governed DataHub canary
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: governed-canary-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.23.1"
+  AWS_PAGER: ""
+  CANARY_STACK_NAME: Archon-staging
+  CANARY_SOURCE_WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+  CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+  CANARY_QUERY: archon_governed_canary_fixture
+  CANARY_COLUMN_PATH: email
+  CANARY_TAG_URN: urn:li:tag:PII
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve-parent:
+    name: Validate interrupted parent and sealed recovery
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      (
+        github.event.workflow_run.conclusion == 'failure' ||
+        github.event.workflow_run.conclusion == 'cancelled'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      requires_recovery: ${{ steps.source.outputs.requires_recovery }}
+      recovery_artifact: ${{ steps.source.outputs.recovery_artifact }}
+      write_artifact: ${{ steps.source.outputs.write_artifact }}
+      has_write: ${{ steps.source.outputs.has_write }}
+      deployment_run_id: ${{ steps.manifest.outputs.deployment_run_id }}
+      release_sha: ${{ steps.manifest.outputs.release_sha }}
+      recovery_digest: ${{ steps.manifest.outputs.recovery_digest }}
+    steps:
+      - name: Validate exact parent workflow and artifact set
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PARENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          PARENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          PARENT_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          PARENT_PATH: ${{ github.event.workflow_run.path }}
+          PARENT_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          [[ "${CANARY_SOURCE_WORKFLOW_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${PARENT_CONCLUSION}" == "failure" || "${PARENT_CONCLUSION}" == "cancelled" ]]
+          test "${PARENT_HEAD_BRANCH}" = "master"
+          test "${PARENT_HEAD_REPOSITORY}" = "${GITHUB_REPOSITORY}"
+          test "${PARENT_PATH}" = ".github/workflows/governed-canary.yml"
+          test "${PARENT_EVENT}" = "workflow_dispatch"
+
+          parent_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_SOURCE_WORKFLOW_RUN_ID}/attempts/${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg conclusion "${PARENT_CONCLUSION}" \
+            --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" '
+              .id == (env.CANARY_SOURCE_WORKFLOW_RUN_ID | tonumber) and
+              .run_attempt == ($attempt | tonumber) and
+              .name == "Governed DataHub canary" and
+              .path == ".github/workflows/governed-canary.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == $conclusion
+            ' <<<"${parent_json}" >/dev/null
+
+          recovery_name="governed-canary-recovery-${CANARY_SOURCE_WORKFLOW_RUN_ID}-${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}"
+          write_name="governed-canary-write-${CANARY_SOURCE_WORKFLOW_RUN_ID}-${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}"
+          artifacts="$(gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_SOURCE_WORKFLOW_RUN_ID}/artifacts?per_page=100")"
+          recovery_count="$(jq -r --arg name "${recovery_name}" \
+            '[.artifacts[] | select(.expired == false and .name == $name)] | length' \
+            <<<"${artifacts}")"
+          write_count="$(jq -r --arg name "${write_name}" \
+            '[.artifacts[] | select(.expired == false and .name == $name)] | length' \
+            <<<"${artifacts}")"
+          [[ "${recovery_count}" == "0" || "${recovery_count}" == "1" ]]
+          [[ "${write_count}" == "0" || "${write_count}" == "1" ]]
+          if [[ "${recovery_count}" == "0" ]]; then
+            test "${write_count}" = "0"
+            echo "requires_recovery=false" >>"${GITHUB_OUTPUT}"
+            echo "### No recovery required" >>"${GITHUB_STEP_SUMMARY}"
+            echo "The parent stopped before sealing recovery; mutation was not yet authorized." \
+              >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          {
+            echo "requires_recovery=true"
+            echo "recovery_artifact=${recovery_name}"
+            echo "write_artifact=${write_name}"
+            [[ "${write_count}" == "1" ]] && echo "has_write=true" || echo "has_write=false"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact sealed recovery from parent
+        if: steps.source.outputs.requires_recovery == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.source.outputs.recovery_artifact }}
+          path: ${{ runner.temp }}/parent-recovery
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Inspect immutable parent coordinates
+        if: steps.source.outputs.requires_recovery == 'true'
+        id: manifest
+        env:
+          RECOVERY_PATH: ${{ runner.temp }}/parent-recovery/recovery.json
+        run: |
+          set -euo pipefail
+          test -f "${RECOVERY_PATH}"
+          test ! -L "${RECOVERY_PATH}"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg run "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
+            --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" '
+              .schemaVersion == "archon.governed-canary-recovery/v1" and
+              .repository == $repository and
+              .workflowRunId == $run and
+              .workflowRunAttempt == $attempt and
+              (.deploymentRunId | test("^[1-9][0-9]{0,19}$")) and
+              (.releaseSha | test("^[a-f0-9]{40}$")) and
+              (.recoveryDigest | test("^sha256:[a-f0-9]{64}$"))
+            ' "${RECOVERY_PATH}" >/dev/null
+          {
+            echo "deployment_run_id=$(jq -er '.deploymentRunId' "${RECOVERY_PATH}")"
+            echo "release_sha=$(jq -er '.releaseSha' "${RECOVERY_PATH}")"
+            echo "recovery_digest=$(jq -er '.recoveryDigest' "${RECOVERY_PATH}")"
+          } >>"${GITHUB_OUTPUT}"
+
+  recover:
+    name: Protected recovery — ${{ needs.resolve-parent.outputs.recovery_digest }}
+    needs: resolve-parent
+    if: needs.resolve-parent.outputs.requires_recovery == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      deployments: write
+      id-token: write
+    environment:
+      name: governed-canary-recovery
+      url: ${{ vars.CANARY_APPLICATION_URL }}
+    env:
+      CANARY_DEPLOYMENT_RUN_ID: ${{ needs.resolve-parent.outputs.deployment_run_id }}
+      CANARY_RELEASE_SHA: ${{ needs.resolve-parent.outputs.release_sha }}
+      CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
+      CANARY_EVIDENCE_BUCKET: ${{ vars.CANARY_EVIDENCE_BUCKET }}
+      CANARY_COGNITO_CLIENT_ID: ${{ vars.CANARY_COGNITO_CLIENT_ID }}
+      CANARY_COGNITO_HOSTED_UI_ORIGIN: ${{ vars.CANARY_COGNITO_HOSTED_UI_ORIGIN }}
+      CANARY_DATASET_URN: ${{ vars.CANARY_DATASET_URN }}
+      CANARY_ISOLATION_MARKER: ${{ vars.CANARY_ISOLATION_MARKER }}
+      CANARY_DATAHUB_READ_GMS_URL: ${{ vars.CANARY_DATAHUB_READ_GMS_URL }}
+      CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
+      CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
+      CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
+      CANARY_WRITE_JOB_RESULT: ${{ needs.resolve-parent.outputs.has_write == 'true' && 'success' || 'failure' }}
+    steps:
+      - name: Revalidate recovery environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-recovery")"
+          jq -e '
+            .name == "governed-canary-recovery" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            any(
+              .protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              (.reviewers | length) >= 1
+            )
+          ' <<<"${environment_json}" >/dev/null
+          policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-recovery/deployment-branch-policies?per_page=100")"
+          jq -e '
+            .total_count == 1 and .branch_policies[0].name == "master"
+          ' <<<"${policies}" >/dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked recovery driver
+        run: npm ci --ignore-scripts
+
+      - name: Download exact sealed recovery
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.resolve-parent.outputs.recovery_artifact }}
+          path: ${{ runner.temp }}/governed-canary/recovery
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download optional verified write manifest
+        if: needs.resolve-parent.outputs.has_write == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.resolve-parent.outputs.write_artifact }}
+          path: ${{ runner.temp }}/governed-canary/write
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Assume read-only staging binding role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: archon-canary-recovery-${{ github.run_id }}
+
+      - name: Revalidate deployment, staging stack, fixture, and endpoint bindings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          deployment="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
+          jq -e --arg repository "${GITHUB_REPOSITORY}" '
+            .path == ".github/workflows/deploy.yml" and
+            .head_repository.full_name == $repository and
+            .head_branch == "master" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success"
+          ' <<<"${deployment}" >/dev/null
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "${AWS_ACCOUNT_ID}"
+          stack="${RUNNER_TEMP}/recovery-stack.json"
+          aws cloudformation describe-stacks \
+            --stack-name "${CANARY_STACK_NAME}" >"${stack}"
+          parameter() {
+            jq -er --arg key "$1" '
+              .Stacks[0].Parameters[] |
+              select(.ParameterKey == $key) |
+              .ParameterValue
+            ' "${stack}"
+          }
+          output() {
+            jq -er --arg key "$1" '
+              .Stacks[0].Outputs[] |
+              select(.OutputKey == $key) |
+              .OutputValue
+            ' "${stack}"
+          }
+          test "$(parameter ReleaseSha)" = "${CANARY_RELEASE_SHA}"
+          test "$(parameter WorkerDesiredCount)" = "1"
+          test "$(parameter DataHubReadGmsUrl)" = "${CANARY_DATAHUB_READ_GMS_URL}"
+          test "$(parameter DataHubReadMcpUrl)" = "${CANARY_DATAHUB_READ_MCP_URL}"
+          test "$(parameter DataHubWriteGmsUrl)" = "${CANARY_DATAHUB_WRITE_GMS_URL}"
+          test "$(parameter DataHubWriteMcpUrl)" = "${CANARY_DATAHUB_WRITE_MCP_URL}"
+          test "$(output ArchonApplicationUrl)" = "${CANARY_APPLICATION_URL}"
+          test "$(output ArchonEvidenceBucketName)" = "${CANARY_EVIDENCE_BUCKET}"
+          test "$(output ArchonUserPoolClientId)" = "${CANARY_COGNITO_CLIENT_ID}"
+          test "$(output ArchonCognitoHostedUiOrigin)" = \
+            "${CANARY_COGNITO_HOSTED_UI_ORIGIN}"
+
+      - name: Execute only the sealed idempotent inverse and prove restoration
+        id: restore
+        env:
+          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
+          CANARY_ROLLBACK_PATH: ${{ needs.resolve-parent.outputs.has_write == 'true' && format('{0}/governed-canary/write/rollback.json', runner.temp) || '' }}
+          CANARY_ROLLBACK_EVIDENCE_PATH: ${{ runner.temp }}/governed-canary/evidence/rollback-evidence.json
+          CANARY_DATAHUB_READ_TOKEN: ${{ secrets.CANARY_DATAHUB_READ_TOKEN }}
+          CANARY_DATAHUB_WRITE_TOKEN: ${{ secrets.CANARY_DATAHUB_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${CANARY_DATAHUB_READ_TOKEN:?CANARY_DATAHUB_READ_TOKEN is required}"
+          : "${CANARY_DATAHUB_WRITE_TOKEN:?CANARY_DATAHUB_WRITE_TOKEN is required}"
+          echo "::add-mask::${CANARY_DATAHUB_READ_TOKEN}"
+          echo "::add-mask::${CANARY_DATAHUB_WRITE_TOKEN}"
+          mkdir -p "$(dirname "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
+          test -f "${CANARY_RECOVERY_PATH}"
+          test ! -L "${CANARY_RECOVERY_PATH}"
+          if [[ -n "${CANARY_ROLLBACK_PATH}" ]]; then
+            test -f "${CANARY_ROLLBACK_PATH}"
+            test ! -L "${CANARY_ROLLBACK_PATH}"
+          fi
+          node --import tsx scripts/governed-canary.ts rollback
+          chmod 0600 "${CANARY_ROLLBACK_EVIDENCE_PATH}"
+          echo "path=${CANARY_ROLLBACK_EVIDENCE_PATH}" >>"${GITHUB_OUTPUT}"
+          echo "digest=$(jq -er '.digest' "${CANARY_ROLLBACK_EVIDENCE_PATH}")" \
+            >>"${GITHUB_OUTPUT}"
+
+      - name: Prepare exact recovery attestation
+        id: predicate
+        env:
+          EVIDENCE_PATH: ${{ steps.restore.outputs.path }}
+          EVIDENCE_DIGEST: ${{ steps.restore.outputs.digest }}
+          RECOVERY_DIGEST: ${{ needs.resolve-parent.outputs.recovery_digest }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$(dirname "${EVIDENCE_PATH}")"
+          (
+            cd "${evidence_dir}"
+            sha256sum rollback-evidence.json >rollback-subject.sha256
+          )
+          jq -n \
+            --arg parentRunId "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
+            --arg parentRunAttempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" \
+            --arg recoveryDigest "${RECOVERY_DIGEST}" \
+            --arg evidenceDigest "${EVIDENCE_DIGEST}" \
+            '{
+              schemaVersion: "archon.governed-canary-recovery-attestation/v1",
+              parentRunId: $parentRunId,
+              parentRunAttempt: $parentRunAttempt,
+              recoveryDigest: $recoveryDigest,
+              rollbackEvidenceDigest: $evidenceDigest,
+              result: "exact-state-restored"
+            }' >"${evidence_dir}/attestation-predicate.json"
+          {
+            echo "checksums=${evidence_dir}/rollback-subject.sha256"
+            echo "predicate=${evidence_dir}/attestation-predicate.json"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Attest independent recovery evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.predicate.outputs.checksums }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/governed-canary-recovery/v1
+          predicate-path: ${{ steps.predicate.outputs.predicate }}
+
+      - name: Retain sanitized independent recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: governed-canary-independent-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/governed-canary/evidence/
+          if-no-files-found: warn
+          retention-days: 90

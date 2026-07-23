@@ -1,0 +1,358 @@
+---
+- name: secure Archon reference architecture passes every preventive control
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      Registry:
+        Type: AWS::ECR::Repository
+        Properties:
+          ImageTagMutability: IMMUTABLE
+          ImageScanningConfiguration:
+            ScanOnPush: true
+          EncryptionConfiguration:
+            EncryptionType: KMS
+            KmsKey: arn:aws:kms:eu-west-1:111111111111:key/registry
+      SpaBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+      EvidenceBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+          VersioningConfiguration:
+            Status: Enabled
+          ObjectLockEnabled: true
+          ObjectLockConfiguration:
+            ObjectLockEnabled: Enabled
+            Rule:
+              DefaultRetention:
+                Mode: GOVERNANCE
+                Days: 30
+      DataKey:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+      ApiLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      ApprovalTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+          DeletionProtectionEnabled: true
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+          SSESpecification:
+            SSEEnabled: true
+            SSEType: KMS
+            KMSMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/data
+      AuditDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:audit-dlq
+            maxReceiveCount: 5
+      ApiTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: Api
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+      ApprovalFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+          Runtime: nodejs24.x
+          ReservedConcurrentExecutions: 10
+          TracingConfig:
+            Mode: Active
+          Environment:
+            Variables:
+              APPROVAL_TABLE: approval-table
+              APPROVER_GROUP: archon-approvers
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          MethodSettings:
+            - ResourcePath: /*
+              HttpMethod: "*"
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            ViewerCertificate:
+              CloudFrontDefaultCertificate: true
+              MinimumProtocolVersion: TLSv1.2_2021
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+      ReadSecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+      ApiWafAssociation:
+        Type: AWS::WAFv2::WebACLAssociation
+        Properties:
+          ResourceArn: arn:aws:apigateway:eu-west-1::/restapis/example/stages/staging
+          WebACLArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
+  expectations:
+    rules:
+      ecr_repositories_are_hardened: PASS
+      s3_buckets_are_private_and_encrypted: PASS
+      platform_has_versioned_object_locked_evidence_store: PASS
+      kms_keys_rotate: PASS
+      retained_logs_are_encrypted: PASS
+      dynamodb_tables_are_resilient_and_encrypted: PASS
+      sqs_queues_are_encrypted: PASS
+      platform_source_queues_use_dead_letter_queues: PASS
+      ecs_task_containers_are_hardened: PASS
+      platform_approval_lambda_is_hardened: PASS
+      api_gateway_stages_are_observable: PASS
+      cloudfront_distributions_enforce_tls_logging_and_oac: PASS
+      secrets_use_customer_managed_kms: PASS
+      platform_has_regional_waf: PASS
+
+- name: mutable unscanned ECR repositories are rejected
+  input:
+    Resources:
+      Registry:
+        Type: AWS::ECR::Repository
+        Properties:
+          ImageTagMutability: MUTABLE
+          ImageScanningConfiguration:
+            ScanOnPush: false
+          EncryptionConfiguration:
+            EncryptionType: AES256
+  expectations:
+    rules:
+      ecr_repositories_are_hardened: FAIL
+
+- name: publicly reachable unencrypted S3 buckets are rejected
+  input:
+    Resources:
+      PublicBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: false
+            BlockPublicPolicy: false
+            IgnorePublicAcls: false
+            RestrictPublicBuckets: false
+          BucketEncryption:
+            ServerSideEncryptionConfiguration: []
+  expectations:
+    rules:
+      s3_buckets_are_private_and_encrypted: FAIL
+
+- name: a platform without object locked evidence is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      platform_has_versioned_object_locked_evidence_store: FAIL
+
+- name: KMS keys without rotation are rejected
+  input:
+    Resources:
+      StaticKey:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: false
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate: FAIL
+
+- name: unencrypted short lived log groups are rejected
+  input:
+    Resources:
+      AppLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+          RetentionInDays: 30
+  expectations:
+    rules:
+      retained_logs_are_encrypted: FAIL
+
+- name: DynamoDB without PITR deletion protection and KMS is rejected
+  input:
+    Resources:
+      UnsafeTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+          DeletionProtectionEnabled: false
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: false
+          SSESpecification:
+            SSEEnabled: false
+            SSEType: AES256
+  expectations:
+    rules:
+      dynamodb_tables_are_resilient_and_encrypted: FAIL
+
+- name: unencrypted SQS queues are rejected
+  input:
+    Resources:
+      PlaintextQueue:
+        Type: AWS::SQS::Queue
+        Properties: {}
+  expectations:
+    rules:
+      sqs_queues_are_encrypted: FAIL
+
+- name: platform work queues without redrive are rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+  expectations:
+    rules:
+      platform_source_queues_use_dead_letter_queues: FAIL
+
+- name: root writable ECS containers are rejected
+  input:
+    Resources:
+      UnsafeTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: Api
+              ReadonlyRootFilesystem: false
+              User: root
+              LogConfiguration:
+                LogDriver: json-file
+  expectations:
+    rules:
+      ecs_task_containers_are_hardened: FAIL
+
+- name: deprecated untraced approval Lambda is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      ApprovalFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+          Runtime: nodejs20.x
+          ReservedConcurrentExecutions: 0
+          TracingConfig:
+            Mode: PassThrough
+          Environment:
+            Variables:
+              APPROVAL_TABLE: approval-table
+              APPROVER_GROUP: archon-approvers
+  expectations:
+    rules:
+      platform_approval_lambda_is_hardened: FAIL
+
+- name: API stages without access logs and tracing are rejected
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          TracingEnabled: false
+          MethodSettings:
+            - ResourcePath: /*
+              HttpMethod: "*"
+              LoggingLevel: "OFF"
+              MetricsEnabled: false
+              DataTraceEnabled: true
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: CloudFront without modern TLS logging and OAC is rejected
+  input:
+    Resources:
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            ViewerCertificate:
+              CloudFrontDefaultCertificate: true
+              MinimumProtocolVersion: TLSv1
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: allow-all
+            Origins:
+              - Id: PublicOrigin
+                DomainName: public.example.com
+  expectations:
+    rules:
+      cloudfront_distributions_enforce_tls_logging_and_oac: FAIL
+
+- name: Secrets Manager secrets without a customer KMS key are rejected
+  input:
+    Resources:
+      PlaintextSecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          Description: missing customer managed encryption
+  expectations:
+    rules:
+      secrets_use_customer_managed_kms: FAIL
+
+- name: a platform without a regional WAF association is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      platform_has_regional_waf: FAIL

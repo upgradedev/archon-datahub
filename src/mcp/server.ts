@@ -92,7 +92,11 @@ export async function callAuditTool(
     const query = typeof args.query === "string" ? args.query : undefined;
     switch (name) {
       case "audit_catalog":
-        return ok(await deps.pipeline.run(deps.datahub, query));
+        return ok(
+          await deps.pipeline.run(deps.datahub, query, {
+            executionProfile: "synchronous-preview",
+          })
+        );
       case "run_audit_loop":
         return ok(await defaultAuditLoop().run(deps.datahub, query));
       case "search_datasets":

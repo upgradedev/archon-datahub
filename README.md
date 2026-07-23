@@ -1,263 +1,306 @@
-# Archon-DataHub — a self-auditing metadata-governance & lineage agent
+# Archon for DataHub
 
-**Build with DataHub: The Agent Hackathon · Track 3 (Production ML Agents / lineage)**
+> **Audit the catalog itself.** Archon is an evidence-first governance agent that finds
+> contradictions, lineage gaps, and control violations inside DataHub, explains their
+> downstream impact, and permits one narrowly governed remediation only after an exact,
+> expiring human approval.
 
-Archon is a **read-only, deterministic** agent that connects to a
-[DataHub](https://datahub.com) catalog over the **official DataHub MCP server**
-(`acryldata/mcp-server-datahub`), harvests its metadata (entities, aspects, schema,
-lineage, governance), and **audits the catalog against itself**. It surfaces three
-classes of problem and, for each, a human-gated recommendation — it **never mutates
-DataHub**:
+Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
-- **Cross-source contradictions** — two ingestion sources (a Snowflake connector, a dbt
-  manifest, a manual edit) disagree about the same entity: different owners for one
-  dataset, different types for one column. A plain catalog lookup silently returns
-  whichever ranked higher; Archon flags the conflict and recommends which side to trust.
-  On a **live** catalog latest-write-wins hides the conflict on the current view — so Archon
-  recovers it from **aspect version history** (a direct GMS OpenAPI v3 read, gated on the
-  `systemMetadata.runId` that wrote each version), firing on real, live-shaped data and not
-  only on offline fixtures. See "Recovering contradictions on a live catalog" below.
-- **Lineage gaps** — a dataset declares an upstream that the catalog never ingested: a
-  dangling lineage edge that hides schema-break risk to everything downstream.
-- **Governance violations** — ungoverned or unclassified assets (no owner, no domain, no
-  description, an untyped field, an unclassified sensitive field), via deterministic
-  policy rules **G1–G6**.
+## What Archon does
 
-> **The differentiator:** a self-auditing contradiction/inconsistency engine. Most catalog
-> agents *retrieve* metadata; Archon *interrogates* it for internal disagreement, with a
-> **pure, deterministic engine** that runs identically on offline fixtures and on live-shaped
-> data — the "self-auditing" claim is measured on the same code that ships. On a live catalog
-> it recovers cross-source contradictions from **aspect version history** (a direct GMS read),
-> so the differentiator fires on real data, not only fixtures — with an honest distinct-source
-> gate that never flags a benign single-run edit. See "Recovering contradictions on a live
-> catalog" below.
+Most catalog assistants retrieve metadata. Archon tests whether the catalog is internally
+consistent:
 
-## Architecture
+- **Cross-source contradictions** — retained aspect versions disagree about ownership,
+  schema, domain, or deprecation. Archon distinguishes a stable ingestion source
+  (`pipelineName`) from an execution (`runId`), so two runs of one pipeline never become a
+  fabricated conflict.
+- **Lineage gaps and blast radius** — a missing upstream or risky asset is expanded into a
+  bounded, cycle-safe downstream impact graph.
+- **Governance controls G1–G6** — deterministic checks find missing ownership, domains,
+  descriptions, typing, and sensitive-field classification.
+- **Evidence, not opaque advice** — every result can be exported as JSON, Markdown, or
+  SARIF and carries provenance, policy, and content digests.
+- **Governed G6 remediation** — only a missing classification tag can become an action.
+  Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
+  optional comment; it never sends a tool name, entity URN, or mutation arguments.
 
+The public audit APIs and normal DataHub client are read-only. The SPA starts the durable
+path with `POST /api/control-loops` and polls a random 256-bit capability URL; the status
+projection never exposes a Step Functions ARN, workflow input/output, task token, identity,
+or provider error. The legacy `POST /api/audits` route remains an explicitly synchronous,
+read-only, one-dataset diagnostic preview with a 25-second pipeline deadline. A separately
+deployed worker is the only component that may
+receive a distinct write credential. Its action catalog is limited to the official
+`add_tags` / `remove_tags` tools, one entity, one column, and one policy tag.
+
+## Why DataHub
+
+DataHub is not an application database or object store. It is the metadata context graph
+and governance control plane across databases, warehouses, BI, ML, and pipelines.
+
+| Product category | What it owns | Relationship to Archon |
+| --- | --- | --- |
+| DataHub | Cross-platform metadata graph, lineage, governance, MCP context | Archon audits and safely acts on this control plane |
+| AWS Glue / DataZone, Microsoft Purview, Google Dataplex, Alibaba metadata services | Cloud-vendor catalog/governance planes | Alternatives when the estate is concentrated in one cloud |
+| CockroachDB | Transactional SQL data | A governed data source, not a catalog substitute |
+| Backblaze B2 / S3 | Object storage | Evidence or dataset storage, not a metadata graph |
+| Qwen / OpenAI / Gemini | Model inference | Optional narration/reasoning providers, not catalog systems |
+
+The concise positioning is: **DataHub catalogs the data estate; Archon audits the
+catalog itself.**
+
+## System design
+
+```mermaid
+flowchart LR
+  UI["React + Tailwind judge application"] -->|POST /api/control-loops| CONTROL["Start/status Lambda"]
+  CONTROL --> SFN["Standard Step Functions"]
+  SFN --> WORKER["Isolated private worker"]
+  CONTROL -. safe verified status projection .-> UI
+  IDE["IDE / agent / MCP client"] --> AMCP["Archon read-only MCP surface"]
+  WORKER --> PIPE["Deterministic audit pipeline"]
+  AMCP --> PIPE
+  PIPE --> READ["Official DataHub MCP read adapter"]
+  PIPE --> HIST["Bounded GMS aspect-version reader"]
+  READ --> DH["DataHub metadata graph"]
+  HIST --> DH
+  PIPE --> FIND["Findings + provenance + blast radius"]
+  FIND --> DOSSIER["G6 evidence dossier + exact plan"]
+  DOSSIER --> APPROVAL["Cognito approver + DynamoDB CAS"]
+  APPROVAL --> SFN
+  WORKER -->|add_tags / remove_tags only| WRITE["Separate DataHub write adapter"]
+  WRITE --> DH
+  WORKER --> RECEIPT["Verified hash-chain receipt + rollback anchor"]
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Archon-DataHub agent (read-only)                                          │
-│                                                                            │
-│   MCP server (our tools)            Multi-agent audit pipeline             │
-│   audit_catalog · run_audit_loop    1. ClassifierAgent      (deterministic)│
-│   search_datasets · get_entity      2. LineageAnalyzerAgent (self-audit ★) │
-│         ▲                            3. GovernanceAuditor    (G1–G6)        │
-│         │ MCP (stdio)               4. NarratorAgent         (LLM summary)  │
-│   any MCP client                          │                                │
-│   (IDE / orchestrator / agent)       ReAct loop (bounded, human-gated) ─────┤
-│                                           │                                │
-│   DataHubClient seam  ◄── harvest ── mcp-client.ts ──► Fake | Live         │
-└───────────────────────────────────────────┬──────────────────────────────┘
-                                             │ MCP: search / get_entities / get_lineage
-                                 ┌───────────▼───────────────┐
-                                 │ acryldata/mcp-server-datahub│  (official)
-                                 └───────────┬───────────────┘
-                                             │ GraphQL / SDK
-                                 ┌───────────▼───────────────┐
-                                 │  DataHub (GMS + graph)      │  ← runs on a CLOUD VM
-                                 └────────────────────────────┘
-```
 
-★ = the self-audit consistency engine — the differentiator.
+Important trust boundaries:
 
-**Two faces, one agent.** Archon *consumes* the DataHub MCP server for metadata and
-*re-exposes* its audit as an MCP server of its own — so an IDE or another agent can call
-`audit_catalog` and get findings + an executive summary. The LLM (narrator + the ReAct
-loop) is provider-agnostic over any OpenAI-compatible endpoint (Qwen / OpenAI / Gemini
-gateway); with **no key configured everything falls back to deterministic Fakes**, so the
-whole agent runs offline with zero secrets and zero spend.
+- DataHub MCP supplies the supported read tools. A complementary direct GMS read recovers
+  retained aspect history because the current MCP view is latest-write-wins.
+- Unknown or unstable provenance fails closed. It may produce a drift candidate, never a
+  confirmed cross-source contradiction.
+- The approval service has no DataHub or LLM secrets. It rehydrates server-owned state by
+  `approvalId` and releases only a server-held callback token.
+- The control service has no DataHub, write, or LLM secret. It may start/describe only this
+  workflow and read only the audit/execution evidence prefixes. For governed terminal
+  success it accepts only the expected remediation-result contract, re-verifies the
+  content-addressed execution evidence and receipt chain, and returns outcome, evidence
+  digests, completion time, and check counts—not raw orchestration output, identities,
+  mutation responses, or provider errors. The opaque audit id is the unguessable browser
+  polling capability.
+- Write and rollback each require their own fresh, digest-bound approval. Approval is
+  one-use and execution is idempotent. The immutable approval deadline is stored separately
+  from DynamoDB TTL; a decided row is retained for 90 days so terminal proof remains
+  independently verifiable.
+- `dist/audit-worker.js`, the secretless approval-handoff Lambda, and
+  `dist/remediation-worker.js` are independent capabilities. Only the first receives
+  read/LLM credentials; only the last receives the write credential; the write worker
+  and its IAM role cannot read the approval-token table. Callback poison is quarantined,
+  evidence is append-only, and rejection also produces a durable execution receipt.
+- `WorkerDesiredCount` still defaults to `0` and may be promoted to `1` only after CI has
+  built and tested the exact image and the environment supplies distinct read/write
+  credentials plus separate hosted read/write MCP endpoints. No deployed worker is claimed
+  until that release workflow succeeds.
 
-## Quickstart (offline — zero credentials)
+More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
+and [evidence-based readiness](docs/READINESS.md).
+
+## Run locally without external services
+
+Node.js 22.15 or newer is recommended.
 
 ```bash
-npm install
-npm test            # 106 tests (unit + integration + security + e2e journeys)
-npm run coverage    # c8 gate, ≥80%
-npm run test:security   # the application-security pen-test suite
-npm run load            # the offline, SLO-gated load test
-npm run slice:datahub   # the first connected slice → a self-audit finding
-npm run audit:demo      # the full four-agent pipeline → findings + summary
+npm ci --ignore-scripts
+npm run typecheck
+npm run build
+npm test
+npm run coverage
+npm run test:security
+npm run load
+npm run audit:demo
+npm start
 ```
 
-`npm run slice:datahub` connects through the DataHub MCP client seam (offline Fake),
-harvests the fixture catalog, runs the self-audit, and prints read-only findings —
-headlined by:
+With no DataHub or model credentials, Archon uses deterministic fixtures. This mode is for
+development and reproducible CI evidence; the UI labels fallback showcase data rather than
+presenting it as a live tenant result.
 
-```
-HEADLINE SELF-AUDIT FINDING:
-  Sources disagree on 'owner' for …sales_orders…: team-finance (snowflake-ingest) vs team-ops (dbt-ingest).
-  → Later harvest supersedes the earlier value; recency is the default tie-breaker.
-    (recommended: team-ops, confidence 0.85). Read-only — a steward decides.
-```
-
-## Running against a real DataHub
-
-DataHub's `datahub docker quickstart` is a **~14-container stack** (GMS, Kafka,
-OpenSearch, MySQL, frontend, …). **Run it on a cloud VM, not a dev laptop** — this repo
-is cloud-first and deliberately does not stand the stack up locally. The live adapter is
-**pinned to the official `acryldata/mcp-server-datahub` source** (exact tool names, argument
-schemas, and cleaned response shapes — see [`src/datahub/live-mappers.ts`](src/datahub/live-mappers.ts)),
-so it works the moment it connects; you do not need a running instance to trust the code.
-
-### 1 — Stand up DataHub on a cloud VM
-
-Provision a VM with **≥2 vCPU / 8 GB RAM / ~15 GB free disk**, Docker + Compose v2, and
-Python 3.10+:
+The React application is an independent locked package:
 
 ```bash
-# on the VM
-python3 -m pip install --upgrade acryl-datahub
-datahub docker quickstart            # pulls ~14 containers; UI on :9002, GMS on :8080
-datahub docker ingest-sample-data    # optional: seed demo metadata
+npm ci --prefix web --ignore-scripts
+npm --prefix web run typecheck
+npm --prefix web test
+npm --prefix web run build
 ```
 
-- UI: `http://<cloud-vm>:9002` — default login `datahub` / `datahub`.
-- Create a **Personal Access Token**: UI → **Settings → Access Tokens**.
-- Open the security group so your agent host can reach GMS (`:8080`) — or run the agent on
-  the same VM.
+Generated `dist/`, `coverage/`, `cdk.out/`, `readiness.json`, dependency directories, and
+test reports are ignored and must not be committed.
 
-### 2 — Point the DataHub MCP Server at it
+## Connect a real DataHub
 
-The agent consumes the **official DataHub MCP Server**. Two transports (the adapter supports
-both; the tool calls + mapping are identical):
-
-- **stdio (default, reliable OSS path)** — the adapter launches the published server for you:
-  ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh   # install uv (provides `uvx`)
-  ```
-  Leave `DATAHUB_MCP_URL` unset; the adapter runs `uvx mcp-server-datahub@latest` with your
-  GMS URL + token in its environment.
-- **HTTP (Streamable)** — set `DATAHUB_MCP_URL` to a hosted MCP endpoint (a DataHub Cloud
-  tenant integrations URL, or a GMS that exposes `/mcp`).
-
-### 3 — Configure `.env` and run the same code
+Use a sanitized demo tenant and a least-privilege read token.
 
 ```bash
-# .env (see .env.example for all options)
-DATAHUB_GMS_URL=http://<cloud-vm>:8080
-DATAHUB_GMS_TOKEN=<personal-access-token>
-# DATAHUB_MCP_URL=https://<tenant>.acryl.io/integrations/ai/mcp/   # only for the HTTP transport
-ANTHROPIC_API_KEY=<optional — enables the real LLM narrator; or DASHSCOPE/GEMINI/OPENAI/LLM_API_KEY>
-
-npm run audit:demo    # the same four-agent pipeline, now against the live catalog
+DATAHUB_GMS_URL=https://datahub.example.test
+DATAHUB_GMS_TOKEN=...
+DATAHUB_MCP_URL=https://datahub.example.test/integrations/ai/mcp/
 ```
 
-The live path is a thin transport shell (`src/datahub/mcp-client-live.ts`) over the pinned
-mappers. Read-only throughout: it calls only `search` / `get_entities` / `get_lineage` and
-never enables the server's mutation tools.
+Archon supports two MCP transports:
 
-**What survives the live MCP read surface (be honest about this).** DataHub aspects are
-single-valued — a read returns one *current* value per aspect — so:
+- **Hosted Streamable HTTP** — set `DATAHUB_MCP_URL`. This is required by the hardened AWS
+  container because it intentionally contains no Python/`uvx` runtime.
+- **Pinned stdio development path** — leave `DATAHUB_MCP_URL` unset and install `uv`.
+  Archon launches the pinned `mcp-server-datahub@0.6.0`, never `@latest`.
 
-- **Governance (G1–G6)** and **schema completeness** audit fully and robustly (they are
-  about absence of aspects on the current view).
-- **Lineage-gap** detection depends on whether declared-but-uningested upstreams surface in
-  the search/graph index; it is instance-dependent.
-- **Cross-source contradiction** detection (the differentiator) **cannot fire from the MCP
-  read tools alone** — two ingestion sources writing the same aspect overwrite each other, so
-  only the latest is queryable through `search`/`get_entities`/`get_lineage`. Archon
-  **recovers** it (see below) from a complementary **direct GMS read**, never claiming the MCP
-  read tools expose what they don't.
+Aspect-version contradiction proof additionally requires:
 
-### Recovering contradictions on a live catalog (the differentiator, live)
+1. retained aspect versions (`v0` plus at least one historical version);
+2. two genuinely distinct stable pipeline identities;
+3. a planted, sanitized conflict; and
+4. the credentialed `Live DataHub proof` GitHub Actions workflow.
 
-DataHub retains every prior write: each aspect version carries `systemMetadata` with the
-`runId` that produced it (GMS **OpenAPI v3** `…/entity/dataset/{urn}/{aspect}?systemMetadata=true`;
-the **Timeline API** `/openapi/v2/timeline/v1/{urn}` is the equivalent change-log surface).
-So `harvestVersionHistories()` does a **direct GMS read** of each mutable aspect's version
-list and feeds it to the *same* pure self-audit engine
-([`src/datahub/version-history.ts`](src/datahub/version-history.ts)). Two ingestion runs
-asserting conflicting values (owner=finance from the Snowflake connector, owner=ops from the
-dbt manifest) resurface as a real contradiction the current view had hidden.
+The live proof fails on auth, server, network, pagination-bound, retention, or provenance
+uncertainty. Only the expected “no next retained version” response terminates history
+enumeration normally.
 
-**Two honesty guards.** (1) This is a **direct GMS read, not an MCP tool** — we do not claim
-the MCP read tools do it. (2) A value that merely *changed* across writes from **one** run is
-benign **drift**, not a conflict; the engine runs with `requireDistinctSources: true`, so only
-histories that **flip-flop between distinct `runId`s** are flagged. The negative case (a
-single-run monotonic edit produces **zero** contradictions) is a first-class test. A
-genuinely on-MCP-surface **cross-scan drift** detector (`detectDrift`) is also provided,
-labeled as *drift / candidate*, never as a confirmed cross-source contradiction.
+One pipeline run creates one fresh harvest bundle: its snapshot and fact stream derive from
+the same `search → get_entities → lineage` result, and version history reuses that exact URN
+set. Live search fails before hydration when its declared total exceeds the execution
+ceiling; every requested entity must be returned exactly once without a per-URN error; and
+lineage must return a complete, count-consistent upstream envelope. MCP `isError` responses
+are failures, never data. Every aspect history must terminate normally within its version
+bound, and a live hosted audit refuses MCP-only configuration without direct GMS history
+capability. The public preview
+allows one URN and two retained versions with an 18-second harvest deadline. The durable
+worker allows at most 25 URNs and 12 retained versions, uses controlled eight-way
+concurrency, and has a 75-minute harvest / 90-minute pipeline budget inside its two-hour
+callback. A broad request is rejected, never converted into an incomplete actionable plan.
 
-> **Seeding the live demo (important):** because the recovery is gated on **distinct
-> `runId`s**, `datahub docker ingest-sample-data` alone shows *nothing* — it is a single
-> bootstrap run, so every aspect shares one `runId` (correctly read as drift, not a conflict).
-> To reproduce a real recovered contradiction, ingest the conflict as **two separate runs**:
-> e.g. emit `owner=team-finance` in one ingestion, then re-emit `owner=team-ops` for the same
-> dataset in a second ingestion. The version history then flip-flops across two `runId`s and
-> the contradiction fires.
+## Governed remediation contract
 
-Full DataHub + MCP integration research: [`docs/DATAHUB_RESEARCH.md`](docs/DATAHUB_RESEARCH.md).
+The versioned policy is [policies/archon-remediation.v1.json](policies/archon-remediation.v1.json).
+An actionable result must satisfy all of these conditions:
 
-## Read-only guarantee
+1. the finding is exactly G6 and has one unambiguous target;
+2. the trusted policy allows that dataset prefix and classification tag;
+3. dossier, policy, action catalog, before-state, and plan digests verify;
+4. an authenticated `DataSteward` approves the exact unexpired plan;
+5. the execution journal claims the approval once;
+6. a fresh pre-state still matches the approved state;
+7. the isolated mutation client invokes the exact official tag tool;
+8. read-after-write verification proves the intended postcondition and no unexpected tag;
+9. a content-addressed receipt records the event chain and a separately approvable rollback.
 
-Archon **recommends, a human disposes.** The DataHub MCP server's mutation tools
-(`add_tags`, `set_domains`, …) are OFF by default and this agent never enables them. The
-ReAct loop's terminal action (`emit_findings`) produces a `pending` report for a steward;
-nothing in the pipeline or the loop writes back to DataHub.
+Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
-## Testing & CI
+## Hosted AWS reference architecture
 
-- **Unit + integration tests:** `node --test` over the consistency engine, governance
-  validator, DataHub MCP client + harvester, the pipeline / ReAct loop / MCP tools, the
-  pinned live-MCP mappers, LLM provider detection, and the version-history recovery
-  (incl. a replay-cassette integration test).
-- **Application-security pen-test** (`npm run test:security` · [`tests/security/`](tests/security)):
-  a real app-sec suite against the agent + the dual-face MCP surface —
-  **AuthZ / tool-boundary** (no mutation tool is exposed or callable; read tools are
-  idempotent; a mutation-named call is refused over both the dispatch layer and the real
-  MCP protocol), **prompt-injection** (a poisoned metadata description / field name cannot
-  flip the deterministic governance verdict or coax the ReAct loop out of contract — it
-  stays read-only and human-gated), **governance/contradiction-engine injection**
-  (adversarial `runId`s cannot forge or mask a contradiction; malformed / `__proto__`-laden
-  aspect values never throw or pollute the prototype; the `requireDistinctSources` guard
-  holds), and **sensitive-data-exposure** (a `DATAHUB_GMS_TOKEN` sentinel never leaks into
-  findings, the narrative, MCP output, or any log line). Plus an **SCA/CVE gate**
-  (`npm audit --audit-level=high`).
-- **Load test** (`npm run load` · [`load/audit.js`](load/audit.js)): an offline,
-  in-process **k6-equivalent** harness (no live DataHub, no creds — Archon has no HTTP
-  surface, so real k6 would only test an unshipped shell) that drives the audit/recall hot
-  path (`AuditPipeline.run` + the dual-face `audit_catalog` tool) under concurrency against
-  the deterministic Fake backend and asserts an **SLO**:
-  - **error rate `== 0`** — the hard gate (any thrown/incomplete iteration fails the build);
-  - **audit **p95** latency `< 1500 ms`** (`LOAD_P95_MS`; generous headroom over the
-    observed offline p95 ≈ 10 ms so shared CI runners never flap);
-  - **all planned iterations complete** (no dropped work).
+[infra/aws](infra/aws) contains the deployment-grade reference:
 
-  Tunable via `LOAD_VUS` / `LOAD_ITERATIONS` / `LOAD_P95_MS`.
-- **Extensive E2E** (`npm run test:e2e` · [`tests/e2e/journeys.e2e.test.ts`](tests/e2e/journeys.e2e.test.ts)):
-  **9 end-to-end journeys** — metadata scan → 4-agent audit; ReAct governance audit (G1–G6);
-  live-shaped contradiction recovery via aspect version history (fires); the drift-candidate
-  negative; the dual-face MCP round-trip; the quantified findings report; and edge journeys
-  (clean single-source catalog, single-run monotonic drift = benign) — plus a replay-cassette
-  journey that recovers a real-shape GMS conflict through the whole pipeline. All offline.
-- **Coverage gate:** `c8` at **≥80%** lines/branches/functions/statements (`.c8rc.json`).
-- **Readiness gate** (`npm run readiness` · [`scripts/readiness.ts`](scripts/readiness.ts)):
-  a machine-checkable, weighted scorecard of the hackathon criteria computed from **real
-  evidence** — it runs the pipeline, the ReAct loop, the MCP round-trip, and the live
-  contradiction-recovery path, and statically verifies the read-only tool surface + the
-  docs/NOTICE consistency. It emits `readiness.json` and **fails CI if the automatable
-  completeness drops below 95%**. It reports a second number, **completeness (incl.
-  user-gated)**, which stays below 100 until the user-gated live proof (a recorded live
-  DataHub run, a real captured cassette, the demo video) lands — so "95% automatable" is
-  never mistaken for "95% ready".
-- **CI** (`.github/workflows/ci.yml`): gitleaks (secret scan, fail-fast) → typecheck →
-  test → coverage gate → **readiness gate** → dependency audit → **pen-test** (security
-  suite + SCA/CVE) → **load** (SLO-gated). Fully offline via the Fakes.
+- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC;
+- same-origin API Gateway with WAF, throttling, strict schemas, access logs, and tracing;
+- private ECS Fargate API/worker services behind an internal NLB and VPC Link;
+- separate read/write/LLM secrets, KMS keys, IAM roles, and network paths;
+- Cognito Hosted UI with browser PKCE S256, an `archon/approve`-scoped approval
+  Lambda, DynamoDB conditional state, Standard Step Functions, encrypted
+  SQS/DLQs, and an Object-Lock evidence bucket;
+- a deployment-generated `/runtime-config.json` that binds the immutable SPA to
+  each environment without rebuilding it and is served no-store through a
+  CloudFront caching-disabled behavior;
+- a strict three-callback async route: audit evidence, durable human-approval handoff, then
+  approved G6 execution; approval alone can never be mistaken for a completed write;
+- a least-privilege control Lambda for public durable start/status, with immutable-evidence
+  and receipt-chain verification plus a sanitized terminal proof panel, with no exposure
+  of callback tokens or raw orchestration data;
+- alarms, dashboards, retained encrypted logs, VPC flow logs, and private AWS endpoints.
 
-## Pre-existing code disclosure
+The deployment workflow accepts only a **successful default-branch CI run ID** and its
+matching full commit SHA. It verifies GitHub's artifact envelope digests plus the inner
+container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
+staging via GitHub OIDC, runs security/smoke contracts, then waits at the protected
+`production` environment before promoting those same three immutable artifacts. Selecting
+an older retained CI run is the rollback path; no application artifact is rebuilt during
+deploy.
 
-This is a **new project** (Apache-2.0) that reuses **our own** prior Archon code as
-libraries, re-aimed onto DataHub metadata governance. The self-audit consistency engine
-and the governance validator are ported from our MemoryAgent; the LLM seam, ReAct loop,
-and MCP server from our Autopilot. The DataHub MCP **client**, the domain model, the
-fixtures, the harvest seam, and the four-agent pipeline are **new**. Full, file-by-file
-disclosure: **[`NOTICE.md`](NOTICE.md)**.
+AWS deployment is user-gated until environment roles, URLs, secrets, and a narrow
+`DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. Staging and production
+smoke evidence bind the query digest and reject `{}` / wildcard catalog sweeps. Source code
+does not imply that a public endpoint has already been deployed.
 
-## Design & roadmap
+## Pipeline-only security and CI/CD
 
-Multi-agent design, the mapping of each reused feature to the six judging criteria, and
-the phased plan to the **Aug 10** deadline: **[`docs/DESIGN.md`](docs/DESIGN.md)**.
+Every security claim must be reproduced by GitHub Actions; workstation or manual scanner
+output is not accepted as release evidence:
+
+| Gate | CI/CD evidence |
+| --- | --- |
+| Secret detection | Checksum-pinned Gitleaks |
+| SAST | CodeQL security-and-quality queries |
+| Application abuse cases | AuthZ/tool-boundary, prompt-injection, provenance injection, data-exposure, and remediation-boundary tests |
+| Dependency security | Root, web, infra, approval-Lambda, and control-Lambda `npm audit`; PR dependency review; Dependabot |
+| IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
+| IaC scanner | Trivy config scan with HIGH/CRITICAL fail gate and SARIF |
+| Container hardening | Non-root/read-only runtime contract and isolated health boot |
+| Supply chain | Exact CI container/SPA/Lambda subjects, Syft SPDX/CycloneDX SBOM, Grype gate with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v3 attestation, trusted-main SARIF, and daily or exact-run rescans |
+| Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
+| Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
+| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, secret rotation, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks |
+
+Workflows:
+
+- [CI](.github/workflows/ci.yml) — root, web, AWS CDK, policy, security, load, staged
+  DataHub Skill contribution, and immutable artifact gates.
+- [CodeQL](.github/workflows/codeql.yml) — SAST on pull requests, `master`, and schedule.
+- [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
+  validation of the workflows themselves.
+- [Production supply chain](.github/workflows/supply-chain.yml) — automatic, daily, and
+  exact-run rescans of the original CI container, SPA, and Lambda bytes; fresh-DB
+  vulnerability gates, SARIF, and v3 attestations.
+- [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
+  a ≤24-hour v3 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then
+  protected same-artifact production promotion.
+- [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
+  flagship retained-history path.
+- [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
+  `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
+  digests, then `APPROVE → VERIFIED`, followed by a separately approved exact rollback
+  and read-after-rollback proof. Its isolation contract is in
+  [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
+- [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
+  exact-parent `workflow_run` compensation for failed or cancelled canaries.
+
+Action dependencies are commit-SHA pinned. A workflow definition is not called “green”
+until its remote run succeeds, and a deployment definition is not called “deployed” until
+the hosted smoke evidence exists.
+
+## Current delivery status
+
+The repository contains the application, UI, security boundaries, locked packages,
+reference infrastructure, and CI/CD definitions. The authoritative remaining proof matrix
+is [docs/READINESS.md](docs/READINESS.md). In particular:
+
+- remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
+- GitHub `staging`, `production`, `datahub-demo`, `governed-canary`,
+  `governed-canary-rollback`, and `governed-canary-recovery` environments and `master`
+  protection must be configured;
+- AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
+  user-gated;
+- a real retained-history contradiction and governed canary write/rollback need sanitized
+  evidence;
+- screenshots, the under-three-minute public video, Devpost copy, and optional public post
+  are intentionally last.
+
+## Prior-work disclosure
+
+This is a new Apache-2.0 project. It reuses selected code patterns from our earlier agents
+while adding a new DataHub client/domain layer, temporal provenance semantics, blast-radius
+analysis, governed remediation contracts, UI, HTTP boundary, and AWS architecture. The
+file-level disclosure is in [NOTICE.md](NOTICE.md).
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache License 2.0](LICENSE).

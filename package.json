@@ -10,24 +10,37 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/http/server.js",
+    "start:audit-worker": "node dist/audit-worker.js",
+    "start:remediation-worker": "node dist/remediation-worker.js",
     "audit:demo": "tsx scripts/demo-audit.ts",
     "slice:datahub": "tsx scripts/first-slice.ts",
-    "readiness": "tsx scripts/readiness.ts",
-    "test:unit": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts",
-    "test:security": "node --import tsx --test tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts",
-    "test:e2e": "node --import tsx --test tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts",
-    "load": "node --import tsx load/audit.js",
-    "test": "node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts",
-    "coverage": "c8 node --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts"
+    "verify:live": "tsx scripts/verify-live-datahub.ts",
+    "verify:contrib": "node scripts/verify-contrib.mjs",
+    "readiness": "node --import ./scripts/offline-env.mjs --import tsx scripts/readiness.ts",
+    "test:unit": "node --import ./scripts/offline-env.mjs --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/governed-canary.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/unit/version-history-reader.test.ts tests/unit/blast-radius.test.ts tests/unit/remediation.test.ts tests/unit/exporters.test.ts tests/unit/worker-contracts.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/integration/http-server.test.ts tests/integration/remediation-mcp.test.ts tests/integration/async-worker.test.ts",
+    "test:security": "node --import ./scripts/offline-env.mjs --import tsx --test tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/security/remediation-boundary.test.ts tests/security/worker-boundary.test.ts tests/security/governed-canary-boundary.test.ts",
+    "test:e2e": "node --import ./scripts/offline-env.mjs --import tsx --test tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts tests/e2e/remediation.e2e.test.ts",
+    "load": "node --import ./scripts/offline-env.mjs --import tsx load/audit.js",
+    "test": "node --import ./scripts/offline-env.mjs --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/governed-canary.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/unit/version-history-reader.test.ts tests/unit/blast-radius.test.ts tests/unit/remediation.test.ts tests/unit/exporters.test.ts tests/unit/worker-contracts.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/integration/http-server.test.ts tests/integration/remediation-mcp.test.ts tests/integration/async-worker.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/security/remediation-boundary.test.ts tests/security/worker-boundary.test.ts tests/security/governed-canary-boundary.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts tests/e2e/remediation.e2e.test.ts",
+    "coverage": "c8 node --import ./scripts/offline-env.mjs --import tsx --test tests/unit/consistency.test.ts tests/unit/governance.test.ts tests/unit/governed-canary.test.ts tests/unit/datahub-mcp.test.ts tests/unit/pipeline.test.ts tests/unit/live-mappers.test.ts tests/unit/llm.test.ts tests/unit/version-history.test.ts tests/unit/version-history-reader.test.ts tests/unit/blast-radius.test.ts tests/unit/remediation.test.ts tests/unit/exporters.test.ts tests/unit/worker-contracts.test.ts tests/integration/mcp-transport.test.ts tests/integration/version-history-cassette.test.ts tests/integration/http-server.test.ts tests/integration/remediation-mcp.test.ts tests/integration/async-worker.test.ts tests/security/authz-tool-boundary.test.ts tests/security/prompt-injection.test.ts tests/security/engine-injection.test.ts tests/security/data-exposure.test.ts tests/security/remediation-boundary.test.ts tests/security/worker-boundary.test.ts tests/security/governed-canary-boundary.test.ts tests/e2e/readiness.e2e.test.ts tests/e2e/journeys.e2e.test.ts tests/e2e/remediation.e2e.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-s3": "3.1090.0",
+    "@aws-sdk/client-sfn": "3.1090.0",
+    "@aws-sdk/client-sqs": "3.1090.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "openai": "^4.77.0",
-    "tsx": "^4.19.2"
+    "openai": "^4.77.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
     "c8": "^10.1.3",
+    "tsx": "^4.19.2",
     "typescript": "^5.5.3"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
   }
 }

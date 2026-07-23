@@ -3,12 +3,12 @@
 // Threat: the version-history recovery path (the differentiator) reads UNTRUSTED aspect
 // values + systemMetadata straight from GMS. An attacker who controls an ingestion run
 // could try to (a) forge a FALSE contradiction to trigger alarm fatigue, (b) MASK a real
-// contradiction with adversarial runIds, (c) CRASH the recovery with malformed shapes, or
+// contradiction with adversarial provenance, (c) CRASH the recovery with malformed shapes, or
 // (d) POLLUTE the prototype via a crafted aspect value. These tests drive the real
 // `auditVersionHistory` / `auditConsistency` engine with adversarial inputs and prove:
-//   • the requireDistinctSources guard holds — same/absent runId ⇒ ZERO contradictions
-//     (no forged conflict), even when values differ;
-//   • a genuine two-run conflict STILL fires when mixed with adversarial single-run noise
+//   • the requireDistinctSources guard holds — different runs of one pipeline and absent
+//     source identity ⇒ ZERO contradictions, even when values differ;
+//   • a genuine two-source conflict STILL fires when mixed with unresolved-provenance noise
 //     (the guard does not mask real disagreements);
 //   • malformed / hostile shapes (null systemMetadata, missing value, huge strings,
 //     __proto__ keys) never throw and never pollute Object.prototype.
@@ -25,19 +25,19 @@ import type { AuditFact } from "../../src/types.js";
 
 const URN = "urn:li:dataset:(urn:li:dataPlatform:snowflake,adversarial,PROD)";
 
-test("engine-injection: differing values under ONE runId do NOT forge a contradiction (drift, not conflict)", () => {
+test("engine-injection: different runIds under ONE pipeline do NOT forge a contradiction", () => {
   const history: AspectVersionHistory = {
     urn: URN,
     aspect: "ownership",
     versions: [
-      { value: { owners: [{ owner: "urn:li:corpGroup:a" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "same-run" } },
-      { value: { owners: [{ owner: "urn:li:corpGroup:b" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "same-run" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:a" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "run-1", pipelineName: "same-pipeline" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:b" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "run-2", pipelineName: "same-pipeline" } },
     ],
   };
   assert.equal(auditVersionHistory([history]).contradictions.length, 0);
 });
 
-test("engine-injection: absent/placeholder runIds collapse to one source ⇒ no forged contradiction", () => {
+test("engine-injection: absent source identities collapse to one source ⇒ no forged contradiction", () => {
   const history: AspectVersionHistory = {
     urn: URN,
     aspect: "ownership",
@@ -47,17 +47,17 @@ test("engine-injection: absent/placeholder runIds collapse to one source ⇒ no 
       { value: { owners: [{ owner: "urn:li:corpGroup:c" }] }, systemMetadata: null },
     ],
   };
-  // sourceOf() maps every placeholder/missing runId to "unknown-run" → one distinct source.
+  // Distinct/missing run ids without stable provenance map to one `unknown-source`.
   assert.equal(auditVersionHistory([history]).contradictions.length, 0);
 });
 
-test("engine-injection: a genuine two-run conflict STILL fires alongside adversarial single-run noise", () => {
+test("engine-injection: a genuine two-source conflict STILL fires alongside unresolved noise", () => {
   const genuine: AspectVersionHistory = {
     urn: URN,
     aspect: "ownership",
     versions: [
-      { value: { owners: [{ owner: "urn:li:corpGroup:finance" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "run-snowflake" } },
-      { value: { owners: [{ owner: "urn:li:corpGroup:ops" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "run-dbt" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:finance" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "run-snowflake", pipelineName: "snowflake-prod" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:ops" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "run-dbt", pipelineName: "dbt-prod" } },
     ],
   };
   const noise: AspectVersionHistory = {

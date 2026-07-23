@@ -1,11 +1,5 @@
 name: CI
 
-# Archon-DataHub CI — gitleaks-first, then typecheck → build → test → coverage gate.
-# Runs FULLY OFFLINE: with no DATAHUB_MCP_URL and no LLM_API_KEY the agent auto-falls
-# back to the deterministic Fakes (Fake DataHub MCP + Fake LLM), so the whole pipeline
-# is exercised end-to-end with zero secrets and zero network. The coverage gate
-# (c8, ≥80% lines/branches/functions/statements) is enforced by .c8rc.json.
-
 on:
   push:
   pull_request:
@@ -13,103 +7,672 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22.23.1"
+  INFRA_NODE_VERSION: "24.18.0"
+  CFN_GUARD_VERSION: "3.2.0"
+  CFN_GUARD_ARCHIVE_SHA256: 9f8c4d9f15f7dd54a37ea70a5237ba00aba682fb1e6521a744d12259961dfc13
+
 jobs:
-  # Stage 1 — fail fast on any committed secret.
   secret-scan:
-    runs-on: ubuntu-latest
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: gitleaks detect (pinned v8.18.4, redacted)
+          persist-credentials: false
+      - name: Gitleaks 8.30.1 (checksum-pinned)
         run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz gitleaks
-          ./gitleaks detect --source . --redact --no-banner
+          curl --fail --silent --show-error --location \
+            --output "${RUNNER_TEMP}/gitleaks.tar.gz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${RUNNER_TEMP}/gitleaks.tar.gz" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "${RUNNER_TEMP}/gitleaks.tar.gz" --directory "${RUNNER_TEMP}" gitleaks
+          "${RUNNER_TEMP}/gitleaks" detect --source . --redact --no-banner
 
-  # Stage 2 — typecheck, test, and enforce the coverage gate.
   build-test:
+    name: Build, test, coverage
     needs: secret-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - name: Install deps
-        run: npm ci
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
       - name: Typecheck
         run: npm run typecheck
-      - name: Unit tests
+      - name: Production build
+        run: npm run build
+      - name: Full hermetic test suite
         run: npm test
-      - name: Coverage gate (c8 ≥80%)
+      - name: Coverage gate
         run: npm run coverage
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 7
 
-  # Stage 3 — readiness gate. Encodes the hackathon criteria as machine-checkable checks
-  # with REAL evidence (runs the pipeline, ReAct loop, MCP round-trip, and the live
-  # contradiction-recovery path; statically verifies the read-only tool surface + docs/NOTICE
-  # consistency). Fails the build if the automatable completeness drops below 95%.
+  web:
+    name: Web typecheck, test, build
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked web dependencies
+        working-directory: web
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Component and API contract tests
+        working-directory: web
+        run: npm test
+      - name: Web SCA gate
+        working-directory: web
+        run: npm audit --audit-level=high
+      - name: Build immutable SPA candidate
+        working-directory: web
+        env:
+          VITE_ARCHON_RELEASE_SHA: ${{ github.sha }}
+        run: npm run build
+      - name: Package deterministic SPA candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f web/dist/index.html
+          if find web/dist -type f -name '*.map' -print -quit | grep -q .; then
+            echo "::error::Public source maps must not be present in the promoted SPA"
+            exit 1
+          fi
+          tar \
+            --sort=name \
+            --mtime='@0' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --directory web/dist \
+            --create \
+            --file - \
+            . | gzip --no-name --best > "${RUNNER_TEMP}/archon-web.tar.gz"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum archon-web.tar.gz > archon-web.tar.gz.sha256
+          )
+      - name: Upload exact SPA candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/archon-web.tar.gz
+            ${{ runner.temp }}/archon-web.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  infra:
+    name: AWS CDK build, test, synth, IaC gate
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      CDK_DEFAULT_ACCOUNT: "111111111111"
+      CDK_DEFAULT_REGION: eu-west-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.INFRA_NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            infra/aws/package-lock.json
+            infra/aws/lambda/approval/package-lock.json
+            infra/aws/lambda/control/package-lock.json
+      - name: Install locked infrastructure dependencies
+        working-directory: infra/aws
+        run: npm ci --ignore-scripts
+      - name: Package locked approval Lambda dependencies
+        working-directory: infra/aws/lambda/approval
+        run: npm ci --omit=dev --ignore-scripts
+      - name: Package locked control Lambda dependencies
+        working-directory: infra/aws/lambda/control
+        run: npm ci --omit=dev --ignore-scripts
+      - name: Typecheck CDK and Lambda contract tests
+        working-directory: infra/aws
+        run: npm run build
+      - name: Validate packaged Lambda entry points
+        working-directory: infra/aws
+        run: |
+          node --check lambda/approval/index.js
+          node -e "require('./lambda/approval/index.js')"
+          node --check lambda/approval/handoff.js
+          node -e "require('./lambda/approval/handoff.js')"
+          node --check lambda/control/index.js
+          node -e "require('./lambda/control/index.js')"
+      - name: CDK assertion tests and coverage gate
+        working-directory: infra/aws
+        run: npm test -- --ci --coverage
+      - name: Infrastructure SCA gate
+        working-directory: infra/aws
+        run: npm audit --audit-level=high
+      - name: Approval Lambda SCA gate
+        working-directory: infra/aws/lambda/approval
+        run: npm audit --omit=dev --audit-level=high
+      - name: Control Lambda SCA gate
+        working-directory: infra/aws/lambda/control
+        run: npm audit --omit=dev --audit-level=high
+      - name: Package deterministic Lambda release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for directory in \
+            infra/aws/lambda/approval \
+            infra/aws/lambda/control; do
+            test -f "${directory}/package.json"
+            test -f "${directory}/package-lock.json"
+            test -d "${directory}/node_modules"
+            if find "${directory}" \
+              \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+              echo "::error::Lambda release inputs may contain only regular files and directories"
+              exit 1
+            fi
+          done
+          tar \
+            --sort=name \
+            --mtime='@0' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            --directory infra/aws/lambda \
+            --create \
+            --file - \
+            approval control |
+            gzip --no-name --best >"${RUNNER_TEMP}/archon-lambdas.tar.gz"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum archon-lambdas.tar.gz >archon-lambdas.tar.gz.sha256
+          )
+      - name: Upload exact Lambda release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lambdas-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/archon-lambdas.tar.gz
+            ${{ runner.temp }}/archon-lambdas.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Synthesize staging and production CloudFormation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/cdk.out"
+          for stage in staging production; do
+            (
+              cd infra/aws
+              npm run synth -- \
+                --all \
+                --no-lookups \
+                --output "${RUNNER_TEMP}/cdk.out/${stage}" \
+                --context "stage=${stage}"
+            )
+          done
+      - name: Validate both synthesized assemblies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for stage in staging production; do
+            assembly="${RUNNER_TEMP}/cdk.out/${stage}"
+            test -f "${assembly}/manifest.json"
+            mapfile -d '' templates < <(
+              find "${assembly}" -maxdepth 1 -name '*.template.json' -print0
+            )
+            test "${#templates[@]}" -ge 2
+            for template in "${templates[@]}"; do
+              jq --exit-status \
+                'type == "object" and (.Resources | type == "object")' \
+                "${template}" >/dev/null
+            done
+          done
+      - name: Install checksum-pinned CloudFormation Guard
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/cfn-guard.tar.gz"
+          tool_dir="${RUNNER_TEMP}/cfn-guard"
+          mkdir -p "${tool_dir}"
+          curl --fail --silent --show-error --location \
+            --output "${archive}" \
+            "https://github.com/aws-cloudformation/cloudformation-guard/releases/download/${CFN_GUARD_VERSION}/cfn-guard-v3-x86_64-ubuntu-latest.tar.gz"
+          echo "${CFN_GUARD_ARCHIVE_SHA256}  ${archive}" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" --directory "${tool_dir}"
+          guard_bin="$(find "${tool_dir}" -type f -name cfn-guard -print -quit)"
+          test -n "${guard_bin}"
+          chmod 0755 "${guard_bin}"
+          "${guard_bin}" --version
+          echo "bin=${guard_bin}" >>"${GITHUB_OUTPUT}"
+      - name: Unit-test project-owned IaC security policy
+        env:
+          GUARD_BIN: ${{ steps.guard.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "${GUARD_BIN}" test \
+            --rules-file infra/aws/policy/archon.guard \
+            --test-data infra/aws/policy/archon_tests.yaml
+      - name: Enforce preventive controls on synthesized templates
+        env:
+          GUARD_BIN: ${{ steps.guard.outputs.bin }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/cfn-guard-results.txt"
+          : >"${report}"
+          for stage in staging production; do
+            for template in "${RUNNER_TEMP}"/cdk.out/"${stage}"/*.template.json; do
+              "${GUARD_BIN}" validate \
+                --data "${template}" \
+                --rules infra/aws/policy/archon.guard \
+                --type CFNTemplate \
+                --show-summary all |
+                tee --append "${report}"
+            done
+          done
+      - name: Scan synthesized IaC
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ runner.temp }}/cdk.out
+          format: sarif
+          output: ${{ runner.temp }}/trivy-iac.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+      - name: Upload trusted IaC SARIF
+        if: >-
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-iac.sarif
+          category: trivy-aws-cdk
+      - name: Retain synthesized IaC and scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: infra-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/cdk.out/**/*.template.json
+            ${{ runner.temp }}/cdk.out/**/manifest.json
+            ${{ runner.temp }}/cdk.out/**/tree.json
+            ${{ runner.temp }}/cfn-guard-results.txt
+            ${{ runner.temp }}/trivy-iac.sarif
+          if-no-files-found: error
+          retention-days: 30
+      - name: Fail on high or critical IaC findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq --exit-status \
+            '([.runs[]?.results[]?] | length) == 0' \
+            "${RUNNER_TEMP}/trivy-iac.sarif" >/dev/null
+
   readiness:
+    name: Hackathon readiness
     needs: secret-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - name: Install deps
-        run: npm ci
-      - name: Readiness gate (automatable ≥ 95%)
+      - run: npm ci --ignore-scripts
+      - name: Readiness gate
         run: npm run readiness
-
-  # Stage 4 — dependency vulnerability audit (fails on high/critical).
-  dep-audit:
-    needs: secret-scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          node-version: 20
-          cache: npm
-      - name: Install deps
-        run: npm ci
-      - name: npm audit (fail on high/critical)
-        run: npm audit --audit-level=high
+          name: readiness-${{ github.sha }}
+          path: readiness.json
+          if-no-files-found: error
+          retention-days: 7
 
-  # Stage 5 — application-security PEN-TEST gate. Runs the real security suite (authz /
-  # tool-boundary, prompt-injection, governance/contradiction-engine injection, sensitive-
-  # data-exposure) AND the SCA/CVE gate (npm audit). Fully offline — Fakes, no creds.
-  pen-test:
+  contrib:
+    name: DataHub ecosystem contribution contract
     needs: secret-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Validate staged read-only DataHub Skill contribution
+        run: npm run verify:contrib
+
+  security:
+    name: Security and dependencies
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - name: Install deps
-        run: npm ci
-      - name: Security suite (authz · prompt-injection · engine-injection · data-exposure)
+      - run: npm ci --ignore-scripts
+      - name: Application-security suite
         run: npm run test:security
-      - name: SCA / CVE gate (npm audit, fail on high/critical)
+      - name: SCA gate
         run: npm audit --audit-level=high
 
-  # Stage 6 — LOAD test. Drives the audit/recall hot path under concurrency against the
-  # offline Fake backend and asserts the SLO (hard gate: error_rate == 0; p95 under budget).
-  # Bounded iterations; a breach exits non-zero and reddens the build.
-  load:
-    needs: secret-scan
-    runs-on: ubuntu-latest
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+  load:
+    name: Offline SLO
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - name: Install deps
-        run: npm ci
-      - name: Load test (offline, SLO-gated)
+      - run: npm ci --ignore-scripts
+      - name: Load test (zero errors, p95 SLO)
         run: npm run load
+
+  container:
+    name: Production container
+    needs: [secret-scan, build-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build once and load the exact candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: archon-datahub:${{ github.sha }}
+          build-args: |
+            ARCHON_RELEASE_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Assert non-root image configuration
+        run: test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{.Config.User}}')" = "node"
+      - name: Assert isolated worker entrypoints in the exact candidate
+        run: |
+          docker run --rm \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --network none \
+            --entrypoint node \
+            "archon-datahub:${GITHUB_SHA}" \
+            -e 'const fs=require("node:fs"); for (const file of ["/app/dist/audit-worker.js","/app/dist/remediation-worker.js"]) { if (!fs.statSync(file).isFile()) process.exit(1); }'
+      - name: Boot hardened candidate
+        run: |
+          docker run --detach --name archon-candidate \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --publish 127.0.0.1:8080:8080 \
+            --env ARCHON_RELEASE_SHA="${GITHUB_SHA}" \
+            "archon-datahub:${GITHUB_SHA}"
+      - name: Hosted health contract
+        run: |
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8080/healthz > "${RUNNER_TEMP}/health.json"; then
+              break
+            fi
+            sleep 1
+          done
+          grep -F "\"releaseSha\":\"${GITHUB_SHA}\"" "${RUNNER_TEMP}/health.json"
+      - name: Scan the exact production container
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: archon-datahub:${{ github.sha }}
+          scanners: vuln
+          format: sarif
+          output: ${{ runner.temp }}/trivy-container.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+      - name: Upload trusted container SARIF
+        if: >-
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-container.sarif
+          category: trivy-production-container
+      - name: Retain container security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-security-${{ github.sha }}
+          path: ${{ runner.temp }}/trivy-container.sarif
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Fail on high or critical container findings
+        run: |
+          set -euo pipefail
+          jq --exit-status \
+            '([.runs[]?.results[]?] | length) == 0' \
+            "${RUNNER_TEMP}/trivy-container.sarif" >/dev/null
+      - name: Export immutable candidate and manifest
+        run: |
+          docker save "archon-datahub:${GITHUB_SHA}" | gzip -9 > "${RUNNER_TEMP}/archon-image.tar.gz"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum archon-image.tar.gz > archon-image.tar.gz.sha256
+          )
+          docker image inspect "archon-datahub:${GITHUB_SHA}" > "${RUNNER_TEMP}/image-inspect.json"
+      - name: Upload exact candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/archon-image.tar.gz
+            ${{ runner.temp }}/archon-image.tar.gz.sha256
+            ${{ runner.temp }}/image-inspect.json
+            ${{ runner.temp }}/health.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Candidate logs
+        if: failure()
+        run: docker logs archon-candidate
+      - name: Stop candidate
+        if: always()
+        run: docker rm --force archon-candidate >/dev/null 2>&1 || true
+
+  attest-release:
+    name: Sign exact CI release candidates
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - secret-scan
+      - build-test
+      - web
+      - contrib
+      - infra
+      - readiness
+      - security
+      - load
+      - container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-${{ github.sha }}
+          path: ${{ runner.temp }}/container
+
+      - name: Download exact SPA candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-${{ github.sha }}
+          path: ${{ runner.temp }}/web
+
+      - name: Download exact Lambda candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lambdas-${{ github.sha }}
+          path: ${{ runner.temp }}/lambdas
+
+      - name: Bind successful CI gates to exact release bytes
+        env:
+          BUILD_TEST_RESULT: ${{ needs.build-test.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+          CONTRIB_RESULT: ${{ needs.contrib.result }}
+          INFRA_RESULT: ${{ needs.infra.result }}
+          LOAD_RESULT: ${{ needs.load.result }}
+          READINESS_RESULT: ${{ needs.readiness.result }}
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+        run: |
+          set -euo pipefail
+          container_dir="${RUNNER_TEMP}/container"
+          web_dir="${RUNNER_TEMP}/web"
+          lambda_dir="${RUNNER_TEMP}/lambdas"
+          evidence_dir="${RUNNER_TEMP}/ci-release-attestation"
+          mkdir -p "${evidence_dir}"
+
+          test -f "${container_dir}/archon-image.tar.gz"
+          test -f "${container_dir}/archon-image.tar.gz.sha256"
+          test -f "${web_dir}/archon-web.tar.gz"
+          test -f "${web_dir}/archon-web.tar.gz.sha256"
+          test -f "${lambda_dir}/archon-lambdas.tar.gz"
+          test -f "${lambda_dir}/archon-lambdas.tar.gz.sha256"
+          container_sha="$(sha256sum "${container_dir}/archon-image.tar.gz" | awk '{print $1}')"
+          web_sha="$(sha256sum "${web_dir}/archon-web.tar.gz" | awk '{print $1}')"
+          lambda_sha="$(sha256sum "${lambda_dir}/archon-lambdas.tar.gz" | awk '{print $1}')"
+          test "$(awk 'NR == 1 {print $1}' \
+            "${container_dir}/archon-image.tar.gz.sha256")" = "${container_sha}"
+          test "$(awk 'NR == 1 {print $1}' \
+            "${web_dir}/archon-web.tar.gz.sha256")" = "${web_sha}"
+          test "$(awk 'NR == 1 {print $1}' \
+            "${lambda_dir}/archon-lambdas.tar.gz.sha256")" = "${lambda_sha}"
+
+          printf '%s  %s\n' "${container_sha}" archon-image.tar.gz \
+            >"${evidence_dir}/release-subjects.sha256"
+          printf '%s  %s\n' "${web_sha}" archon-web.tar.gz \
+            >>"${evidence_dir}/release-subjects.sha256"
+          printf '%s  %s\n' "${lambda_sha}" archon-lambdas.tar.gz \
+            >>"${evidence_dir}/release-subjects.sha256"
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg runUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg secretScan "${SECRET_SCAN_RESULT}" \
+            --arg buildTest "${BUILD_TEST_RESULT}" \
+            --arg web "${WEB_RESULT}" \
+            --arg contrib "${CONTRIB_RESULT}" \
+            --arg infra "${INFRA_RESULT}" \
+            --arg readiness "${READINESS_RESULT}" \
+            --arg security "${SECURITY_RESULT}" \
+            --arg load "${LOAD_RESULT}" \
+            --arg container "${CONTAINER_RESULT}" '
+              {
+                schemaVersion: "archon.ci-release/v1",
+                source: {
+                  repository: $repository,
+                  commit: $commit,
+                  ref: $ref,
+                  event: "push",
+                  workflowRun: $runUrl
+                },
+                gates: {
+                  secretScan: $secretScan,
+                  buildTest: $buildTest,
+                  web: $web,
+                  contribution: $contrib,
+                  infrastructure: $infra,
+                  readiness: $readiness,
+                  security: $security,
+                  load: $load,
+                  container: $container
+                }
+              }
+            ' >"${evidence_dir}/predicate.json"
+          jq -e '
+            .source.ref == "refs/heads/master" and
+            ([.gates[]] | all(. == "success"))
+          ' "${evidence_dir}/predicate.json" >/dev/null
+
+      - name: Sign exact CI release candidates
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/ci-release-attestation/release-subjects.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1
+          predicate-path: ${{ runner.temp }}/ci-release-attestation/predicate.json

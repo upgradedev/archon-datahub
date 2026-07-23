@@ -36,8 +36,9 @@ export class LineageAnalyzerAgent {
   // Run the self-audit over aspect VERSION HISTORY (recovered from a direct GMS read —
   // OpenAPI v3 / Timeline). This is what makes the flagship cross-source contradiction
   // detection fire on a LIVE catalog: latest-write-wins hid the conflict on the current
-  // view, but the history still carries every run's value. The distinct-source gate
-  // (inside auditVersionHistory) ensures benign single-run drift is NOT reported.
+  // view, but the history still carries every retained write. The distinct-source gate
+  // (inside auditVersionHistory) uses stable pipeline/source identity, so changes between
+  // executions of one pipeline are NOT reported as cross-source conflicts.
   analyzeVersionHistory(histories: AspectVersionHistory[]): Finding[] {
     return this.toFindings(auditVersionHistory(histories));
   }

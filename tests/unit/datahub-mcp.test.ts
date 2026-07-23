@@ -17,6 +17,12 @@ import {
 import { reportsToFacts, entityToFacts } from "../../src/audit/harvest.js";
 import { FIXTURE_REPORTS, UNCATALOGUED_UPSTREAM } from "../../src/datahub/fixtures.js";
 import { auditConsistency } from "../../src/audit/consistency.js";
+import {
+  DataHubHarvestError,
+  harvestPolicy,
+  mapWithConcurrency,
+  waitWithinDeadline,
+} from "../../src/datahub/harvest-policy.js";
 
 const SALES = "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
 
@@ -116,4 +122,76 @@ test("hasDataHubCreds is false when no DataHub env is set", () => {
     if (saved.gms === undefined) delete process.env.DATAHUB_GMS_URL;
     else process.env.DATAHUB_GMS_URL = saved.gms;
   }
+});
+
+test("hosted harvest profiles are explicit and remain inside their platform deadlines", () => {
+  const preview = harvestPolicy("synchronous-preview");
+  const worker = harvestPolicy("async-worker");
+  assert.equal(preview.maxEntities, 1);
+  assert.ok(preview.harvestDeadlineMs < preview.pipelineDeadlineMs);
+  assert.ok(preview.pipelineDeadlineMs < 29_000);
+  assert.equal(worker.maxEntities, 25);
+  assert.equal(worker.maxHistoricalVersions, 12);
+  assert.ok(worker.harvestDeadlineMs < worker.pipelineDeadlineMs);
+  assert.ok(worker.pipelineDeadlineMs < 2 * 60 * 60_000);
+});
+
+test("bounded mapper preserves order and never exceeds configured concurrency", async () => {
+  let active = 0;
+  let maximum = 0;
+  const output = await mapWithConcurrency(
+    [1, 2, 3, 4, 5],
+    2,
+    new AbortController().signal,
+    async (value) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active -= 1;
+      return value * 2;
+    }
+  );
+  assert.deepEqual(output, [2, 4, 6, 8, 10]);
+  assert.equal(maximum, 2);
+});
+
+test("bounded mapper and deadline waiter fail closed on invalid or aborted work", async () => {
+  await assert.rejects(
+    mapWithConcurrency(
+      [1],
+      0,
+      new AbortController().signal,
+      async (value) => value
+    ),
+    RangeError
+  );
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    mapWithConcurrency([1], 1, controller.signal, async (value) => value),
+    (error: unknown) =>
+      error instanceof DataHubHarvestError &&
+      error.code === "HARVEST_DEADLINE_EXCEEDED"
+  );
+  await assert.rejects(
+    waitWithinDeadline(
+      Promise.resolve("late"),
+      controller.signal,
+      "PIPELINE_DEADLINE_EXCEEDED"
+    ),
+    (error: unknown) =>
+      error instanceof DataHubHarvestError &&
+      error.code === "PIPELINE_DEADLINE_EXCEEDED"
+  );
+});
+
+test("deadline waiter returns a completed operation without changing its value", async () => {
+  assert.equal(
+    await waitWithinDeadline(
+      Promise.resolve("ok"),
+      new AbortController().signal,
+      "HARVEST_DEADLINE_EXCEEDED"
+    ),
+    "ok"
+  );
 });

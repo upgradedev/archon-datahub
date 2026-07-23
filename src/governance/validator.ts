@@ -29,6 +29,9 @@ export interface GovernanceResult {
   passed: boolean;
   severity: Severity;
   message: string;
+  // Machine-readable, policy-produced evidence. Remediation planning consumes this instead
+  // of parsing human prose, so free-text metadata cannot steer a write target.
+  evidence?: Readonly<Record<string, unknown>>;
 }
 
 function g1(e: CatalogEntity): GovernanceResult {
@@ -155,6 +158,10 @@ function g6(e: CatalogEntity): GovernanceResult {
     message: passed
       ? `All ${sensitive.length} sensitive field(s) classified.`
       : `${unclassified.length} sensitive field(s) lack a tag/term: ${unclassified.join(", ")}.`,
+    evidence: {
+      sensitiveFields: sensitive.map((field) => field.path).sort(),
+      unclassifiedFields: unclassified.sort(),
+    },
   };
 }
 

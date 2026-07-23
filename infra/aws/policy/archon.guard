@@ -1,0 +1,222 @@
+# Archon project-owned preventive controls for synthesized CloudFormation.
+# These rules intentionally encode the security invariants of this reference
+# architecture instead of applying a generic pack with blanket suppressions.
+
+let platform_markers = Resources.*[
+  Type == 'AWS::ECS::Cluster'
+]
+
+let ecr_repositories = Resources.*[
+  Type == 'AWS::ECR::Repository'
+]
+
+let s3_buckets = Resources.*[
+  Type == 'AWS::S3::Bucket'
+]
+
+let object_locked_buckets = Resources.*[
+  Type == 'AWS::S3::Bucket'
+  Properties.ObjectLockEnabled == true
+]
+
+let kms_keys = Resources.*[
+  Type == 'AWS::KMS::Key'
+]
+
+let log_groups = Resources.*[
+  Type == 'AWS::Logs::LogGroup'
+]
+
+let dynamodb_tables = Resources.*[
+  Type == 'AWS::DynamoDB::Table'
+]
+
+let sqs_queues = Resources.*[
+  Type == 'AWS::SQS::Queue'
+]
+
+let source_queues = Resources.*[
+  Type == 'AWS::SQS::Queue'
+  Properties.RedrivePolicy exists
+]
+
+let ecs_task_definitions = Resources.*[
+  Type == 'AWS::ECS::TaskDefinition'
+]
+
+let approval_lambdas = Resources.*[
+  Type == 'AWS::Lambda::Function'
+  Properties.Environment.Variables.APPROVER_GROUP exists
+]
+
+let api_gateway_stages = Resources.*[
+  Type == 'AWS::ApiGateway::Stage'
+]
+
+let cloudfront_distributions = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+]
+
+let secrets = Resources.*[
+  Type == 'AWS::SecretsManager::Secret'
+]
+
+let waf_associations = Resources.*[
+  Type == 'AWS::WAFv2::WebACLAssociation'
+]
+
+rule ecr_repositories_are_hardened when %ecr_repositories !empty {
+  %ecr_repositories.Properties {
+    ImageTagMutability == 'IMMUTABLE'
+    ImageScanningConfiguration.ScanOnPush == true
+    EncryptionConfiguration.EncryptionType == 'KMS'
+    EncryptionConfiguration.KmsKey exists
+  }
+}
+
+rule s3_buckets_are_private_and_encrypted when %s3_buckets !empty {
+  %s3_buckets.Properties {
+    PublicAccessBlockConfiguration exists
+    PublicAccessBlockConfiguration {
+      BlockPublicAcls == true
+      BlockPublicPolicy == true
+      IgnorePublicAcls == true
+      RestrictPublicBuckets == true
+    }
+    BucketEncryption.ServerSideEncryptionConfiguration !empty
+    BucketEncryption.ServerSideEncryptionConfiguration[*] {
+      ServerSideEncryptionByDefault.SSEAlgorithm IN [
+        'AES256',
+        'aws:kms'
+      ]
+    }
+  }
+}
+
+rule platform_has_versioned_object_locked_evidence_store
+  when %platform_markers !empty {
+  %object_locked_buckets !empty
+  %object_locked_buckets.Properties {
+    VersioningConfiguration.Status == 'Enabled'
+    ObjectLockConfiguration.ObjectLockEnabled == 'Enabled'
+    ObjectLockConfiguration.Rule.DefaultRetention.Mode IN [
+      'GOVERNANCE',
+      'COMPLIANCE'
+    ]
+  }
+}
+
+rule kms_keys_rotate when %kms_keys !empty {
+  %kms_keys.Properties {
+    EnableKeyRotation == true
+    KeyPolicy exists
+  }
+}
+
+rule retained_logs_are_encrypted when %log_groups !empty {
+  %log_groups.Properties {
+    KmsKeyId exists
+    RetentionInDays >= 365
+  }
+}
+
+rule dynamodb_tables_are_resilient_and_encrypted
+  when %dynamodb_tables !empty {
+  %dynamodb_tables.Properties {
+    DeletionProtectionEnabled == true
+    PointInTimeRecoverySpecification.PointInTimeRecoveryEnabled == true
+    SSESpecification {
+      SSEEnabled == true
+      SSEType == 'KMS'
+      KMSMasterKeyId exists
+    }
+  }
+}
+
+rule sqs_queues_are_encrypted when %sqs_queues !empty {
+  %sqs_queues.Properties {
+    KmsMasterKeyId exists
+  }
+}
+
+rule platform_source_queues_use_dead_letter_queues
+  when %platform_markers !empty {
+  %source_queues !empty
+  %source_queues.Properties.RedrivePolicy {
+    deadLetterTargetArn exists
+    maxReceiveCount >= 1
+  }
+}
+
+rule ecs_task_containers_are_hardened
+  when %ecs_task_definitions !empty {
+  %ecs_task_definitions.Properties {
+    ContainerDefinitions !empty
+    ContainerDefinitions[*] {
+      ReadonlyRootFilesystem == true
+      User exists
+      User != '0'
+      User != 'root'
+      LogConfiguration.LogDriver == 'awslogs'
+    }
+  }
+}
+
+rule platform_approval_lambda_is_hardened
+  when %platform_markers !empty {
+  %approval_lambdas !empty
+  %approval_lambdas.Properties {
+    Runtime == 'nodejs24.x'
+    ReservedConcurrentExecutions >= 1
+    TracingConfig.Mode == 'Active'
+    Environment.Variables.APPROVAL_TABLE exists
+    Environment.Variables.APPROVER_GROUP == 'archon-approvers'
+  }
+}
+
+rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
+  %api_gateway_stages.Properties {
+    AccessLogSetting.DestinationArn exists
+    AccessLogSetting.Format exists
+    TracingEnabled == true
+    MethodSettings !empty
+    some MethodSettings[*] {
+      LoggingLevel IN [
+        'ERROR',
+        'INFO'
+      ]
+      MetricsEnabled == true
+      DataTraceEnabled == false
+    }
+  }
+}
+
+rule cloudfront_distributions_enforce_tls_logging_and_oac
+  when %cloudfront_distributions !empty {
+  %cloudfront_distributions.Properties.DistributionConfig {
+    Enabled == true
+    Logging.Bucket exists
+    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.2_2021'
+    DefaultCacheBehavior.ViewerProtocolPolicy IN [
+      'https-only',
+      'redirect-to-https'
+    ]
+    some Origins[*] {
+      OriginAccessControlId exists
+    }
+  }
+}
+
+rule secrets_use_customer_managed_kms when %secrets !empty {
+  %secrets.Properties {
+    KmsKeyId exists
+  }
+}
+
+rule platform_has_regional_waf when %platform_markers !empty {
+  %waf_associations !empty
+  %waf_associations.Properties {
+    ResourceArn exists
+    WebACLArn exists
+  }
+}
