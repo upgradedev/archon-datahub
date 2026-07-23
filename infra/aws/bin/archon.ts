@@ -10,7 +10,13 @@ if (!/^[a-z][a-z0-9-]{1,15}$/.test(stage)) {
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
-  region: process.env.CDK_DEFAULT_REGION ?? "eu-west-1"
+  // AWS_REGION/AWS_DEFAULT_REGION are deployment inputs. CDK_DEFAULT_REGION
+  // is emitted by the CLI and may fall back to us-east-1 without credentials.
+  region:
+    process.env.AWS_REGION ??
+    process.env.AWS_DEFAULT_REGION ??
+    process.env.CDK_DEFAULT_REGION ??
+    "eu-west-1"
 };
 
 const registry = new ArchonRegistryStack(app, "Archon-Registry", {
@@ -24,7 +30,7 @@ const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
   repository: registry.repository,
   description: `Archon DataHub ${stage} control plane`
 });
-platform.addDependency(registry);
+platform.addStackDependency(registry);
 
 for (const stack of [registry, platform]) {
   Tags.of(stack).add("Application", "archon-datahub");

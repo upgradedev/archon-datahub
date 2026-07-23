@@ -160,7 +160,12 @@ export class ArchonPlatformStack extends Stack {
 
     const vpc = new ec2.Vpc(this, "Vpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.42.0.0/16"),
-      maxAzs: 2,
+      // Give the construct a known list length without a context-provider
+      // lookup; CloudFormation resolves the account's actual AZ names.
+      availabilityZones: [
+        Fn.select(0, Fn.getAzs()),
+        Fn.select(1, Fn.getAzs())
+      ],
       natGateways: isProduction ? 2 : 1,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [
@@ -356,7 +361,7 @@ export class ArchonPlatformStack extends Stack {
 
     const cluster = new ecs.Cluster(this, "Cluster", {
       vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
       enableFargateCapacityProviders: true
     });
     // An unresolved parameter cannot be classified as a tag vs digest by
@@ -766,8 +771,8 @@ export class ArchonPlatformStack extends Stack {
         request: sfn.JsonPath.objectAt("$")
       }),
       resultPath: "$.auditResult",
-      heartbeat: Duration.minutes(15),
-      timeout: Duration.hours(2)
+      heartbeatTimeout: sfn.Timeout.duration(Duration.minutes(15)),
+      taskTimeout: sfn.Timeout.duration(Duration.hours(2))
     });
     const dispatchApproval = new tasks.SqsSendMessage(this, "DispatchApproval", {
       queue: approvalQueue,
@@ -786,7 +791,7 @@ export class ArchonPlatformStack extends Stack {
         expiresAt: sfn.JsonPath.stringAt("$.auditResult.approvalExpiresAt")
       }),
       resultPath: "$.approvalResult",
-      timeout: Duration.days(7)
+      taskTimeout: sfn.Timeout.duration(Duration.days(7))
     });
     const dispatchRemediation = new tasks.SqsSendMessage(this, "DispatchRemediation", {
       queue: remediationQueue,
@@ -801,8 +806,8 @@ export class ArchonPlatformStack extends Stack {
         approvalResult: sfn.JsonPath.objectAt("$.approvalResult")
       }),
       resultPath: "$.remediationResult",
-      heartbeat: Duration.minutes(15),
-      timeout: Duration.hours(2)
+      heartbeatTimeout: sfn.Timeout.duration(Duration.minutes(15)),
+      taskTimeout: sfn.Timeout.duration(Duration.hours(2))
     });
     const governedWriteComplete = new sfn.Succeed(this, "GovernedWriteComplete");
     const approvalRejected = new sfn.Succeed(this, "ApprovalRejected");
@@ -881,7 +886,9 @@ export class ArchonPlatformStack extends Stack {
       mfa: cognito.Mfa.OPTIONAL,
       mfaSecondFactor: { otp: true, sms: false },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      advancedSecurityMode: cognito.AdvancedSecurityMode.ENFORCED,
+      featurePlan: cognito.FeaturePlan.PLUS,
+      standardThreatProtectionMode:
+        cognito.StandardThreatProtectionMode.FULL_FUNCTION,
       deletionProtection: true,
       removalPolicy: RemovalPolicy.RETAIN
     });
@@ -1111,7 +1118,7 @@ export class ArchonPlatformStack extends Stack {
       },
       cloudWatchRole: true,
       binaryMediaTypes: [],
-      minimumCompressionSize: 1024,
+      minCompressionSize: Size.bytes(1024),
       retainDeployments: true
     });
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "Authorizer", {
@@ -1715,10 +1722,12 @@ function retainedTable(
     encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
     encryptionKey,
     deletionProtection: true,
-    pointInTimeRecovery: true,
+    pointInTimeRecoverySpecification: {
+      pointInTimeRecoveryEnabled: true
+    },
     timeToLiveAttribute: "expiresAt",
     stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-    contributorInsightsEnabled: true,
+    contributorInsightsSpecification: { enabled: true },
     removalPolicy: RemovalPolicy.RETAIN,
     tableClass: dynamodb.TableClass.STANDARD
   });

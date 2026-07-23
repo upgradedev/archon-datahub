@@ -7,7 +7,8 @@ artifacts to an environment:
 - same-origin `/api/*` routing to a regional, WAF-protected API Gateway;
 - a public, bounded durable audit start/status API plus an explicitly read-only synchronous
   preview route and a scope-protected approval route;
-- a Cognito classic Hosted UI and public authorization-code client for browser PKCE S256;
+- a Cognito Plus classic Hosted UI with enforced standard threat protection and a
+  public authorization-code client for browser PKCE S256;
 - a dedicated approval Lambda with strict schemas, approver-group authorization,
   DynamoDB conditional writes, and a server-held callback token;
 - a separate no-secret control Lambda that starts only the Archon state machine and
@@ -284,6 +285,9 @@ This stack keeps environment-dependent claims explicit:
 - the public audit remains usable without sign-in, while approval is disabled
   until the SPA completes Cognito authorization code + PKCE and holds a
   short-lived scoped access token in memory;
+- enforced standard Cognito threat protection explicitly selects the billable
+  `PLUS` feature plan; approve that environment cost and attach budget alerts
+  before enabling a long-lived hosted environment;
 - custom Route 53/ACM names, a branded Cognito custom domain, cross-account ECR
   replication, and private DataHub connectivity depend on the target
   organization and belong in environment-specific stacks;

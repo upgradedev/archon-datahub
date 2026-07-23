@@ -90,6 +90,25 @@ describe("Archon AWS reference architecture", () => {
     expect(serialized).toContain('"Name":"DATAHUB_WRITE_MCP_URL"');
   });
 
+  test("resolves exactly two VPC availability zones at deploy time", () => {
+    const { platform } = templates();
+    const subnetAvailabilityZones = new Set(
+      Object.values(platform.findResources("AWS::EC2::Subnet")).map(
+        (resource: any) => JSON.stringify(resource.Properties.AvailabilityZone)
+      )
+    );
+    expect(subnetAvailabilityZones).toEqual(
+      new Set([
+        JSON.stringify({
+          "Fn::Select": [0, { "Fn::GetAZs": "" }]
+        }),
+        JSON.stringify({
+          "Fn::Select": [1, { "Fn::GetAZs": "" }]
+        })
+      ])
+    );
+  });
+
   test("keeps SPA and evidence private, encrypted, versioned, and retained", () => {
     const { platform } = templates();
     platform.hasResourceProperties("AWS::S3::Bucket", {
@@ -168,6 +187,12 @@ describe("Archon AWS reference architecture", () => {
   test("keeps audit public but makes the strict approval contract Cognito-only", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::Cognito::UserPool", 1);
+    platform.hasResourceProperties("AWS::Cognito::UserPool", {
+      UserPoolTier: "PLUS",
+      UserPoolAddOns: {
+        AdvancedSecurityMode: "ENFORCED"
+      }
+    });
     platform.hasResourceProperties("AWS::ApiGateway::Model", {
       Schema: Match.objectLike({
         additionalProperties: false,
@@ -451,6 +476,9 @@ describe("Archon AWS reference architecture", () => {
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: true
       },
+      ContributorInsightsSpecification: {
+        Enabled: true
+      },
       SSESpecification: {
         KMSMasterKeyId: Match.anyValue(),
         SSEEnabled: true,
@@ -476,6 +504,8 @@ describe("Archon AWS reference architecture", () => {
     expect(definition).toContain("REMEDIATION_REQUESTED");
     expect(definition.match(/HeartbeatSeconds/g)).toHaveLength(2);
     expect(definition.match(/900/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(definition).toContain("7200");
+    expect(definition).toContain("604800");
     expect(definition).toContain("VerifyRemediationOutcome");
     expect(definition).toContain("GovernedWriteNotVerified");
     expect(definition).toContain("REJECTED");
@@ -575,6 +605,17 @@ describe("Archon AWS reference architecture", () => {
 
   test("has private Fargate services, WAF, observability, and stable outputs", () => {
     const { platform } = templates();
+    platform.hasResourceProperties("AWS::ECS::Cluster", {
+      ClusterSettings: [
+        {
+          Name: "containerInsights",
+          Value: "enabled"
+        }
+      ]
+    });
+    platform.hasResourceProperties("AWS::ApiGateway::RestApi", {
+      MinimumCompressionSize: 1024
+    });
     platform.resourceCountIs("AWS::ECS::Service", 3);
     const services = Object.values(platform.findResources("AWS::ECS::Service")) as any[];
     for (const service of services) {
