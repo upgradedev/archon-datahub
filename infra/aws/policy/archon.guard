@@ -221,9 +221,7 @@ let cloudfront_origin_custom_headers = Resources.*[
   Type == 'AWS::CloudFront::Distribution'
 ].Properties.DistributionConfig.Origins.*.OriginCustomHeaders.*
 
-let cloudfront_api_key_origin_headers = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[*].OriginCustomHeaders[
+let cloudfront_api_key_origin_headers = %cloudfront_origin_custom_headers[
   HeaderName == 'x-api-key'
 ]
 
@@ -651,6 +649,7 @@ rule waf_logging_is_filtered_and_redacted
       Behavior == 'KEEP'
       Requirement == 'MEETS_ANY'
       Conditions !empty
+      Conditions[*].ActionCondition.Action IN ['BLOCK', 'COUNT']
     }
     RedactedFields !empty
     some RedactedFields[*] {
