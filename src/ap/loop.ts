@@ -136,9 +136,12 @@ export class AuditLoop {
   private async execute(name: string, state: LoopState, datahub: DataHubClient, query?: string): Promise<string> {
     switch (name) {
       case "harvest_catalog": {
-        const snapshot = await datahub.harvestSnapshot(query);
+        const harvest = await datahub.harvestAudit(query, {
+          profile: "synchronous-preview",
+        });
+        const snapshot = harvest.snapshot;
         (state as LoopState & { snapshot?: unknown }).snapshot = snapshot;
-        (state as LoopState & { facts?: unknown }).facts = await datahub.harvestFacts(query);
+        (state as LoopState & { facts?: unknown }).facts = harvest.facts;
         state.harvested = true;
         return `harvested ${snapshot.entities.length} entities (${this.classifier.classify(snapshot).withLineage} with lineage)`;
       }

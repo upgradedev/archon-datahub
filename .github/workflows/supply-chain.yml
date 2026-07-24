@@ -1,0 +1,3734 @@
+name: Production Supply Chain
+
+# Trusted default-branch pushes arrive here through the completed CI workflow so this
+# workflow scans and attests the exact container, SPA, and Lambda artifacts CI already
+# built against vulnerability intelligence refreshed and sealed during the attesting run.
+# Pull requests are gated inside CI itself, avoiding workflow_run merge-SHA ambiguity and
+# privileged processing of fork artifacts. The daily path observes the live production
+# stack through a read-only OIDC role and resolves the unique successful master CI run for
+# its exact deployed release SHA; manual rescans require an exact CI run ID and commit SHA.
+# Every path downloads the same retained container, SPA, and Lambda artifacts and never
+# rebuilds release subjects.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Exact successful master CI run containing all three retained subjects
+        required: true
+        type: string
+      release_sha:
+        description: Exact lowercase 40-character commit SHA for that CI run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: archon-datahub
+  SYFT_VERSION: "1.49.0"
+  SYFT_ARCHIVE_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
+  SYFT_BINARY_SHA256: 6368bf376b578991192e2e94f5e276e6c70d313d6368ad8c249866f020a86cb0
+  GRYPE_VERSION: "0.116.0"
+  GRYPE_ARCHIVE_SHA256: 40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5
+  GRYPE_BINARY_SHA256: 766fec22cd9eb84aa5efc854a8bd569305c7d96da4e1dbd7e2940b556c4d21ff
+  GRYPE_CHECK_FOR_APP_UPDATE: "false"
+  GRYPE_DB_AUTO_UPDATE: "true"
+  GRYPE_DB_REQUIRE_UPDATE_CHECK: "true"
+  GRYPE_DB_VALIDATE_BY_HASH_ON_START: "true"
+  GRYPE_DB_VALIDATE_AGE: "true"
+  GRYPE_DB_MAX_ALLOWED_BUILT_AGE: "24h"
+  GRYPE_EXTERNAL_SOURCES_ENABLE: "false"
+  SYFT_CHECK_FOR_APP_UPDATE: "false"
+
+jobs:
+  resolve-production:
+    name: Resolve the deployed production release
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production-observer
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      binding: ${{ steps.production.outputs.binding }}
+      binding_digest: ${{ steps.production.outputs.binding_digest }}
+      ci_run_id: ${{ steps.production.outputs.ci_run_id }}
+      deployment_artifact_digest: ${{ steps.production.outputs.deployment_artifact_digest }}
+      deployment_artifact_id: ${{ steps.production.outputs.deployment_artifact_id }}
+      deployment_evidence: ${{ steps.production.outputs.deployment_evidence }}
+      deployment_evidence_digest: ${{ steps.production.outputs.deployment_evidence_digest }}
+      deployment_run_attempt: ${{ steps.production.outputs.deployment_run_attempt }}
+      deployment_run_id: ${{ steps.production.outputs.deployment_run_id }}
+      image_digest: ${{ steps.production.outputs.image_digest }}
+      live_runtime_manifest_digest: ${{ steps.production.outputs.live_runtime_manifest_digest }}
+      release_sha: ${{ steps.production.outputs.release_sha }}
+    env:
+      BASH_ENV: /dev/null
+      EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      DEPLOY_REGION: ${{ vars.AWS_REGION }}
+      READ_ROLE_ARN: ${{ vars.AWS_RUNTIME_READ_ROLE_ARN }}
+      STACK_NAME: Archon-production
+    steps:
+      - name: Validate observer configuration
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+            echo "::error::production-observer AWS_ACCOUNT_ID must be a 12-digit account ID"
+            exit 1
+          }
+          [[ "${DEPLOY_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] || {
+            echo "::error::production-observer AWS_REGION is invalid"
+            exit 1
+          }
+          [[ "${READ_ROLE_ARN}" =~ ^arn:aws[a-z-]*:iam::${EXPECTED_ACCOUNT_ID}:role/[^[:space:]]+$ ]] || {
+            echo "::error::AWS_RUNTIME_READ_ROLE_ARN must be an IAM role in AWS_ACCOUNT_ID"
+            exit 1
+          }
+          test "${GITHUB_REF}" = "refs/heads/master" || {
+            echo "::error::Scheduled production rescans must execute from master"
+            exit 1
+          }
+          repository_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          jq -e '
+            .archived == false and
+            .disabled == false and
+            .full_name == env.GITHUB_REPOSITORY
+          ' <<<"${repository_json}" >/dev/null || {
+            echo "::error::The observer repository identity or lifecycle state is invalid"
+            exit 1
+          }
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master" || {
+            echo "::error::Scheduled production rescans require master as the default branch"
+            exit 1
+          }
+          master_ref="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}"
+          )"
+          master_sha="$(
+            jq -er '.object.sha | select(test("^[0-9a-f]{40}$"))' \
+              <<<"${master_ref}"
+          )"
+          test "${master_sha}" = "${GITHUB_SHA}" || {
+            echo "::error::Scheduled production rescans must use the current default-branch head"
+            exit 1
+          }
+
+          gate_runs='[]'
+          for workflow in ci.yml codeql.yml workflow-security.yml; do
+            runs="$(
+              gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+                -f "head_sha=${GITHUB_SHA}" \
+                -f "branch=${default_branch}" \
+                -f event=push \
+                -f per_page=100
+            )"
+            latest="$(
+              jq -ce \
+                --arg path ".github/workflows/${workflow}" \
+                --arg sha "${GITHUB_SHA}" \
+                --arg branch "${default_branch}" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .path == $path and
+                      .head_sha == $sha and
+                      .head_branch == $branch and
+                      .event == "push"
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  select(
+                    . != null and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ' <<<"${runs}"
+            )" || {
+              echo "::error::The latest ${workflow} push run is not successful for the observer control plane"
+              exit 1
+            }
+            gate_runs="$(
+              jq -c --argjson run "${latest}" '. + [$run]' <<<"${gate_runs}"
+            )"
+          done
+          test "$(jq -r 'length' <<<"${gate_runs}")" = "3"
+          jq -cS --null-input \
+            --arg schemaVersion "archon.supply-chain-control-plane-gates/v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg branch "${default_branch}" \
+            --arg sha "${GITHUB_SHA}" \
+            --argjson runs "${gate_runs}" '
+              {
+                schemaVersion: $schemaVersion,
+                repository: $repository,
+                branch: $branch,
+                commit: $sha,
+                workflows: (
+                  $runs |
+                  map({
+                    name,
+                    path,
+                    workflowId: .workflow_id,
+                    runId: .id,
+                    runAttempt: .run_attempt,
+                    event,
+                    headBranch: .head_branch,
+                    headSha: .head_sha,
+                    status,
+                    conclusion,
+                    url: .html_url
+                  }) |
+                  sort_by(.path)
+                )
+              }
+            ' >"${RUNNER_TEMP}/supply-chain-control-plane-gates.json"
+
+      - name: Check out the exact observer control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate exact observer control plane before AWS trust
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          sealed_gates="${RUNNER_TEMP}/supply-chain-control-plane-gates.json"
+          test -f "${sealed_gates}"
+          current_dir="${RUNNER_TEMP}/supply-chain-current-control-plane"
+          mkdir -p "${current_dir}"
+          current_gates="${current_dir}/control-plane-security-gates.json"
+          OUTPUT_PATH="${current_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          jq -en \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile sealed "${sealed_gates}" \
+            --slurpfile current "${current_gates}" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              $sealed[0].schemaVersion ==
+                "archon.supply-chain-control-plane-gates/v1" and
+              $sealed[0].repository == $repository and
+              $sealed[0].branch == "master" and
+              $sealed[0].commit == $sha and
+              $current[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $current[0].branch == "master" and
+              $current[0].sourceSha == $sha and
+              ($sealed[0].workflows | receipt) ==
+                ($current[0].workflows | receipt)
+            ' >/dev/null || {
+            echo "::error::The observer control-plane receipt is no longer current"
+            exit 1
+          }
+
+      - name: Configure read-only production observer through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_RUNTIME_READ_ROLE_ARN }}
+          role-session-name: archon-${{ github.run_id }}-supply-resolve
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Seal the exact live production binding
+        id: production
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          actual_account="$(
+            aws sts get-caller-identity --query Account --output text
+          )"
+          test "${actual_account}" = "${EXPECTED_ACCOUNT_ID}" || {
+            echo "::error::The observer role resolved an unexpected AWS account"
+            exit 1
+          }
+
+          stack_json="$(
+            aws cloudformation describe-stacks \
+              --region "${DEPLOY_REGION}" \
+              --stack-name "${STACK_NAME}" \
+              --output json
+          )"
+          jq -e \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg stack "${STACK_NAME}" '
+              (.Stacks | type == "array" and length == 1) and
+              (.Stacks[0].StackName == $stack) and
+              (.Stacks[0].StackId |
+                test("^arn:aws[^:]*:cloudformation:" + $region + ":" +
+                  $account + ":stack/" + $stack + "/[0-9a-f-]+$")) and
+              (.Stacks[0].StackStatus == "CREATE_COMPLETE" or
+                .Stacks[0].StackStatus == "UPDATE_COMPLETE") and
+              (.Stacks[0].Outputs | type == "array") and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonReleaseSha")] | length == 1) and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonContainerImageDigest")] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonSpaArtifactSha256")] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonContainerArchiveSha256")] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonLambdaArchiveSha256")] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonDeploymentWorkflowRunId")] |
+                length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(
+                  .OutputKey == "ArchonDeploymentWorkflowRunAttempt"
+                )] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonCiRunId")] | length == 1)
+              and
+              ([.Stacks[0].Outputs[] |
+                select(.OutputKey == "ArchonSpaKeyArn")] | length == 1)
+            ' <<<"${stack_json}" >/dev/null || {
+              echo "::error::Archon-production failed account, region, name, status, or output-schema validation"
+              exit 1
+            }
+
+          release_sha="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonReleaseSha") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          image_digest="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonContainerImageDigest") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          web_archive_sha="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonSpaArtifactSha256") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          container_archive_sha="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonContainerArchiveSha256") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          lambda_archive_sha="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonLambdaArchiveSha256") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          deployment_run_id="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonDeploymentWorkflowRunId") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          deployment_run_attempt="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(
+                .OutputKey == "ArchonDeploymentWorkflowRunAttempt"
+              ) |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          ci_run_id="$(
+            jq -er '.Stacks[0].Outputs[] |
+              select(.OutputKey == "ArchonCiRunId") |
+              .OutputValue' <<<"${stack_json}"
+          )"
+          stack_id="$(jq -er '.Stacks[0].StackId' <<<"${stack_json}")"
+          stack_status="$(jq -er '.Stacks[0].StackStatus' <<<"${stack_json}")"
+          stack_last_updated_at="$(
+            jq -er '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              <<<"${stack_json}"
+          )"
+          [[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::ArchonReleaseSha is not a full lowercase commit SHA"
+            exit 1
+          }
+          [[ "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::ArchonContainerImageDigest is not an immutable sha256 digest"
+            exit 1
+          }
+          for archive_sha in \
+            "${container_archive_sha}" \
+            "${web_archive_sha}" \
+            "${lambda_archive_sha}"; do
+            [[ "${archive_sha}" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "::error::A deployed release archive digest is invalid"
+              exit 1
+            }
+          done
+          [[ "${deployment_run_id}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${deployment_run_attempt}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${ci_run_id}" =~ ^[1-9][0-9]{0,19}$ ]]
+
+          deployment_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${deployment_run_id}/attempts/${deployment_run_attempt}"
+          )"
+          deployment_control_plane_sha="$(
+            jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' \
+              <<<"${deployment_run}"
+          )"
+          jq -e \
+            --argjson runId "${deployment_run_id}" \
+            --argjson runAttempt "${deployment_run_attempt}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${deployment_control_plane_sha}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .name == "Deploy immutable AWS release" and
+              .path == ".github/workflows/deploy.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .head_sha == $sha and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success"
+            ' <<<"${deployment_run}" >/dev/null || {
+            echo "::error::The live stack does not identify an exact successful production deployment"
+            exit 1
+          }
+
+          deployment_artifact_name="deployment-evidence-${release_sha}-${deployment_run_attempt}"
+          deployment_artifacts="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${deployment_run_id}/artifacts?per_page=100"
+          )"
+          deployment_artifact="$(
+            jq -sce \
+              --arg name "${deployment_artifact_name}" \
+              --argjson runId "${deployment_run_id}" '
+                [
+                  .[] |
+                  .artifacts[] |
+                  select(
+                    .expired == false and
+                    .name == $name and
+                    .workflow_run.id == $runId and
+                    (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  )
+                ] |
+                if length == 1 then
+                  .[0]
+                else
+                  error(
+                    "expected exactly one retained production deployment evidence artifact"
+                  )
+                end
+              ' <<<"${deployment_artifacts}"
+          )"
+          deployment_artifact_id="$(
+            jq -er '.id | select(type == "number" and . >= 1)' \
+              <<<"${deployment_artifact}"
+          )"
+          deployment_artifact_digest="$(
+            jq -er '.digest' <<<"${deployment_artifact}"
+          )"
+          deployment_archive="${RUNNER_TEMP}/production-deployment-evidence.zip"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${deployment_artifact_id}/zip" \
+            >"${deployment_archive}"
+          test "sha256:$(
+            sha256sum "${deployment_archive}" | cut -d ' ' -f 1
+          )" = "${deployment_artifact_digest}" || {
+            echo "::error::Production deployment evidence failed GitHub artifact digest verification"
+            exit 1
+          }
+          mapfile -t deployment_entries < <(unzip -Z1 "${deployment_archive}")
+          test "${#deployment_entries[@]}" -ge 1
+          test "${#deployment_entries[@]}" -le 64
+          for entry in "${deployment_entries[@]}"; do
+            if [[ "${entry}" == /* || "${entry}" == *\\* ||
+              "${entry}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe production deployment evidence path: ${entry}"
+              exit 1
+            fi
+          done
+          for required_entry in \
+            control-plane-security-gates.json \
+            deployment-evidence.json \
+            live-runtime-manifest.json; do
+            test "$(
+              printf '%s\n' "${deployment_entries[@]}" |
+                grep -Fxc "${required_entry}"
+            )" = "1"
+          done
+          if zipinfo -l "${deployment_archive}" |
+            awk '$1 ~ /^l[rwxStTs-]{9}$/ { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::Production deployment evidence may not contain symlinks"
+            exit 1
+          fi
+          deployment_evidence_path="${RUNNER_TEMP}/deployment-evidence.json"
+          unzip -p "${deployment_archive}" deployment-evidence.json \
+            >"${deployment_evidence_path}"
+          test -s "${deployment_evidence_path}"
+          jq -cS . "${deployment_evidence_path}" \
+            >"${deployment_evidence_path}.canonical"
+          mv \
+            "${deployment_evidence_path}.canonical" \
+            "${deployment_evidence_path}"
+          deployment_evidence_digest="sha256:$(
+            sha256sum "${deployment_evidence_path}" | cut -d ' ' -f 1
+          )"
+          deployment_control_plane_path="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/deployment-control-plane-gates.json"
+          )"
+          unzip -p \
+            "${deployment_archive}" \
+            control-plane-security-gates.json \
+            >"${deployment_control_plane_path}"
+          test -s "${deployment_control_plane_path}"
+          jq -cS . "${deployment_control_plane_path}" \
+            >"${deployment_control_plane_path}.canonical"
+          cmp --silent \
+            "${deployment_control_plane_path}" \
+            "${deployment_control_plane_path}.canonical" || {
+            echo "::error::The deployment control-plane receipt is not canonical"
+            exit 1
+          }
+          rm "${deployment_control_plane_path}.canonical"
+          runtime_resolution_dir="${RUNNER_TEMP}/production-runtime-resolution"
+          mkdir -p "${runtime_resolution_dir}"
+          live_runtime_manifest_path="$(
+            printf '%s' \
+              "${runtime_resolution_dir}/live-runtime-manifest.json"
+          )"
+          unzip -p "${deployment_archive}" live-runtime-manifest.json \
+            >"${live_runtime_manifest_path}"
+          test -s "${live_runtime_manifest_path}"
+          jq -cS . "${live_runtime_manifest_path}" \
+            >"${live_runtime_manifest_path}.canonical"
+          cmp --silent \
+            "${live_runtime_manifest_path}" \
+            "${live_runtime_manifest_path}.canonical" || {
+            echo "::error::The deployment live-runtime manifest is not canonical"
+            exit 1
+          }
+          rm "${live_runtime_manifest_path}.canonical"
+          live_runtime_manifest_digest="$(
+            sha256sum "${live_runtime_manifest_path}" | cut -d ' ' -f 1
+          )"
+          expected_deployment_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${deployment_run_id}"
+          expected_ci_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${release_sha}" \
+            --arg ciRunId "${ci_run_id}" \
+            --arg ciRunUrl "${expected_ci_url}" \
+            --arg deploymentRunId "${deployment_run_id}" \
+            --arg deploymentRunUrl "${expected_deployment_url}" \
+            --arg controlPlaneSha "${deployment_control_plane_sha}" \
+            --arg containerArchive "${container_archive_sha}" \
+            --arg webArchive "${web_archive_sha}" \
+            --arg lambdaArchive "${lambda_archive_sha}" \
+            --arg image "${image_digest}" '
+              .schemaVersion == 1 and
+              .promotionPolicy == "build-once-promote-same-artifacts" and
+              .rollbackSelector.ciRunId == $ciRunId and
+              .rollbackSelector.releaseSha == $release and
+              .source.sourceRunUrl == $ciRunUrl and
+              .source.deploymentRunUrl == $deploymentRunUrl and
+              .source.deploymentControlPlaneSha == $controlPlaneSha and
+              .immutableArtifacts.containerArchiveSha256 ==
+                $containerArchive and
+              .immutableArtifacts.webArchiveSha256 == $webArchive and
+              .immutableArtifacts.lambdaArchiveSha256 == $lambdaArchive and
+              .immutableArtifacts.stagingEcrImageDigest == $image and
+              .immutableArtifacts.productionEcrImageDigest == $image and
+              .immutableArtifacts.identicalImageDigest == true and
+              (
+                .immutableArtifacts.containerArtifactSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              (
+                .immutableArtifacts.webArtifactSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              (
+                .immutableArtifacts.lambdaArtifactSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              .pipelineSecurity.preProductionGovernedCanary.deploymentWorkflowRunId ==
+                $deploymentRunId and
+              .pipelineSecurity.preProductionGovernedCanary.releaseSha ==
+                $release and
+              .pipelineSecurity.preProductionGovernedCanary.controlPlaneSha ==
+                $controlPlaneSha and
+              .pipelineSecurity.preProductionGovernedCanary.result ==
+                "write-verified-and-rollback-proven" and
+              .production.stackName == "Archon-production" and
+              (
+                .production.liveRuntimeManifestSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              .production.result == "passed"
+            ' "${deployment_evidence_path}" >/dev/null || {
+            echo "::error::Production deployment evidence does not bind the live stack to exact CI subjects"
+            exit 1
+          }
+          deployment_control_plane_digest="$(
+            sha256sum "${deployment_control_plane_path}" | cut -d ' ' -f 1
+          )"
+          test "${deployment_control_plane_digest}" = "$(
+            jq -er \
+              '.pipelineSecurity.deploymentControlPlaneGatesSha256' \
+              "${deployment_evidence_path}"
+          )" || {
+            echo "::error::The deployment control-plane receipt differs from deployment evidence"
+            exit 1
+          }
+          jq -e \
+            --arg sha "${deployment_control_plane_sha}" '
+              .schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              .sourceSha == $sha and
+              .branch == "master" and
+              (.workflows | length) == 3 and
+              ([.workflows[].path] | sort) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .workflows[];
+                (.workflowId | type == "number" and . >= 1) and
+                (.runId | type == "number" and . >= 1) and
+                (.runAttempt | type == "number" and . >= 1) and
+                .conclusion == "success"
+              )
+            ' "${deployment_control_plane_path}" >/dev/null || {
+            echo "::error::The deployment control-plane receipt is invalid"
+            exit 1
+          }
+          test "${live_runtime_manifest_digest}" = "$(
+            jq -er '.production.liveRuntimeManifestSha256' \
+              "${deployment_evidence_path}"
+          )" || {
+            echo "::error::The sealed live-runtime manifest differs from deployment evidence"
+            exit 1
+          }
+          observer_output_dir="${RUNNER_TEMP}/production-runtime-observation"
+          mkdir -p "${observer_output_dir}"
+          observed_live_runtime_path="$(
+            printf '%s' "${observer_output_dir}/live-runtime-manifest.json"
+          )"
+          AWS_REGION="${DEPLOY_REGION}" \
+          EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+          STACK_NAME="${STACK_NAME}" \
+          OUTPUT_PATH="${observed_live_runtime_path}" \
+          VERIFY_LOCAL_CANDIDATES=false \
+          RELEASE_SHA="${release_sha}" \
+          EXPECTED_IMAGE_DIGEST="${image_digest}" \
+          EXPECTED_CONTAINER_ARCHIVE_SHA256="${container_archive_sha}" \
+          EXPECTED_LAMBDA_ARCHIVE_SHA256="${lambda_archive_sha}" \
+          EXPECTED_WEB_ARCHIVE_SHA256="${web_archive_sha}" \
+            bash scripts/observe-aws-live-runtime.sh
+          test -f "${observed_live_runtime_path}"
+          test ! -L "${observed_live_runtime_path}"
+          jq -cS . "${observed_live_runtime_path}" \
+            >"${observed_live_runtime_path}.canonical"
+          cmp --silent \
+            "${observed_live_runtime_path}" \
+            "${observed_live_runtime_path}.canonical" || {
+            echo "::error::The production runtime observer emitted non-canonical evidence"
+            exit 1
+          }
+          rm "${observed_live_runtime_path}.canonical"
+          cmp --silent \
+            "${live_runtime_manifest_path}" \
+            "${observed_live_runtime_path}" || {
+            echo "::error::Current production bytes differ from the sealed deployment manifest"
+            exit 1
+          }
+          observer_control_plane="$(
+            jq -cS . \
+              "${RUNNER_TEMP}/supply-chain-control-plane-gates.json"
+          )"
+
+          observed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          binding_json="$(
+            jq -cS --null-input \
+              --arg schemaVersion "archon.production-deployment-binding/v1" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg accountId "${EXPECTED_ACCOUNT_ID}" \
+              --arg region "${DEPLOY_REGION}" \
+              --arg stackName "${STACK_NAME}" \
+              --arg stackId "${stack_id}" \
+              --arg stackStatus "${stack_status}" \
+              --arg stackLastUpdatedAt "${stack_last_updated_at}" \
+              --arg releaseSha "${release_sha}" \
+              --arg imageDigest "${image_digest}" \
+              --arg containerArchiveSha256 "${container_archive_sha}" \
+              --arg webArchiveSha256 "${web_archive_sha}" \
+              --arg lambdaArchiveSha256 "${lambda_archive_sha}" \
+              --arg deploymentRunId "${deployment_run_id}" \
+              --arg deploymentRunAttempt "${deployment_run_attempt}" \
+              --arg deploymentArtifactId "${deployment_artifact_id}" \
+              --arg deploymentArtifactName "${deployment_artifact_name}" \
+              --arg deploymentArtifactDigest "${deployment_artifact_digest}" \
+              --arg deploymentEvidenceDigest "${deployment_evidence_digest}" \
+              --arg deploymentControlPlaneSha "${deployment_control_plane_sha}" \
+              --arg deploymentControlPlaneGatesDigest \
+                "sha256:${deployment_control_plane_digest}" \
+              --arg ciRunId "${ci_run_id}" \
+              --arg liveRuntimeManifestDigest \
+                "sha256:${live_runtime_manifest_digest}" \
+              --argjson observerControlPlane "${observer_control_plane}" \
+              --arg observedAt "${observed_at}" \
+              --arg workflowRun \
+                "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '
+                {
+                  schemaVersion: $schemaVersion,
+                  repository: $repository,
+                  aws: {
+                    accountId: $accountId,
+                    region: $region
+                  },
+                  stack: {
+                    name: $stackName,
+                    id: $stackId,
+                    status: $stackStatus,
+                    lastUpdatedAt: $stackLastUpdatedAt
+                  },
+                  release: {
+                    sha: $releaseSha,
+                    containerImageDigest: $imageDigest,
+                    containerArchiveSha256: $containerArchiveSha256,
+                    webArchiveSha256: $webArchiveSha256,
+                    lambdaArchiveSha256: $lambdaArchiveSha256
+                  },
+                  deployment: {
+                    runId: $deploymentRunId,
+                    runAttempt: $deploymentRunAttempt,
+                    controlPlaneSha: $deploymentControlPlaneSha,
+                    artifactId: $deploymentArtifactId,
+                    artifactName: $deploymentArtifactName,
+                    artifactDigest: $deploymentArtifactDigest,
+                    evidenceDigest: $deploymentEvidenceDigest,
+                    controlPlaneGatesDigest:
+                      $deploymentControlPlaneGatesDigest
+                  },
+                  ci: {
+                    runId: $ciRunId
+                  },
+                  runtime: {
+                    liveManifestDigest: $liveRuntimeManifestDigest,
+                    observedManifestDigest: $liveRuntimeManifestDigest,
+                    exactlyMatches: true
+                  },
+                  observerControlPlane: $observerControlPlane,
+                  observedAt: $observedAt,
+                  workflowRun: $workflowRun
+                }
+              '
+          )"
+          binding_digest="$(
+            printf '%s\n' "${binding_json}" | sha256sum | cut -d ' ' -f 1
+          )"
+          binding="$(
+            printf '%s\n' "${binding_json}" | base64 --wrap=0
+          )"
+          deployment_evidence="$(
+            base64 --wrap=0 "${deployment_evidence_path}"
+          )"
+          {
+            echo "binding=${binding}"
+            echo "binding_digest=sha256:${binding_digest}"
+            echo "ci_run_id=${ci_run_id}"
+            echo "deployment_artifact_digest=${deployment_artifact_digest}"
+            echo "deployment_artifact_id=${deployment_artifact_id}"
+            echo "deployment_evidence=${deployment_evidence}"
+            echo "deployment_evidence_digest=${deployment_evidence_digest}"
+            echo "deployment_run_attempt=${deployment_run_attempt}"
+            echo "deployment_run_id=${deployment_run_id}"
+            echo "image_digest=${image_digest}"
+            echo "live_runtime_manifest_digest=sha256:${live_runtime_manifest_digest}"
+            echo "release_sha=${release_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+  scan:
+    name: Exact release SBOM and vulnerability gate
+    needs: resolve-production
+    if: >-
+      always() &&
+      (
+        (
+          github.event_name == 'schedule' &&
+          needs.resolve-production.result == 'success'
+        ) ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      evidence_artifact: ${{ steps.subject.outputs.evidence_artifact }}
+      evidence_artifact_id: ${{ steps.evidence_upload.outputs.artifact-id }}
+      sarif_ready: ${{ steps.reports.outputs.sarif_ready }}
+      source_sha: ${{ steps.subject.outputs.source_sha }}
+      source_run_id: ${{ steps.source.outputs.run_id }}
+      production_binding_digest: ${{ steps.production_binding.outputs.binding_digest }}
+    env:
+      BASH_ENV: /dev/null
+    steps:
+      - name: Resolve and validate the exact successful master CI run
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          REQUESTED_CI_RUN_ID: ${{ inputs.ci_run_id }}
+          REQUESTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYED_CI_RUN_ID: ${{ needs.resolve-production.outputs.ci_run_id }}
+          DEPLOYED_RELEASE_SHA: ${{ needs.resolve-production.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_branch="master"
+          expected_path=".github/workflows/ci.yml"
+          requested_run_id=""
+          requested_release_sha=""
+
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_run)
+              requested_run_id="${EVENT_RUN_ID}"
+              requested_release_sha="${EVENT_RELEASE_SHA}"
+              ;;
+            schedule)
+              test "${GITHUB_REF}" = "refs/heads/${expected_branch}" || {
+                echo "::error::Scheduled rescans must execute from master"
+                exit 1
+              }
+              [[ "${DEPLOYED_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "::error::The production resolver did not provide an exact release SHA"
+                exit 1
+              }
+              [[ "${DEPLOYED_CI_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || {
+                echo "::error::The production resolver did not provide an exact CI run ID"
+                exit 1
+              }
+              requested_run_id="${DEPLOYED_CI_RUN_ID}"
+              requested_release_sha="${DEPLOYED_RELEASE_SHA}"
+              ;;
+            workflow_dispatch)
+              test "${GITHUB_REF}" = "refs/heads/${expected_branch}" || {
+                echo "::error::Manual rescans must execute from master"
+                exit 1
+              }
+              requested_run_id="${REQUESTED_CI_RUN_ID}"
+              requested_release_sha="${REQUESTED_RELEASE_SHA}"
+              ;;
+            *)
+              echo "::error::Unsupported supply-chain event: ${GITHUB_EVENT_NAME}"
+              exit 1
+              ;;
+          esac
+
+          [[ "${requested_run_id}" =~ ^[0-9]+$ ]] || {
+            echo "::error::The resolved CI run ID must be numeric"
+            exit 1
+          }
+          if [[ -n "${requested_release_sha}" ]]; then
+            [[ "${requested_release_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::The requested release SHA must be a full lowercase commit SHA"
+              exit 1
+            }
+          fi
+
+          run_json="$(gh api \
+            --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${requested_run_id}")"
+          jq -e \
+            --arg branch "${expected_branch}" \
+            --arg path "${expected_path}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .status == "completed" and
+              .conclusion == "success" and
+              .event == "push" and
+              .head_branch == $branch and
+              .head_repository.full_name == $repository and
+              .path == $path
+            ' <<<"${run_json}" >/dev/null || {
+              echo "::error::The selected source is not a successful master CI push run"
+              exit 1
+            }
+
+          source_run_id="$(jq -er '.id | tostring' <<<"${run_json}")"
+          source_sha="$(jq -er '.head_sha' <<<"${run_json}")"
+          [[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          test "${source_run_id}" = "${requested_run_id}"
+          if [[ -n "${requested_release_sha}" ]]; then
+            test "${source_sha}" = "${requested_release_sha}" || {
+              echo "::error::The selected CI run does not match release_sha"
+              exit 1
+            }
+          fi
+
+          {
+            echo "run_id=${source_run_id}"
+            echo "source_sha=${source_sha}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "SOURCE_SHA=${source_sha}"
+            echo "SOURCE_EVENT=push"
+            echo "SOURCE_REPOSITORY=${GITHUB_REPOSITORY}"
+            echo "SOURCE_RUN_ID=${source_run_id}"
+          } >>"${GITHUB_ENV}"
+
+      - name: Check out the exact successful CI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare ephemeral directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/candidate"
+          web_candidate_dir="${RUNNER_TEMP}/web-candidate"
+          web_content_dir="${RUNNER_TEMP}/web-content"
+          web_scan_dir="${RUNNER_TEMP}/web-scan"
+          lambda_candidate_dir="${RUNNER_TEMP}/lambda-candidate"
+          lambda_content_dir="${RUNNER_TEMP}/lambda-content"
+          evidence_dir="${RUNNER_TEMP}/supply-chain-evidence"
+          tools_dir="${RUNNER_TEMP}/supply-chain-tools"
+          grype_db_cache_dir="${RUNNER_TEMP}/grype-db"
+          {
+            echo "CANDIDATE_DIR=${candidate_dir}"
+            echo "WEB_CANDIDATE_DIR=${web_candidate_dir}"
+            echo "WEB_CONTENT_DIR=${web_content_dir}"
+            echo "WEB_SCAN_DIR=${web_scan_dir}"
+            echo "LAMBDA_CANDIDATE_DIR=${lambda_candidate_dir}"
+            echo "LAMBDA_CONTENT_DIR=${lambda_content_dir}"
+            echo "EVIDENCE_DIR=${evidence_dir}"
+            echo "TOOLS_DIR=${tools_dir}"
+            echo "GRYPE_DB_CACHE_DIR=${grype_db_cache_dir}"
+          } >>"${GITHUB_ENV}"
+          mkdir -p \
+            "${candidate_dir}" \
+            "${web_candidate_dir}" \
+            "${web_content_dir}" \
+            "${web_scan_dir}" \
+            "${lambda_candidate_dir}" \
+            "${lambda_content_dir}" \
+            "${evidence_dir}" \
+            "${tools_dir}" \
+            "${grype_db_cache_dir}"
+
+      - name: Materialize the sealed production binding
+        if: github.event_name == 'schedule'
+        id: production_binding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCTION_BINDING: ${{ needs.resolve-production.outputs.binding }}
+          PRODUCTION_DEPLOYMENT_EVIDENCE: ${{ needs.resolve-production.outputs.deployment_evidence }}
+          EXPECTED_BINDING_DIGEST: ${{ needs.resolve-production.outputs.binding_digest }}
+          EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST: ${{ needs.resolve-production.outputs.deployment_artifact_digest }}
+          EXPECTED_DEPLOYMENT_ARTIFACT_ID: ${{ needs.resolve-production.outputs.deployment_artifact_id }}
+          EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST: ${{ needs.resolve-production.outputs.deployment_evidence_digest }}
+          EXPECTED_DEPLOYMENT_RUN_ATTEMPT: ${{ needs.resolve-production.outputs.deployment_run_attempt }}
+          EXPECTED_DEPLOYMENT_RUN_ID: ${{ needs.resolve-production.outputs.deployment_run_id }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.resolve-production.outputs.image_digest }}
+          EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST: ${{ needs.resolve-production.outputs.live_runtime_manifest_digest }}
+          EXPECTED_RELEASE_SHA: ${{ needs.resolve-production.outputs.release_sha }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          deployment_archive="${RUNNER_TEMP}/scan-deployment-evidence.zip"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXPECTED_DEPLOYMENT_ARTIFACT_ID}/zip" \
+            >"${deployment_archive}"
+          test "sha256:$(
+            sha256sum "${deployment_archive}" | cut -d ' ' -f 1
+          )" = "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" || {
+            echo "::error::The deployment evidence artifact changed before scan"
+            exit 1
+          }
+          mapfile -t deployment_entries < <(unzip -Z1 "${deployment_archive}")
+          test "${#deployment_entries[@]}" -ge 3
+          test "${#deployment_entries[@]}" -le 64
+          for entry in "${deployment_entries[@]}"; do
+            if [[ "${entry}" == /* || "${entry}" == *\\* ||
+              "${entry}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe deployment evidence path: ${entry}"
+              exit 1
+            fi
+          done
+          for required_entry in \
+            control-plane-security-gates.json \
+            deployment-evidence.json \
+            live-runtime-manifest.json \
+            production-runtime-config.json; do
+            test "$(
+              printf '%s\n' "${deployment_entries[@]}" |
+                grep -Fxc "${required_entry}"
+            )" = "1"
+          done
+          if zipinfo -l "${deployment_archive}" |
+            awk '$1 ~ /^l[rwxStTs-]{9}$/ { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::Deployment evidence may not contain symlinks"
+            exit 1
+          fi
+          unzip -p "${deployment_archive}" live-runtime-manifest.json \
+            >"${EVIDENCE_DIR}/live-runtime-manifest.json"
+          unzip -p "${deployment_archive}" deployment-evidence.json \
+            >"${EVIDENCE_DIR}/deployment-evidence.from-artifact.json"
+          unzip -p "${deployment_archive}" production-runtime-config.json \
+            >"${EVIDENCE_DIR}/production-runtime-config.json"
+          unzip -p \
+            "${deployment_archive}" \
+            control-plane-security-gates.json \
+            >"${EVIDENCE_DIR}/deployment-control-plane-gates.json"
+          test -s "${EVIDENCE_DIR}/live-runtime-manifest.json"
+          test -s "${EVIDENCE_DIR}/deployment-control-plane-gates.json"
+          jq -cS . "${EVIDENCE_DIR}/live-runtime-manifest.json" \
+            >"${EVIDENCE_DIR}/live-runtime-manifest.canonical.json"
+          cmp --silent \
+            "${EVIDENCE_DIR}/live-runtime-manifest.json" \
+            "${EVIDENCE_DIR}/live-runtime-manifest.canonical.json" || {
+            echo "::error::The live-runtime manifest is not canonical"
+            exit 1
+          }
+          rm "${EVIDENCE_DIR}/live-runtime-manifest.canonical.json"
+          jq -cS . "${EVIDENCE_DIR}/deployment-control-plane-gates.json" \
+            >"${EVIDENCE_DIR}/deployment-control-plane-gates.canonical.json"
+          cmp --silent \
+            "${EVIDENCE_DIR}/deployment-control-plane-gates.json" \
+            "${EVIDENCE_DIR}/deployment-control-plane-gates.canonical.json" || {
+            echo "::error::The deployment control-plane receipt is not canonical"
+            exit 1
+          }
+          rm "${EVIDENCE_DIR}/deployment-control-plane-gates.canonical.json"
+          live_runtime_manifest_digest="sha256:$(
+            sha256sum "${EVIDENCE_DIR}/live-runtime-manifest.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${live_runtime_manifest_digest}" = \
+            "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" || {
+            echo "::error::The live-runtime manifest changed between resolver and scan"
+            exit 1
+          }
+
+          printf '%s' "${PRODUCTION_BINDING}" |
+            base64 --decode >"${EVIDENCE_DIR}/production-binding.json"
+          jq -cS '.' "${EVIDENCE_DIR}/production-binding.json" \
+            >"${EVIDENCE_DIR}/production-binding.canonical.json"
+          mv \
+            "${EVIDENCE_DIR}/production-binding.canonical.json" \
+            "${EVIDENCE_DIR}/production-binding.json"
+          actual_digest="sha256:$(
+            sha256sum "${EVIDENCE_DIR}/production-binding.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${actual_digest}" = "${EXPECTED_BINDING_DIGEST}" || {
+            echo "::error::The production binding output failed digest verification"
+            exit 1
+          }
+          jq -cS '.observerControlPlane' \
+            "${EVIDENCE_DIR}/production-binding.json" \
+            >"${EVIDENCE_DIR}/supply-chain-control-plane-gates.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" '
+              .schemaVersion ==
+                "archon.supply-chain-control-plane-gates/v1" and
+              .repository == $repository and
+              .branch == "master" and
+              .commit == $sha and
+              (.workflows | length == 3) and
+              all(
+                .workflows[];
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' "${EVIDENCE_DIR}/supply-chain-control-plane-gates.json" \
+            >/dev/null || {
+            echo "::error::The observer control-plane receipts are invalid"
+            exit 1
+          }
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${EXPECTED_RELEASE_SHA}" \
+            --arg image "${EXPECTED_IMAGE_DIGEST}" \
+            --arg artifactId "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg runtime "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" '
+              .schemaVersion == "archon.production-deployment-binding/v1" and
+              .repository == $repository and
+              .stack.name == "Archon-production" and
+              .release.sha == $release and
+              .release.containerImageDigest == $image and
+              .deployment.artifactId == $artifactId and
+              .runtime.liveManifestDigest == $runtime and
+              .runtime.observedManifestDigest == $runtime and
+              .runtime.exactlyMatches == true
+            ' "${EVIDENCE_DIR}/production-binding.json" >/dev/null || {
+              echo "::error::The production binding is inconsistent with resolver outputs"
+              exit 1
+            }
+          test "${EXPECTED_RELEASE_SHA}" = "${SOURCE_SHA}" || {
+            echo "::error::The scanned CI source differs from the deployed production release"
+            exit 1
+          }
+          test "${SOURCE_RUN_ID}" = "$(
+            jq -er '.ci.runId' "${EVIDENCE_DIR}/production-binding.json"
+          )" || {
+            echo "::error::The selected CI run differs from the live deployment binding"
+            exit 1
+          }
+
+          printf '%s' "${PRODUCTION_DEPLOYMENT_EVIDENCE}" |
+            base64 --decode >"${EVIDENCE_DIR}/deployment-evidence.json"
+          jq -cS . "${EVIDENCE_DIR}/deployment-evidence.json" \
+            >"${EVIDENCE_DIR}/deployment-evidence.canonical.json"
+          mv \
+            "${EVIDENCE_DIR}/deployment-evidence.canonical.json" \
+            "${EVIDENCE_DIR}/deployment-evidence.json"
+          actual_deployment_evidence_digest="sha256:$(
+            sha256sum "${EVIDENCE_DIR}/deployment-evidence.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${actual_deployment_evidence_digest}" = \
+            "${EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST}" || {
+            echo "::error::Production deployment evidence changed across jobs"
+            exit 1
+          }
+          jq -cS . "${EVIDENCE_DIR}/deployment-evidence.from-artifact.json" \
+            >"${EVIDENCE_DIR}/deployment-evidence.from-artifact.canonical.json"
+          mv \
+            "${EVIDENCE_DIR}/deployment-evidence.from-artifact.canonical.json" \
+            "${EVIDENCE_DIR}/deployment-evidence.from-artifact.json"
+          cmp --silent \
+            "${EVIDENCE_DIR}/deployment-evidence.json" \
+            "${EVIDENCE_DIR}/deployment-evidence.from-artifact.json" || {
+            echo "::error::The re-downloaded deployment evidence changed"
+            exit 1
+          }
+          rm "${EVIDENCE_DIR}/deployment-evidence.from-artifact.json"
+          deployment_control_plane_digest="sha256:$(
+            sha256sum \
+              "${EVIDENCE_DIR}/deployment-control-plane-gates.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${deployment_control_plane_digest}" = "sha256:$(
+            jq -er \
+              '.pipelineSecurity.deploymentControlPlaneGatesSha256' \
+              "${EVIDENCE_DIR}/deployment-evidence.json"
+          )" || {
+            echo "::error::The deployment control-plane receipt changed"
+            exit 1
+          }
+          jq -e \
+            --arg digest "${deployment_control_plane_digest}" \
+            --slurpfile gates \
+              "${EVIDENCE_DIR}/deployment-control-plane-gates.json" '
+              .deployment.controlPlaneGatesDigest == $digest and
+              $gates[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $gates[0].sourceSha == .deployment.controlPlaneSha and
+              $gates[0].branch == "master" and
+              ($gates[0].workflows | length) == 3 and
+              all(
+                $gates[0].workflows[];
+                .conclusion == "success"
+              )
+            ' "${EVIDENCE_DIR}/production-binding.json" >/dev/null || {
+            echo "::error::The deployment binding does not seal its control-plane receipt"
+            exit 1
+          }
+          test "$(sha256sum \
+            "${EVIDENCE_DIR}/production-runtime-config.json" |
+            cut -d ' ' -f 1)" = "$(
+            jq -er '.production.runtimeConfigSha256' \
+              "${EVIDENCE_DIR}/deployment-evidence.json"
+          )" || {
+            echo "::error::The production runtime configuration changed"
+            exit 1
+          }
+          jq -e \
+            --arg bindingDigest "${actual_deployment_evidence_digest}" \
+            --arg artifactDigest "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --arg artifactId "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg deploymentRunId "${EXPECTED_DEPLOYMENT_RUN_ID}" \
+            --arg deploymentRunAttempt "${EXPECTED_DEPLOYMENT_RUN_ATTEMPT}" \
+            --arg ciRunId "${SOURCE_RUN_ID}" \
+            --arg release "${EXPECTED_RELEASE_SHA}" \
+            --arg image "${EXPECTED_IMAGE_DIGEST}" \
+            --arg runtime "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" \
+            --slurpfile binding "${EVIDENCE_DIR}/production-binding.json" '
+              .rollbackSelector.ciRunId == $ciRunId and
+              .rollbackSelector.releaseSha == $release and
+              .immutableArtifacts.containerArchiveSha256 ==
+                $binding[0].release.containerArchiveSha256 and
+              .immutableArtifacts.webArchiveSha256 ==
+                $binding[0].release.webArchiveSha256 and
+              .immutableArtifacts.lambdaArchiveSha256 ==
+                $binding[0].release.lambdaArchiveSha256 and
+              .immutableArtifacts.productionEcrImageDigest == $image and
+              ("sha256:" + .production.liveRuntimeManifestSha256) ==
+                $runtime and
+              $binding[0].runtime.liveManifestDigest == $runtime and
+              $binding[0].runtime.observedManifestDigest == $runtime and
+              $binding[0].runtime.exactlyMatches == true and
+              $binding[0].deployment.artifactId == $artifactId and
+              $binding[0].deployment.runId == $deploymentRunId and
+              $binding[0].deployment.runAttempt == $deploymentRunAttempt and
+              $binding[0].deployment.artifactDigest == $artifactDigest and
+              $binding[0].deployment.evidenceDigest == $bindingDigest
+            ' "${EVIDENCE_DIR}/deployment-evidence.json" >/dev/null || {
+            echo "::error::Deployment evidence is not transitively bound to the live stack"
+            exit 1
+          }
+
+          ci_artifacts="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100"
+          )"
+          for subject in container web lambdas; do
+            case "${subject}" in
+              container)
+                evidence_field="containerArtifactSha256"
+                ;;
+              web)
+                evidence_field="webArtifactSha256"
+                ;;
+              lambdas)
+                evidence_field="lambdaArtifactSha256"
+                ;;
+            esac
+            expected_name="${subject}-${SOURCE_SHA}"
+            expected_artifact_sha="$(
+              jq -er --arg field "${evidence_field}" \
+                '.immutableArtifacts[$field]' \
+                "${EVIDENCE_DIR}/deployment-evidence.json"
+            )"
+            [[ "${expected_artifact_sha}" =~ ^[0-9a-f]{64}$ ]]
+            actual_artifact_digest="$(
+              jq -srce \
+                --arg name "${expected_name}" \
+                --argjson runId "${SOURCE_RUN_ID}" '
+                  [
+                    .[] |
+                    .artifacts[] |
+                    select(
+                      .expired == false and
+                      .name == $name and
+                      .workflow_run.id == $runId and
+                      (.digest | test("^sha256:[0-9a-f]{64}$"))
+                    )
+                  ] |
+                  if length == 1 then
+                    .[0].digest
+                  else
+                    error(
+                      "expected one immutable CI artifact named " + $name
+                    )
+                  end
+                ' <<<"${ci_artifacts}"
+            )"
+            test "${actual_artifact_digest}" = \
+              "sha256:${expected_artifact_sha}" || {
+              echo "::error::${expected_name} differs from production deployment evidence"
+              exit 1
+            }
+          done
+          {
+            echo "binding_digest=${actual_digest}"
+            echo "PRODUCTION_BINDING_DIGEST=${actual_digest}"
+            echo "PRODUCTION_DEPLOYMENT_EVIDENCE_DIGEST=${actual_deployment_evidence_digest}"
+            echo "PRODUCTION_IMAGE_DIGEST=${EXPECTED_IMAGE_DIGEST}"
+            echo "PRODUCTION_LIVE_RUNTIME_MANIFEST_DIGEST=${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "PRODUCTION_BINDING_DIGEST=${actual_digest}"
+            echo "PRODUCTION_DEPLOYMENT_EVIDENCE_DIGEST=${actual_deployment_evidence_digest}"
+            echo "PRODUCTION_IMAGE_DIGEST=${EXPECTED_IMAGE_DIGEST}"
+            echo "PRODUCTION_LIVE_RUNTIME_MANIFEST_DIGEST=${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}"
+          } >>"${GITHUB_ENV}"
+
+      - name: Download the exact CI-built container candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: container-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Download the exact CI-built SPA candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/web-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Download the exact CI-built Lambda candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lambdas-${{ steps.source.outputs.source_sha }}
+          path: ${{ runner.temp }}/lambda-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Verify and load immutable candidate
+        id: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$SOURCE_SHA" != ""
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -f "$CANDIDATE_DIR/archon-image.tar.gz"
+          test -f "$CANDIDATE_DIR/archon-image.tar.gz.sha256"
+
+          expected="$(awk 'NR == 1 { print $1 }' "$CANDIDATE_DIR/archon-image.tar.gz.sha256")"
+          actual="$(sha256sum "$CANDIDATE_DIR/archon-image.tar.gz" | cut -d ' ' -f 1)"
+          test "$expected" = "$actual"
+          test "${#actual}" -eq 64
+
+          gzip --decompress --stdout "$CANDIDATE_DIR/archon-image.tar.gz" | docker load
+          image_id="$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Id}}')"
+          test "$image_id" != ""
+          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Config.User}}')" = "node"
+          test "$(
+            docker image inspect "$IMAGE_NAME:$SOURCE_SHA" \
+              --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+          )" = "$SOURCE_SHA"
+
+          printf '%s  %s\n' "$actual" archon-image.tar.gz \
+            >"$EVIDENCE_DIR/container-subject.sha256"
+          cp "$EVIDENCE_DIR/container-subject.sha256" \
+            "$EVIDENCE_DIR/release-subjects.sha256"
+          test -f "$WEB_CANDIDATE_DIR/archon-web.tar.gz"
+          test -f "$WEB_CANDIDATE_DIR/archon-web.tar.gz.sha256"
+          expected_web="$(
+            awk 'NR == 1 { print $1 }' \
+              "$WEB_CANDIDATE_DIR/archon-web.tar.gz.sha256"
+          )"
+          actual_web="$(
+            sha256sum "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+              cut -d ' ' -f 1
+          )"
+          test "$expected_web" = "$actual_web"
+          test "${#actual_web}" -eq 64
+          if tar --list --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+            awk '
+              /^\// { unsafe=1 }
+              /(^|\/)\.\.(\/|$)/ { unsafe=1 }
+              END { exit unsafe ? 0 : 1 }
+            '; then
+            echo "::error::SPA archive contains an unsafe path"
+            exit 1
+          fi
+          if tar --list --verbose --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+            awk '
+              substr($1, 1, 1) !~ /^[-d]$/ { unsafe=1 }
+              END { exit unsafe ? 0 : 1 }
+            '; then
+            echo "::error::SPA archive may contain only regular files and directories"
+            exit 1
+          fi
+          tar --extract --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" \
+            --directory "$WEB_CONTENT_DIR" \
+            --no-same-owner \
+            --no-same-permissions
+          if find "$WEB_CONTENT_DIR" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::Extracted SPA contains a non-regular member"
+            exit 1
+          fi
+          test -f "$WEB_CONTENT_DIR/index.html"
+          test -f web/package.json
+          test -f web/package-lock.json
+          jq --exit-status \
+            '.name == "archon-datahub-web" and
+             (.dependencies.react | type == "string") and
+             (.dependencies["react-dom"] | type == "string")' \
+            web/package.json >/dev/null
+          jq --exit-status \
+            '.name == "archon-datahub-web" and
+             .lockfileVersion == 3 and
+             (.packages[""].dependencies.react | type == "string") and
+             (.packages[""].dependencies["react-dom"] | type == "string")' \
+            web/package-lock.json >/dev/null
+          mkdir -p "$WEB_SCAN_DIR/dist"
+          cp -a -- "$WEB_CONTENT_DIR/." "$WEB_SCAN_DIR/dist/"
+          cp -- web/package.json web/package-lock.json "$WEB_SCAN_DIR/"
+          (
+            cd web
+            sha256sum package.json package-lock.json
+          ) >"$EVIDENCE_DIR/web-source-metadata.sha256"
+          test -s "$EVIDENCE_DIR/web-source-metadata.sha256"
+          printf '%s  %s\n' "$actual_web" archon-web.tar.gz \
+            >"$EVIDENCE_DIR/web-subject.sha256"
+          cat "$EVIDENCE_DIR/web-subject.sha256" \
+            >>"$EVIDENCE_DIR/release-subjects.sha256"
+
+          test -f "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz"
+          test -f "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz.sha256"
+          expected_lambda="$(
+            awk 'NR == 1 { print $1 }' \
+              "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz.sha256"
+          )"
+          actual_lambda="$(
+            sha256sum "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" |
+              cut -d ' ' -f 1
+          )"
+          test "$expected_lambda" = "$actual_lambda"
+          test "${#actual_lambda}" -eq 64
+
+          while IFS= read -r member; do
+            case "$member" in
+              approval|approval/*|control|control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda archive member: $member"
+                exit 1
+                ;;
+            esac
+            if [[ "$member" == /* || "$member" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe Lambda archive member: $member"
+              exit 1
+            fi
+          done < <(tar --list --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz")
+          if tar --list --verbose --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" |
+            awk '
+              substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" {
+                unsafe = 1
+              }
+              END { exit(unsafe ? 0 : 1) }
+            '
+          then
+            echo "::error::Lambda archive may contain only regular files and directories"
+            exit 1
+          fi
+          tar --extract --gzip \
+            --file "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz" \
+            --directory "$LAMBDA_CONTENT_DIR" \
+            --no-same-owner \
+            --no-same-permissions
+          if find "$LAMBDA_CONTENT_DIR" \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Extracted Lambda candidate contains a special file"
+            exit 1
+          fi
+          for entry in \
+            approval/index.js approval/handoff.js approval/package.json \
+            approval/package-lock.json control/index.js control/package.json \
+            control/package-lock.json; do
+            test -f "$LAMBDA_CONTENT_DIR/$entry"
+          done
+          test -d "$LAMBDA_CONTENT_DIR/approval/node_modules"
+          test -d "$LAMBDA_CONTENT_DIR/control/node_modules"
+
+          if [[ -f "$EVIDENCE_DIR/live-runtime-manifest.json" ]]; then
+            jq -e \
+              --arg release "$SOURCE_SHA" \
+              --arg containerArchive "$actual" \
+              --arg lambdaArchive "$actual_lambda" \
+              --arg spaArchive "$actual_web" \
+              --arg image "$PRODUCTION_IMAGE_DIGEST" '
+                .schemaVersion == "archon.live-runtime-manifest/v1" and
+                .releaseBinding.releaseSha == $release and
+                .releaseBinding.containerImageDigest == $image and
+                .releaseBinding.containerArchiveSha256 ==
+                  $containerArchive and
+                .releaseBinding.lambdaArchiveSha256 == $lambdaArchive and
+                .releaseBinding.spaArtifactSha256 == $spaArchive and
+                (.ecs.services | type == "array" and length == 3) and
+                all(
+                  .ecs.services[];
+                  (
+                    .primaryDeployment.taskDefinitionArn |
+                    test("^arn:aws[^:]*:ecs:[^:]+:[0-9]{12}:task-definition/[^/]+:[1-9][0-9]*$")
+                  ) and
+                  (.taskDefinition.containers | length >= 1) and
+                  all(
+                    .taskDefinition.containers[];
+                    .imageDigest == $image and
+                    (
+                      .imageReferenceSha256 |
+                      test("^[0-9a-f]{64}$")
+                    )
+                  ) and
+                  .runningImageDigests == [$image]
+                ) and
+                (.lambdas | type == "array" and length == 3) and
+                all(
+                  .lambdas[];
+                  (.version | type == "string" and length >= 1) and
+                  (.revisionId | type == "string" and length >= 1) and
+                  (.configurationSha256 |
+                    test("^[0-9a-f]{64}$")) and
+                  (.codeSha256 |
+                    test("^[A-Za-z0-9+/]{43}=$")) and
+                  (.codeZipSha256 |
+                    test("^[0-9a-f]{64}$")) and
+                  (.content | type == "array" and length >= 1)
+                ) and
+                .spa.versioningStatus == "Enabled" and
+                .spa.encryption.algorithm == "aws:kms" and
+                .spa.encryption.bucketKeyEnabled == true and
+                (.spa.encryption.keyArnSha256 |
+                  test("^[0-9a-f]{64}$")) and
+                (.spa.objects | type == "array" and length >= 2) and
+                .verification.result == "passed"
+              ' "$EVIDENCE_DIR/live-runtime-manifest.json" >/dev/null || {
+              echo "::error::The live-runtime manifest schema or release binding is invalid"
+              exit 1
+            }
+
+            emit_content_manifest() {
+              local root="$1"
+              local output="$2"
+              local ndjson="${output}.ndjson"
+              : >"${ndjson}"
+              while IFS= read -r -d '' file; do
+                local relative="${file#"${root}/"}"
+                [[ -n "${relative}" ]]
+                [[ "${relative}" != /* ]]
+                [[ ! "${relative}" =~ (^|/)\.\.(/|$) ]]
+                local size
+                local digest
+                size="$(stat --format='%s' "${file}")"
+                digest="$(sha256sum "${file}" | cut -d ' ' -f 1)"
+                jq -cS --null-input \
+                  --arg path "${relative}" \
+                  --argjson size "${size}" \
+                  --arg sha256 "${digest}" \
+                  '{path: $path, size: $size, sha256: $sha256}' \
+                  >>"${ndjson}"
+              done < <(
+                find "${root}" -type f -print0 |
+                  LC_ALL=C sort --zero-terminated
+              )
+              jq -cS --slurp 'sort_by(.path)' "${ndjson}" >"${output}"
+              rm "${ndjson}"
+            }
+
+            runtime_compare_dir="${RUNNER_TEMP}/runtime-ci-comparison"
+            mkdir -p "${runtime_compare_dir}"
+            emit_content_manifest \
+              "$LAMBDA_CONTENT_DIR/approval" \
+              "${runtime_compare_dir}/approval.json"
+            emit_content_manifest \
+              "$LAMBDA_CONTENT_DIR/control" \
+              "${runtime_compare_dir}/control.json"
+            emit_content_manifest \
+              "$WEB_CONTENT_DIR" \
+              "${runtime_compare_dir}/spa.json"
+
+            for lambda_binding in \
+              "archon-production-approval:approval.json" \
+              "archon-production-approval-handoff:approval.json" \
+              "archon-production-control:control.json"; do
+              function_name="${lambda_binding%%:*}"
+              ci_manifest="${lambda_binding#*:}"
+              jq -cS \
+                --arg name "${function_name}" '
+                  [
+                    .lambdas[] |
+                    select(.functionName == $name) |
+                    .content
+                  ] |
+                  if length == 1 then
+                    .[0] | sort_by(.path)
+                  else
+                    error("expected exactly one Lambda runtime binding")
+                  end
+                ' "$EVIDENCE_DIR/live-runtime-manifest.json" \
+                >"${runtime_compare_dir}/${function_name}.json"
+              cmp --silent \
+                "${runtime_compare_dir}/${ci_manifest}" \
+                "${runtime_compare_dir}/${function_name}.json" || {
+                echo "::error::${function_name} live bytes differ from the exact CI Lambda candidate"
+                exit 1
+              }
+            done
+
+            jq -cS '
+              [
+                .spa.objects[] |
+                select(.key != "runtime-config.json") |
+                {
+                  path: .key,
+                  size,
+                  sha256
+                }
+              ] |
+              sort_by(.path)
+            ' "$EVIDENCE_DIR/live-runtime-manifest.json" \
+              >"${runtime_compare_dir}/live-spa.json"
+            cmp --silent \
+              "${runtime_compare_dir}/spa.json" \
+              "${runtime_compare_dir}/live-spa.json" || {
+              echo "::error::Live SPA bytes differ from the exact CI web candidate"
+              exit 1
+            }
+            runtime_config_sha="$(
+              jq -er '
+                [
+                  .spa.objects[] |
+                  select(.key == "runtime-config.json") |
+                  .sha256
+                ] |
+                if length == 1 then
+                  .[0]
+                else
+                  error("expected exactly one runtime-config.json")
+                end
+              ' "$EVIDENCE_DIR/live-runtime-manifest.json"
+            )"
+            test "${runtime_config_sha}" = "$(
+              jq -er '.production.runtimeConfigSha256' \
+                "$EVIDENCE_DIR/deployment-evidence.json"
+            )" || {
+              echo "::error::The live runtime configuration differs from deployment evidence"
+              exit 1
+            }
+          fi
+
+          printf '%s  %s\n' "$actual_lambda" archon-lambdas.tar.gz \
+            >"$EVIDENCE_DIR/lambda-subject.sha256"
+          cat "$EVIDENCE_DIR/lambda-subject.sha256" \
+            >>"$EVIDENCE_DIR/release-subjects.sha256"
+          if [[ -f "$EVIDENCE_DIR/deployment-evidence.json" ]]; then
+            jq -e \
+              --arg container "$actual" \
+              --arg web "$actual_web" \
+              --arg lambda "$actual_lambda" '
+                .immutableArtifacts.containerArchiveSha256 == $container and
+                .immutableArtifacts.webArchiveSha256 == $web and
+                .immutableArtifacts.lambdaArchiveSha256 == $lambda
+              ' "$EVIDENCE_DIR/deployment-evidence.json" >/dev/null || {
+              echo "::error::Scanned subjects differ from the exact production deployment"
+              exit 1
+            }
+          fi
+          printf '%s\n' "$image_id" > "$EVIDENCE_DIR/image-id.txt"
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "evidence_artifact=supply-chain-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Install checksum-pinned Syft and Grype
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS_DIR/syft" "$TOOLS_DIR/grype"
+          syft_archive="$TOOLS_DIR/syft/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          grype_archive="$TOOLS_DIR/grype/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+
+          curl --fail --silent --show-error --location \
+            --output "$syft_archive" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --output "$grype_archive" \
+            "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+
+          echo "$SYFT_ARCHIVE_SHA256  $syft_archive" | sha256sum --check --strict
+          echo "$GRYPE_ARCHIVE_SHA256  $grype_archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$syft_archive" --directory "$TOOLS_DIR/syft" syft
+          tar --extract --gzip --file "$grype_archive" --directory "$TOOLS_DIR/grype" grype
+          chmod 0755 "$TOOLS_DIR/syft/syft" "$TOOLS_DIR/grype/grype"
+          test "$(sha256sum "$TOOLS_DIR/syft/syft" | cut -d ' ' -f 1)" = "$SYFT_BINARY_SHA256"
+          test "$(sha256sum "$TOOLS_DIR/grype/grype" | cut -d ' ' -f 1)" = "$GRYPE_BINARY_SHA256"
+          "$TOOLS_DIR/syft/syft" version > "$EVIDENCE_DIR/syft-version.txt"
+          "$TOOLS_DIR/grype/grype" version > "$EVIDENCE_DIR/grype-version.txt"
+
+      - name: Refresh and seal current vulnerability intelligence
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" db update
+          "$TOOLS_DIR/grype/grype" db check
+          "$TOOLS_DIR/grype/grype" db status > "$EVIDENCE_DIR/grype-db-status.txt"
+          retrieved_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "retrievedAt=${retrieved_at}"
+            echo "maxAllowedBuiltAge=${GRYPE_DB_MAX_ALLOWED_BUILT_AGE}"
+            echo "updateCheckRequired=${GRYPE_DB_REQUIRE_UPDATE_CHECK}"
+            echo "hashValidationRequired=${GRYPE_DB_VALIDATE_BY_HASH_ON_START}"
+            echo "ageValidationRequired=${GRYPE_DB_VALIDATE_AGE}"
+          } > "$EVIDENCE_DIR/grype-db-policy.txt"
+          find "$GRYPE_DB_CACHE_DIR" -type f -print -quit | grep -q . || {
+            echo "::error::Grype did not materialize a vulnerability database"
+            exit 1
+          }
+          (
+            cd "$GRYPE_DB_CACHE_DIR"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) > "$EVIDENCE_DIR/grype-db-files.sha256"
+          test -s "$EVIDENCE_DIR/grype-db-files.sha256"
+
+      - name: Generate SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "docker:$IMAGE_NAME:$SOURCE_SHA" --scope squashed \
+            --output "syft-json=$EVIDENCE_DIR/archon.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon.cyclonedx.json"
+          jq --exit-status '.artifacts | type == "array"' "$EVIDENCE_DIR/archon.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array"' "$EVIDENCE_DIR/archon.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array"' "$EVIDENCE_DIR/archon.cyclonedx.json" >/dev/null
+
+      - name: Generate Lambda SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "dir:$LAMBDA_CONTENT_DIR" \
+            --output "syft-json=$EVIDENCE_DIR/archon-lambda.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon-lambda.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon-lambda.cyclonedx.json"
+          jq --exit-status '.artifacts | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array"' \
+            "$EVIDENCE_DIR/archon-lambda.cyclonedx.json" >/dev/null
+
+      - name: Generate SPA SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "dir:$WEB_SCAN_DIR" \
+            --output "syft-json=$EVIDENCE_DIR/archon-web.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon-web.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon-web.cyclonedx.json"
+          jq --exit-status '
+            (.artifacts | type == "array" and length > 0) and
+            ([.artifacts[].name] as $names |
+              ($names | index("react")) != null and
+              ($names | index("react-dom")) != null)
+          ' \
+            "$EVIDENCE_DIR/archon-web.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array" and length > 0' \
+            "$EVIDENCE_DIR/archon-web.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array" and length > 0' \
+            "$EVIDENCE_DIR/archon-web.cyclonedx.json" >/dev/null
+
+      - name: Produce vulnerability reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" "sbom:$EVIDENCE_DIR/archon.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-report.txt"
+          jq --exit-status '.matches | type == "array"' "$EVIDENCE_DIR/grype-report.json" >/dev/null
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-report.sarif" >/dev/null
+
+      - name: Produce Lambda vulnerability reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-lambda.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-lambda-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-lambda-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-lambda-report.txt"
+          jq --exit-status '.matches | type == "array"' \
+            "$EVIDENCE_DIR/grype-lambda-report.json" >/dev/null
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-lambda-report.sarif" >/dev/null
+
+      - name: Produce SPA vulnerability reports
+        id: reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-web.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-web-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-web-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-web-report.txt"
+          jq --exit-status '.matches | type == "array"' \
+            "$EVIDENCE_DIR/grype-web-report.json" >/dev/null
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-web-report.sarif" >/dev/null
+          echo "sarif_ready=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Bind source, image, SBOM, scanner, and CI provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_db_manifest="${RUNNER_TEMP}/grype-db-files.current.sha256"
+          (
+            cd "$GRYPE_DB_CACHE_DIR"
+            find . -type f -print0 |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum
+          ) >"${current_db_manifest}"
+          cmp --silent \
+            "$EVIDENCE_DIR/grype-db-files.sha256" \
+            "${current_db_manifest}" || {
+              echo "::error::The vulnerability database changed after it was sealed"
+              exit 1
+            }
+
+          archive_sha="$(
+            awk '$2 == "archon-image.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          web_archive_sha="$(
+            awk '$2 == "archon-web.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          lambda_archive_sha="$(
+            awk '$2 == "archon-lambdas.tar.gz" { print $1 }' \
+              "$EVIDENCE_DIR/release-subjects.sha256"
+          )"
+          image_id="$(cat "$EVIDENCE_DIR/image-id.txt")"
+          syft_sha="$(sha256sum "$EVIDENCE_DIR/archon.syft.json" | cut -d ' ' -f 1)"
+          spdx_sha="$(sha256sum "$EVIDENCE_DIR/archon.spdx.json" | cut -d ' ' -f 1)"
+          cyclonedx_sha="$(sha256sum "$EVIDENCE_DIR/archon.cyclonedx.json" | cut -d ' ' -f 1)"
+          web_syft_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.syft.json" |
+              cut -d ' ' -f 1
+          )"
+          web_spdx_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.spdx.json" |
+              cut -d ' ' -f 1
+          )"
+          web_cyclonedx_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.cyclonedx.json" |
+              cut -d ' ' -f 1
+          )"
+          web_package_lock_sha="$(
+            awk '$2 == "package-lock.json" { print $1 }' \
+              "$EVIDENCE_DIR/web-source-metadata.sha256"
+          )"
+          [[ "${web_package_lock_sha}" =~ ^[0-9a-f]{64}$ ]]
+          lambda_syft_sha=""
+          lambda_spdx_sha=""
+          lambda_cyclonedx_sha=""
+          grype_db_manifest_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-files.sha256" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_status_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-status.txt" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_policy_sha="$(
+            sha256sum "$EVIDENCE_DIR/grype-db-policy.txt" |
+              cut -d ' ' -f 1
+          )"
+          grype_db_retrieved_at="$(
+            sed -n 's/^retrievedAt=//p' "$EVIDENCE_DIR/grype-db-policy.txt"
+          )"
+          [[ "${grype_db_retrieved_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          production_binding_digest=""
+          production_deployment_evidence_digest=""
+          production_deployment_run_id=""
+          production_deployment_run_attempt=""
+          production_image_digest=""
+          production_live_runtime_manifest_digest=""
+          production_observer_control_plane_gates_digest=""
+          production_stack_id=""
+          production_observed_at=""
+          if [[ -f "$EVIDENCE_DIR/production-binding.json" ]]; then
+            production_binding_digest="sha256:$(
+              sha256sum "$EVIDENCE_DIR/production-binding.json" |
+                cut -d ' ' -f 1
+            )"
+            production_image_digest="$(
+              jq -er '.release.containerImageDigest' \
+                "$EVIDENCE_DIR/production-binding.json"
+            )"
+            production_stack_id="$(
+              jq -er '.stack.id' "$EVIDENCE_DIR/production-binding.json"
+            )"
+            production_observed_at="$(
+              jq -er '.observedAt' "$EVIDENCE_DIR/production-binding.json"
+            )"
+            production_deployment_run_id="$(
+              jq -er '.deployment.runId' \
+                "$EVIDENCE_DIR/production-binding.json"
+            )"
+            production_deployment_run_attempt="$(
+              jq -er '.deployment.runAttempt' \
+                "$EVIDENCE_DIR/production-binding.json"
+            )"
+            production_deployment_evidence_digest="sha256:$(
+              sha256sum "$EVIDENCE_DIR/deployment-evidence.json" |
+                cut -d ' ' -f 1
+            )"
+            production_live_runtime_manifest_digest="sha256:$(
+              sha256sum "$EVIDENCE_DIR/live-runtime-manifest.json" |
+                cut -d ' ' -f 1
+            )"
+            production_observer_control_plane_gates_digest="sha256:$(
+              sha256sum "$EVIDENCE_DIR/supply-chain-control-plane-gates.json" |
+                cut -d ' ' -f 1
+            )"
+            test "${production_binding_digest}" = \
+              "${PRODUCTION_BINDING_DIGEST}" || {
+                echo "::error::The production binding changed before provenance was sealed"
+                exit 1
+              }
+            test "${production_image_digest}" = \
+              "${PRODUCTION_IMAGE_DIGEST}" || {
+                echo "::error::The expected production image digest changed"
+                exit 1
+              }
+            test "${production_deployment_evidence_digest}" = \
+              "${PRODUCTION_DEPLOYMENT_EVIDENCE_DIGEST}" || {
+                echo "::error::The exact production deployment evidence changed"
+                exit 1
+              }
+            test "${production_live_runtime_manifest_digest}" = \
+              "${PRODUCTION_LIVE_RUNTIME_MANIFEST_DIGEST}" || {
+                echo "::error::The exact production live-runtime manifest changed"
+                exit 1
+              }
+          fi
+          if [[ -f "$EVIDENCE_DIR/archon-lambda.syft.json" ]]; then
+            lambda_syft_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.syft.json" |
+                cut -d ' ' -f 1
+            )"
+            lambda_spdx_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.spdx.json" |
+                cut -d ' ' -f 1
+            )"
+            lambda_cyclonedx_sha="$(
+              sha256sum "$EVIDENCE_DIR/archon-lambda.cyclonedx.json" |
+                cut -d ' ' -f 1
+            )"
+          fi
+          source_run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID"
+
+          jq --null-input \
+            --arg schemaVersion "archon.verified-ci-artifact/v4" \
+            --arg sourceRepository "$SOURCE_REPOSITORY" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceEvent "$SOURCE_EVENT" \
+            --arg sourceRunUrl "$source_run_url" \
+            --arg imageId "$image_id" \
+            --arg archiveDigest "sha256:$archive_sha" \
+            --arg webArchiveDigest "${web_archive_sha:+sha256:$web_archive_sha}" \
+            --arg lambdaArchiveDigest "${lambda_archive_sha:+sha256:$lambda_archive_sha}" \
+            --arg syftDigest "sha256:$syft_sha" \
+            --arg spdxDigest "sha256:$spdx_sha" \
+            --arg cyclonedxDigest "sha256:$cyclonedx_sha" \
+            --arg webSyftDigest "sha256:$web_syft_sha" \
+            --arg webSpdxDigest "sha256:$web_spdx_sha" \
+            --arg webCyclonedxDigest "sha256:$web_cyclonedx_sha" \
+            --arg webPackageLockDigest "sha256:$web_package_lock_sha" \
+            --arg lambdaSyftDigest "${lambda_syft_sha:+sha256:$lambda_syft_sha}" \
+            --arg lambdaSpdxDigest "${lambda_spdx_sha:+sha256:$lambda_spdx_sha}" \
+            --arg lambdaCyclonedxDigest "${lambda_cyclonedx_sha:+sha256:$lambda_cyclonedx_sha}" \
+            --arg syftVersion "$SYFT_VERSION" \
+            --arg grypeVersion "$GRYPE_VERSION" \
+            --arg grypeDbManifestDigest "sha256:$grype_db_manifest_sha" \
+            --arg grypeDbStatusDigest "sha256:$grype_db_status_sha" \
+            --arg grypeDbPolicyDigest "sha256:$grype_db_policy_sha" \
+            --arg grypeDbRetrievedAt "$grype_db_retrieved_at" \
+            --arg grypeDbMaxAge "$GRYPE_DB_MAX_ALLOWED_BUILT_AGE" \
+            --arg productionBindingDigest "$production_binding_digest" \
+            --arg productionDeploymentEvidenceDigest \
+              "$production_deployment_evidence_digest" \
+            --arg productionDeploymentRunId "$production_deployment_run_id" \
+            --arg productionDeploymentRunAttempt \
+              "$production_deployment_run_attempt" \
+            --arg productionImageDigest "$production_image_digest" \
+            --arg productionLiveRuntimeManifestDigest \
+              "$production_live_runtime_manifest_digest" \
+            --arg productionObserverControlPlaneGatesDigest \
+              "$production_observer_control_plane_gates_digest" \
+            --arg productionStackId "$production_stack_id" \
+            --arg productionObservedAt "$production_observed_at" \
+            '{
+              schemaVersion: $schemaVersion,
+              source: {
+                repository: $sourceRepository,
+                commit: $sourceSha,
+                event: $sourceEvent,
+                workflowRun: $sourceRunUrl
+              },
+              subjects: (
+                [
+                  {
+                    name: "archon-image.tar.gz",
+                    archiveDigest: $archiveDigest,
+                    imageId: $imageId
+                  }
+                ] +
+                if $webArchiveDigest == "" then
+                  []
+                else
+                  [
+                    {
+                      name: "archon-web.tar.gz",
+                      archiveDigest: $webArchiveDigest
+                    }
+                  ]
+                end +
+                if $lambdaArchiveDigest == "" then
+                  []
+                else
+                  [
+                    {
+                      name: "archon-lambdas.tar.gz",
+                      archiveDigest: $lambdaArchiveDigest
+                    }
+                  ]
+                end
+              ),
+              sbom: {
+                syft: $syftDigest,
+                spdx: $spdxDigest,
+                cyclonedx: $cyclonedxDigest,
+                web: {
+                  syft: $webSyftDigest,
+                  spdx: $webSpdxDigest,
+                  cyclonedx: $webCyclonedxDigest,
+                  dependencyMetadata: {
+                    sourceCommit: $sourceSha,
+                    packageLock: $webPackageLockDigest
+                  }
+                },
+                lambda: (
+                  if $lambdaSyftDigest == "" then
+                    null
+                  else
+                    {
+                      syft: $lambdaSyftDigest,
+                      spdx: $lambdaSpdxDigest,
+                      cyclonedx: $lambdaCyclonedxDigest
+                    }
+                  end
+                )
+              },
+              scanners: {
+                syft: $syftVersion,
+                grype: {
+                  version: $grypeVersion,
+                  database: {
+                    retrievedAt: $grypeDbRetrievedAt,
+                    filesManifestDigest: $grypeDbManifestDigest,
+                    statusDigest: $grypeDbStatusDigest,
+                    policyDigest: $grypeDbPolicyDigest,
+                    maxAllowedBuiltAge: $grypeDbMaxAge,
+                    updateCheckRequired: true,
+                    validateByHashOnStart: true,
+                    validateAge: true
+                  }
+                }
+              },
+              productionDeployment: (
+                if $productionBindingDigest == "" then
+                  null
+                else
+                  {
+                    stackName: "Archon-production",
+                    stackId: $productionStackId,
+                    releaseSha: $sourceSha,
+                    containerImageDigest: $productionImageDigest,
+                    liveRuntimeManifestDigest:
+                      $productionLiveRuntimeManifestDigest,
+                    observerControlPlaneGatesDigest:
+                      $productionObserverControlPlaneGatesDigest,
+                    bindingDigest: $productionBindingDigest,
+                    deploymentEvidenceDigest:
+                      $productionDeploymentEvidenceDigest,
+                    deploymentWorkflowRunId:
+                      $productionDeploymentRunId,
+                    deploymentWorkflowRunAttempt:
+                      $productionDeploymentRunAttempt,
+                    observedAt: $productionObservedAt
+                  }
+                end
+              )
+            }' > "$EVIDENCE_DIR/provenance.json"
+
+          (
+            cd "$EVIDENCE_DIR"
+            evidence_files=(
+              archon.cyclonedx.json
+              archon.spdx.json
+              archon.syft.json
+              archon-web.cyclonedx.json
+              archon-web.spdx.json
+              archon-web.syft.json
+              grype-db-files.sha256
+              grype-db-policy.txt
+              grype-db-status.txt
+              grype-report.json
+              grype-report.sarif
+              grype-report.txt
+              grype-web-report.json
+              grype-web-report.sarif
+              grype-web-report.txt
+              grype-version.txt
+              image-id.txt
+              provenance.json
+              container-subject.sha256
+              release-subjects.sha256
+              syft-version.txt
+              web-subject.sha256
+              web-source-metadata.sha256
+            )
+            if [[ -f archon-lambda.syft.json ]]; then
+              evidence_files+=(
+                archon-lambda.cyclonedx.json
+                archon-lambda.spdx.json
+                archon-lambda.syft.json
+                grype-lambda-report.json
+                grype-lambda-report.sarif
+                grype-lambda-report.txt
+                lambda-subject.sha256
+              )
+            fi
+            if [[ -f production-binding.json ]]; then
+              evidence_files+=(
+                deployment-control-plane-gates.json
+                deployment-evidence.json
+                live-runtime-manifest.json
+                production-binding.json
+                production-runtime-config.json
+                supply-chain-control-plane-gates.json
+              )
+            fi
+            sha256sum "${evidence_files[@]}" > SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Retain CI-only supply-chain evidence
+        id: evidence_upload
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.subject.outputs.evidence_artifact || format('supply-chain-failed-{0}-{1}', github.run_id, github.run_attempt) }}
+          path: ${{ runner.temp }}/supply-chain-evidence/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+      - name: Fail on high or critical production-image vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" "sbom:$EVIDENCE_DIR/archon.syft.json" \
+            --by-cve --fail-on high --output table
+
+      - name: Fail on high or critical Lambda vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-lambda.syft.json" \
+            --by-cve --fail-on high --output table
+
+      - name: Fail on high or critical SPA vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-web.syft.json" \
+            --by-cve --fail-on high --output table
+
+  revalidate-production:
+    name: Revalidate the deployed production release
+    needs:
+      - resolve-production
+      - scan
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.resolve-production.result == 'success' &&
+      needs.scan.result != 'cancelled' &&
+      needs.scan.outputs.source_sha != '' &&
+      needs.scan.outputs.production_binding_digest != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production-observer
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      artifact: ${{ steps.revalidation_upload.outputs.artifact-id }}
+      artifact_name: ${{ steps.revalidate.outputs.artifact_name }}
+      binding_digest: ${{ steps.revalidate.outputs.binding_digest }}
+      revalidation_digest: ${{ steps.revalidate.outputs.revalidation_digest }}
+    env:
+      BASH_ENV: /dev/null
+      EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      DEPLOY_REGION: ${{ vars.AWS_REGION }}
+      READ_ROLE_ARN: ${{ vars.AWS_RUNTIME_READ_ROLE_ARN }}
+      STACK_NAME: Archon-production
+      EXPECTED_BINDING: ${{ needs.resolve-production.outputs.binding }}
+      EXPECTED_BINDING_DIGEST: ${{ needs.resolve-production.outputs.binding_digest }}
+      EXPECTED_CI_RUN_ID: ${{ needs.resolve-production.outputs.ci_run_id }}
+      EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST: ${{ needs.resolve-production.outputs.deployment_artifact_digest }}
+      EXPECTED_DEPLOYMENT_ARTIFACT_ID: ${{ needs.resolve-production.outputs.deployment_artifact_id }}
+      EXPECTED_DEPLOYMENT_EVIDENCE: ${{ needs.resolve-production.outputs.deployment_evidence }}
+      EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST: ${{ needs.resolve-production.outputs.deployment_evidence_digest }}
+      EXPECTED_DEPLOYMENT_RUN_ATTEMPT: ${{ needs.resolve-production.outputs.deployment_run_attempt }}
+      EXPECTED_DEPLOYMENT_RUN_ID: ${{ needs.resolve-production.outputs.deployment_run_id }}
+      EXPECTED_IMAGE_DIGEST: ${{ needs.resolve-production.outputs.image_digest }}
+      EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST: ${{ needs.resolve-production.outputs.live_runtime_manifest_digest }}
+      EXPECTED_RELEASE_SHA: ${{ needs.resolve-production.outputs.release_sha }}
+    steps:
+      - name: Validate observer configuration and scan binding
+        shell: bash
+        env:
+          SCANNED_BINDING_DIGEST: ${{ needs.scan.outputs.production_binding_digest }}
+          SCANNED_SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${DEPLOY_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "${READ_ROLE_ARN}" =~ ^arn:aws[a-z-]*:iam::${EXPECTED_ACCOUNT_ID}:role/[^[:space:]]+$ ]]
+          [[ "${EXPECTED_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_BINDING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_CI_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${EXPECTED_RELEASE_SHA}" = "${SCANNED_SOURCE_SHA}"
+          test "${EXPECTED_BINDING_DIGEST}" = \
+            "${SCANNED_BINDING_DIGEST}"
+
+      - name: Check out the exact observer control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate sealed observer gates before AWS trust
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          pretrust_dir="${RUNNER_TEMP}/supply-chain-revalidation-pretrust"
+          mkdir -p "${pretrust_dir}"
+          binding="${pretrust_dir}/production-binding.json"
+          printf '%s' "${EXPECTED_BINDING}" |
+            base64 --decode >"${binding}"
+          jq -cS . "${binding}" >"${binding}.canonical"
+          mv "${binding}.canonical" "${binding}"
+          test "sha256:$(
+            sha256sum "${binding}" | cut -d ' ' -f 1
+          )" = "${EXPECTED_BINDING_DIGEST}"
+          sealed_gates="${pretrust_dir}/sealed-observer-gates.json"
+          jq -cS '.observerControlPlane' "${binding}" >"${sealed_gates}"
+          current_gates="${pretrust_dir}/control-plane-security-gates.json"
+          OUTPUT_PATH="${current_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          jq -en \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile sealed "${sealed_gates}" \
+            --slurpfile current "${current_gates}" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              $sealed[0].schemaVersion ==
+                "archon.supply-chain-control-plane-gates/v1" and
+              $sealed[0].repository == $repository and
+              $sealed[0].branch == "master" and
+              $sealed[0].commit == $sha and
+              $current[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $current[0].branch == "master" and
+              $current[0].sourceSha == $sha and
+              ($sealed[0].workflows | receipt) ==
+                ($current[0].workflows | receipt)
+            ' >/dev/null || {
+            echo "::error::The sealed observer control plane is no longer current"
+            exit 1
+          }
+
+      - name: Configure read-only production observer through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_RUNTIME_READ_ROLE_ARN }}
+          role-session-name: archon-${{ github.run_id }}-supply-revalidate
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Reject production deployment TOCTOU changes
+        id: revalidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence_dir="${RUNNER_TEMP}/production-revalidation"
+          mkdir -p "${evidence_dir}"
+          deployment_archive="${RUNNER_TEMP}/revalidate-deployment-evidence.zip"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXPECTED_DEPLOYMENT_ARTIFACT_ID}/zip" \
+            >"${deployment_archive}"
+          test "sha256:$(
+            sha256sum "${deployment_archive}" | cut -d ' ' -f 1
+          )" = "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" || {
+            echo "::error::The deployment evidence artifact changed before revalidation"
+            exit 1
+          }
+          mapfile -t deployment_entries < <(unzip -Z1 "${deployment_archive}")
+          test "${#deployment_entries[@]}" -ge 3
+          test "${#deployment_entries[@]}" -le 64
+          for entry in "${deployment_entries[@]}"; do
+            if [[ "${entry}" == /* || "${entry}" == *\\* ||
+              "${entry}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe deployment evidence path: ${entry}"
+              exit 1
+            fi
+          done
+          for required_entry in \
+            control-plane-security-gates.json \
+            deployment-evidence.json \
+            live-runtime-manifest.json \
+            production-runtime-config.json; do
+            test "$(
+              printf '%s\n' "${deployment_entries[@]}" |
+                grep -Fxc "${required_entry}"
+            )" = "1"
+          done
+          if zipinfo -l "${deployment_archive}" |
+            awk '$1 ~ /^l[rwxStTs-]{9}$/ { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::Deployment evidence may not contain symlinks"
+            exit 1
+          fi
+          unzip -p "${deployment_archive}" live-runtime-manifest.json \
+            >"${evidence_dir}/live-runtime-manifest.json"
+          unzip -p "${deployment_archive}" deployment-evidence.json \
+            >"${evidence_dir}/deployment-evidence.from-artifact.json"
+          unzip -p "${deployment_archive}" production-runtime-config.json \
+            >"${evidence_dir}/production-runtime-config.json"
+          unzip -p \
+            "${deployment_archive}" \
+            control-plane-security-gates.json \
+            >"${evidence_dir}/deployment-control-plane-gates.json"
+          jq -cS . "${evidence_dir}/live-runtime-manifest.json" \
+            >"${evidence_dir}/live-runtime-manifest.canonical.json"
+          cmp --silent \
+            "${evidence_dir}/live-runtime-manifest.json" \
+            "${evidence_dir}/live-runtime-manifest.canonical.json" || {
+            echo "::error::The sealed live-runtime manifest is not canonical"
+            exit 1
+          }
+          rm "${evidence_dir}/live-runtime-manifest.canonical.json"
+          jq -cS . "${evidence_dir}/deployment-control-plane-gates.json" \
+            >"${evidence_dir}/deployment-control-plane-gates.canonical.json"
+          cmp --silent \
+            "${evidence_dir}/deployment-control-plane-gates.json" \
+            "${evidence_dir}/deployment-control-plane-gates.canonical.json" || {
+            echo "::error::The deployment control-plane receipt is not canonical"
+            exit 1
+          }
+          rm "${evidence_dir}/deployment-control-plane-gates.canonical.json"
+          sealed_live_runtime_digest="sha256:$(
+            sha256sum "${evidence_dir}/live-runtime-manifest.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${sealed_live_runtime_digest}" = \
+            "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" || {
+            echo "::error::The sealed live-runtime manifest changed before revalidation"
+            exit 1
+          }
+          printf '%s' "${EXPECTED_BINDING}" |
+            base64 --decode >"${evidence_dir}/production-binding.json"
+          jq -cS '.' "${evidence_dir}/production-binding.json" \
+            >"${evidence_dir}/production-binding.canonical.json"
+          mv \
+            "${evidence_dir}/production-binding.canonical.json" \
+            "${evidence_dir}/production-binding.json"
+          binding_digest="sha256:$(
+            sha256sum "${evidence_dir}/production-binding.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${binding_digest}" = "${EXPECTED_BINDING_DIGEST}" || {
+            echo "::error::The original production binding failed digest verification"
+            exit 1
+          }
+          jq -cS '.observerControlPlane' \
+            "${evidence_dir}/production-binding.json" \
+            >"${evidence_dir}/supply-chain-control-plane-gates.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" '
+              .schemaVersion ==
+                "archon.supply-chain-control-plane-gates/v1" and
+              .repository == $repository and
+              .branch == "master" and
+              .commit == $sha and
+              (.workflows | length == 3)
+            ' "${evidence_dir}/supply-chain-control-plane-gates.json" \
+            >/dev/null || {
+            echo "::error::The observer control-plane receipts are invalid"
+            exit 1
+          }
+          current_master_ref="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master"
+          )"
+          test "$(
+            jq -er '.object.sha' <<<"${current_master_ref}"
+          )" = "${GITHUB_SHA}" || {
+            echo "::error::The observer control-plane branch changed during the rescan"
+            exit 1
+          }
+          while IFS= read -r encoded_gate; do
+            gate="$(base64 --decode <<<"${encoded_gate}")"
+            gate_id="$(jq -er '.runId | tostring' <<<"${gate}")"
+            gate_attempt="$(jq -er '.runAttempt | tostring' <<<"${gate}")"
+            gate_workflow_id="$(jq -er '.workflowId | tostring' <<<"${gate}")"
+            gate_path="$(jq -er '.path' <<<"${gate}")"
+            current_gate="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${gate_id}/attempts/${gate_attempt}"
+            )"
+            jq -e \
+              --argjson runId "${gate_id}" \
+              --argjson runAttempt "${gate_attempt}" \
+              --arg path "${gate_path}" \
+              --arg sha "${GITHUB_SHA}" '
+                .id == $runId and
+                .run_attempt == $runAttempt and
+                .path == $path and
+                .head_branch == "master" and
+                .head_sha == $sha and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              ' <<<"${current_gate}" >/dev/null || {
+              echo "::error::A sealed observer control-plane gate changed"
+              exit 1
+            }
+            latest_gate_runs="$(
+              gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${gate_workflow_id}/runs" \
+                -f "head_sha=${GITHUB_SHA}" \
+                -f branch=master \
+                -f event=push \
+                -f per_page=100
+            )"
+            jq -e \
+              --argjson runId "${gate_id}" \
+              --argjson runAttempt "${gate_attempt}" \
+              --arg path "${gate_path}" \
+              --arg sha "${GITHUB_SHA}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_branch == "master" and
+                    .head_sha == $sha and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                .id == $runId and
+                .run_attempt == $runAttempt and
+                .status == "completed" and
+                .conclusion == "success"
+              ' <<<"${latest_gate_runs}" >/dev/null || {
+              echo "::error::A newer observer control-plane gate invalidated the rescan"
+              exit 1
+            }
+          done < <(
+            jq -r '.workflows[] | @base64' \
+              "${evidence_dir}/supply-chain-control-plane-gates.json"
+          )
+          printf '%s' "${EXPECTED_DEPLOYMENT_EVIDENCE}" |
+            base64 --decode >"${evidence_dir}/deployment-evidence.json"
+          jq -cS . "${evidence_dir}/deployment-evidence.json" \
+            >"${evidence_dir}/deployment-evidence.canonical.json"
+          mv \
+            "${evidence_dir}/deployment-evidence.canonical.json" \
+            "${evidence_dir}/deployment-evidence.json"
+          deployment_evidence_digest="sha256:$(
+            sha256sum "${evidence_dir}/deployment-evidence.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${deployment_evidence_digest}" = \
+            "${EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST}" || {
+            echo "::error::The exact deployment evidence changed before revalidation"
+            exit 1
+          }
+          jq -cS . "${evidence_dir}/deployment-evidence.from-artifact.json" \
+            >"${evidence_dir}/deployment-evidence.from-artifact.canonical.json"
+          mv \
+            "${evidence_dir}/deployment-evidence.from-artifact.canonical.json" \
+            "${evidence_dir}/deployment-evidence.from-artifact.json"
+          cmp --silent \
+            "${evidence_dir}/deployment-evidence.json" \
+            "${evidence_dir}/deployment-evidence.from-artifact.json" || {
+            echo "::error::The re-downloaded deployment evidence changed"
+            exit 1
+          }
+          rm "${evidence_dir}/deployment-evidence.from-artifact.json"
+          deployment_control_plane_digest="sha256:$(
+            sha256sum \
+              "${evidence_dir}/deployment-control-plane-gates.json" |
+              cut -d ' ' -f 1
+          )"
+          test "${deployment_control_plane_digest}" = "sha256:$(
+            jq -er \
+              '.pipelineSecurity.deploymentControlPlaneGatesSha256' \
+              "${evidence_dir}/deployment-evidence.json"
+          )" || {
+            echo "::error::The deployment control-plane receipt changed during the rescan"
+            exit 1
+          }
+          jq -e \
+            --arg digest "${deployment_control_plane_digest}" \
+            --slurpfile gates \
+              "${evidence_dir}/deployment-control-plane-gates.json" '
+              .deployment.controlPlaneGatesDigest == $digest and
+              $gates[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $gates[0].sourceSha == .deployment.controlPlaneSha and
+              $gates[0].branch == "master" and
+              ($gates[0].workflows | length) == 3 and
+              all(
+                $gates[0].workflows[];
+                .conclusion == "success"
+              )
+            ' "${evidence_dir}/production-binding.json" >/dev/null || {
+            echo "::error::The deployment binding lost its control-plane receipt"
+            exit 1
+          }
+          test "$(sha256sum \
+            "${evidence_dir}/production-runtime-config.json" |
+            cut -d ' ' -f 1)" = "$(
+            jq -er '.production.runtimeConfigSha256' \
+              "${evidence_dir}/deployment-evidence.json"
+          )" || {
+            echo "::error::The production runtime configuration changed"
+            exit 1
+          }
+
+          actual_account="$(
+            aws sts get-caller-identity --query Account --output text
+          )"
+          test "${actual_account}" = "${EXPECTED_ACCOUNT_ID}" || {
+            echo "::error::The observer role resolved an unexpected AWS account"
+            exit 1
+          }
+          stack_json="$(
+            aws cloudformation describe-stacks \
+              --region "${DEPLOY_REGION}" \
+              --stack-name "${STACK_NAME}" \
+              --output json
+          )"
+          jq -e \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg stack "${STACK_NAME}" '
+              (.Stacks | type == "array" and length == 1) and
+              (.Stacks[0].StackName == $stack) and
+              (.Stacks[0].StackId |
+                test("^arn:aws[^:]*:cloudformation:" + $region + ":" +
+                  $account + ":stack/" + $stack + "/[0-9a-f-]+$")) and
+              (.Stacks[0].StackStatus == "CREATE_COMPLETE" or
+                .Stacks[0].StackStatus == "UPDATE_COMPLETE") and
+              (.Stacks[0].Outputs | type == "array")
+            ' <<<"${stack_json}" >/dev/null || {
+              echo "::error::Archon-production is no longer in the expected stable schema"
+              exit 1
+            }
+          output_value() {
+            jq -er --arg key "$1" '
+              [
+                .Stacks[0].Outputs[] |
+                select(.OutputKey == $key) |
+                .OutputValue
+              ] |
+              if length == 1 then
+                .[0]
+              else
+                error("expected exactly one stack output " + $key)
+              end
+            ' <<<"${stack_json}"
+          }
+          release_sha="$(output_value ArchonReleaseSha)"
+          image_digest="$(output_value ArchonContainerImageDigest)"
+          web_archive_sha="$(output_value ArchonSpaArtifactSha256)"
+          container_archive_sha="$(
+            output_value ArchonContainerArchiveSha256
+          )"
+          lambda_archive_sha="$(output_value ArchonLambdaArchiveSha256)"
+          deployment_run_id="$(
+            output_value ArchonDeploymentWorkflowRunId
+          )"
+          deployment_run_attempt="$(
+            output_value ArchonDeploymentWorkflowRunAttempt
+          )"
+          ci_run_id="$(output_value ArchonCiRunId)"
+          stack_id="$(jq -er '.Stacks[0].StackId' <<<"${stack_json}")"
+          stack_status="$(jq -er '.Stacks[0].StackStatus' <<<"${stack_json}")"
+          stack_last_updated_at="$(
+            jq -er '.Stacks[0].LastUpdatedTime // .Stacks[0].CreationTime' \
+              <<<"${stack_json}"
+          )"
+          original_stack_id="$(
+            jq -er '.stack.id' "${evidence_dir}/production-binding.json"
+          )"
+          original_stack_status="$(
+            jq -er '.stack.status' "${evidence_dir}/production-binding.json"
+          )"
+          original_stack_last_updated_at="$(
+            jq -er '.stack.lastUpdatedAt' \
+              "${evidence_dir}/production-binding.json"
+          )"
+          if [[ "${release_sha}" != "${EXPECTED_RELEASE_SHA}" ||
+            "${image_digest}" != "${EXPECTED_IMAGE_DIGEST}" ||
+            "${container_archive_sha}" != "$(
+              jq -er '.release.containerArchiveSha256' \
+                "${evidence_dir}/production-binding.json"
+            )" ||
+            "${web_archive_sha}" != "$(
+              jq -er '.release.webArchiveSha256' \
+                "${evidence_dir}/production-binding.json"
+            )" ||
+            "${lambda_archive_sha}" != "$(
+              jq -er '.release.lambdaArchiveSha256' \
+                "${evidence_dir}/production-binding.json"
+            )" ||
+            "${deployment_run_id}" != "${EXPECTED_DEPLOYMENT_RUN_ID}" ||
+            "${deployment_run_attempt}" != "${EXPECTED_DEPLOYMENT_RUN_ATTEMPT}" ||
+            "${ci_run_id}" != "${EXPECTED_CI_RUN_ID}" ||
+            "${stack_id}" != "${original_stack_id}" ||
+            "${stack_status}" != "${original_stack_status}" ||
+            "${stack_last_updated_at}" != "${original_stack_last_updated_at}"
+          ]]; then
+            echo "::error::Production changed while its deployed release was being scanned"
+            exit 1
+          fi
+
+          expected_control_plane_sha="$(
+            jq -er '.deployment.controlPlaneSha' \
+              "${evidence_dir}/production-binding.json"
+          )"
+          deployment_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${deployment_run_id}/attempts/${deployment_run_attempt}"
+          )"
+          jq -e \
+            --argjson runId "${deployment_run_id}" \
+            --argjson runAttempt "${deployment_run_attempt}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${expected_control_plane_sha}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .name == "Deploy immutable AWS release" and
+              .path == ".github/workflows/deploy.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .head_sha == $sha and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success"
+            ' <<<"${deployment_run}" >/dev/null || {
+            echo "::error::The exact production deployment run is no longer valid"
+            exit 1
+          }
+          expected_deployment_artifact_name="$(
+            jq -er '.deployment.artifactName' \
+              "${evidence_dir}/production-binding.json"
+          )"
+          deployment_artifacts="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${deployment_run_id}/artifacts?per_page=100"
+          )"
+          current_deployment_artifact_digest="$(
+            jq -srce \
+              --arg name "${expected_deployment_artifact_name}" \
+              --argjson artifactId "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" \
+              --argjson runId "${deployment_run_id}" '
+                [
+                  .[] |
+                  .artifacts[] |
+                  select(
+                    .expired == false and
+                    .id == $artifactId and
+                    .name == $name and
+                    .workflow_run.id == $runId and
+                    (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  )
+                ] |
+                if length == 1 then
+                  .[0].digest
+                else
+                  error(
+                    "expected one retained production deployment artifact"
+                  )
+                end
+              ' <<<"${deployment_artifacts}"
+          )"
+          test "${current_deployment_artifact_digest}" = \
+            "${EXPECTED_DEPLOYMENT_ARTIFACT_DIGEST}" || {
+            echo "::error::Production deployment evidence artifact metadata changed"
+            exit 1
+          }
+          ci_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}"
+          )"
+          jq -e \
+            --argjson runId "${ci_run_id}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${release_sha}" '
+              .id == $runId and
+              .name == "CI" and
+              .path == ".github/workflows/ci.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .head_sha == $release and
+              .event == "push" and
+              .status == "completed" and
+              .conclusion == "success"
+            ' <<<"${ci_run}" >/dev/null || {
+            echo "::error::The exact CI source run is no longer valid"
+            exit 1
+          }
+          ci_artifacts="$(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}/artifacts?per_page=100"
+          )"
+          for subject in container web lambdas; do
+            case "${subject}" in
+              container)
+                evidence_field="containerArtifactSha256"
+                ;;
+              web)
+                evidence_field="webArtifactSha256"
+                ;;
+              lambdas)
+                evidence_field="lambdaArtifactSha256"
+                ;;
+            esac
+            expected_name="${subject}-${release_sha}"
+            expected_artifact_digest="sha256:$(
+              jq -er --arg field "${evidence_field}" \
+                '.immutableArtifacts[$field]' \
+                "${evidence_dir}/deployment-evidence.json"
+            )"
+            current_artifact_digest="$(
+              jq -srce \
+                --arg name "${expected_name}" \
+                --argjson runId "${ci_run_id}" '
+                  [
+                    .[] |
+                    .artifacts[] |
+                    select(
+                      .expired == false and
+                      .name == $name and
+                      .workflow_run.id == $runId and
+                      (.digest | test("^sha256:[0-9a-f]{64}$"))
+                    )
+                  ] |
+                  if length == 1 then
+                    .[0].digest
+                  else
+                    error("expected one retained CI artifact named " + $name)
+                  end
+                ' <<<"${ci_artifacts}"
+            )"
+            test "${current_artifact_digest}" = \
+              "${expected_artifact_digest}" || {
+              echo "::error::${expected_name} changed during the production rescan"
+              exit 1
+            }
+          done
+
+          revalidation_observer_dir="$(
+            printf '%s' "${RUNNER_TEMP}/production-runtime-revalidation"
+          )"
+          mkdir -p "${revalidation_observer_dir}"
+          current_live_runtime_path="$(
+            printf '%s' \
+              "${revalidation_observer_dir}/live-runtime-manifest.json"
+          )"
+          AWS_REGION="${DEPLOY_REGION}" \
+          EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+          STACK_NAME="${STACK_NAME}" \
+          OUTPUT_PATH="${current_live_runtime_path}" \
+          VERIFY_LOCAL_CANDIDATES=false \
+          RELEASE_SHA="${release_sha}" \
+          EXPECTED_IMAGE_DIGEST="${image_digest}" \
+          EXPECTED_CONTAINER_ARCHIVE_SHA256="${container_archive_sha}" \
+          EXPECTED_LAMBDA_ARCHIVE_SHA256="${lambda_archive_sha}" \
+          EXPECTED_WEB_ARCHIVE_SHA256="${web_archive_sha}" \
+            bash scripts/observe-aws-live-runtime.sh
+          test -f "${current_live_runtime_path}"
+          test ! -L "${current_live_runtime_path}"
+          jq -cS . "${current_live_runtime_path}" \
+            >"${current_live_runtime_path}.canonical"
+          cmp --silent \
+            "${current_live_runtime_path}" \
+            "${current_live_runtime_path}.canonical" || {
+            echo "::error::The runtime revalidation observation is not canonical"
+            exit 1
+          }
+          rm "${current_live_runtime_path}.canonical"
+          current_live_runtime_digest="sha256:$(
+            sha256sum "${current_live_runtime_path}" | cut -d ' ' -f 1
+          )"
+          test "${current_live_runtime_digest}" = \
+            "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}"
+          cmp --silent \
+            "${evidence_dir}/live-runtime-manifest.json" \
+            "${current_live_runtime_path}" || {
+            echo "::error::Production runtime bytes changed during the rescan"
+            exit 1
+          }
+          cp \
+            "${current_live_runtime_path}" \
+            "${evidence_dir}/revalidated-live-runtime-manifest.json"
+          runtime_config_digest="sha256:$(
+            sha256sum "${evidence_dir}/production-runtime-config.json" |
+              cut -d ' ' -f 1
+          )"
+          observer_gates_digest="sha256:$(
+            sha256sum \
+              "${evidence_dir}/supply-chain-control-plane-gates.json" |
+              cut -d ' ' -f 1
+          )"
+
+          revalidated_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          jq -cS --null-input \
+            --arg schemaVersion "archon.production-deployment-revalidation/v1" \
+            --arg bindingDigest "${binding_digest}" \
+            --arg accountId "${EXPECTED_ACCOUNT_ID}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg stackName "${STACK_NAME}" \
+            --arg stackId "${stack_id}" \
+            --arg stackStatus "${stack_status}" \
+            --arg stackLastUpdatedAt "${stack_last_updated_at}" \
+            --arg releaseSha "${release_sha}" \
+            --arg imageDigest "${image_digest}" \
+            --arg containerArchiveSha256 "${container_archive_sha}" \
+            --arg webArchiveSha256 "${web_archive_sha}" \
+            --arg lambdaArchiveSha256 "${lambda_archive_sha}" \
+            --arg deploymentRunId "${deployment_run_id}" \
+            --arg deploymentRunAttempt "${deployment_run_attempt}" \
+            --arg deploymentArtifactId "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg deploymentArtifactName \
+              "${expected_deployment_artifact_name}" \
+            --arg deploymentArtifactDigest \
+              "${current_deployment_artifact_digest}" \
+            --arg deploymentEvidenceDigest \
+              "${deployment_evidence_digest}" \
+            --arg deploymentControlPlaneSha \
+              "${expected_control_plane_sha}" \
+            --arg deploymentControlPlaneGatesDigest \
+              "${deployment_control_plane_digest}" \
+            --arg ciRunId "${ci_run_id}" \
+            --arg sealedLiveRuntimeManifestDigest \
+              "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" \
+            --arg revalidatedLiveRuntimeManifestDigest \
+              "${current_live_runtime_digest}" \
+            --arg runtimeConfigDigest "${runtime_config_digest}" \
+            --arg observerControlPlaneGatesDigest \
+              "${observer_gates_digest}" \
+            --arg revalidatedAt "${revalidated_at}" \
+            --arg workflowRun \
+              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '
+              {
+                schemaVersion: $schemaVersion,
+                originalBindingDigest: $bindingDigest,
+                aws: {
+                  accountId: $accountId,
+                  region: $region
+                },
+                stack: {
+                  name: $stackName,
+                  id: $stackId,
+                  status: $stackStatus,
+                  lastUpdatedAt: $stackLastUpdatedAt
+                },
+                release: {
+                  sha: $releaseSha,
+                  containerImageDigest: $imageDigest,
+                  containerArchiveSha256: $containerArchiveSha256,
+                  webArchiveSha256: $webArchiveSha256,
+                  lambdaArchiveSha256: $lambdaArchiveSha256
+                },
+                deployment: {
+                  runId: $deploymentRunId,
+                  runAttempt: $deploymentRunAttempt,
+                  controlPlaneSha: $deploymentControlPlaneSha,
+                  artifactId: $deploymentArtifactId,
+                  artifactName: $deploymentArtifactName,
+                  artifactDigest: $deploymentArtifactDigest,
+                  evidenceDigest: $deploymentEvidenceDigest,
+                  controlPlaneGatesDigest:
+                    $deploymentControlPlaneGatesDigest
+                },
+                ci: {
+                  runId: $ciRunId,
+                  artifactsRevalidated: true
+                },
+                runtime: {
+                  sealedManifestDigest:
+                    $sealedLiveRuntimeManifestDigest,
+                  revalidatedManifestDigest:
+                    $revalidatedLiveRuntimeManifestDigest,
+                  runtimeConfigDigest: $runtimeConfigDigest,
+                  observerControlPlaneGatesDigest:
+                    $observerControlPlaneGatesDigest,
+                  exactlyMatches: true
+                },
+                unchanged: true,
+                revalidatedAt: $revalidatedAt,
+                workflowRun: $workflowRun
+              }
+            ' >"${evidence_dir}/production-revalidation.json"
+          revalidation_digest="sha256:$(
+            sha256sum "${evidence_dir}/production-revalidation.json" |
+              cut -d ' ' -f 1
+          )"
+          (
+            cd "${evidence_dir}"
+            sha256sum \
+              deployment-control-plane-gates.json \
+              deployment-evidence.json \
+              live-runtime-manifest.json \
+              production-binding.json \
+              production-revalidation.json \
+              production-runtime-config.json \
+              revalidated-live-runtime-manifest.json \
+              supply-chain-control-plane-gates.json \
+              >SHA256SUMS.production
+            sha256sum --check --strict SHA256SUMS.production
+          )
+          artifact_name="production-revalidation-${EXPECTED_RELEASE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "artifact_name=${artifact_name}"
+            echo "binding_digest=${binding_digest}"
+            echo "revalidation_digest=${revalidation_digest}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Clear observer credentials before artifact handling
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_SESSION_TOKEN \
+            AWS_SECURITY_TOKEN \
+            AWS_SESSION_EXPIRATION
+          {
+            echo "AWS_ACCESS_KEY_ID="
+            echo "AWS_SECRET_ACCESS_KEY="
+            echo "AWS_SESSION_TOKEN="
+            echo "AWS_SECURITY_TOKEN="
+            echo "AWS_SESSION_EXPIRATION="
+          } >>"${GITHUB_ENV}"
+
+      - name: Retain production binding and revalidation evidence
+        id: revalidation_upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.revalidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/production-revalidation/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+  publish-sarif:
+    name: Publish trusted vulnerability results
+    needs:
+      - scan
+      - revalidate-production
+    if: >-
+      always() &&
+      needs.scan.outputs.evidence_artifact != '' &&
+      needs.scan.outputs.evidence_artifact_id != '' &&
+      needs.scan.outputs.sarif_ready == 'true' &&
+      (
+        github.event_name != 'schedule' ||
+        needs.revalidate-production.result == 'success'
+      ) &&
+      (
+        github.event_name != 'workflow_run' ||
+        (
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download scan evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.scan.outputs.evidence_artifact }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Upload Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-report.sarif
+          category: grype-production-image
+
+      - name: Upload Lambda Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-lambda-report.sarif
+          category: grype-production-lambdas
+
+      - name: Upload SPA Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-web-report.sarif
+          category: grype-production-spa
+
+  attest:
+    name: Sign provenance and SBOM attestations
+    needs:
+      - resolve-production
+      - scan
+      - revalidate-production
+    if: >-
+      always() &&
+      needs.scan.result == 'success' &&
+      (
+        (
+          github.event_name == 'schedule' &&
+          needs.revalidate-production.result == 'success'
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/master'
+        ) ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'master' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download verified evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.scan.outputs.evidence_artifact }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Verify the evidence envelope
+        shell: bash
+        working-directory: ${{ runner.temp }}/evidence
+        env:
+          SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS
+          test "$(jq --raw-output '.source.commit' provenance.json)" = "${SOURCE_SHA}"
+
+      - name: Download production revalidation evidence
+        if: github.event_name == 'schedule'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.revalidate-production.outputs.artifact_name }}
+          path: ${{ runner.temp }}/production-revalidation
+
+      - name: Verify production revalidation evidence
+        if: github.event_name == 'schedule'
+        shell: bash
+        working-directory: ${{ runner.temp }}/production-revalidation
+        env:
+          EXPECTED_BINDING_DIGEST: ${{ needs.revalidate-production.outputs.binding_digest }}
+          EXPECTED_DEPLOYMENT_ARTIFACT_ID: ${{ needs.resolve-production.outputs.deployment_artifact_id }}
+          EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST: ${{ needs.resolve-production.outputs.deployment_evidence_digest }}
+          EXPECTED_DEPLOYMENT_RUN_ATTEMPT: ${{ needs.resolve-production.outputs.deployment_run_attempt }}
+          EXPECTED_DEPLOYMENT_RUN_ID: ${{ needs.resolve-production.outputs.deployment_run_id }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.resolve-production.outputs.image_digest }}
+          EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST: ${{ needs.resolve-production.outputs.live_runtime_manifest_digest }}
+          EXPECTED_RELEASE_SHA: ${{ needs.scan.outputs.source_sha }}
+          EXPECTED_REVALIDATION_DIGEST: ${{ needs.revalidate-production.outputs.revalidation_digest }}
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS.production
+          binding_digest="sha256:$(
+            sha256sum production-binding.json | cut -d ' ' -f 1
+          )"
+          revalidation_digest="sha256:$(
+            sha256sum production-revalidation.json | cut -d ' ' -f 1
+          )"
+          deployment_evidence_digest="sha256:$(
+            sha256sum deployment-evidence.json | cut -d ' ' -f 1
+          )"
+          deployment_control_plane_digest="sha256:$(
+            sha256sum deployment-control-plane-gates.json |
+              cut -d ' ' -f 1
+          )"
+          test "${binding_digest}" = "${EXPECTED_BINDING_DIGEST}"
+          test "${revalidation_digest}" = "${EXPECTED_REVALIDATION_DIGEST}"
+          test "${deployment_evidence_digest}" = \
+            "${EXPECTED_DEPLOYMENT_EVIDENCE_DIGEST}"
+          live_runtime_digest="sha256:$(
+            sha256sum live-runtime-manifest.json | cut -d ' ' -f 1
+          )"
+          revalidated_live_runtime_digest="sha256:$(
+            sha256sum revalidated-live-runtime-manifest.json |
+              cut -d ' ' -f 1
+          )"
+          runtime_config_digest="sha256:$(
+            sha256sum production-runtime-config.json | cut -d ' ' -f 1
+          )"
+          observer_gates_digest="sha256:$(
+            sha256sum supply-chain-control-plane-gates.json |
+              cut -d ' ' -f 1
+          )"
+          test "${live_runtime_digest}" = \
+            "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}"
+          test "${revalidated_live_runtime_digest}" = \
+            "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}"
+          cmp --silent \
+            live-runtime-manifest.json \
+            revalidated-live-runtime-manifest.json
+          jq -e \
+            --arg binding "${binding_digest}" \
+            --arg deploymentEvidence "${deployment_evidence_digest}" \
+            --arg deploymentRunId "${EXPECTED_DEPLOYMENT_RUN_ID}" \
+            --arg deploymentRunAttempt "${EXPECTED_DEPLOYMENT_RUN_ATTEMPT}" \
+            --arg deploymentArtifactId "${EXPECTED_DEPLOYMENT_ARTIFACT_ID}" \
+            --arg deploymentControlPlane \
+              "${deployment_control_plane_digest}" \
+            --arg release "${EXPECTED_RELEASE_SHA}" \
+            --arg image "${EXPECTED_IMAGE_DIGEST}" \
+            --arg runtime "${EXPECTED_LIVE_RUNTIME_MANIFEST_DIGEST}" \
+            --arg runtimeConfig "${runtime_config_digest}" \
+            --arg observerGates "${observer_gates_digest}" '
+              .schemaVersion ==
+                "archon.production-deployment-revalidation/v1" and
+              .originalBindingDigest == $binding and
+              .stack.name == "Archon-production" and
+              .deployment.runId == $deploymentRunId and
+              .deployment.runAttempt == $deploymentRunAttempt and
+              .deployment.artifactId == $deploymentArtifactId and
+              .deployment.controlPlaneGatesDigest ==
+                $deploymentControlPlane and
+              .deployment.evidenceDigest == $deploymentEvidence and
+              .release.sha == $release and
+              .release.containerImageDigest == $image and
+              .runtime.sealedManifestDigest == $runtime and
+              .runtime.revalidatedManifestDigest == $runtime and
+              .runtime.runtimeConfigDigest == $runtimeConfig and
+              .runtime.observerControlPlaneGatesDigest ==
+                $observerGates and
+              .runtime.exactlyMatches == true and
+              .unchanged == true
+            ' production-revalidation.json >/dev/null
+
+      - name: Bind independent security workflow gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+          EVIDENCE_DIR: ${{ runner.temp }}/evidence
+          EXPECTED_BRANCH: master
+          PRODUCTION_BINDING_DIGEST: ${{ needs.revalidate-production.outputs.binding_digest }}
+          PRODUCTION_REVALIDATION_DIGEST: ${{ needs.revalidate-production.outputs.revalidation_digest }}
+          PRODUCTION_REVALIDATION_DIR: ${{ runner.temp }}/production-revalidation
+        run: |
+          set -euo pipefail
+          gate_ready=false
+          for _ in {1..30}; do
+            codeql_runs_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/codeql.yml/runs" \
+              -f "head_sha=${SOURCE_SHA}" \
+              -f "branch=${EXPECTED_BRANCH}" \
+              -f event=push \
+              -f per_page=100)"
+            workflow_security_runs_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/workflow-security.yml/runs" \
+              -f "head_sha=${SOURCE_SHA}" \
+              -f "branch=${EXPECTED_BRANCH}" \
+              -f event=push \
+              -f per_page=100)"
+            runs_json="$(
+              jq -cn \
+                --argjson codeql "${codeql_runs_json}" \
+                --argjson workflow_security "${workflow_security_runs_json}" \
+                '{
+                  workflow_runs:
+                    ($codeql.workflow_runs + $workflow_security.workflow_runs)
+                }'
+            )"
+            if jq -e \
+              --arg sha "${SOURCE_SHA}" \
+              --arg branch "${EXPECTED_BRANCH}" '
+              def latest_exact($path):
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last;
+              [
+                latest_exact(".github/workflows/codeql.yml"),
+                latest_exact(".github/workflows/workflow-security.yml")
+              ] |
+              length == 2 and
+              all(
+                .[];
+                . != null and
+                .status == "completed" and
+                .conclusion == "success"
+              )
+            ' <<<"${runs_json}" >/dev/null; then
+              gate_ready=true
+              break
+            fi
+            sleep 15
+          done
+          test "${gate_ready}" = "true" || {
+            echo "::error::CodeQL and Workflow security must both succeed for the exact source SHA"
+            jq -r '
+              .workflow_runs[] |
+              [
+                .path,
+                .head_branch,
+                .head_sha,
+                .status,
+                (.conclusion // "pending"),
+                .html_url
+              ] |
+              @tsv
+            ' <<<"${runs_json}"
+            exit 1
+          }
+
+          jq -cS \
+            --arg sha "${SOURCE_SHA}" \
+            --arg branch "${EXPECTED_BRANCH}" '
+            def latest_exact($path):
+              [
+                .workflow_runs[] |
+                select(
+                  .path == $path and
+                  .head_sha == $sha and
+                  .head_branch == $branch and
+                  .event == "push"
+                )
+              ] |
+              sort_by(.id, .run_attempt) |
+              last;
+            {
+              schemaVersion: "archon.security-workflow-gates/v1",
+              sourceSha: $sha,
+              branch: $branch,
+              workflows: (
+                [
+                  latest_exact(".github/workflows/codeql.yml"),
+                  latest_exact(".github/workflows/workflow-security.yml")
+                ] |
+                map({
+                  name,
+                  path,
+                  workflowId: .workflow_id,
+                  headBranch: .head_branch,
+                  headSha: .head_sha,
+                  event,
+                  runId: .id,
+                  runAttempt: .run_attempt,
+                  url: .html_url,
+                  conclusion
+                }) |
+                sort_by(.path)
+              )
+            }
+          ' <<<"${runs_json}" >"${EVIDENCE_DIR}/security-workflow-gates.json"
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            test -f \
+              "${PRODUCTION_REVALIDATION_DIR}/production-binding.json"
+            test -f \
+              "${PRODUCTION_REVALIDATION_DIR}/production-revalidation.json"
+            test -f \
+              "${PRODUCTION_REVALIDATION_DIR}/deployment-evidence.json"
+            cmp --silent \
+              "${EVIDENCE_DIR}/deployment-evidence.json" \
+              "${PRODUCTION_REVALIDATION_DIR}/deployment-evidence.json" || {
+              echo "::error::Deployment evidence differs between scan and revalidation"
+              exit 1
+            }
+            for runtime_file in \
+              deployment-control-plane-gates.json \
+              live-runtime-manifest.json \
+              production-runtime-config.json \
+              supply-chain-control-plane-gates.json; do
+              cmp --silent \
+                "${EVIDENCE_DIR}/${runtime_file}" \
+                "${PRODUCTION_REVALIDATION_DIR}/${runtime_file}" || {
+                echo "::error::${runtime_file} differs between scan and revalidation"
+                exit 1
+              }
+            done
+            cmp --silent \
+              "${PRODUCTION_REVALIDATION_DIR}/live-runtime-manifest.json" \
+              "${PRODUCTION_REVALIDATION_DIR}/revalidated-live-runtime-manifest.json" || {
+              echo "::error::Production runtime bytes changed before attestation"
+              exit 1
+            }
+            original_binding_digest="$(
+              jq -er '.productionDeployment.bindingDigest' \
+                "${EVIDENCE_DIR}/provenance.json"
+            )"
+            test "${original_binding_digest}" = \
+              "${PRODUCTION_BINDING_DIGEST}"
+            jq \
+              --slurpfile gates \
+                "${EVIDENCE_DIR}/security-workflow-gates.json" \
+              --slurpfile binding \
+                "${PRODUCTION_REVALIDATION_DIR}/production-binding.json" \
+              --slurpfile revalidation \
+                "${PRODUCTION_REVALIDATION_DIR}/production-revalidation.json" \
+              --arg bindingDigest "${PRODUCTION_BINDING_DIGEST}" \
+              --arg revalidationDigest \
+                "${PRODUCTION_REVALIDATION_DIGEST}" '
+                . + {
+                  securityWorkflowGates: $gates[0],
+                  productionDeploymentEvidence: {
+                    binding: $binding[0],
+                    bindingDigest: $bindingDigest,
+                    revalidation: $revalidation[0],
+                    revalidationDigest: $revalidationDigest
+                  }
+                }
+              ' "${EVIDENCE_DIR}/provenance.json" \
+              >"${EVIDENCE_DIR}/attested-provenance.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/production-binding.json" \
+              "${EVIDENCE_DIR}/production-binding.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/production-revalidation.json" \
+              "${EVIDENCE_DIR}/production-revalidation.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/deployment-evidence.json" \
+              "${EVIDENCE_DIR}/deployment-evidence.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/deployment-control-plane-gates.json" \
+              "${EVIDENCE_DIR}/deployment-control-plane-gates.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/live-runtime-manifest.json" \
+              "${EVIDENCE_DIR}/live-runtime-manifest.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/production-runtime-config.json" \
+              "${EVIDENCE_DIR}/production-runtime-config.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/revalidated-live-runtime-manifest.json" \
+              "${EVIDENCE_DIR}/revalidated-live-runtime-manifest.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/supply-chain-control-plane-gates.json" \
+              "${EVIDENCE_DIR}/supply-chain-control-plane-gates.json"
+            cp \
+              "${PRODUCTION_REVALIDATION_DIR}/SHA256SUMS.production" \
+              "${EVIDENCE_DIR}/SHA256SUMS.production"
+          else
+            jq \
+              --slurpfile gates \
+                "${EVIDENCE_DIR}/security-workflow-gates.json" \
+              '. + {securityWorkflowGates: $gates[0]}' \
+              "${EVIDENCE_DIR}/provenance.json" \
+              >"${EVIDENCE_DIR}/attested-provenance.json"
+          fi
+          test "$(jq -r '.securityWorkflowGates.sourceSha' \
+            "${EVIDENCE_DIR}/attested-provenance.json")" = "${SOURCE_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            test "$(
+              jq -r '.productionDeploymentEvidence.bindingDigest' \
+                "${EVIDENCE_DIR}/attested-provenance.json"
+            )" = "${PRODUCTION_BINDING_DIGEST}"
+            test "$(
+              jq -r '.productionDeploymentEvidence.revalidationDigest' \
+              "${EVIDENCE_DIR}/attested-provenance.json"
+            )" = "${PRODUCTION_REVALIDATION_DIGEST}"
+          fi
+
+      - name: Check out the exact observer control plane before attestation
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate sealed observer control plane immediately before attestation
+        if: github.event_name == 'schedule'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          PRODUCTION_REVALIDATION_DIR: ${{ runner.temp }}/production-revalidation
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          sealed_gates="$(
+            printf '%s' \
+              "${PRODUCTION_REVALIDATION_DIR}/supply-chain-control-plane-gates.json"
+          )"
+          test -f "${sealed_gates}"
+          test ! -L "${sealed_gates}"
+          final_gate_dir="${RUNNER_TEMP}/supply-chain-final-control-plane"
+          mkdir -p "${final_gate_dir}"
+          current_gates="${final_gate_dir}/control-plane-security-gates.json"
+          OUTPUT_PATH="${current_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          jq -en \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile sealed "${sealed_gates}" \
+            --slurpfile current "${current_gates}" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              $sealed[0].schemaVersion ==
+                "archon.supply-chain-control-plane-gates/v1" and
+              $sealed[0].repository == $repository and
+              $sealed[0].branch == "master" and
+              $sealed[0].commit == $sha and
+              $current[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $current[0].branch == "master" and
+              $current[0].sourceSha == $sha and
+              ($sealed[0].workflows | receipt) ==
+                ($current[0].workflows | receipt)
+            ' >/dev/null || {
+            echo "::error::The observer control plane changed before attestation"
+            exit 1
+          }
+
+      - name: Revalidate sealed source security gates immediately before attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.scan.outputs.source_sha }}
+          EXPECTED_BRANCH: master
+          EVIDENCE_DIR: ${{ runner.temp }}/evidence
+        run: |
+          set -euo pipefail
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          sealed_gates="${EVIDENCE_DIR}/security-workflow-gates.json"
+          test -f "${sealed_gates}"
+          test ! -L "${sealed_gates}"
+          jq -e \
+            --arg sha "${SOURCE_SHA}" \
+            --arg branch "${EXPECTED_BRANCH}" '
+              .schemaVersion == "archon.security-workflow-gates/v1" and
+              .sourceSha == $sha and
+              .branch == $branch and
+              (.workflows | length) == 2 and
+              ([.workflows[].path] | sort) == [
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .workflows[];
+                (.workflowId | type == "number" and . >= 1) and
+                (.runId | type == "number" and . >= 1) and
+                (.runAttempt | type == "number" and . >= 1) and
+                .conclusion == "success"
+              )
+            ' "${sealed_gates}" >/dev/null || {
+            echo "::error::The sealed source security-gate receipt is invalid"
+            exit 1
+          }
+
+          read_source_gate_snapshot() {
+            local expected_name expected_path response selected snapshot
+            local workflow_file
+
+            snapshot="[]"
+            while IFS='|' read -r workflow_file expected_name; do
+              expected_path=".github/workflows/${workflow_file}"
+              response="$(
+                gh api \
+                  --method GET \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2026-03-10" \
+                  "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+                  -f "head_sha=${SOURCE_SHA}" \
+                  -f "branch=${EXPECTED_BRANCH}" \
+                  -f event=push \
+                  -f per_page=100
+              )" || return 1
+              selected="$(
+                jq -ce \
+                  --arg name "${expected_name}" \
+                  --arg path "${expected_path}" \
+                  --arg sha "${SOURCE_SHA}" \
+                  --arg branch "${EXPECTED_BRANCH}" \
+                  --arg repository "${GITHUB_REPOSITORY}" '
+                    [
+                      .workflow_runs[] |
+                      select(
+                        .name == $name and
+                        .path == $path and
+                        .head_sha == $sha and
+                        .head_branch == $branch and
+                        .head_repository.full_name == $repository and
+                        .event == "push"
+                      )
+                    ] |
+                    sort_by(.id, .run_attempt) |
+                    last |
+                    select(
+                      . != null and
+                      .status == "completed" and
+                      .conclusion == "success"
+                    )
+                  ' <<<"${response}"
+              )" || return 1
+              snapshot="$(
+                jq -cn \
+                  --argjson current "${snapshot}" \
+                  --argjson selected "${selected}" '
+                    $current + [{
+                      path: $selected.path,
+                      workflowId: $selected.workflow_id,
+                      runId: $selected.id,
+                      runAttempt: $selected.run_attempt,
+                      conclusion: $selected.conclusion
+                    }]
+                  '
+              )" || return 1
+            done <<'EOF'
+          codeql.yml|CodeQL
+          workflow-security.yml|Workflow security
+          EOF
+            test "$(jq -r 'length' <<<"${snapshot}")" = "2" || return 1
+            jq -cS 'sort_by(.path)' <<<"${snapshot}"
+          }
+
+          first_snapshot="$(read_source_gate_snapshot)" || {
+            echo "::error::The latest exact-source security gates are not successful"
+            exit 1
+          }
+          second_snapshot="$(read_source_gate_snapshot)" || {
+            echo "::error::The exact-source security-gate snapshot changed or is no longer successful"
+            exit 1
+          }
+          test "${second_snapshot}" = "${first_snapshot}" || {
+            echo "::error::The exact-source security-gate snapshot changed during final verification"
+            exit 1
+          }
+          sealed_snapshot="$(
+            jq -cS '
+              [
+                .workflows[] |
+                {
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }
+              ] |
+              sort_by(.path)
+            ' "${sealed_gates}"
+          )"
+          test "${second_snapshot}" = "${sealed_snapshot}" || {
+            echo "::error::The sealed source security gates are no longer the latest successful runs"
+            exit 1
+          }
+
+      - name: Sign verified CI-artifact provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/release-subjects.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v4
+          predicate-path: ${{ runner.temp }}/evidence/attested-provenance.json
+
+      - name: Sign container SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/container-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon.spdx.json
+
+      - name: Sign SPA SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/web-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon-web.spdx.json
+
+      - name: Sign Lambda SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/lambda-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon-lambda.spdx.json
+
+      - name: Retain signed-gate projection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: attestation-gates-${{ needs.scan.outputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/evidence/security-workflow-gates.json
+            ${{ runner.temp }}/evidence/attested-provenance.json
+            ${{ runner.temp }}/evidence/deployment-control-plane-gates.json
+            ${{ runner.temp }}/evidence/deployment-evidence.json
+            ${{ runner.temp }}/evidence/live-runtime-manifest.json
+            ${{ runner.temp }}/evidence/production-binding.json
+            ${{ runner.temp }}/evidence/production-revalidation.json
+            ${{ runner.temp }}/evidence/production-runtime-config.json
+            ${{ runner.temp }}/evidence/revalidated-live-runtime-manifest.json
+            ${{ runner.temp }}/evidence/supply-chain-control-plane-gates.json
+            ${{ runner.temp }}/evidence/SHA256SUMS.production
+          if-no-files-found: error
+          retention-days: 90

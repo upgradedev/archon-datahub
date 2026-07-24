@@ -10,6 +10,13 @@ import { LineageAnalyzerAgent } from "../agents/lineage-analyzer.js";
 import { GovernanceAuditorAgent } from "../agents/governance-auditor.js";
 import { NarratorAgent } from "../agents/narrator.js";
 import type { Finding } from "../types.js";
+import { computeBlastRadius } from "../datahub/blast-radius.js";
+import {
+  deadlineSignal,
+  harvestPolicy,
+  waitWithinDeadline,
+  type AuditExecutionProfile,
+} from "../datahub/harvest-policy.js";
 
 export interface AuditReport {
   scanId: string;
@@ -27,6 +34,10 @@ export interface PipelineAgents {
   narrator?: NarratorAgent;
 }
 
+export interface AuditRunOptions {
+  executionProfile?: AuditExecutionProfile;
+}
+
 export class AuditPipeline {
   private classifier: ClassifierAgent;
   private lineage: LineageAnalyzerAgent;
@@ -40,33 +51,64 @@ export class AuditPipeline {
     this.narrator = agents.narrator ?? new NarratorAgent();
   }
 
-  async run(client: DataHubClient, query?: string): Promise<AuditReport> {
-    const snapshot = await client.harvestSnapshot(query);
-    const facts = await client.harvestFacts(query);
+  async run(
+    client: DataHubClient,
+    query?: string,
+    options: AuditRunOptions = {}
+  ): Promise<AuditReport> {
+    const executionProfile = options.executionProfile ?? "synchronous-preview";
+    const policy = harvestPolicy(executionProfile);
+    const signal = deadlineSignal(policy.pipelineDeadlineMs);
+    return waitWithinDeadline(
+      this.runWithinDeadline(client, query, executionProfile, signal),
+      signal,
+      "PIPELINE_DEADLINE_EXCEEDED"
+    );
+  }
+
+  private async runWithinDeadline(
+    client: DataHubClient,
+    query: string | undefined,
+    executionProfile: AuditExecutionProfile,
+    signal: AbortSignal
+  ): Promise<AuditReport> {
+    const harvest = await client.harvestAudit(query, {
+      profile: executionProfile,
+      signal,
+    });
+    const { snapshot, facts } = harvest;
 
     const classification = this.classifier.classify(snapshot);
     const factFindings = this.lineage.analyze(facts);
 
-    // Version-history recovery (the LIVE contradiction path): if the client can supply
-    // aspect version history (a direct GMS read — OpenAPI v3 / Timeline), run the self-audit
-    // over it too. On a live catalog latest-write-wins hides cross-source contradictions on
+    // Version-history recovery (the LIVE contradiction path): the same harvest bundle may
+    // include direct-GMS aspect history (OpenAPI v3 / Timeline), which is audited here.
+    // On a live catalog latest-write-wins hides cross-source contradictions on
     // the current view, so THIS is where they resurface; offline it re-derives the same
     // fixture contradictions, which we DEDUPE against the fact-based ones below.
-    const historyFindings = client.harvestVersionHistories
-      ? this.lineage.analyzeVersionHistory(await client.harvestVersionHistories(query))
-      : [];
+    const historyFindings = this.lineage.analyzeVersionHistory(
+      harvest.versionHistories
+    );
     const lineageFindings = dedupeFindings([...factFindings, ...historyFindings]);
     const versionHistoryContradictions = historyFindings.filter((f) => f.type === "contradiction").length;
 
     const governanceFindings = this.governance.audit(snapshot);
 
     // Deterministic ordering: highest severity first, then by type + subject.
-    const findings = [...lineageFindings, ...governanceFindings].sort(
+    const findings = [...lineageFindings, ...governanceFindings]
+      .map((finding) => ({
+        ...finding,
+        detail: {
+          ...finding.detail,
+          blastRadius: computeBlastRadius(snapshot, finding.subject),
+        },
+      }))
+      .sort(
       (a, b) =>
         sev(b.severity) - sev(a.severity) ||
         a.type.localeCompare(b.type) ||
         a.subject.localeCompare(b.subject)
-    );
+      );
 
     const narrative = await this.narrator.summarize(findings, classification);
 

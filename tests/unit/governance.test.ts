@@ -75,6 +75,7 @@ test("G6 flags an unclassified sensitive field", () => {
   const g6 = validateEntity(e, snapshot([e])).find((r) => r.ruleId === "G6")!;
   assert.equal(g6.passed, false);
   assert.match(g6.message, /email/);
+  assert.deepEqual(g6.evidence?.["unclassifiedFields"], ["email"]);
 });
 
 test("looksSensitive matches known sensitive hints and ignores plain fields", () => {

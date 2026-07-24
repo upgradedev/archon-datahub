@@ -98,12 +98,10 @@ export interface AuditOptions {
   // When true, a disagreement is only reported as a CONTRADICTION when the
   // conflicting facts span AT LEAST TWO DISTINCT `source`s. This is the honest gate
   // for the version-history recovery path (src/datahub/version-history.ts): an aspect
-  // whose value merely CHANGED over successive writes from the SAME ingestion run is
-  // benign drift (a correction), not a cross-source conflict. Only when two DIFFERENT
-  // ingestion runs (`systemMetadata.runId`) assert conflicting values — the history
-  // flip-flops between sources — has latest-write-wins actually hidden a real
-  // disagreement. Default false (backward-compatible: fixtures already carry distinct
-  // sources, so the offline behavior is unchanged).
+  // whose value merely CHANGED over successive executions of the SAME ingestion pipeline
+  // is drift, not a cross-source conflict. `runId` is deliberately kept separate because
+  // DataHub creates a new one for each execution. Only facts whose stable pipeline/source
+  // identities differ can pass this gate. Default false.
   requireDistinctSources?: boolean;
 }
 

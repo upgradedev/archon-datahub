@@ -22,6 +22,7 @@
 //           downstreams?: { ... } }   (upstream=True yields `upstreams`)
 
 import type { CatalogEntity, LineageEdge, SchemaField, Urn } from "./models.js";
+import { DataHubHarvestError } from "./harvest-policy.js";
 
 // ── Pinned cleaned-response types (the exact shapes the MCP server returns) ────
 
@@ -98,6 +99,73 @@ export interface DhSearchResponse {
 export interface DhLineageResponse {
   upstreams?: DhSearchResponse;
   downstreams?: DhSearchResponse;
+}
+
+export interface StrictSearchPage {
+  urns: Urn[];
+  total: number;
+}
+
+// MCP tool failures are part of the wire contract. A text block attached to isError=true
+// is provider diagnostics, never successful data, and must not flow into a mapper. Successful
+// read tools must return JSON either as structuredContent or as one JSON text block.
+export function parseMcpReadToolResult(result: unknown): unknown {
+  if (!result || typeof result !== "object") {
+    throw new DataHubHarvestError(
+      "MCP_RESPONSE_INVALID",
+      "DataHub MCP returned an invalid read-tool envelope."
+    );
+  }
+  const response = result as {
+    isError?: unknown;
+    structuredContent?: unknown;
+    content?: unknown;
+  };
+  if (response.isError === true) {
+    throw new DataHubHarvestError(
+      "MCP_TOOL_ERROR",
+      "DataHub MCP reported a read-tool failure."
+    );
+  }
+  if (
+    response.isError !== undefined &&
+    typeof response.isError !== "boolean"
+  ) {
+    throw new DataHubHarvestError(
+      "MCP_RESPONSE_INVALID",
+      "DataHub MCP returned an invalid read-tool status."
+    );
+  }
+  if (response.structuredContent !== undefined) {
+    return response.structuredContent;
+  }
+  if (!Array.isArray(response.content)) {
+    throw new DataHubHarvestError(
+      "MCP_RESPONSE_INVALID",
+      "DataHub MCP returned no readable JSON content."
+    );
+  }
+  const textBlocks = response.content.filter(
+    (item): item is { type: "text"; text: string } =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string"
+  );
+  if (response.content.length !== 1 || textBlocks.length !== 1) {
+    throw new DataHubHarvestError(
+      "MCP_RESPONSE_INVALID",
+      "DataHub MCP returned an ambiguous read-tool payload."
+    );
+  }
+  try {
+    return JSON.parse(textBlocks[0]!.text);
+  } catch {
+    throw new DataHubHarvestError(
+      "MCP_RESPONSE_INVALID",
+      "DataHub MCP returned non-JSON read-tool content."
+    );
+  }
 }
 
 // ── Pure mappers ──────────────────────────────────────────────────────────────
@@ -192,15 +260,110 @@ export function mapSearchUrns(res: DhSearchResponse | null | undefined): Urn[] {
     .filter((u): u is string => Boolean(u));
 }
 
-// Map a `get_entities` response (array when we pass an array of URNs) to CatalogEntity[].
-// Per-URN error objects ({ error, urn }) are skipped — a missing entity is simply absent
-// from the harvest, which the lineage-gap / governance audit treats correctly.
+// Search drives the completeness boundary for the whole audit. A malformed page, an
+// unstable total, a duplicate, or a declared total above the fixed execution ceiling is
+// therefore an error. Returning a convenient prefix would make a partial catalog appear
+// complete and could incorrectly feed the governed planner.
+export function mapSearchPageStrict(
+  res: DhSearchResponse | null | undefined,
+  expectedOffset: number,
+  maxEntities: number
+): StrictSearchPage {
+  const start = res?.start;
+  const count = res?.count;
+  const total = res?.total;
+  const results = res?.searchResults;
+  if (
+    !Number.isInteger(start) ||
+    start !== expectedOffset ||
+    !Number.isInteger(count) ||
+    !Number.isInteger(total) ||
+    (count as number) < 0 ||
+    (total as number) < 0 ||
+    !Array.isArray(results) ||
+    count !== results.length ||
+    expectedOffset + (count as number) > (total as number)
+  ) {
+    throw new DataHubHarvestError(
+      "SEARCH_RESPONSE_INCOMPLETE",
+      "DataHub search returned an invalid or incomplete page."
+    );
+  }
+  if ((total as number) > maxEntities) {
+    throw new DataHubHarvestError(
+      "SEARCH_LIMIT_EXCEEDED",
+      `DataHub search matched more than the ${maxEntities}-entity hosted safety limit. Use a narrower query.`
+    );
+  }
+
+  const urns = results.map((result) => result.entity?.urn);
+  if (
+    urns.some((urn) => typeof urn !== "string" || urn.length === 0) ||
+    new Set(urns as string[]).size !== urns.length
+  ) {
+    throw new DataHubHarvestError(
+      "SEARCH_RESPONSE_INCOMPLETE",
+      "DataHub search returned a missing or duplicate dataset URN."
+    );
+  }
+  return { urns: urns as Urn[], total: total as number };
+}
+
+// Permissive mapper retained for isolated fixture/shape diagnostics. Live audit assembly
+// must use mapEntitiesStrict below so a provider error can never become a partial snapshot.
 export function mapEntities(
   res: DhCleanedEntity[] | { entities?: DhCleanedEntity[] } | null | undefined,
   source: string
 ): CatalogEntity[] {
   const raw: DhCleanedEntity[] = Array.isArray(res) ? res : (res?.entities ?? []);
   return raw.filter((e) => e && !e.error && e.urn).map((e) => mapEntity(e, source));
+}
+
+// Strict batch hydration used by the live audit. The official tool can return a mixed
+// list of entities and per-URN error objects; every requested URN must occur exactly once,
+// without errors or extras, before any entity is admitted to an audit snapshot.
+export function mapEntitiesStrict(
+  res: DhCleanedEntity[] | { entities?: DhCleanedEntity[] } | null | undefined,
+  requestedUrns: readonly Urn[],
+  source: string
+): CatalogEntity[] {
+  const requested = new Set(requestedUrns);
+  if (
+    requested.size !== requestedUrns.length ||
+    requestedUrns.some((urn) => typeof urn !== "string" || urn.length === 0)
+  ) {
+    throw new DataHubHarvestError(
+      "ENTITY_RESPONSE_INCOMPLETE",
+      "The get_entities request contained a missing or duplicate URN."
+    );
+  }
+
+  const raw: DhCleanedEntity[] = Array.isArray(res) ? res : (res?.entities ?? []);
+  const byUrn = new Map<Urn, DhCleanedEntity>();
+  for (const item of raw) {
+    const urn = item?.urn;
+    if (
+      !item ||
+      typeof urn !== "string" ||
+      urn.length === 0 ||
+      item.error !== undefined ||
+      !requested.has(urn) ||
+      byUrn.has(urn)
+    ) {
+      throw new DataHubHarvestError(
+        "ENTITY_RESPONSE_INCOMPLETE",
+        "DataHub get_entities returned an error, malformed item, unexpected URN, or duplicate."
+      );
+    }
+    byUrn.set(urn, item);
+  }
+  if (byUrn.size !== requested.size) {
+    throw new DataHubHarvestError(
+      "ENTITY_RESPONSE_INCOMPLETE",
+      "DataHub get_entities did not return every requested URN."
+    );
+  }
+  return requestedUrns.map((urn) => mapEntity(byUrn.get(urn)!, source));
 }
 
 // Map a `get_lineage` (upstream) response to our LineageEdge[]. Every node returned by
@@ -221,4 +384,66 @@ export function mapUpstreamEdges(
       upstreamResolved: isKnown(upstream),
       type: undefined,
     }));
+}
+
+// Strict live lineage mapping. We make one bounded, offset-zero request, so the response
+// must contain the complete upstream envelope in that one page. Missing envelopes, bad
+// counts, truncated totals, malformed degrees/URNs, and duplicates abort the whole audit.
+export function mapUpstreamEdgesStrict(
+  res: DhLineageResponse | null | undefined,
+  isKnown: (urn: Urn) => boolean,
+  maxResults: number
+): LineageEdge[] {
+  const upstreams = res?.upstreams;
+  const start = upstreams?.start;
+  const count = upstreams?.count;
+  const total = upstreams?.total;
+  const results = upstreams?.searchResults;
+  if (
+    !Number.isInteger(maxResults) ||
+    maxResults < 1
+  ) {
+    throw new RangeError("maxResults must be a positive integer");
+  }
+  if (
+    !upstreams ||
+    start !== 0 ||
+    !Number.isInteger(count) ||
+    !Number.isInteger(total) ||
+    (count as number) < 0 ||
+    (total as number) < 0 ||
+    !Array.isArray(results) ||
+    count !== results.length ||
+    total !== count ||
+    (total as number) > maxResults
+  ) {
+    throw new DataHubHarvestError(
+      "LINEAGE_RESPONSE_INCOMPLETE",
+      "DataHub lineage returned an invalid, incomplete, or truncated upstream page."
+    );
+  }
+  const urns = results.map((result) => result.entity?.urn);
+  if (
+    urns.some(
+      (urn) =>
+        typeof urn !== "string" ||
+        !urn.startsWith("urn:li:")
+    ) ||
+    results.some(
+      (result) =>
+        !Number.isInteger(result.degree) ||
+        (result.degree as number) < 1
+    ) ||
+    new Set(urns as string[]).size !== urns.length
+  ) {
+    throw new DataHubHarvestError(
+      "LINEAGE_RESPONSE_INCOMPLETE",
+      "DataHub lineage returned a malformed or duplicate upstream entity."
+    );
+  }
+  return (urns as Urn[]).map((upstream) => ({
+    upstream,
+    upstreamResolved: isKnown(upstream),
+    type: undefined,
+  }));
 }

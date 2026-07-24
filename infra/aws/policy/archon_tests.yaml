@@ -1,0 +1,1568 @@
+---
+- name: secure Archon reference architecture passes every preventive control
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      Registry:
+        Type: AWS::ECR::Repository
+        Properties:
+          ImageTagMutability: IMMUTABLE
+          ImageScanningConfiguration:
+            ScanOnPush: true
+          EncryptionConfiguration:
+            EncryptionType: KMS
+            KmsKey: arn:aws:kms:eu-west-1:111111111111:key/registry
+      SpaBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: arn:aws:kms:eu-west-1:111111111111:key/spa
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+            - Key: ArchonBucketPurpose
+              Value: spa
+          VersioningConfiguration:
+            Status: Enabled
+          LoggingConfiguration:
+            DestinationBucketName: archon-log-archive
+            LogFilePrefix: s3-access/spa/
+      EvidenceBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: arn:aws:kms:eu-west-1:111111111111:key/evidence
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+            - Key: ArchonBucketPurpose
+              Value: evidence
+          VersioningConfiguration:
+            Status: Enabled
+          LoggingConfiguration:
+            DestinationBucketName: archon-log-archive
+            LogFilePrefix: s3-access/evidence/
+          ObjectLockEnabled: true
+          ObjectLockConfiguration:
+            ObjectLockEnabled: Enabled
+            Rule:
+              DefaultRetention:
+                Mode: GOVERNANCE
+                Days: 30
+      CloudFrontLogBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          Tags:
+            - Key: ArchonBucketRole
+              Value: access-log-sink
+            - Key: ArchonBucketPurpose
+              Value: access-logs
+          VersioningConfiguration:
+            Status: Enabled
+      DataKey:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+      ApiLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      ApprovalTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+          DeletionProtectionEnabled: true
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+          SSESpecification:
+            SSEEnabled: true
+            SSEType: KMS
+            KMSMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/data
+      AuditDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:audit-dlq
+            maxReceiveCount: 5
+      ApprovalDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      ApprovalQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-events
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:approval-dlq
+            maxReceiveCount: 5
+      RemediationDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      RemediationQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:remediation-dlq
+            maxReceiveCount: 5
+      ApiTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: Api
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+      ApprovalFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+          Runtime: nodejs24.x
+          ReservedConcurrentExecutions: 10
+          TracingConfig:
+            Mode: Active
+          Environment:
+            Variables:
+              APPROVAL_TABLE: approval-table
+              APPROVER_GROUP: archon-approvers
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicAuditMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      CloudFrontOriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      CloudFrontOriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      CloudFrontOriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
+      PrivateSubnet:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: vpc-12345678
+          CidrBlock: 10.42.4.0/22
+          MapPublicIpOnLaunch: false
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - archon.example.com
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            CacheBehaviors:
+              - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      SecretsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+          Tags:
+            - Key: ArchonKeyPurpose
+              Value: secrets
+      CloudFrontOriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId:
+            Fn::GetAtt:
+              - SecretsKey
+              - Arn
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+      ReadSecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+      RegionalWebAcl:
+        Type: AWS::WAFv2::WebACL
+        Properties:
+          Scope: REGIONAL
+          DefaultAction:
+            Allow: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: archon-staging-api-waf
+            SampledRequestsEnabled: true
+          DataProtectionConfig:
+            DataProtections:
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - authorization
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - cookie
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - x-api-key
+      ApiWafLogging:
+        Type: AWS::WAFv2::LoggingConfiguration
+        Properties:
+          ResourceArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
+          LogDestinationConfigs:
+            - arn:aws:logs:eu-west-1:111111111111:log-group:aws-waf-logs-archon-staging-api
+          LoggingFilter:
+            DefaultBehavior: DROP
+            Filters:
+              - Behavior: KEEP
+                Requirement: MEETS_ANY
+                Conditions:
+                  - ActionCondition:
+                      Action: BLOCK
+                  - ActionCondition:
+                      Action: COUNT
+          RedactedFields:
+            - SingleHeader:
+                Name: authorization
+            - SingleHeader:
+                Name: cookie
+            - SingleHeader:
+                Name: x-api-key
+      ApiWafAssociation:
+        Type: AWS::WAFv2::WebACLAssociation
+        Properties:
+          ResourceArn: arn:aws:apigateway:eu-west-1::/restapis/example/stages/staging
+          WebACLArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
+  expectations:
+    rules:
+      ecr_repositories_are_hardened: PASS
+      s3_buckets_are_private_and_encrypted: PASS
+      platform_has_s3_server_access_logging: PASS
+      platform_has_versioned_object_locked_evidence_store: PASS
+      kms_keys_rotate: PASS
+      retained_logs_are_encrypted: PASS
+      dynamodb_tables_are_resilient_and_encrypted: PASS
+      sqs_queues_are_encrypted: PASS
+      platform_source_queues_use_dead_letter_queues: PASS
+      ecs_task_containers_are_hardened: PASS
+      platform_approval_lambda_is_hardened: PASS
+      lambda_functions_enable_active_xray: PASS
+      subnets_never_auto_assign_public_ips: PASS
+      api_gateway_stages_are_observable: PASS
+      public_api_methods_require_cloudfront_origin_gate: PASS
+      cloudfront_api_origin_is_rest_api_bound: PASS
+      cloudfront_origin_custom_headers_are_api_key_only: PASS
+      cloudfront_origin_key_is_stage_bound: PASS
+      cloudfront_origin_key_uses_dedicated_cmk: PASS
+      cloudfront_distributions_enforce_tls_logging_and_oac: PASS
+      secrets_use_customer_managed_kms: PASS
+      waf_web_acls_protect_sensitive_sampled_data: PASS
+      waf_logging_is_filtered_and_redacted: PASS
+      platform_has_regional_waf: PASS
+
+- name: mutable unscanned ECR repositories are rejected
+  input:
+    Resources:
+      Registry:
+        Type: AWS::ECR::Repository
+        Properties:
+          ImageTagMutability: MUTABLE
+          ImageScanningConfiguration:
+            ScanOnPush: false
+          EncryptionConfiguration:
+            EncryptionType: AES256
+  expectations:
+    rules:
+      ecr_repositories_are_hardened: FAIL
+
+- name: publicly reachable unencrypted S3 buckets are rejected
+  input:
+    Resources:
+      PublicBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: false
+            BlockPublicPolicy: false
+            IgnorePublicAcls: false
+            RestrictPublicBuckets: false
+          BucketEncryption:
+            ServerSideEncryptionConfiguration: []
+  expectations:
+    rules:
+      s3_buckets_are_private_and_encrypted: FAIL
+
+- name: a platform without object locked evidence is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      platform_has_versioned_object_locked_evidence_store: FAIL
+
+- name: object lock on a non-evidence bucket cannot satisfy evidence retention
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      MisidentifiedLockedBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          Tags:
+            - Key: ArchonBucketPurpose
+              Value: spa
+          VersioningConfiguration:
+            Status: Enabled
+          ObjectLockEnabled: true
+          ObjectLockConfiguration:
+            ObjectLockEnabled: Enabled
+            Rule:
+              DefaultRetention:
+                Mode: GOVERNANCE
+                Days: 30
+      EvidenceWithoutLock:
+        Type: AWS::S3::Bucket
+        Properties:
+          Tags:
+            - Key: ArchonBucketPurpose
+              Value: evidence
+          VersioningConfiguration:
+            Status: Enabled
+  expectations:
+    rules:
+      platform_has_versioned_object_locked_evidence_store: FAIL
+
+- name: a platform without S3 server access logging is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      platform_has_s3_server_access_logging: FAIL
+
+- name: every application S3 bucket must emit server access logs
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      LoggedApplicationBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: arn:aws:kms:eu-west-1:111111111111:key/logged
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+          LoggingConfiguration:
+            DestinationBucketName: archon-log-archive
+            LogFilePrefix: s3-access/logged/
+      UnloggedApplicationBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: arn:aws:kms:eu-west-1:111111111111:key/unlogged
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+      LogSinkBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          Tags:
+            - Key: ArchonBucketRole
+              Value: access-log-sink
+  expectations:
+    rules:
+      platform_has_s3_server_access_logging: FAIL
+
+- name: every application S3 bucket must use KMS and an S3 Bucket Key
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      SecureApplicationBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: arn:aws:kms:eu-west-1:111111111111:key/secure
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+          LoggingConfiguration:
+            DestinationBucketName: archon-log-archive
+            LogFilePrefix: s3-access/secure/
+      SseApplicationBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: BucketOwnerEnforced
+          Tags:
+            - Key: ArchonBucketRole
+              Value: application
+          LoggingConfiguration:
+            DestinationBucketName: archon-log-archive
+            LogFilePrefix: s3-access/sse/
+      LogSinkBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          Tags:
+            - Key: ArchonBucketRole
+              Value: access-log-sink
+  expectations:
+    rules:
+      platform_has_s3_server_access_logging: FAIL
+
+- name: KMS keys without rotation are rejected
+  input:
+    Resources:
+      StaticKey:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: false
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate: FAIL
+
+- name: unencrypted short lived log groups are rejected
+  input:
+    Resources:
+      AppLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+          RetentionInDays: 30
+  expectations:
+    rules:
+      retained_logs_are_encrypted: FAIL
+
+- name: DynamoDB without PITR deletion protection and KMS is rejected
+  input:
+    Resources:
+      UnsafeTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+          DeletionProtectionEnabled: false
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: false
+          SSESpecification:
+            SSEEnabled: false
+            SSEType: AES256
+  expectations:
+    rules:
+      dynamodb_tables_are_resilient_and_encrypted: FAIL
+
+- name: unencrypted SQS queues are rejected
+  input:
+    Resources:
+      PlaintextQueue:
+        Type: AWS::SQS::Queue
+        Properties: {}
+  expectations:
+    rules:
+      sqs_queues_are_encrypted: FAIL
+
+- name: platform work queues without redrive are rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+  expectations:
+    rules:
+      platform_source_queues_use_dead_letter_queues: FAIL
+
+- name: every project source queue must use a dead letter queue
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      AuditDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:audit-dlq
+            maxReceiveCount: 5
+      ApprovalDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      ApprovalQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-events
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:approval-dlq
+            maxReceiveCount: 5
+      RemediationDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      RemediationQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+  expectations:
+    rules:
+      platform_source_queues_use_dead_letter_queues: FAIL
+
+- name: project dead letter queues may not themselves redrive
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      AuditDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:unrelated-dlq
+            maxReceiveCount: 5
+      AuditQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-audit-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:audit-dlq
+            maxReceiveCount: 5
+      ApprovalDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      ApprovalQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-approval-events
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:approval-dlq
+            maxReceiveCount: 5
+      RemediationDlq:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-dlq
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+      RemediationQueue:
+        Type: AWS::SQS::Queue
+        Properties:
+          QueueName: archon-staging-remediation-jobs
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/queues
+          RedrivePolicy:
+            deadLetterTargetArn: arn:aws:sqs:eu-west-1:111111111111:remediation-dlq
+            maxReceiveCount: 5
+  expectations:
+    rules:
+      platform_source_queues_use_dead_letter_queues: FAIL
+
+- name: root writable ECS containers are rejected
+  input:
+    Resources:
+      UnsafeTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: Api
+              ReadonlyRootFilesystem: false
+              User: root
+              LogConfiguration:
+                LogDriver: json-file
+  expectations:
+    rules:
+      ecs_task_containers_are_hardened: FAIL
+
+- name: deprecated untraced approval Lambda is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      ApprovalFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+          Runtime: nodejs20.x
+          ReservedConcurrentExecutions: 0
+          TracingConfig:
+            Mode: PassThrough
+          Environment:
+            Variables:
+              APPROVAL_TABLE: approval-table
+              APPROVER_GROUP: archon-approvers
+  expectations:
+    rules:
+      platform_approval_lambda_is_hardened: FAIL
+      lambda_functions_enable_active_xray: FAIL
+
+- name: subnets that auto assign public IP addresses are rejected
+  input:
+    Resources:
+      PublicSubnet:
+        Type: AWS::EC2::Subnet
+        Properties:
+          VpcId: vpc-12345678
+          CidrBlock: 10.42.0.0/24
+          MapPublicIpOnLaunch: true
+  expectations:
+    rules:
+      subnets_never_auto_assign_public_ips: FAIL
+
+- name: API stages without access logs and tracing are rejected
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          TracingEnabled: false
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: API cache is rejected outside the exact read only control loop route
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: POST
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: API cache must use a positive bounded TTL
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 0
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: an additional cached method cannot hide behind the approved GET cache
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+            - ResourcePath: /~1api~1approvals
+              HttpMethod: POST
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: an uncached wildcard method setting cannot bypass the exact cache contract
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+            - ResourcePath: /*
+              HttpMethod: "*"
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: a public API method without the CloudFront origin key is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: false
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      OriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - archon.example.com
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            CacheBehaviors:
+              - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+  expectations:
+    rules:
+      public_api_methods_require_cloudfront_origin_gate: FAIL
+
+- name: a CloudFront origin key on the SPA instead of the API origin is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      OriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - archon.example.com
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            CacheBehaviors:
+              - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+  expectations:
+    rules:
+      public_api_methods_require_cloudfront_origin_gate: FAIL
+
+- name: a duplicated CloudFront origin key on the SPA is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+  expectations:
+    rules:
+      cloudfront_origin_custom_headers_are_api_key_only: FAIL
+
+- name: an attacker-suffix CloudFront API origin is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Origins:
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.attacker.example
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+  expectations:
+    rules:
+      cloudfront_api_origin_is_rest_api_bound: FAIL
+
+- name: the API key dynamic reference and generated secret are stage-bound
+  input:
+    Resources:
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_is_stage_bound: PASS
+
+- name: a cross-stage origin-key decoy secret is rejected
+  input:
+    Resources:
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/production/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_is_stage_bound: FAIL
+
+- name: an origin key encrypted by the AWS-managed Secrets Manager key is rejected
+  input:
+    Resources:
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: alias/aws/secretsmanager
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_uses_dedicated_cmk: FAIL
+
+- name: CloudFront custom domain with legacy TLS no logging and no OAC is rejected
+  input:
+    Resources:
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - unsafe.example.com
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/11111111-1111-4111-8111-111111111111
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: allow-all
+            Origins:
+              - Id: PublicOrigin
+                DomainName: public.example.com
+  expectations:
+    rules:
+      cloudfront_distributions_enforce_tls_logging_and_oac: FAIL
+
+- name: Secrets Manager secrets without a customer KMS key are rejected
+  input:
+    Resources:
+      PlaintextSecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          Description: missing customer managed encryption
+  expectations:
+    rules:
+      secrets_use_customer_managed_kms: FAIL
+
+- name: a platform without a regional WAF association is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      platform_has_regional_waf: FAIL
+
+- name: sampled WAF telemetry without web ACL data protection is rejected
+  input:
+    Resources:
+      UnsafeWebAcl:
+        Type: AWS::WAFv2::WebACL
+        Properties:
+          Scope: REGIONAL
+          DefaultAction:
+            Allow: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: unsafe
+            SampledRequestsEnabled: true
+  expectations:
+    rules:
+      waf_web_acls_protect_sensitive_sampled_data: FAIL
+
+- name: sampled WAF telemetry with an additional unapproved protected field is rejected
+  input:
+    Resources:
+      OverbroadWebAcl:
+        Type: AWS::WAFv2::WebACL
+        Properties:
+          Scope: REGIONAL
+          DefaultAction:
+            Allow: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: overbroad
+            SampledRequestsEnabled: true
+          DataProtectionConfig:
+            DataProtections:
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - authorization
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - cookie
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - x-api-key
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - x-extra
+  expectations:
+    rules:
+      waf_web_acls_protect_sensitive_sampled_data: FAIL
+
+- name: WAF logging without filtering and sensitive field redaction is rejected
+  input:
+    Resources:
+      UnsafeWafLogging:
+        Type: AWS::WAFv2::LoggingConfiguration
+        Properties:
+          ResourceArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/unsafe/id
+          LogDestinationConfigs:
+            - arn:aws:logs:eu-west-1:111111111111:log-group:aws-waf-logs-unsafe
+          LoggingFilter:
+            DefaultBehavior: KEEP
+            Filters: []
+          RedactedFields: []
+  expectations:
+    rules:
+      waf_logging_is_filtered_and_redacted: FAIL
+
+- name: WAF logging with an additional permissive keep filter is rejected
+  input:
+    Resources:
+      EvasiveWafLogging:
+        Type: AWS::WAFv2::LoggingConfiguration
+        Properties:
+          ResourceArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/evasive/id
+          LogDestinationConfigs:
+            - arn:aws:logs:eu-west-1:111111111111:log-group:aws-waf-logs-evasive
+          LoggingFilter:
+            DefaultBehavior: DROP
+            Filters:
+              - Behavior: KEEP
+                Requirement: MEETS_ANY
+                Conditions:
+                  - ActionCondition:
+                      Action: BLOCK
+                  - ActionCondition:
+                      Action: COUNT
+              - Behavior: KEEP
+                Requirement: MEETS_ANY
+                Conditions:
+                  - ActionCondition:
+                      Action: ALLOW
+          RedactedFields:
+            - SingleHeader:
+                Name: authorization
+            - SingleHeader:
+                Name: cookie
+            - SingleHeader:
+                Name: x-api-key
+  expectations:
+    rules:
+      waf_logging_is_filtered_and_redacted: FAIL

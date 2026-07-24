@@ -3,11 +3,10 @@
 // contradiction detection fire on a LIVE catalog, where latest-write-wins collapses the
 // conflict on the current view.
 //
-// The load-bearing property is the HONEST semantic guard: a value that merely CHANGED
-// across writes from ONE ingestion run is benign drift and MUST NOT be reported; only a
-// history that FLIP-FLOPS between DISTINCT runs is a genuine recovered contradiction. Both
-// cases are asserted below (positive + negative), so "it fires live" is not conflated with
-// "it fires on any edit."
+// The load-bearing property is the HONEST semantic guard: DataHub `runId` identifies one
+// execution, not a stable source. A value that changes between two executions of the SAME
+// pipeline is drift and MUST NOT be reported; only DIFFERENT stable pipeline/source
+// identities can form a recovered contradiction. Unknown provenance fails closed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,44 +22,68 @@ import type { AuditFact } from "../../src/types.js";
 
 const URN = "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
 
-// A minimal ownership history that flip-flops between two ingestion runs.
-const crossRunOwnership: AspectVersionHistory = {
+// A minimal ownership history that flip-flops between two stable ingestion pipelines.
+const crossSourceOwnership: AspectVersionHistory = {
   urn: URN,
   aspect: "ownership",
   versions: [
     {
       value: { owners: [{ owner: "urn:li:corpGroup:team-finance" }] },
-      systemMetadata: { version: "1", lastObserved: 1000, runId: "snowflake-run" },
+      systemMetadata: {
+        version: "1",
+        lastObserved: 1000,
+        runId: "snowflake-run-2026-06",
+        pipelineName: "snowflake-prod",
+      },
     },
     {
       value: { owners: [{ owner: "urn:li:corpGroup:team-ops" }] },
-      systemMetadata: { version: "2", lastObserved: 2000, runId: "dbt-run" },
+      systemMetadata: {
+        version: "2",
+        lastObserved: 2000,
+        runId: "dbt-run-2026-07",
+        pipelineName: "dbt-prod",
+      },
     },
   ],
 };
 
-// A monotonic single-run edit (a correction) — same runId throughout.
-const singleRunOwnership: AspectVersionHistory = {
+// Two different executions of ONE pipeline — drift, even though runId differs.
+const sameSourceOwnership: AspectVersionHistory = {
   urn: URN,
   aspect: "ownership",
   versions: [
     {
       value: { owners: [{ owner: "urn:li:corpGroup:team-a" }] },
-      systemMetadata: { version: "1", lastObserved: 1000, runId: "snowflake-run" },
+      systemMetadata: {
+        version: "1",
+        lastObserved: 1000,
+        runId: "snowflake-run-2026-06",
+        pipelineName: "snowflake-prod",
+      },
     },
     {
       value: { owners: [{ owner: "urn:li:corpGroup:team-b" }] },
-      systemMetadata: { version: "2", lastObserved: 2000, runId: "snowflake-run" },
+      systemMetadata: {
+        version: "2",
+        lastObserved: 2000,
+        runId: "snowflake-run-2026-07",
+        pipelineName: "snowflake-prod",
+      },
     },
   ],
 };
 
-test("versionHistoryToFacts tags each version with its runId as the source", () => {
-  const facts = versionHistoryToFacts(crossRunOwnership);
+test("versionHistoryToFacts separates stable pipeline source from execution runId", () => {
+  const facts = versionHistoryToFacts(crossSourceOwnership);
   assert.equal(facts.length, 2);
   assert.deepEqual(
     facts.map((f) => f.source).sort(),
-    ["dbt-run", "snowflake-run"]
+    ["dbt-prod", "snowflake-prod"]
+  );
+  assert.deepEqual(
+    facts.map((f) => f.scan).sort(),
+    ["dbt-run-2026-07", "snowflake-run-2026-06"]
   );
   assert.equal(facts[0]!.metadata!["record"], URN);
   assert.ok(facts.every((f) => f.kind === "ownership"));
@@ -68,26 +91,68 @@ test("versionHistoryToFacts tags each version with its runId as the source", () 
   assert.equal(facts[0]!.createdAt, new Date(1000).toISOString());
 });
 
-test("auditVersionHistory FIRES on a genuine cross-run flip-flop", () => {
-  const report = auditVersionHistory([crossRunOwnership]);
+test("auditVersionHistory FIRES on a genuine cross-source flip-flop", () => {
+  const report = auditVersionHistory([crossSourceOwnership]);
   assert.equal(report.contradictions.length, 1);
   const c = report.contradictions[0]!;
   assert.equal(c.subject, URN);
   assert.equal(c.attribute, "owner");
-  // the recommender still runs — recency picks the latest run's value.
+  // the recommender still runs — recency picks the latest write's value.
   assert.equal(c.resolution.recommendedValue, "urn:li:corpGroup:team-ops");
 });
 
-test("auditVersionHistory does NOT fire on a monotonic single-run edit (drift, not conflict)", () => {
-  const report = auditVersionHistory([singleRunOwnership]);
-  assert.equal(report.contradictions.length, 0, "single-source edit must be drift, not a contradiction");
+test("different runIds from the SAME pipeline are drift, not a contradiction", () => {
+  const report = auditVersionHistory([sameSourceOwnership]);
+  assert.equal(report.contradictions.length, 0, "same-pipeline edits must be drift");
 });
 
-test("shipped fixture history recovers the owner + field-type contradictions, ignores the single-run edit", () => {
+test("different runIds with UNKNOWN source identity fail closed to drift", () => {
+  const history: AspectVersionHistory = {
+    urn: URN,
+    aspect: "ownership",
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:a" }] },
+        systemMetadata: { version: "1", lastObserved: 1, runId: "run-1" },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:b" }] },
+        systemMetadata: { version: "2", lastObserved: 2, runId: "run-2" },
+      },
+    ],
+  };
+  const facts = versionHistoryToFacts(history);
+  assert.ok(facts.every((fact) => fact.source === "unknown-source"));
+  assert.equal(auditVersionHistory([history]).contradictions.length, 0);
+});
+
+test("trusted runId resolution supports histories without pipelineName", () => {
+  const history: AspectVersionHistory = {
+    urn: URN,
+    aspect: "ownership",
+    sourceIdentityByRunId: {
+      "run-snowflake": "urn:li:dataHubIngestionSource:snowflake-prod",
+      "run-dbt": "urn:li:dataHubIngestionSource:dbt-prod",
+    },
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:a" }] },
+        systemMetadata: { version: "1", lastObserved: 1, runId: "run-snowflake" },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:b" }] },
+        systemMetadata: { version: "2", lastObserved: 2, runId: "run-dbt" },
+      },
+    ],
+  };
+  assert.equal(auditVersionHistory([history]).contradictions.length, 1);
+});
+
+test("shipped fixture history recovers owner + field-type conflicts and ignores same-pipeline drift", () => {
   const report = auditVersionHistory(FIXTURE_VERSION_HISTORY);
   const attrs = report.contradictions.map((c) => c.attribute).sort();
   // sales_orders ownership (owner) + sales_orders.amount type (fieldType) fire;
-  // raw_orders' single-run ownership correction does NOT.
+  // raw_orders' same-pipeline ownership correction does NOT.
   assert.deepEqual(attrs, ["fieldType", "owner"]);
 });
 
@@ -110,11 +175,21 @@ test("schemaMetadata history contradicts at the FIELD level", () => {
     versions: [
       {
         value: { fields: [{ fieldPath: "amount", nativeDataType: "NUMBER" }] },
-        systemMetadata: { version: "1", lastObserved: 1000, runId: "snowflake-run" },
+        systemMetadata: {
+          version: "1",
+          lastObserved: 1000,
+          runId: "snowflake-run",
+          pipelineName: "snowflake-prod",
+        },
       },
       {
         value: { fields: [{ fieldPath: "amount", nativeDataType: "STRING" }] },
-        systemMetadata: { version: "2", lastObserved: 2000, runId: "dbt-run" },
+        systemMetadata: {
+          version: "2",
+          lastObserved: 2000,
+          runId: "dbt-run",
+          pipelineName: "dbt-prod",
+        },
       },
     ],
   };
@@ -129,23 +204,23 @@ test("domains + deprecation histories map to comparable attributes", () => {
     urn: URN,
     aspect: "domains",
     versions: [
-      { value: { domains: ["urn:li:domain:sales"] }, systemMetadata: { version: "1", lastObserved: 1, runId: "a" } },
-      { value: { domains: ["urn:li:domain:finance"] }, systemMetadata: { version: "2", lastObserved: 2, runId: "b" } },
+      { value: { domains: ["urn:li:domain:sales"] }, systemMetadata: { version: "1", lastObserved: 1, runId: "a", pipelineName: "source-a" } },
+      { value: { domains: ["urn:li:domain:finance"] }, systemMetadata: { version: "2", lastObserved: 2, runId: "b", pipelineName: "source-b" } },
     ],
   };
   const dep: AspectVersionHistory = {
     urn: URN,
     aspect: "deprecation",
     versions: [
-      { value: { deprecated: false }, systemMetadata: { version: "1", lastObserved: 1, runId: "a" } },
-      { value: { deprecated: true }, systemMetadata: { version: "2", lastObserved: 2, runId: "b" } },
+      { value: { deprecated: false }, systemMetadata: { version: "1", lastObserved: 1, runId: "a", pipelineName: "source-a" } },
+      { value: { deprecated: true }, systemMetadata: { version: "2", lastObserved: 2, runId: "b", pipelineName: "source-b" } },
     ],
   };
   assert.equal(auditVersionHistory([domains]).contradictions[0]!.attribute, "domain");
   assert.equal(auditVersionHistory([dep]).contradictions[0]!.attribute, "deprecated");
 });
 
-test("missing/placeholder runId collapses to one source → treated as drift", () => {
+test("missing/placeholder provenance collapses to one source → treated as drift", () => {
   const history: AspectVersionHistory = {
     urn: URN,
     aspect: "ownership",
@@ -157,7 +232,7 @@ test("missing/placeholder runId collapses to one source → treated as drift", (
       },
     ],
   };
-  // both collapse to "unknown-run" → single source → no contradiction.
+  // both collapse to "unknown-source" → single source → no contradiction.
   assert.equal(auditVersionHistory([history]).contradictions.length, 0);
 });
 

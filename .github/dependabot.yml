@@ -1,0 +1,160 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:10"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(root)
+    groups:
+      root-production-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+      root-development-minor-patch:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /web
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "04:20"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(web)
+    groups:
+      web-production-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+      web-development-minor-patch:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "04:30"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci(deps)
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "04:35"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps(container)
+
+  - package-ecosystem: npm
+    directory: /infra/aws
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: thursday
+      time: "04:40"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(infra)
+    groups:
+      infra-production-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+      infra-development-minor-patch:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /infra/aws/lambda/approval
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: friday
+      time: "04:50"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(approval-lambda)
+    groups:
+      approval-lambda-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /infra/aws/lambda/control
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "05:00"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    versioning-strategy: increase-if-necessary
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(control-lambda)
+    groups:
+      control-lambda-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
