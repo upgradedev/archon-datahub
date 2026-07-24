@@ -259,6 +259,62 @@ printf '%s==%s --hash=sha256:%s\n' \
 test -s "${build_constraints}"
 test ! -L "${build_constraints}"
 
+# uv 0.11.31 supports project build constraints but not the later
+# `uv sync --build-constraint` CLI spelling. Add a CI-local, digest-recorded
+# overlay to the already hash-verified upstream pyproject. The direct PyPI wheel
+# URL carries the committed SHA-256, so the isolated legacy build cannot resolve
+# a floating setuptools distribution.
+readonly upstream_pyproject="${destination}/pyproject.toml"
+readonly upstream_pyproject_sha="$(
+  jq -er '.files["pyproject.toml"].sha256' "${contract}"
+)"
+readonly build_constraint_requirement="$(
+  printf '%s @ %s#sha256=%s' \
+    "${backend_name}" \
+    "${backend_url}" \
+    "${backend_sha}"
+)"
+readonly build_constraint_overlay="${provenance_dir}/build-constraint-overlay.json"
+python3 - \
+  "${upstream_pyproject}" \
+  "${build_constraint_requirement}" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+requirement = sys.argv[2]
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("upstream pyproject must be one regular file")
+text = path.read_text(encoding="utf-8")
+marker = "[tool.uv]\n"
+if text.count(marker) != 1:
+    raise SystemExit("upstream pyproject must contain one [tool.uv] table")
+if "build-constraint-dependencies" in text:
+    raise SystemExit("upstream pyproject already defines build constraints")
+entry = f"build-constraint-dependencies = [{json.dumps(requirement)}]\n"
+path.write_text(text.replace(marker, marker + entry, 1), encoding="utf-8")
+PY
+test -f "${upstream_pyproject}"
+test ! -L "${upstream_pyproject}"
+readonly overlaid_pyproject_sha="$(
+  sha256sum "${upstream_pyproject}" | awk '{print $1}'
+)"
+test "${overlaid_pyproject_sha}" != "${upstream_pyproject_sha}"
+jq -cnS \
+  --arg upstreamPyprojectSha256 "${upstream_pyproject_sha}" \
+  --arg overlaidPyprojectSha256 "${overlaid_pyproject_sha}" \
+  --arg requirement "${build_constraint_requirement}" '
+    {
+      schemaVersion: "archon.datahub-mcp-build-constraint-overlay/v1",
+      upstreamPyprojectSha256: $upstreamPyprojectSha256,
+      overlaidPyprojectSha256: $overlaidPyprojectSha256,
+      requirement: $requirement
+    }
+  ' >"${build_constraint_overlay}"
+test -s "${build_constraint_overlay}"
+test ! -L "${build_constraint_overlay}"
+
 # PyPI's trusted-publisher provenance binds the exact wheel digest to the official
 # acryldata GitHub release workflow. Pin the DSSE statement, signature, Fulcio
 # certificate, and Rekor entry as well as validating the semantic subject/publisher.
@@ -368,7 +424,6 @@ uv sync \
   --no-dev \
   --no-install-project \
   --no-cache \
-  --build-constraint "${build_constraints}" \
   "${no_build_args[@]}" \
   --python "${python_version}"
 printf '%s @ %s --hash=sha256:%s\n' \

@@ -230,8 +230,8 @@ describe("live production runtime byte binding", () => {
     );
     expect(observer).toContain("sort_by(.role)");
     expect(observer).toContain("sort_by(.key)");
-    expect(workflow).toContain(
-      "liveRuntimeManifestSha256: $liveRuntimeManifestSha256"
+    expect(workflow).toMatch(
+      /liveRuntimeManifestSha256:\s+\$liveRuntimeManifestSha256/u
     );
     expect(workflow).toContain(
       '"${evidence_dir}/live-runtime-manifest.json"'

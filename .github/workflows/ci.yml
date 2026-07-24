@@ -527,6 +527,8 @@ jobs:
             "${evidence_dir}/allowed-source-build.tar.gz"
           cp "${MCP_PROJECT}/.archon-evidence/build-constraints.txt" \
             "${evidence_dir}/build-constraints.txt"
+          cp "${MCP_PROJECT}/.archon-evidence/build-constraint-overlay.json" \
+            "${evidence_dir}/build-constraint-overlay.json"
           cp "${MCP_PROJECT}/.archon-evidence/no-build-packages.txt" \
             "${evidence_dir}/no-build-packages.txt"
           backend_filename="$(
@@ -564,6 +566,10 @@ jobs:
               jq -er \
                 '.sourceBuildPolicy.buildBackend.wheel.sha256' \
                 "${contract}"
+            )" \
+            --arg buildConstraintOverlaySha256 "$(
+              sha256sum "${evidence_dir}/build-constraint-overlay.json" |
+                awk '{print $1}'
             )" '
               {
                 schemaVersion: "archon.datahub-mcp-security-evidence/v1",
@@ -579,6 +585,8 @@ jobs:
                   mcpWheelSha256: $wheelSha256,
                   allowedSourceBuildSha256: $allowedSdistSha256,
                   buildBackendWheelSha256: $buildBackendWheelSha256,
+                  buildConstraintOverlaySha256:
+                    $buildConstraintOverlaySha256,
                   pypiTrustedPublisherProvenance:
                     "matched-pinned-pypi-record"
                 },
@@ -594,6 +602,7 @@ jobs:
               allowed-source-build.tar.gz \
               audit.sarif \
               build-backend.whl \
+              build-constraint-overlay.json \
               build-constraints.txt \
               installed-packages.json \
               lock-contract.json \
