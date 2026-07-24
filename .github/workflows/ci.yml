@@ -502,7 +502,7 @@ jobs:
           set +e
           uv audit \
             --project "${MCP_PROJECT}" \
-            --locked \
+            --frozen \
             --no-dev \
             --no-build \
             --no-cache \

@@ -35,7 +35,7 @@
     "excludeNewer": "2026-07-23T03:00:00Z",
     "sourceBuilds": "deny",
     "projectMode": "virtual-static-metadata",
-    "resolvedLockSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    "resolvedLockSha256": "8fa40a6f15951c03c98371bcbf91d23d6550a7bf2284ad0696a56b1ff74e0bba"
   },
   "upstreamLockProvenance": {
     "wheelLessDependency": {
