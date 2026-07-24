@@ -243,8 +243,13 @@ promoting those same three immutable artifacts. Selecting an older retained CI r
 rollback path; no application artifact is rebuilt during deploy.
 Infrastructure is deliberately reconciled from the current default-branch deployment
 control plane only after that exact commit has successful CI, CodeQL, and workflow-security
-push runs. An application rollback therefore cannot silently roll back newer IaC security
-controls.
+push runs. The workflow revalidates the default-branch ref and latest exact-SHA receipts
+after production approval, immediately before each AWS OIDC trust boundary, and immediately
+before the first staging and production mutations. After observing the exact live production
+bytes, it reproduces the original receipt digest once more immediately before sealing
+promotion evidence; the canonical receipt is retained in that evidence. An application
+rollback therefore cannot silently roll back newer IaC security controls, and a mid-promotion
+branch or gate change cannot produce a trusted successful deployment record.
 
 AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
 DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
@@ -277,7 +282,7 @@ output is not accepted as release evidence:
 | IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
 | IaC scanner | Trivy config scan with an all-severity, zero-finding fail gate plus structurally validated SARIF |
 | Container hardening | Non-root/read-only runtime contract and isolated health boot |
-| Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, and daily or exact-run rescans |
+| Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, exact-run rescans, and a daily read-only-OIDC rescan transitively bound to current ECS image digests, Lambda ZIP/config/content digests, every versioned KMS-encrypted SPA object, exact deployment/CI artifacts, and a second post-scan live-byte TOCTOU observation |
 | Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
 | Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/regional-WAF/network contracts |
@@ -289,14 +294,28 @@ Workflows:
 - [CodeQL](.github/workflows/codeql.yml) — SAST on pull requests, `master`, and schedule.
 - [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
   validation of the workflows themselves.
-- [Production supply chain](.github/workflows/supply-chain.yml) — automatic, daily, and
-  exact-run rescans of the original CI container, SPA, and Lambda bytes; fresh-DB
-  vulnerability gates, SARIF, and v4 attestations.
+- [Production supply chain](.github/workflows/supply-chain.yml) — automatic and exact-run
+  rescans plus a daily rescan of the original CI container, SPA, and Lambda bytes for the
+  exact successful deployment currently identified by `Archon-production`; it verifies
+  the deployment-evidence artifact, GitHub artifact metadata digests, inner subject
+  digests, and a canonical ECS/Lambda/S3 live-runtime manifest. It repeats the live AWS
+  observation after scanning, revalidates the sealed observer whole-snapshot receipt before
+  read-only OIDC and again immediately before provenance signing. Immediately before the
+  first attestation it also reads the latest exact historical-source CodeQL and workflow-
+  security receipts twice and requires both snapshots to equal the sealed receipt; the
+  deployed source SHA may be older than the current `master`. The workflow produces
+  fresh-DB gates, self-verifiable 90-day raw evidence, SARIF, and v4 attestations.
+- [Production posture](.github/workflows/production-posture.yml) — scheduled/manual,
+  read-only-OIDC termination-protection, CloudFormation drift, alarm-subscription, and
+  TOCTOU verification for all three production stacks, with signed 90-day evidence.
 - [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
-  a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then
+  a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then an
+  exact-run governed write/rollback canary whose signed evidence is required before the
   protected same-artifact production promotion.
 - [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
-  flagship retained-history path.
+  flagship retained-history path, with matching pre-secret, post-proof, and immediate
+  pre-attestation exact control-plane gates and both the enforced and enriched receipts
+  included in the signed subject set.
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
   digests, then `APPROVE → VERIFIED`, followed by a separately approved exact rollback

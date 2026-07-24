@@ -52,7 +52,7 @@ describe("Archon AWS reference architecture", () => {
     registry.hasOutput("ArchonEcrRepositoryName", {});
   });
 
-  test("requires digest-addressed image and build-once SPA parameters", () => {
+  test("requires exact immutable release and workflow subject parameters", () => {
     const { platform } = templates();
     const json = platform.toJSON();
     expect(json.Parameters.ImageDigest).toEqual(
@@ -65,6 +65,31 @@ describe("Archon AWS reference architecture", () => {
         AllowedPattern: "^[a-f0-9]{64}$"
       })
     );
+    for (const parameter of [
+      "ContainerArchiveSha256",
+      "LambdaArchiveSha256"
+    ]) {
+      expect(json.Parameters[parameter]).toEqual(
+        expect.objectContaining({
+          Type: "String",
+          AllowedPattern: "^[a-f0-9]{64}$"
+        })
+      );
+      expect(json.Parameters[parameter].Default).toBeUndefined();
+    }
+    for (const parameter of [
+      "DeploymentWorkflowRunId",
+      "DeploymentWorkflowRunAttempt",
+      "CiRunId"
+    ]) {
+      expect(json.Parameters[parameter]).toEqual(
+        expect.objectContaining({
+          Type: "String",
+          AllowedPattern: "^[1-9][0-9]{0,19}$"
+        })
+      );
+      expect(json.Parameters[parameter].Default).toBeUndefined();
+    }
     expect(json.Parameters.CloudFrontDomainName).toEqual(
       expect.objectContaining({
         MaxLength: 253,
@@ -728,9 +753,11 @@ describe("Archon AWS reference architecture", () => {
         }
       })
     });
-    const [originPolicyLogicalId] = Object.entries(
+    const originPolicyLogicalIds = Object.keys(
       platform.findResources("AWS::CloudFront::OriginRequestPolicy")
-    )[0];
+    );
+    expect(originPolicyLogicalIds).toHaveLength(1);
+    const originPolicyLogicalId = originPolicyLogicalIds[0]!;
     const apiBehavior =
       distribution.Properties.DistributionConfig.CacheBehaviors.find(
         (behavior: any) => behavior.PathPattern === "api/*"
@@ -1345,6 +1372,7 @@ describe("Archon AWS reference architecture", () => {
 
     for (const outputName of [
       "ArchonSpaBucketName",
+      "ArchonSpaKeyArn",
       "ArchonEvidenceBucketName",
       "ArchonCloudFrontDistributionId",
       "ArchonCloudFrontDomainName",
@@ -1387,9 +1415,28 @@ describe("Archon AWS reference architecture", () => {
       "ArchonLlmSecretArn",
       "ArchonContainerImageDigest",
       "ArchonSpaArtifactSha256",
+      "ArchonContainerArchiveSha256",
+      "ArchonLambdaArchiveSha256",
+      "ArchonDeploymentWorkflowRunId",
+      "ArchonDeploymentWorkflowRunAttempt",
+      "ArchonCiRunId",
       "ArchonReleaseSha"
     ]) {
       platform.hasOutput(outputName, {});
+    }
+    for (const [outputName, parameterName] of [
+      ["ArchonContainerArchiveSha256", "ContainerArchiveSha256"],
+      ["ArchonLambdaArchiveSha256", "LambdaArchiveSha256"],
+      ["ArchonDeploymentWorkflowRunId", "DeploymentWorkflowRunId"],
+      [
+        "ArchonDeploymentWorkflowRunAttempt",
+        "DeploymentWorkflowRunAttempt"
+      ],
+      ["ArchonCiRunId", "CiRunId"]
+    ] as const) {
+      platform.hasOutput(outputName, {
+        Value: { Ref: parameterName }
+      });
     }
   });
 

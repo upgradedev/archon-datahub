@@ -6,6 +6,20 @@ on:
       - Governed DataHub canary
     types:
       - completed
+  workflow_dispatch:
+    inputs:
+      parent_run_id:
+        description: Failed or cancelled governed-canary workflow run ID
+        required: true
+        type: string
+      parent_run_attempt:
+        description: Exact parent workflow run attempt
+        required: true
+        type: string
+      confirmation:
+        description: Type RECOVER SEALED GOVERNED CANARY
+        required: true
+        type: string
 
 permissions:
   actions: read
@@ -19,8 +33,8 @@ env:
   NODE_VERSION: "22.23.1"
   AWS_PAGER: ""
   CANARY_STACK_NAME: Archon-staging
-  CANARY_SOURCE_WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
-  CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+  CANARY_SOURCE_WORKFLOW_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.parent_run_id }}
+  CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.run_attempt || inputs.parent_run_attempt }}
   CANARY_QUERY: archon_governed_canary_fixture
   CANARY_COLUMN_PATH: email
   CANARY_TAG_URN: urn:li:tag:PII
@@ -36,8 +50,17 @@ jobs:
       github.repository == 'upgradedev/archon-datahub' &&
       github.ref == 'refs/heads/master' &&
       (
-        github.event.workflow_run.conclusion == 'failure' ||
-        github.event.workflow_run.conclusion == 'cancelled'
+        (
+          github.event_name == 'workflow_run' &&
+          (
+            github.event.workflow_run.conclusion == 'failure' ||
+            github.event.workflow_run.conclusion == 'cancelled'
+          )
+        ) ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.confirmation == 'RECOVER SEALED GOVERNED CANARY'
+        )
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -47,29 +70,42 @@ jobs:
       write_artifact: ${{ steps.source.outputs.write_artifact }}
       has_write: ${{ steps.source.outputs.has_write }}
       control_plane_sha: ${{ steps.source.outputs.control_plane_sha }}
+      control_plane_gate_sha256: ${{ steps.manifest.outputs.control_plane_gate_sha256 }}
       deployment_run_id: ${{ steps.manifest.outputs.deployment_run_id }}
       release_sha: ${{ steps.manifest.outputs.release_sha }}
       recovery_digest: ${{ steps.manifest.outputs.recovery_digest }}
+      recovery_driver_sha: ${{ steps.recovery_driver.outputs.sha }}
+      recovery_driver_gate_sha256: ${{ steps.recovery_driver.outputs.gate_sha256 }}
+      recovery_driver_gate_base64: ${{ steps.recovery_driver.outputs.gate_base64 }}
     steps:
       - name: Validate exact parent workflow and artifact set
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
-          PARENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          PARENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          PARENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          PARENT_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
-          PARENT_PATH: ${{ github.event.workflow_run.path }}
-          PARENT_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_EVENT_NAME: ${{ github.event_name }}
+          RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+          EVENT_PARENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT_PARENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT_PARENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_PARENT_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          EVENT_PARENT_PATH: ${{ github.event.workflow_run.path }}
+          EVENT_PARENT_EVENT: ${{ github.event.workflow_run.event }}
         run: |
           set -euo pipefail
           [[ "${CANARY_SOURCE_WORKFLOW_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
-          [[ "${PARENT_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${PARENT_CONCLUSION}" == "failure" || "${PARENT_CONCLUSION}" == "cancelled" ]]
-          test "${PARENT_HEAD_REPOSITORY}" = "${GITHUB_REPOSITORY}"
-          test "${PARENT_PATH}" = ".github/workflows/governed-canary.yml"
-          test "${PARENT_EVENT}" = "workflow_dispatch"
+          case "${TRIGGER_EVENT_NAME}" in
+            workflow_run)
+              ;;
+            workflow_dispatch)
+              test "${RECOVERY_CONFIRMATION}" = \
+                "RECOVER SEALED GOVERNED CANARY"
+              ;;
+            *)
+              echo "::error::Unsupported recovery trigger"
+              exit 1
+              ;;
+          esac
 
           repository_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -77,70 +113,46 @@ jobs:
           default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
           test "${default_branch}" = "master"
           test "${GITHUB_REF}" = "refs/heads/${default_branch}"
-          test "${PARENT_HEAD_BRANCH}" = "${default_branch}"
 
           parent_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_SOURCE_WORKFLOW_RUN_ID}/attempts/${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}")"
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg conclusion "${PARENT_CONCLUSION}" \
             --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" \
-            --arg branch "${default_branch}" \
-            --arg headSha "${PARENT_HEAD_SHA}" '
+            --arg branch "${default_branch}" '
               .id == (env.CANARY_SOURCE_WORKFLOW_RUN_ID | tonumber) and
               .run_attempt == ($attempt | tonumber) and
               .name == "Governed DataHub canary" and
               .path == ".github/workflows/governed-canary.yml" and
               .head_repository.full_name == $repository and
               .head_branch == $branch and
-              .head_sha == $headSha and
+              (.head_sha | test("^[0-9a-f]{40}$")) and
               .event == "workflow_dispatch" and
               .status == "completed" and
-              .conclusion == $conclusion
+              (
+                .conclusion == "failure" or
+                .conclusion == "cancelled"
+              )
             ' <<<"${parent_json}" >/dev/null
+          PARENT_CONCLUSION="$(jq -er '.conclusion' <<<"${parent_json}")"
+          PARENT_HEAD_BRANCH="$(jq -er '.head_branch' <<<"${parent_json}")"
+          PARENT_HEAD_SHA="$(jq -er '.head_sha' <<<"${parent_json}")"
+          PARENT_HEAD_REPOSITORY="$(
+            jq -er '.head_repository.full_name' <<<"${parent_json}"
+          )"
+          PARENT_PATH="$(jq -er '.path' <<<"${parent_json}")"
+          PARENT_EVENT="$(jq -er '.event' <<<"${parent_json}")"
+          if [[ "${TRIGGER_EVENT_NAME}" == "workflow_run" ]]; then
+            test "${EVENT_PARENT_CONCLUSION}" = "${PARENT_CONCLUSION}"
+            test "${EVENT_PARENT_HEAD_BRANCH}" = "${PARENT_HEAD_BRANCH}"
+            test "${EVENT_PARENT_HEAD_SHA}" = "${PARENT_HEAD_SHA}"
+            test "${EVENT_PARENT_HEAD_REPOSITORY}" = \
+              "${PARENT_HEAD_REPOSITORY}"
+            test "${EVENT_PARENT_PATH}" = "${PARENT_PATH}"
+            test "${EVENT_PARENT_EVENT}" = "${PARENT_EVENT}"
+          fi
 
-          workflow_success() {
-            local workflow_file="$1"
-            local expected_name="$2"
-            local expected_path=".github/workflows/${workflow_file}"
-            local response
-            response="$(gh api \
-              --method GET \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
-              -f "head_sha=${PARENT_HEAD_SHA}" \
-              -f "branch=${default_branch}" \
-              -f event=push \
-              -f status=completed \
-              -f per_page=100)"
-            jq -e \
-              --arg name "${expected_name}" \
-              --arg path "${expected_path}" \
-              --arg sha "${PARENT_HEAD_SHA}" \
-              --arg branch "${default_branch}" \
-              --arg repository "${GITHUB_REPOSITORY}" '
-                any(
-                  .workflow_runs[];
-                  .name == $name and
-                  .path == $path and
-                  .head_sha == $sha and
-                  .head_branch == $branch and
-                  .head_repository.full_name == $repository and
-                  .event == "push" and
-                  .status == "completed" and
-                  .conclusion == "success"
-                )
-              ' <<<"${response}" >/dev/null
-          }
-
-          workflow_success ci.yml CI &&
-            workflow_success codeql.yml CodeQL &&
-            workflow_success workflow-security.yml "Workflow security" || {
-              echo "::error::Independent recovery requires successful exact-parent-SHA CI, CodeQL, and Workflow security push runs"
-              exit 1
-            }
           echo "control_plane_sha=${PARENT_HEAD_SHA}" >>"${GITHUB_OUTPUT}"
 
           recovery_name="governed-canary-recovery-${CANARY_SOURCE_WORKFLOW_RUN_ID}-${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}"
@@ -168,7 +180,11 @@ jobs:
             echo "requires_recovery=true"
             echo "recovery_artifact=${recovery_name}"
             echo "write_artifact=${write_name}"
-            [[ "${write_count}" == "1" ]] && echo "has_write=true" || echo "has_write=false"
+            if [[ "${write_count}" == "1" ]]; then
+              echo "has_write=true"
+            else
+              echo "has_write=false"
+            fi
           } >>"${GITHUB_OUTPUT}"
 
       - name: Download exact sealed recovery from parent
@@ -178,34 +194,279 @@ jobs:
           name: ${{ steps.source.outputs.recovery_artifact }}
           path: ${{ runner.temp }}/parent-recovery
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.CANARY_SOURCE_WORKFLOW_RUN_ID }}
           github-token: ${{ github.token }}
 
       - name: Inspect immutable parent coordinates
         if: steps.source.outputs.requires_recovery == 'true'
         id: manifest
         env:
+          GH_TOKEN: ${{ github.token }}
           RECOVERY_PATH: ${{ runner.temp }}/parent-recovery/recovery.json
+          CONTROL_PLANE_GATES_PATH: ${{ runner.temp }}/parent-recovery/control-plane-security-gates.json
+          PARENT_HEAD_SHA: ${{ steps.source.outputs.control_plane_sha }}
         run: |
           set -euo pipefail
           test -f "${RECOVERY_PATH}"
           test ! -L "${RECOVERY_PATH}"
+          test -f "${CONTROL_PLANE_GATES_PATH}"
+          test ! -L "${CONTROL_PLANE_GATES_PATH}"
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg run "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
             --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" '
-              .schemaVersion == "archon.governed-canary-recovery/v1" and
+              .schemaVersion == "archon.governed-canary-recovery/v2" and
               .repository == $repository and
               .workflowRunId == $run and
               .workflowRunAttempt == $attempt and
               (.deploymentRunId | test("^[1-9][0-9]{0,19}$")) and
+              (.controlPlaneGatesSha256 | test("^[a-f0-9]{64}$")) and
               (.releaseSha | test("^[a-f0-9]{40}$")) and
               (.recoveryDigest | test("^sha256:[a-f0-9]{64}$"))
             ' "${RECOVERY_PATH}" >/dev/null
+          canonical_recovery="${RUNNER_TEMP}/parent-recovery-manifest.json"
+          jq -cS . "${RECOVERY_PATH}" >"${canonical_recovery}"
+          cmp --silent "${RECOVERY_PATH}" "${canonical_recovery}" || {
+            echo "::error::The sealed recovery manifest is not canonical"
+            exit 1
+          }
+          unsigned_recovery="$(jq -cS 'del(.recoveryDigest)' "${RECOVERY_PATH}")"
+          actual_recovery_digest="sha256:$(
+            printf '%s' "${unsigned_recovery}" | sha256sum | awk '{print $1}'
+          )"
+          test "${actual_recovery_digest}" = \
+            "$(jq -er '.recoveryDigest' "${RECOVERY_PATH}")" || {
+            echo "::error::The sealed recovery manifest digest is invalid"
+            exit 1
+          }
+          expected_gate_sha256="$(
+            jq -er '.controlPlaneGatesSha256' "${RECOVERY_PATH}"
+          )"
+          test "$(sha256sum "${CONTROL_PLANE_GATES_PATH}" | awk '{print $1}')" = \
+            "${expected_gate_sha256}"
+          canonical_gate="${RUNNER_TEMP}/parent-control-plane-security-gates.json"
+          jq -cS . "${CONTROL_PLANE_GATES_PATH}" >"${canonical_gate}"
+          cmp --silent "${CONTROL_PLANE_GATES_PATH}" "${canonical_gate}" || {
+            echo "::error::The sealed historical control-plane receipt is not canonical"
+            exit 1
+          }
+          jq -e \
+            --arg sha "${PARENT_HEAD_SHA}" '
+              .schemaVersion == "archon.deployment-control-plane-gates/v1" and
+              .sourceSha == $sha and
+              .branch == "master" and
+              (.workflows | length) == 3 and
+              ([.workflows[].path] | sort) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .workflows[];
+                (.workflowId | type) == "number" and
+                (.runId | type) == "number" and
+                (.runAttempt | type) == "number" and
+                (.url | type) == "string" and
+                .conclusion == "success"
+              )
+            ' "${CONTROL_PLANE_GATES_PATH}" >/dev/null || {
+            echo "::error::The sealed historical control-plane receipt is invalid"
+            exit 1
+          }
+          while IFS= read -r sealed_receipt; do
+            workflow_path="$(jq -er '.path' <<<"${sealed_receipt}")"
+            case "${workflow_path}" in
+              .github/workflows/ci.yml)
+                workflow_name="CI"
+                ;;
+              .github/workflows/codeql.yml)
+                workflow_name="CodeQL"
+                ;;
+              .github/workflows/workflow-security.yml)
+                workflow_name="Workflow security"
+                ;;
+              *)
+                echo "::error::A sealed historical workflow path is invalid"
+                exit 1
+                ;;
+            esac
+            workflow_id="$(jq -er '.workflowId' <<<"${sealed_receipt}")"
+            run_id="$(jq -er '.runId' <<<"${sealed_receipt}")"
+            run_attempt="$(jq -er '.runAttempt' <<<"${sealed_receipt}")"
+            run_url="$(jq -er '.url' <<<"${sealed_receipt}")"
+            sealed_run="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${run_attempt}")"
+            jq -e \
+              --arg name "${workflow_name}" \
+              --arg path "${workflow_path}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg branch "master" \
+              --arg sha "${PARENT_HEAD_SHA}" \
+              --arg url "${run_url}" \
+              --argjson workflowId "${workflow_id}" \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${run_attempt}" '
+                .id == $runId and
+                .workflow_id == $workflowId and
+                .run_attempt == $runAttempt and
+                .name == $name and
+                .path == $path and
+                .head_repository.full_name == $repository and
+                .head_branch == $branch and
+                .head_sha == $sha and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success" and
+                .html_url == $url
+              ' <<<"${sealed_run}" >/dev/null || {
+              echo "::error::A sealed historical workflow attempt is invalid"
+              exit 1
+            }
+          done < <(jq -c '.workflows[]' "${CONTROL_PLANE_GATES_PATH}")
           {
             echo "deployment_run_id=$(jq -er '.deploymentRunId' "${RECOVERY_PATH}")"
+            echo "control_plane_gate_sha256=${expected_gate_sha256}"
             echo "release_sha=$(jq -er '.releaseSha' "${RECOVERY_PATH}")"
             echo "recovery_digest=$(jq -er '.recoveryDigest' "${RECOVERY_PATH}")"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Seal trusted recovery driver before protected approval
+        if: steps.source.outputs.requires_recovery == 'true'
+        id: recovery_driver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          driver_sha="${GITHUB_SHA}"
+          [[ "${driver_sha}" =~ ^[0-9a-f]{40}$ ]]
+          read_current_driver_sha() {
+            local repository_json ref_json
+            repository_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}")"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                .full_name == $repository and
+                .default_branch == "master" and
+                .archived == false and
+                .disabled == false
+              ' <<<"${repository_json}" >/dev/null
+            ref_json="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master")"
+            jq -er '
+              select(
+                .ref == "refs/heads/master" and
+                .object.type == "commit" and
+                (.object.sha | test("^[0-9a-f]{40}$"))
+              ) |
+              .object.sha
+            ' <<<"${ref_json}"
+          }
+          test "$(read_current_driver_sha)" = "${driver_sha}" || {
+            echo "::error::The recovery workflow is no longer current"
+            exit 1
+          }
+
+          read_driver_gates() {
+            local workflow_file expected_name expected_path response selected
+            local gates="[]"
+            while IFS='|' read -r workflow_file expected_name; do
+              expected_path=".github/workflows/${workflow_file}"
+              response="$(gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+                -f "head_sha=${driver_sha}" \
+                -f branch=master \
+                -f event=push \
+                -f per_page=100)"
+              selected="$(jq -ce \
+                --arg name "${expected_name}" \
+                --arg path "${expected_path}" \
+                --arg sha "${driver_sha}" \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .name == $name and
+                      .path == $path and
+                      .head_sha == $sha and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository and
+                      .event == "push"
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  select(
+                    . != null and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ' <<<"${response}")"
+              gates="$(jq -cn \
+                --argjson current "${gates}" \
+                --argjson selected "${selected}" '
+                  $current + [{
+                    path: $selected.path,
+                    workflowId: $selected.workflow_id,
+                    runId: $selected.id,
+                    runAttempt: $selected.run_attempt,
+                    url: $selected.html_url,
+                    conclusion: $selected.conclusion
+                  }]
+                ')"
+            done <<'EOF'
+          ci.yml|CI
+          codeql.yml|CodeQL
+          workflow-security.yml|Workflow security
+          EOF
+            jq -cS 'sort_by(.path)' <<<"${gates}"
+          }
+
+          first_gates="$(read_driver_gates)"
+          test "$(read_current_driver_sha)" = "${driver_sha}" || {
+            echo "::error::The recovery driver changed during bootstrap"
+            exit 1
+          }
+          second_gates="$(read_driver_gates)"
+          test "${second_gates}" = "${first_gates}" || {
+            echo "::error::The recovery driver gates changed during bootstrap"
+            exit 1
+          }
+          test "$(read_current_driver_sha)" = "${driver_sha}" || {
+            echo "::error::The recovery driver changed after gate bootstrap"
+            exit 1
+          }
+          bootstrap_dir="${RUNNER_TEMP}/governed-canary/recovery-driver-bootstrap"
+          mkdir -p "${bootstrap_dir}"
+          bootstrap_receipt="${bootstrap_dir}/control-plane-security-gates.json"
+          jq -cnS \
+            --arg sha "${driver_sha}" \
+            --argjson workflows "${second_gates}" '
+              {
+                schemaVersion: "archon.deployment-control-plane-gates/v1",
+                sourceSha: $sha,
+                branch: "master",
+                workflows: ($workflows | sort_by(.path))
+              }
+            ' >"${bootstrap_receipt}"
+          bootstrap_sha256="$(
+            sha256sum "${bootstrap_receipt}" | awk '{print $1}'
+          )"
+          bootstrap_base64="$(base64 -w 0 "${bootstrap_receipt}")"
+          {
+            echo "sha=${driver_sha}"
+            echo "gate_sha256=${bootstrap_sha256}"
+            echo "gate_base64=${bootstrap_base64}"
           } >>"${GITHUB_OUTPUT}"
 
   recover:
@@ -226,6 +487,7 @@ jobs:
     env:
       CANARY_CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.control_plane_sha }}
       CANARY_DEPLOYMENT_RUN_ID: ${{ needs.resolve-parent.outputs.deployment_run_id }}
+      CANARY_CONTROL_PLANE_GATES_SHA256: ${{ needs.resolve-parent.outputs.control_plane_gate_sha256 }}
       CANARY_RELEASE_SHA: ${{ needs.resolve-parent.outputs.release_sha }}
       CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
       CANARY_EVIDENCE_BUCKET: ${{ vars.CANARY_EVIDENCE_BUCKET }}
@@ -267,16 +529,45 @@ jobs:
             .total_count == 1 and .branch_policies[0].name == "master"
           ' <<<"${policies}" >/dev/null
 
+      - name: Materialize the unprivileged sealed recovery driver receipt
+        id: recovery_driver_receipt
+        env:
+          RECOVERY_DRIVER_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
+          RECOVERY_DRIVER_GATE_SHA256: ${{ needs.resolve-parent.outputs.recovery_driver_gate_sha256 }}
+          RECOVERY_DRIVER_GATE_BASE64: ${{ needs.resolve-parent.outputs.recovery_driver_gate_base64 }}
+        run: |
+          set -euo pipefail
+          [[ "${RECOVERY_DRIVER_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RECOVERY_DRIVER_GATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          receipt_dir="${RUNNER_TEMP}/governed-canary/recovery-driver-bootstrap"
+          mkdir -p "${receipt_dir}"
+          receipt="${receipt_dir}/control-plane-security-gates.json"
+          printf '%s' "${RECOVERY_DRIVER_GATE_BASE64}" |
+            base64 --decode >"${receipt}"
+          test "$(sha256sum "${receipt}" | awk '{print $1}')" = \
+            "${RECOVERY_DRIVER_GATE_SHA256}"
+          canonical="${receipt_dir}/canonical-control-plane-security-gates.json"
+          jq -cS . "${receipt}" >"${canonical}"
+          cmp --silent "${receipt}" "${canonical}"
+          jq -e \
+            --arg sha "${RECOVERY_DRIVER_SHA}" '
+              .schemaVersion == "archon.deployment-control-plane-gates/v1" and
+              .sourceSha == $sha and
+              .branch == "master" and
+              (.workflows | length) == 3
+            ' "${receipt}" >/dev/null
+          echo "path=${receipt}" >>"${GITHUB_OUTPUT}"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.resolve-parent.outputs.control_plane_sha }}
+          ref: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Assert exact reviewed parent control plane
+      - name: Assert exact sealed recovery driver
         env:
-          EXPECTED_CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.control_plane_sha }}
-        run: test "$(git rev-parse HEAD)" = "${EXPECTED_CONTROL_PLANE_SHA}"
+          EXPECTED_RECOVERY_DRIVER_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_RECOVERY_DRIVER_SHA}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -292,7 +583,7 @@ jobs:
           name: ${{ needs.resolve-parent.outputs.recovery_artifact }}
           path: ${{ runner.temp }}/governed-canary/recovery
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.CANARY_SOURCE_WORKFLOW_RUN_ID }}
           github-token: ${{ github.token }}
 
       - name: Download optional verified write manifest
@@ -302,8 +593,26 @@ jobs:
           name: ${{ needs.resolve-parent.outputs.write_artifact }}
           path: ${{ runner.temp }}/governed-canary/write
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.CANARY_SOURCE_WORKFLOW_RUN_ID }}
           github-token: ${{ github.token }}
+
+      - name: Authenticate sealed recovery driver before AWS trust
+        id: recovery_driver_gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
+          EXPECTED_GATE_SHA256: ${{ needs.resolve-parent.outputs.recovery_driver_gate_sha256 }}
+          VERIFICATION_MODE: sealed
+          SEALED_GATE_PATH: ${{ steps.recovery_driver_receipt.outputs.path }}
+          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/recovery-aws-gates/control-plane-security-gates.json
+        run: |
+          set -euo pipefail
+          bash scripts/verify-github-control-plane.sh
+          gate_sha256="$(
+            sha256sum "${OUTPUT_PATH}" | awk '{print $1}'
+          )"
+          [[ "${gate_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "gate_sha256=${gate_sha256}" >>"${GITHUB_OUTPUT}"
 
       - name: Assume read-only staging binding role
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -333,12 +642,61 @@ jobs:
             .head_branch == "master" and
             .head_sha == $controlPlane and
             .event == "workflow_dispatch" and
-            .status == "completed" and
-            .conclusion == "success"
+            (
+              (
+                .status == "in_progress" and
+                .conclusion == null
+              ) or
+              (
+                .status == "completed" and
+                (
+                  .conclusion == "success" or
+                  .conclusion == "failure" or
+                  .conclusion == "cancelled"
+                )
+              )
+            )
           ' <<<"${deployment}" >/dev/null || {
-            echo "::error::Recovery deployment is not bound to the exact parent control-plane SHA"
+            echo "::error::Recovery deployment is not an exact active or terminal canary parent"
             exit 1
           }
+          deployment_attempt="$(jq -er \
+            '.run_attempt | select(type == "number" and . >= 1)' \
+            <<<"${deployment}")"
+          deployment_jobs="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}/attempts/${deployment_attempt}/jobs?per_page=100")"
+          jq -e \
+            --argjson runAttempt "${deployment_attempt}" '
+              [
+                .jobs[] |
+                select(.name == "Verify once and deploy staging")
+              ] as $staging |
+              ($staging | length) == 1 and
+              $staging[0].run_attempt == $runAttempt and
+              $staging[0].status == "completed" and
+              $staging[0].conclusion == "success"
+            ' <<<"${deployment_jobs}" >/dev/null || {
+            echo "::error::Recovery requires exact same-attempt successful staging"
+            exit 1
+          }
+          if test "$(jq -er '.status' <<<"${deployment}")" = "in_progress"; then
+            jq -e '
+              [
+                .jobs[] |
+                select(.name == "Approve and promote identical artifacts") |
+                select(
+                  .started_at != null or
+                  (.status != "queued" and .status != "pending")
+                )
+              ] |
+              length == 0
+            ' <<<"${deployment_jobs}" >/dev/null || {
+              echo "::error::Active-parent recovery is forbidden after production starts"
+              exit 1
+            }
+          fi
           test "$(aws sts get-caller-identity --query Account --output text)" = \
             "${AWS_ACCOUNT_ID}"
           stack="${RUNNER_TEMP}/recovery-stack.json"
@@ -369,6 +727,16 @@ jobs:
           test "$(output ArchonUserPoolClientId)" = "${CANARY_COGNITO_CLIENT_ID}"
           test "$(output ArchonCognitoHostedUiOrigin)" = \
             "${CANARY_COGNITO_HOSTED_UI_ORIGIN}"
+
+      - name: Authenticate sealed recovery driver before token mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
+          EXPECTED_GATE_SHA256: ${{ steps.recovery_driver_gates.outputs.gate_sha256 }}
+          VERIFICATION_MODE: sealed
+          SEALED_GATE_PATH: ${{ runner.temp }}/governed-canary/recovery-aws-gates/control-plane-security-gates.json
+          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/recovery-mutation-gates/control-plane-security-gates.json
+        run: bash scripts/verify-github-control-plane.sh
 
       - name: Execute only the sealed idempotent inverse and prove restoration
         id: restore
@@ -403,6 +771,9 @@ jobs:
           EVIDENCE_PATH: ${{ steps.restore.outputs.path }}
           EVIDENCE_DIGEST: ${{ steps.restore.outputs.digest }}
           RECOVERY_DIGEST: ${{ needs.resolve-parent.outputs.recovery_digest }}
+          PARENT_CONTROL_PLANE_GATES_SHA256: ${{ needs.resolve-parent.outputs.control_plane_gate_sha256 }}
+          RECOVERY_DRIVER_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
+          RECOVERY_DRIVER_GATES_SHA256: ${{ steps.recovery_driver_gates.outputs.gate_sha256 }}
         run: |
           set -euo pipefail
           evidence_dir="$(dirname "${EVIDENCE_PATH}")"
@@ -414,6 +785,11 @@ jobs:
             --arg parentRunId "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
             --arg parentRunAttempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" \
             --arg controlPlaneSha "${CANARY_CONTROL_PLANE_SHA}" \
+            --arg parentControlPlaneGatesSha256 \
+              "${PARENT_CONTROL_PLANE_GATES_SHA256}" \
+            --arg recoveryDriverSha "${RECOVERY_DRIVER_SHA}" \
+            --arg recoveryDriverControlPlaneGatesSha256 \
+              "${RECOVERY_DRIVER_GATES_SHA256}" \
             --arg deploymentRunId "${CANARY_DEPLOYMENT_RUN_ID}" \
             --arg releaseSha "${CANARY_RELEASE_SHA}" \
             --arg recoveryDigest "${RECOVERY_DIGEST}" \
@@ -423,6 +799,11 @@ jobs:
               parentRunId: $parentRunId,
               parentRunAttempt: $parentRunAttempt,
               controlPlaneSha: $controlPlaneSha,
+              parentControlPlaneGatesSha256:
+                $parentControlPlaneGatesSha256,
+              recoveryDriverSha: $recoveryDriverSha,
+              recoveryDriverControlPlaneGatesSha256:
+                $recoveryDriverControlPlaneGatesSha256,
               deploymentRunId: $deploymentRunId,
               releaseSha: $releaseSha,
               recoveryDigest: $recoveryDigest,
@@ -445,7 +826,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: governed-canary-independent-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: governed-canary-independent-recovery-${{ env.CANARY_SOURCE_WORKFLOW_RUN_ID }}-${{ env.CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT }}
           path: ${{ runner.temp }}/governed-canary/evidence/
           if-no-files-found: warn
           retention-days: 90

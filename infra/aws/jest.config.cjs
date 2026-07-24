@@ -3,7 +3,11 @@ module.exports = {
   preset: "ts-jest",
   testEnvironment: "node",
   roots: ["<rootDir>/test"],
-  collectCoverageFrom: ["lib/**/*.ts"],
+  collectCoverageFrom: [
+    "lib/**/*.ts",
+    "lambda/**/*.js",
+    "!lambda/**/node_modules/**"
+  ],
   coverageThreshold: {
     global: {
       branches: 75,

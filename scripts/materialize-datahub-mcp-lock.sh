@@ -14,7 +14,7 @@ if [[ -z "${destination}" || "${destination}" != /* ]]; then
 fi
 
 jq --exit-status '
-  .schemaVersion == "archon.datahub-mcp-lock/v1" and
+  .schemaVersion == "archon.datahub-mcp-lock/v2" and
   .package.name == "mcp-server-datahub" and
   .package.version == "0.6.0" and
   .package.wheel.filename ==
@@ -40,6 +40,31 @@ jq --exit-status '
   .package.pypiProvenance.integratedTime == "1779123580" and
   .runtime.pythonVersion == "3.11.15" and
   .runtime.uvVersion == "0.11.31" and
+  .sourceBuildPolicy.allowed == [{
+    name: "pyperclip",
+    version: "1.9.0",
+    registry: "https://pypi.org/simple",
+    sdist: {
+      filename: "pyperclip-1.9.0.tar.gz",
+      url:
+        "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz",
+      sha256:
+        "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
+      size: 20961
+    }
+  }] and
+  .sourceBuildPolicy.buildBackend == {
+    name: "setuptools",
+    version: "83.0.0",
+    wheel: {
+      filename: "setuptools-83.0.0-py3-none-any.whl",
+      url:
+        "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl",
+      sha256:
+        "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3",
+      size: 1008090
+    }
+  } and
   .source.repository ==
     "https://github.com/acryldata/mcp-server-datahub.git" and
   .source.commit == "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9" and
@@ -48,9 +73,19 @@ jq --exit-status '
   .source.githubCommitSignatureVerified == true and
   ([.source.commit, .source.tree, .files[].gitBlob] |
     all(test("^[0-9a-f]{40}$"))) and
-  ([.package.wheel.sha256, .files[].sha256] |
+  ([
+    .package.wheel.sha256,
+    .sourceBuildPolicy.allowed[].sdist.sha256,
+    .sourceBuildPolicy.buildBackend.wheel.sha256,
+    .files[].sha256
+  ] |
     all(test("^[0-9a-f]{64}$"))) and
-  ([.files[].size] | all(type == "number" and . > 0))
+  ([
+    .package.wheel.size,
+    .sourceBuildPolicy.allowed[].sdist.size,
+    .sourceBuildPolicy.buildBackend.wheel.size,
+    .files[].size
+  ] | all(type == "number" and . > 0))
 ' "${contract}" >/dev/null
 
 readonly repository="$(jq -er '.source.repository' "${contract}")"
@@ -96,15 +131,141 @@ test "$(uv --version | awk '{print $2}')" = \
   "$(jq -er '.runtime.uvVersion' "${contract}")"
 uv lock --project "${destination}" --check
 
+# Fail closed if the committed upstream lock introduces another source-only
+# dependency. Every package that publishes wheels is passed to --no-build-package;
+# the sole exception must match the repository-owned name, version, registry, URL,
+# digest, and size contract exactly.
+readonly provenance_dir="${destination}/.archon-evidence"
+readonly no_build_packages="${provenance_dir}/no-build-packages.txt"
+mkdir -p "${provenance_dir}"
+python3 - "${destination}/uv.lock" "${contract}" \
+  >"${no_build_packages}" <<'PY'
+import json
+import sys
+import tomllib
+
+lock_path, contract_path = sys.argv[1:]
+with open(lock_path, "rb") as handle:
+    lock = tomllib.load(handle)
+with open(contract_path, encoding="utf-8") as handle:
+    contract = json.load(handle)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(message)
+
+
+project_name = contract["package"]["name"]
+allowed = contract["sourceBuildPolicy"]["allowed"]
+require(len(allowed) == 1, "exactly one source-build exception is required")
+observed = []
+no_build = set()
+
+for package in lock["package"]:
+    name = package["name"]
+    source = package.get("source", {})
+    if "editable" in source:
+        require(name == project_name, f"unexpected editable package: {name}")
+        require(
+            source == {"editable": "."},
+            f"unexpected editable source for {name}",
+        )
+        continue
+    if package.get("wheels"):
+        no_build.add(name)
+        continue
+    observed.append(
+        {
+            "name": name,
+            "version": package["version"],
+            "registry": source["registry"],
+            "sdist": {
+                "filename": package["sdist"]["url"].rsplit("/", 1)[-1],
+                "url": package["sdist"]["url"],
+                "sha256": package["sdist"]["hash"].removeprefix("sha256:"),
+                "size": package["sdist"]["size"],
+            },
+        }
+    )
+
+require(
+    observed == allowed,
+    "wheel-less dependency set does not match the committed exception",
+)
+for name in sorted(no_build):
+    print(name)
+PY
+test -s "${no_build_packages}"
+test ! -L "${no_build_packages}"
+
+# Inspect and retain the one allowed sdist before its setup.py is executed. The
+# upstream archive is hash/size-bound and must be a simple legacy-setuptools tree;
+# no package-controlled PEP 517 graph is accepted.
+readonly allowed_sdist="${provenance_dir}/pyperclip-1.9.0.tar.gz"
+readonly allowed_sdist_url="$(
+  jq -er '.sourceBuildPolicy.allowed[0].sdist.url' "${contract}"
+)"
+curl --fail --silent --show-error --location \
+  --output "${allowed_sdist}" \
+  "${allowed_sdist_url}"
+test -f "${allowed_sdist}"
+test ! -L "${allowed_sdist}"
+test "$(sha256sum "${allowed_sdist}" | awk '{print $1}')" = \
+  "$(jq -er '.sourceBuildPolicy.allowed[0].sdist.sha256' "${contract}")"
+test "$(stat --format='%s' "${allowed_sdist}")" = \
+  "$(jq -er '.sourceBuildPolicy.allowed[0].sdist.size' "${contract}")"
+tar -tzf "${allowed_sdist}" |
+  awk '
+    !/^pyperclip-1[.]9[.]0\/[^\\]*$/ { exit 1 }
+    /(^|\/)[.][.]?(\/|$)/ { exit 1 }
+    /\/setup[.]py$/ { setup_py += 1 }
+    /\/pyproject[.]toml$/ { pyproject += 1 }
+    END { exit !(setup_py == 1 && pyproject == 0) }
+  '
+
+# Pin the legacy setuptools build environment to one non-vulnerable wheel. uv
+# verifies the supplied hash and applies this constraint only to isolated build
+# dependencies; no floating setuptools resolution is permitted.
+readonly build_constraints="${provenance_dir}/build-constraints.txt"
+readonly backend_name="$(
+  jq -er '.sourceBuildPolicy.buildBackend.name' "${contract}"
+)"
+readonly backend_version="$(
+  jq -er '.sourceBuildPolicy.buildBackend.version' "${contract}"
+)"
+readonly backend_url="$(
+  jq -er '.sourceBuildPolicy.buildBackend.wheel.url' "${contract}"
+)"
+readonly backend_sha="$(
+  jq -er '.sourceBuildPolicy.buildBackend.wheel.sha256' "${contract}"
+)"
+readonly backend_filename="$(
+  jq -er '.sourceBuildPolicy.buildBackend.wheel.filename' "${contract}"
+)"
+readonly backend_wheel="${provenance_dir}/${backend_filename}"
+curl --fail --silent --show-error --location \
+  --output "${backend_wheel}" \
+  "${backend_url}"
+test -f "${backend_wheel}"
+test ! -L "${backend_wheel}"
+test "$(sha256sum "${backend_wheel}" | awk '{print $1}')" = "${backend_sha}"
+test "$(stat --format='%s' "${backend_wheel}")" = \
+  "$(jq -er '.sourceBuildPolicy.buildBackend.wheel.size' "${contract}")"
+printf '%s==%s --hash=sha256:%s\n' \
+  "${backend_name}" \
+  "${backend_version}" \
+  "${backend_sha}" >"${build_constraints}"
+test -s "${build_constraints}"
+test ! -L "${build_constraints}"
+
 # PyPI's trusted-publisher provenance binds the exact wheel digest to the official
 # acryldata GitHub release workflow. Pin the DSSE statement, signature, Fulcio
 # certificate, and Rekor entry as well as validating the semantic subject/publisher.
 readonly provenance_url="$(
   jq -er '.package.pypiProvenance.url' "${contract}"
 )"
-readonly provenance_dir="${destination}/.archon-evidence"
 readonly provenance="${provenance_dir}/pypi-provenance.json"
-mkdir -p "${provenance_dir}"
 curl --fail --silent --show-error --location \
   -H 'Accept: application/vnd.pypi.integrity.v1+json' \
   --output "${provenance}" \
@@ -182,9 +343,10 @@ test "$(
     awk '{print $1}'
 )" = "$(jq -er '.package.pypiProvenance.certificateSha256' "${contract}")"
 
-# Do not build the upstream project: its open-ended PEP 517 requirements would create a
-# second, floating build graph. Sync only uv.lock's transitive closure, then install the
-# official PyPI wheel by the committed SHA-256 with resolution and builds disabled.
+# Do not build the upstream project. Sync only uv.lock's transitive closure, allow the
+# one contract-bound legacy sdist with its hash-pinned backend, and prohibit source
+# builds for every other locked dependency. Then install the official MCP PyPI wheel
+# by the committed SHA-256 with resolution and builds disabled.
 readonly python_version="$(jq -er '.runtime.pythonVersion' "${contract}")"
 readonly package_name="$(jq -er '.package.name' "${contract}")"
 readonly package_version="$(jq -er '.package.version' "${contract}")"
@@ -193,12 +355,21 @@ readonly wheel_sha="$(jq -er '.package.wheel.sha256' "${contract}")"
 readonly wheel_requirement="$(mktemp)"
 trap 'rm -f "${wheel_requirement}"' EXIT
 
+no_build_args=()
+while IFS= read -r dependency; do
+  test -n "${dependency}"
+  no_build_args+=(--no-build-package "${dependency}")
+done <"${no_build_packages}"
+test "${#no_build_args[@]}" -gt 20
+
 uv sync \
   --project "${destination}" \
   --locked \
   --no-dev \
   --no-install-project \
-  --no-build \
+  --no-cache \
+  --build-constraint "${build_constraints}" \
+  "${no_build_args[@]}" \
   --python "${python_version}"
 printf '%s @ %s --hash=sha256:%s\n' \
   "${package_name}" \
@@ -208,6 +379,7 @@ uv pip install \
   --python "${destination}/.venv/bin/python" \
   --no-deps \
   --no-build \
+  --no-cache \
   --require-hashes \
   --requirement "${wheel_requirement}"
 test -x "${destination}/.venv/bin/mcp-server-datahub"

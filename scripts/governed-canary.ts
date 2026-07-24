@@ -30,7 +30,7 @@ import { verifyAuditEvidence } from "../src/worker/service.js";
 const APPLICATION_TAG = "urn:li:tag:PII";
 const CANARY_QUERY = "archon_governed_canary_fixture";
 const CANARY_COLUMN = "email";
-const RECOVERY_SCHEMA = "archon.governed-canary-recovery/v1";
+const RECOVERY_SCHEMA = "archon.governed-canary-recovery/v2";
 const ROLLBACK_SCHEMA = "archon.governed-canary-rollback/v1";
 const ROLLBACK_EVIDENCE_SCHEMA =
   "archon.governed-canary-rollback-evidence/v1";
@@ -63,6 +63,7 @@ export interface CanaryIdentity {
   workflowRunId: string;
   workflowRunAttempt: string;
   deploymentRunId: string;
+  controlPlaneGatesSha256: string;
   releaseSha: string;
   applicationUrl: string;
   evidenceBucket: string;
@@ -91,6 +92,7 @@ export interface RecoveryManifest {
   workflowRunId: string;
   workflowRunAttempt: string;
   deploymentRunId: string;
+  controlPlaneGatesSha256: string;
   releaseSha: string;
   applicationUrl: string;
   evidenceBucket: string;
@@ -342,6 +344,14 @@ export function parseCanaryIdentity(
   if (!/^[1-9][0-9]{0,19}$/u.test(deploymentRunId)) {
     fail("CANARY_DEPLOYMENT_RUN_ID must be numeric.");
   }
+  const controlPlaneGatesSha256 = required(
+    source,
+    "CANARY_CONTROL_PLANE_GATES_SHA256",
+    64
+  );
+  if (!/^[a-f0-9]{64}$/u.test(controlPlaneGatesSha256)) {
+    fail("CANARY_CONTROL_PLANE_GATES_SHA256 must be an exact SHA-256 digest.");
+  }
   const releaseSha = required(source, "CANARY_RELEASE_SHA", 40);
   if (!RELEASE_SHA.test(releaseSha)) {
     fail("CANARY_RELEASE_SHA must be a full lowercase commit SHA.");
@@ -423,6 +433,7 @@ export function parseCanaryIdentity(
     workflowRunId,
     workflowRunAttempt,
     deploymentRunId,
+    controlPlaneGatesSha256,
     releaseSha,
     applicationUrl,
     evidenceBucket,
@@ -746,6 +757,7 @@ export function createRecoveryManifest(input: {
     workflowRunId: identity.workflowRunId,
     workflowRunAttempt: identity.workflowRunAttempt,
     deploymentRunId: identity.deploymentRunId,
+    controlPlaneGatesSha256: identity.controlPlaneGatesSha256,
     releaseSha: identity.releaseSha,
     applicationUrl: identity.applicationUrl,
     evidenceBucket: identity.evidenceBucket,
@@ -789,6 +801,7 @@ export function verifyRecoveryManifest(
     manifest.workflowRunId !== identity.workflowRunId ||
     manifest.workflowRunAttempt !== identity.workflowRunAttempt ||
     manifest.deploymentRunId !== identity.deploymentRunId ||
+    manifest.controlPlaneGatesSha256 !== identity.controlPlaneGatesSha256 ||
     manifest.releaseSha !== identity.releaseSha ||
     manifest.applicationUrl !== identity.applicationUrl ||
     manifest.evidenceBucket !== identity.evidenceBucket ||

@@ -131,9 +131,60 @@ export class ArchonPlatformStack extends Stack {
       allowedPattern: "^[a-f0-9]{64}$",
       constraintDescription: "must be a lowercase 64-character SHA-256"
     });
+    const containerArchiveSha256 = new CfnParameter(
+      this,
+      "ContainerArchiveSha256",
+      {
+        type: "String",
+        description:
+          "SHA-256 of the build-once container archive promoted to this environment",
+        allowedPattern: "^[a-f0-9]{64}$",
+        constraintDescription: "must be a lowercase 64-character SHA-256"
+      }
+    );
+    const lambdaArchiveSha256 = new CfnParameter(
+      this,
+      "LambdaArchiveSha256",
+      {
+        type: "String",
+        description:
+          "SHA-256 of the build-once Lambda archive promoted to this environment",
+        allowedPattern: "^[a-f0-9]{64}$",
+        constraintDescription: "must be a lowercase 64-character SHA-256"
+      }
+    );
+    const deploymentWorkflowRunId = new CfnParameter(
+      this,
+      "DeploymentWorkflowRunId",
+      {
+        type: "String",
+        description: "GitHub Actions deployment workflow run ID",
+        allowedPattern: "^[1-9][0-9]{0,19}$",
+        constraintDescription: "must be a positive decimal GitHub Actions run ID"
+      }
+    );
+    const deploymentWorkflowRunAttempt = new CfnParameter(
+      this,
+      "DeploymentWorkflowRunAttempt",
+      {
+        type: "String",
+        description: "GitHub Actions deployment workflow run attempt",
+        allowedPattern: "^[1-9][0-9]{0,19}$",
+        constraintDescription:
+          "must be a positive decimal GitHub Actions run attempt"
+      }
+    );
+    const ciRunId = new CfnParameter(this, "CiRunId", {
+      type: "String",
+      description:
+        "GitHub Actions CI workflow run ID that produced the promoted archives",
+      allowedPattern: "^[1-9][0-9]{0,19}$",
+      constraintDescription: "must be a positive decimal GitHub Actions run ID"
+    });
     const releaseSha = new CfnParameter(this, "ReleaseSha", {
       type: "String",
-      description: "Source commit represented by ImageDigest and SpaArtifactSha256",
+      description:
+        "Source commit represented by the immutable image and promoted archives",
       allowedPattern: "^[a-f0-9]{7,64}$"
     });
     const cloudFrontDomainName = new CfnParameter(
@@ -2102,6 +2153,7 @@ export class ArchonPlatformStack extends Stack {
 
     const preferredApiUrl = `https://${cloudFrontDomainName.valueAsString}/api`;
     output(this, "ArchonSpaBucketName", spaBucket.bucketName);
+    output(this, "ArchonSpaKeyArn", spaKey.keyArn);
     output(this, "ArchonEvidenceBucketName", evidenceBucket.bucketName);
     output(this, "ArchonCloudFrontDistributionId", distribution.distributionId);
     output(this, "ArchonCloudFrontDomainName", distribution.distributionDomainName);
@@ -2173,6 +2225,27 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonAlarmTopicArn", alarmTopic.topicArn);
     output(this, "ArchonContainerImageDigest", imageDigest.valueAsString);
     output(this, "ArchonSpaArtifactSha256", spaArtifactSha256.valueAsString);
+    output(
+      this,
+      "ArchonContainerArchiveSha256",
+      containerArchiveSha256.valueAsString
+    );
+    output(
+      this,
+      "ArchonLambdaArchiveSha256",
+      lambdaArchiveSha256.valueAsString
+    );
+    output(
+      this,
+      "ArchonDeploymentWorkflowRunId",
+      deploymentWorkflowRunId.valueAsString
+    );
+    output(
+      this,
+      "ArchonDeploymentWorkflowRunAttempt",
+      deploymentWorkflowRunAttempt.valueAsString
+    );
+    output(this, "ArchonCiRunId", ciRunId.valueAsString);
     output(this, "ArchonReleaseSha", releaseSha.valueAsString);
   }
 }

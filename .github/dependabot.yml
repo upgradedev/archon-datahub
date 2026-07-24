@@ -72,6 +72,24 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
+  - package-ecosystem: docker
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "04:35"
+      timezone: Europe/Athens
+    open-pull-requests-limit: 3
+    rebase-strategy: auto
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    commit-message:
+      prefix: deps(container)
+
   - package-ecosystem: npm
     directory: /infra/aws
     target-branch: master

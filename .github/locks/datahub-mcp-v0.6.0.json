@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "archon.datahub-mcp-lock/v1",
+  "schemaVersion": "archon.datahub-mcp-lock/v2",
   "package": {
     "name": "mcp-server-datahub",
     "version": "0.6.0",
@@ -27,6 +27,31 @@
   "runtime": {
     "pythonVersion": "3.11.15",
     "uvVersion": "0.11.31"
+  },
+  "sourceBuildPolicy": {
+    "allowed": [
+      {
+        "name": "pyperclip",
+        "version": "1.9.0",
+        "registry": "https://pypi.org/simple",
+        "sdist": {
+          "filename": "pyperclip-1.9.0.tar.gz",
+          "url": "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz",
+          "sha256": "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
+          "size": 20961
+        }
+      }
+    ],
+    "buildBackend": {
+      "name": "setuptools",
+      "version": "83.0.0",
+      "wheel": {
+        "filename": "setuptools-83.0.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl",
+        "sha256": "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3",
+        "size": 1008090
+      }
+    }
   },
   "source": {
     "repository": "https://github.com/acryldata/mcp-server-datahub.git",

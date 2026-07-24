@@ -134,12 +134,17 @@ Both WAFs use the moving AWS-managed default rule-group versions (no stale versi
 an explicit 300-second IP rate window, sampled-field substitution, filtered/redacted
 logging, and an exact enabled, rotating, single-Region customer KMS key binding.
 
-The environment stack has three mandatory promotion parameters:
+The environment stack has eight mandatory promotion parameters:
 
 | Parameter | Contract |
 | --- | --- |
 | `ImageDigest` | Exact `sha256:...` returned by ECR after one CI build |
 | `SpaArtifactSha256` | SHA-256 of the one CI-produced SPA archive |
+| `ContainerArchiveSha256` | SHA-256 of the exact retained CI container archive |
+| `LambdaArchiveSha256` | SHA-256 of the exact retained CI Lambda archive |
+| `DeploymentWorkflowRunId` | Numeric GitHub Actions deployment run that performed the promotion |
+| `DeploymentWorkflowRunAttempt` | Exact attempt number of that deployment run |
+| `CiRunId` | Numeric successful `master` CI run that produced all retained subjects |
 | `ReleaseSha` | Source commit represented by the container, SPA, and Lambda release candidates |
 
 The platform also requires `DataHubReadGmsUrl`, hosted `DataHubReadMcpUrl`,
@@ -222,7 +227,11 @@ and Lambda archive. It must not rebuild application code for staging or producti
 Those immutable application subjects may be rolled back to an older retained CI run.
 Infrastructure remains reconciled from the current default-branch deployment-control-plane
 commit, which the workflow admits only after successful CI, CodeQL, and workflow-security
-push runs for that exact commit; application rollback never reverts newer IaC protections.
+push runs for that exact commit. The ref and latest exact-SHA receipts are revalidated after
+production approval, before each AWS OIDC trust boundary, immediately before mutation, and
+after the live production byte observation immediately before promotion evidence is sealed.
+That final check must reproduce the original receipt digest; the canonical receipt is
+included in deployment evidence. Application rollback never reverts newer IaC protections.
 The staging and production receipts retain compact edge-security and network-egress
 contracts. They bind the exact certificate/WAF identities and edge-output digest to the
 validated prefix-list identities, weights, and calculated security-group quota use.
@@ -312,7 +321,11 @@ Do not pipe an unpinned installer from the default branch into a shell.
    inner deterministic `archon-web.tar.gz` digest, not the GitHub ZIP envelope. The
    pipeline resolves the two AWS service prefix lists, deploys the edge stack first,
    validates its outputs, and passes those outputs plus the three customer-managed
-   allowlists to the platform stack:
+   allowlists to the platform stack. Normal releases must use
+   `.github/workflows/deploy.yml`; the following is the pipeline contract, not a manual
+   operator bypass. `CONTAINER_ARCHIVE_SHA256`, `LAMBDA_ARCHIVE_SHA256`,
+   `DEPLOYMENT_WORKFLOW_RUN_ID`, `DEPLOYMENT_WORKFLOW_RUN_ATTEMPT`, and `CI_RUN_ID` must
+   come from the exact verified GitHub runs and artifacts:
 
    ```bash
    S3_PREFIX_LIST_ID="$(aws ec2 describe-managed-prefix-lists \
@@ -352,9 +365,14 @@ Do not pipe an unpinned installer from the default branch into a shell.
        -c "stage=${ARCHON_STAGE}" \
        --exclusively \
        --require-approval never \
-       --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
-       --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA256}" \
-       --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+        --parameters "${STACK_NAME}:ImageDigest=${IMAGE_DIGEST}" \
+        --parameters "${STACK_NAME}:SpaArtifactSha256=${SPA_ARTIFACT_SHA256}" \
+        --parameters "${STACK_NAME}:ContainerArchiveSha256=${CONTAINER_ARCHIVE_SHA256}" \
+        --parameters "${STACK_NAME}:LambdaArchiveSha256=${LAMBDA_ARCHIVE_SHA256}" \
+        --parameters "${STACK_NAME}:DeploymentWorkflowRunId=${DEPLOYMENT_WORKFLOW_RUN_ID}" \
+        --parameters "${STACK_NAME}:DeploymentWorkflowRunAttempt=${DEPLOYMENT_WORKFLOW_RUN_ATTEMPT}" \
+        --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
+        --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
        --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
        --parameters "${STACK_NAME}:CloudFrontCertificateArn=${EDGE_CERTIFICATE_ARN}" \
        --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -475,7 +493,7 @@ Every edge stack exports:
 
 Every environment stack exports:
 
-- `ArchonSpaBucketName`, `ArchonEvidenceBucketName`
+- `ArchonSpaBucketName`, `ArchonSpaKeyArn`, `ArchonEvidenceBucketName`
 - `ArchonCloudFrontDistributionId`, `ArchonCloudFrontDomainName`
 - `ArchonApplicationUrl`, `ArchonApiUrl`, `ArchonApiInvokeUrl`, `ArchonApiStageArn`
 - `ArchonRegionalWebAclArn`, `ArchonRegionalWafLogGroupName`,
@@ -494,7 +512,10 @@ Every environment stack exports:
   `ArchonRemediationWorkerSecurityGroupId`, `ArchonVpcEndpointSecurityGroupId`
 - `ArchonReadSecretArn`, `ArchonWriteSecretArn`, `ArchonLlmSecretArn`
 - `ArchonAlarmTopicArn`
-- `ArchonContainerImageDigest`, `ArchonSpaArtifactSha256`, `ArchonReleaseSha`
+- `ArchonContainerImageDigest`, `ArchonSpaArtifactSha256`,
+  `ArchonContainerArchiveSha256`, `ArchonLambdaArchiveSha256`
+- `ArchonDeploymentWorkflowRunId`, `ArchonDeploymentWorkflowRunAttempt`,
+  `ArchonCiRunId`, `ArchonReleaseSha`
 
 Data and secrets use `RETAIN`; DynamoDB and Cognito deletion protection are
 enabled. Production also enables NLB deletion protection. Destruction therefore

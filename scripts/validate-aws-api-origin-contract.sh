@@ -257,6 +257,7 @@ validate_method() {
     --arg integrationType "${integration_type}" \
     --arg connectionType "${connection_type}" \
     --arg credentialIsolation "${credential_isolation}" \
+    --arg staticOriginCredential "'redacted'" \
     --arg expectedRequestTemplate "${expected_request_template}" \
     --argjson authorizationScopes "${authorization_scopes}" \
     --argjson requestParameters "${request_parameters}" \
@@ -323,7 +324,7 @@ validate_method() {
       (
         if $credentialIsolation == "static-redaction" then
           .methodIntegration.requestParameters == {
-            "integration.request.header.x-api-key": "'redacted'"
+            "integration.request.header.x-api-key": $staticOriginCredential
           } and
           ((.methodIntegration.requestTemplates // {}) | length) == 0
         else
@@ -375,7 +376,7 @@ validate_method() {
         end
       )
     ' <<<"${method_json}" >/dev/null || {
-    fail_contract "${http_method} ${resource_path} violates the API-origin method contract"
+    fail_contract "${http_method} ${resource_path} violates the API-origin ${credential_isolation} method contract"
   }
 
   request_template_sha=""

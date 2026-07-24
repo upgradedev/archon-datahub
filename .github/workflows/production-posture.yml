@@ -1,0 +1,962 @@
+name: Production posture
+
+# Scheduled and operator-triggered, read-only verification of the deployed AWS
+# control plane. The unprivileged job first binds this workflow to the current
+# default-branch commit and its three independent green workflow gates. Only
+# then may the protected production-observer environment mint AWS credentials.
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: production-posture-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  control-plane:
+    name: Bind exact green default-branch control plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      control_plane_sha: ${{ steps.gates.outputs.control_plane_sha }}
+      gates: ${{ steps.gates.outputs.gates }}
+      gates_sha256: ${{ steps.gates.outputs.gates_sha256 }}
+    env:
+      BASH_ENV: /dev/null
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require the current default branch and exact green workflow gates
+        id: gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${AWS_ACCESS_KEY_ID:-}"
+          test -z "${AWS_SECRET_ACCESS_KEY:-}"
+          test -z "${AWS_SESSION_TOKEN:-}"
+
+          repository_json="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master" || {
+            echo "::error::Production posture requires the reviewed master default branch"
+            exit 1
+          }
+          test "${GITHUB_REF}" = "refs/heads/${default_branch}" || {
+            echo "::error::Dispatch production posture from the current default branch"
+            exit 1
+          }
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+
+          ref_json="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}"
+          )"
+          default_sha="$(
+            jq -er \
+              --arg expected_ref "refs/heads/${default_branch}" '
+                select(
+                  .ref == $expected_ref and
+                  .object.type == "commit"
+                ) |
+                .object.sha
+              ' <<<"${ref_json}"
+          )"
+          test "${default_sha}" = "${GITHUB_SHA}" || {
+            echo "::error::The workflow commit is no longer the default-branch head"
+            exit 1
+          }
+
+          evidence_dir="${RUNNER_TEMP}/production-posture-control-plane"
+          mkdir -p "${evidence_dir}"
+          gate_entries="${evidence_dir}/workflow-gates.ndjson"
+          : >"${gate_entries}"
+
+          require_latest_success() {
+            local workflow_file="$1"
+            local expected_name="$2"
+            local expected_path=".github/workflows/${workflow_file}"
+            local response
+            local selected
+
+            response="$(
+              gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+                -f "head_sha=${GITHUB_SHA}" \
+                -f "branch=${default_branch}" \
+                -f event=push \
+                -f per_page=100
+            )"
+            selected="$(
+              jq -ecS \
+                --arg branch "${default_branch}" \
+                --arg name "${expected_name}" \
+                --arg path "${expected_path}" \
+                --arg repository "${GITHUB_REPOSITORY}" \
+                --arg sha "${GITHUB_SHA}" '
+                  [
+                    .workflow_runs[] |
+                    select(
+                      .name == $name and
+                      .path == $path and
+                      .head_branch == $branch and
+                      .head_sha == $sha and
+                      .head_repository.full_name == $repository and
+                      .event == "push"
+                    )
+                  ] |
+                  if length == 0 then
+                    error("missing exact-SHA workflow run for " + $path)
+                  else
+                    sort_by(.id, .run_attempt) |
+                    last
+                  end |
+                  if (
+                    .status == "completed" and
+                    .conclusion == "success" and
+                    (.run_attempt | type) == "number"
+                  ) then
+                    {
+                      name,
+                      path,
+                      workflowId: .workflow_id,
+                      runId: .id,
+                      runAttempt: .run_attempt,
+                      event,
+                      headBranch: .head_branch,
+                      headSha: .head_sha,
+                      conclusion,
+                      url: .html_url
+                    }
+                  else
+                    error("latest exact-SHA workflow run is not successful")
+                  end
+                ' <<<"${response}"
+            )" || {
+              echo "::error::${expected_name} must be green for the exact default-branch SHA"
+              exit 1
+            }
+            printf '%s\n' "${selected}" >>"${gate_entries}"
+          }
+
+          require_latest_success ci.yml CI
+          require_latest_success codeql.yml CodeQL
+          require_latest_success workflow-security.yml "Workflow security"
+
+          jq -cSs \
+            --arg branch "${default_branch}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" '
+              {
+                schemaVersion: "archon.production-posture-control-plane/v1",
+                repository: $repository,
+                branch: $branch,
+                sourceSha: $sha,
+                workflows: sort_by(.path)
+              } |
+              select(
+                (.workflows | length) == 3 and
+                ([.workflows[].path] | sort) == [
+                  ".github/workflows/ci.yml",
+                  ".github/workflows/codeql.yml",
+                  ".github/workflows/workflow-security.yml"
+                ] and
+                all(
+                  .workflows[];
+                  .headSha == $sha and
+                  .headBranch == $branch and
+                  .event == "push" and
+                  .conclusion == "success"
+                )
+              )
+            ' "${gate_entries}" \
+            >"${evidence_dir}/control-plane-gates.json"
+          test -s "${evidence_dir}/control-plane-gates.json"
+
+          gates_sha256="$(
+            sha256sum "${evidence_dir}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          gates="$(
+            base64 --wrap=0 "${evidence_dir}/control-plane-gates.json"
+          )"
+          {
+            echo "control_plane_sha=${GITHUB_SHA}"
+            echo "gates=${gates}"
+            echo "gates_sha256=${gates_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+  observe:
+    name: Detect production drift and seal posture evidence
+    needs: control-plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: production-observer
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      ALARM_SUBSCRIPTION_ARN: ${{ vars.ALARM_SUBSCRIPTION_ARN }}
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_PAGER: ""
+      BASH_ENV: /dev/null
+      CONTROL_PLANE_GATES: ${{ needs.control-plane.outputs.gates }}
+      CONTROL_PLANE_GATES_SHA256: ${{ needs.control-plane.outputs.gates_sha256 }}
+      CONTROL_PLANE_SHA: ${{ needs.control-plane.outputs.control_plane_sha }}
+      DEPLOY_REGION: ${{ vars.AWS_REGION }}
+      EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      READ_ROLE_ARN: ${{ vars.AWS_READ_ROLE_ARN }}
+    steps:
+      - name: Validate protected observer configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${CONTROL_PLANE_SHA}" = "${GITHUB_SHA}"
+          [[ "${CONTROL_PLANE_GATES_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+            echo "::error::production-observer AWS_ACCOUNT_ID must be a 12-digit account ID"
+            exit 1
+          }
+          [[ "${DEPLOY_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]] || {
+            echo "::error::production-observer AWS_REGION is invalid"
+            exit 1
+          }
+          [[ "${READ_ROLE_ARN}" =~ ^arn:aws[a-z-]*:iam::${EXPECTED_ACCOUNT_ID}:role/[^[:space:]]+$ ]] || {
+            echo "::error::AWS_READ_ROLE_ARN must be an IAM role in AWS_ACCOUNT_ID"
+            exit 1
+          }
+          partition="$(cut -d: -f2 <<<"${READ_ROLE_ARN}")"
+          [[ "${ALARM_SUBSCRIPTION_ARN}" =~ ^arn:${partition}:sns:${DEPLOY_REGION}:${EXPECTED_ACCOUNT_ID}:[A-Za-z0-9_-]{1,256}:[0-9a-fA-F-]{36}$ ]] || {
+            echo "::error::ALARM_SUBSCRIPTION_ARN must be a concrete subscription in the configured account and region"
+            exit 1
+          }
+          current_default_sha="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" |
+              jq -er '
+                select(
+                  .ref == "refs/heads/master" and
+                  .object.type == "commit"
+                ) |
+                .object.sha
+              '
+          )"
+          test "${current_default_sha}" = "${CONTROL_PLANE_SHA}" || {
+            echo "::error::The approved observer run is no longer on the current default-branch head"
+            exit 1
+          }
+
+          evidence_dir="${RUNNER_TEMP}/production-posture-evidence"
+          mkdir -p "${evidence_dir}"
+          printf '%s' "${CONTROL_PLANE_GATES}" |
+            base64 --decode >"${evidence_dir}/control-plane-gates.json"
+          actual_gate_sha="$(
+            sha256sum "${evidence_dir}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          test "${actual_gate_sha}" = "${CONTROL_PLANE_GATES_SHA256}"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" '
+              .schemaVersion ==
+                "archon.production-posture-control-plane/v1" and
+              .repository == $repository and
+              .branch == "master" and
+              .sourceSha == $sha and
+              (.workflows | length) == 3 and
+              ([.workflows[].path] | sort) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .workflows[];
+                .headSha == $sha and
+                .headBranch == "master" and
+                .event == "push" and
+                .conclusion == "success"
+              )
+            ' "${evidence_dir}/control-plane-gates.json" >/dev/null
+          echo "EVIDENCE_DIR=${evidence_dir}" >>"${GITHUB_ENV}"
+
+      - name: Check out the exact posture control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate exact latest gates before AWS trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          current_dir="${RUNNER_TEMP}/production-posture-current-control-plane"
+          mkdir -p "${current_dir}"
+          current_gates="${current_dir}/control-plane-security-gates.json"
+          OUTPUT_PATH="${current_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          jq -en \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile sealed "${EVIDENCE_DIR}/control-plane-gates.json" \
+            --slurpfile current "${current_gates}" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              ($sealed | length) == 1 and
+              ($current | length) == 1 and
+              $sealed[0].schemaVersion ==
+                "archon.production-posture-control-plane/v1" and
+              $sealed[0].repository == $repository and
+              $sealed[0].branch == "master" and
+              $sealed[0].sourceSha == $sha and
+              $current[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $current[0].branch == "master" and
+              $current[0].sourceSha == $sha and
+              ($sealed[0].workflows | receipt) ==
+                ($current[0].workflows | receipt)
+            ' >/dev/null || {
+              echo "::error::The protected observer gates changed before AWS trust"
+              exit 1
+            }
+
+      - name: Configure least-privilege production observer through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_READ_ROLE_ARN }}
+          role-session-name: archon-${{ github.run_id }}-production-posture
+          role-duration-seconds: 2400
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Verify stacks, drift, alarms, and post-check state
+        id: posture
+        shell: bash
+        run: |
+          set -euo pipefail
+          posture_started_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          actual_account="$(
+            aws sts get-caller-identity --query Account --output text
+          )"
+          test "${actual_account}" = "${EXPECTED_ACCOUNT_ID}" || {
+            echo "::error::The observer role resolved an unexpected AWS account"
+            exit 1
+          }
+          partition="$(cut -d: -f2 <<<"${READ_ROLE_ARN}")"
+
+          stack_names=(
+            "Archon-Registry"
+            "Archon-production"
+            "Archon-production-Edge"
+          )
+          declare -A stack_regions=(
+            ["Archon-Registry"]="${DEPLOY_REGION}"
+            ["Archon-production"]="${DEPLOY_REGION}"
+            ["Archon-production-Edge"]="us-east-1"
+          )
+          declare -A initial_snapshots
+          declare -A detection_ids
+          declare -A detection_id_digests
+
+          snapshot_stack() {
+            local name="$1"
+            local region="$2"
+            local raw
+            local output_projection
+            local output_digest
+            local alarm_topic="null"
+
+            raw="$(
+              aws cloudformation describe-stacks \
+                --region "${region}" \
+                --stack-name "${name}" \
+                --output json
+            )"
+            jq -e \
+              --arg account "${EXPECTED_ACCOUNT_ID}" \
+              --arg name "${name}" \
+              --arg partition "${partition}" \
+              --arg region "${region}" '
+                (.Stacks | type == "array" and length == 1) and
+                (.Stacks[0].StackName == $name) and
+                (.Stacks[0].StackId |
+                  test(
+                    "^arn:" + $partition +
+                    ":cloudformation:" + $region + ":" + $account +
+                    ":stack/" + $name + "/[0-9a-f-]+$"
+                  )) and
+                (
+                  .Stacks[0].StackStatus == "CREATE_COMPLETE" or
+                  .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+                ) and
+                (.Stacks[0].EnableTerminationProtection == true) and
+                ((.Stacks[0].Outputs // []) | type == "array")
+              ' <<<"${raw}" >/dev/null || {
+                echo "::error::${name} is absent, mutable, deleting, or not in an allowed stable state" >&2
+                return 1
+              }
+
+            output_projection="$(
+              jq -cS '
+                [
+                  ((.Stacks[0].Outputs // [])[]) |
+                  {
+                    outputKey: .OutputKey,
+                    outputValue: .OutputValue,
+                    exportName: (.ExportName // null)
+                  }
+                ] |
+                sort_by(.outputKey)
+              ' <<<"${raw}"
+            )"
+            output_digest="$(
+              printf '%s\n' "${output_projection}" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            if [[ "${name}" == "Archon-production" ]]; then
+              alarm_topic="$(
+                jq -cer '
+                  [
+                    (.Stacks[0].Outputs // [])[] |
+                    select(.OutputKey == "ArchonAlarmTopicArn") |
+                    .OutputValue
+                  ] |
+                  if length == 1 then .[0]
+                  else error("expected exactly one alarm topic output")
+                  end
+                ' <<<"${raw}"
+              )" || {
+                echo "::error::Archon-production must expose exactly one ArchonAlarmTopicArn" >&2
+                return 1
+              }
+              [[ "${alarm_topic}" =~ ^arn:${partition}:sns:${DEPLOY_REGION}:${EXPECTED_ACCOUNT_ID}:[A-Za-z0-9_-]{1,256}$ ]] || {
+                echo "::error::ArchonAlarmTopicArn is outside the configured account or region" >&2
+                return 1
+              }
+              alarm_topic="$(jq -cn --arg value "${alarm_topic}" '$value')"
+            fi
+
+            jq -cS \
+              --arg name "${name}" \
+              --arg region "${region}" \
+              --arg outputDigest "sha256:${output_digest}" \
+              --argjson alarmTopicArn "${alarm_topic}" '
+                .Stacks[0] |
+                {
+                  name: $name,
+                  region: $region,
+                  stackId: .StackId,
+                  status: .StackStatus,
+                  terminationProtection: .EnableTerminationProtection,
+                  creationTime: .CreationTime,
+                  lastUpdatedTime: (.LastUpdatedTime // .CreationTime),
+                  outputSetSha256: $outputDigest,
+                  alarmTopicArn: $alarmTopicArn
+                }
+              ' <<<"${raw}"
+          }
+
+          for name in "${stack_names[@]}"; do
+            region="${stack_regions[$name]}"
+            initial_snapshots["${name}"]="$(snapshot_stack "${name}" "${region}")"
+          done
+
+          alarm_topic_arn="$(
+            jq -er '.alarmTopicArn' \
+              <<<"${initial_snapshots[Archon-production]}"
+          )"
+          expected_subscription_prefix="${alarm_topic_arn}:"
+          [[ "${ALARM_SUBSCRIPTION_ARN}" == "${expected_subscription_prefix}"* ]] || {
+            echo "::error::ALARM_SUBSCRIPTION_ARN is not attached to ArchonAlarmTopicArn"
+            exit 1
+          }
+
+          subscription_json="$(
+            aws sns get-subscription-attributes \
+              --region "${DEPLOY_REGION}" \
+              --subscription-arn "${ALARM_SUBSCRIPTION_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg subscription "${ALARM_SUBSCRIPTION_ARN}" \
+            --arg topic "${alarm_topic_arn}" '
+              .Attributes.SubscriptionArn == $subscription and
+              .Attributes.TopicArn == $topic and
+              .Attributes.PendingConfirmation == "false" and
+              .Attributes.Owner == $account and
+              (
+                .Attributes.Protocol == "application" or
+                .Attributes.Protocol == "email" or
+                .Attributes.Protocol == "email-json" or
+                .Attributes.Protocol == "firehose" or
+                .Attributes.Protocol == "http" or
+                .Attributes.Protocol == "https" or
+                .Attributes.Protocol == "lambda" or
+                .Attributes.Protocol == "sms" or
+                .Attributes.Protocol == "sqs"
+              )
+            ' <<<"${subscription_json}" >/dev/null || {
+              echo "::error::The configured alarm subscription is missing, pending, cross-account, or non-concrete"
+              exit 1
+            }
+          subscription_projection="$(
+            jq -cS '
+              .Attributes |
+              {
+                owner: .Owner,
+                protocol: .Protocol,
+                pendingConfirmation: .PendingConfirmation
+              }
+            ' <<<"${subscription_json}"
+          )"
+
+          for name in "${stack_names[@]}"; do
+            region="${stack_regions[$name]}"
+            detection_id="$(
+              aws cloudformation detect-stack-drift \
+                --region "${region}" \
+                --stack-name "${name}" \
+                --query StackDriftDetectionId \
+                --output text
+            )"
+            [[ "${detection_id}" =~ ^[0-9A-Za-z-]{1,36}$ ]] || {
+              echo "::error::${name} returned a malformed drift-detection identifier"
+              exit 1
+            }
+            detection_ids["${name}"]="${detection_id}"
+            detection_id_digests["${name}"]="sha256:$(
+              printf '%s' "${detection_id}" | sha256sum | awk '{print $1}'
+            )"
+          done
+
+          drift_complete="false"
+          for attempt in {1..90}; do
+            pending=0
+            for name in "${stack_names[@]}"; do
+              region="${stack_regions[$name]}"
+              detection_json="$(
+                aws cloudformation describe-stack-drift-detection-status \
+                  --region "${region}" \
+                  --stack-drift-detection-id "${detection_ids[$name]}" \
+                  --output json
+              )"
+              expected_stack_id="$(
+                jq -er '.stackId' <<<"${initial_snapshots[$name]}"
+              )"
+              jq -e \
+                --arg detectionId "${detection_ids[$name]}" \
+                --arg stackId "${expected_stack_id}" '
+                  .StackDriftDetectionId == $detectionId and
+                  .StackId == $stackId
+                ' <<<"${detection_json}" >/dev/null || {
+                  echo "::error::${name} drift status is not bound to the requested operation and stack"
+                  exit 1
+                }
+              detection_status="$(
+                jq -er '.DetectionStatus' <<<"${detection_json}"
+              )"
+              case "${detection_status}" in
+                DETECTION_COMPLETE)
+                  jq -e '
+                    .StackDriftStatus == "IN_SYNC" and
+                    .DriftedStackResourceCount == 0
+                  ' <<<"${detection_json}" >/dev/null || {
+                    echo "::error::${name} is not IN_SYNC"
+                    exit 1
+                  }
+                  ;;
+                DETECTION_IN_PROGRESS)
+                  pending=$((pending + 1))
+                  ;;
+                *)
+                  echo "::error::${name} drift detection failed or returned an unknown status"
+                  exit 1
+                  ;;
+              esac
+            done
+            if (( pending == 0 )); then
+              drift_complete="true"
+              break
+            fi
+            if (( attempt < 90 )); then
+              sleep 10
+            fi
+          done
+          test "${drift_complete}" = "true" || {
+            echo "::error::Stack drift detection exceeded the bounded 15-minute poll"
+            exit 1
+          }
+
+          stack_evidence="${RUNNER_TEMP}/production-posture-stacks.ndjson"
+          : >"${stack_evidence}"
+          for name in "${stack_names[@]}"; do
+            region="${stack_regions[$name]}"
+            final_snapshot="$(snapshot_stack "${name}" "${region}")"
+            test "${final_snapshot}" = "${initial_snapshots[$name]}" || {
+              echo "::error::${name} changed during production posture verification"
+              exit 1
+            }
+            jq -cS \
+              --arg detectionIdSha256 "${detection_id_digests[$name]}" '
+                del(.stackId, .alarmTopicArn) +
+                {
+                  drift: {
+                    detectionIdSha256: $detectionIdSha256,
+                    detectionStatus: "DETECTION_COMPLETE",
+                    stackDriftStatus: "IN_SYNC"
+                  },
+                  unchangedAfterVerification: true
+                }
+              ' <<<"${final_snapshot}" >>"${stack_evidence}"
+          done
+
+          final_subscription_json="$(
+            aws sns get-subscription-attributes \
+              --region "${DEPLOY_REGION}" \
+              --subscription-arn "${ALARM_SUBSCRIPTION_ARN}" \
+              --output json
+          )"
+          final_subscription_projection="$(
+            jq -ecS \
+              --arg account "${EXPECTED_ACCOUNT_ID}" \
+              --arg subscription "${ALARM_SUBSCRIPTION_ARN}" \
+              --arg topic "${alarm_topic_arn}" '
+                select(
+                  .Attributes.SubscriptionArn == $subscription and
+                  .Attributes.TopicArn == $topic and
+                  .Attributes.PendingConfirmation == "false" and
+                  .Attributes.Owner == $account
+                ) |
+                .Attributes |
+                {
+                  owner: .Owner,
+                  protocol: .Protocol,
+                  pendingConfirmation: .PendingConfirmation
+                }
+              ' <<<"${final_subscription_json}"
+          )" || {
+            echo "::error::The alarm subscription changed during verification"
+            exit 1
+          }
+          test "${final_subscription_projection}" = \
+            "${subscription_projection}" || {
+            echo "::error::The alarm subscription changed during verification"
+            exit 1
+          }
+          final_default_sha="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" |
+              jq -er '
+                select(
+                  .ref == "refs/heads/master" and
+                  .object.type == "commit"
+                ) |
+                .object.sha
+              '
+          )"
+          test "${final_default_sha}" = "${CONTROL_PLANE_SHA}" || {
+            echo "::error::The default branch advanced during production posture verification"
+            exit 1
+          }
+
+          alarm_topic_sha256="sha256:$(
+            printf '%s' "${alarm_topic_arn}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          subscription_arn_sha256="sha256:$(
+            printf '%s' "${ALARM_SUBSCRIPTION_ARN}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          observer_role_sha256="sha256:$(
+            printf '%s' "${READ_ROLE_ARN}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          posture_completed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+
+          jq -cSs \
+            --slurpfile gates "${EVIDENCE_DIR}/control-plane-gates.json" \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg alarmTopicSha256 "${alarm_topic_sha256}" \
+            --arg completedAt "${posture_completed_at}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg observerRoleSha256 "${observer_role_sha256}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg runUrl \
+              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg startedAt "${posture_started_at}" \
+            --arg subscriptionArnSha256 "${subscription_arn_sha256}" \
+            --argjson subscription "${subscription_projection}" '
+              {
+                schemaVersion: "archon.production-posture-evidence/v1",
+                repository: $repository,
+                controlPlane: {
+                  sha: $controlPlaneSha,
+                  gates: $gates[0]
+                },
+                observer: {
+                  awsAccountId: $account,
+                  workloadRegion: $region,
+                  edgeRegion: "us-east-1",
+                  roleArnSha256: $observerRoleSha256
+                },
+                stacks: sort_by(.name),
+                alarms: {
+                  topicArnSha256: $alarmTopicSha256,
+                  subscriptionArnSha256: $subscriptionArnSha256,
+                  owner: $subscription.owner,
+                  protocol: $subscription.protocol,
+                  pendingConfirmation: false,
+                  unchangedAfterVerification: true
+                },
+                verification: {
+                  startedAt: $startedAt,
+                  completedAt: $completedAt,
+                  result: "passed"
+                },
+                workflowRun: $runUrl
+              }
+            ' "${stack_evidence}" >"${EVIDENCE_DIR}/production-posture.json"
+
+          jq -e \
+            --arg sha "${CONTROL_PLANE_SHA}" '
+              .schemaVersion == "archon.production-posture-evidence/v1" and
+              .controlPlane.sha == $sha and
+              (.controlPlane.gates.workflows | length) == 3 and
+              (.stacks | length) == 3 and
+              all(
+                .stacks[];
+                .terminationProtection == true and
+                .drift.detectionStatus == "DETECTION_COMPLETE" and
+                .drift.stackDriftStatus == "IN_SYNC" and
+                .unchangedAfterVerification == true
+              ) and
+              .alarms.pendingConfirmation == false and
+              .alarms.unchangedAfterVerification == true and
+              .verification.result == "passed"
+            ' "${EVIDENCE_DIR}/production-posture.json" >/dev/null
+
+          posture_sha256="$(
+            sha256sum "${EVIDENCE_DIR}/production-posture.json" |
+              awk '{print $1}'
+          )"
+          gate_sha256="$(
+            sha256sum "${EVIDENCE_DIR}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          jq -cnS \
+            --arg controlPlaneGatesSha256 "sha256:${gate_sha256}" \
+            --arg productionPostureSha256 "sha256:${posture_sha256}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg sha "${CONTROL_PLANE_SHA}" '
+              {
+                schemaVersion: "archon.production-posture-manifest/v1",
+                repository: $repository,
+                controlPlaneSha: $sha,
+                workflow: {
+                  path: ".github/workflows/production-posture.yml",
+                  runId: ($runId | tonumber),
+                  runAttempt: ($runAttempt | tonumber)
+                },
+                files: {
+                  "control-plane-gates.json": $controlPlaneGatesSha256,
+                  "production-posture.json": $productionPostureSha256
+                }
+              }
+            ' >"${EVIDENCE_DIR}/manifest.json"
+          manifest_sha256="$(
+            sha256sum "${EVIDENCE_DIR}/manifest.json" |
+              awk '{print $1}'
+          )"
+          jq -cnS \
+            --arg evidenceSha256 "sha256:${posture_sha256}" \
+            --arg manifestSha256 "sha256:${manifest_sha256}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${CONTROL_PLANE_SHA}" '
+              {
+                schemaVersion: "archon.production-posture-attestation/v1",
+                repository: $repository,
+                controlPlaneSha: $sha,
+                evidenceSha256: $evidenceSha256,
+                manifestSha256: $manifestSha256,
+                verificationResult: "passed"
+              }
+            ' >"${EVIDENCE_DIR}/attestation-predicate.json"
+          printf '%s  %s\n' \
+            "${posture_sha256}" \
+            "production-posture.json" \
+            >"${EVIDENCE_DIR}/posture-subject.sha256"
+
+          (
+            cd "${EVIDENCE_DIR}"
+            sha256sum \
+              attestation-predicate.json \
+              control-plane-gates.json \
+              manifest.json \
+              posture-subject.sha256 \
+              production-posture.json \
+              >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          echo "posture_sha256=${posture_sha256}" >>"${GITHUB_OUTPUT}"
+
+      - name: Remove AWS credentials before evidence publication
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "AWS_ACCESS_KEY_ID="
+            echo "AWS_SECRET_ACCESS_KEY="
+            echo "AWS_SESSION_TOKEN="
+            echo "AWS_SECURITY_TOKEN="
+          } >>"${GITHUB_ENV}"
+
+      - name: Revalidate exact control plane without AWS credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${AWS_ACCESS_KEY_ID:-}"
+          test -z "${AWS_SECRET_ACCESS_KEY:-}"
+          test -z "${AWS_SESSION_TOKEN:-}"
+
+          current_default_sha="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" |
+              jq -er '
+                select(
+                  .ref == "refs/heads/master" and
+                  .object.type == "commit"
+                ) |
+                .object.sha
+              '
+          )"
+          test "${current_default_sha}" = "${CONTROL_PLANE_SHA}"
+
+          mapfile -t gate_runs < <(
+            jq -er '
+              .workflows[] |
+              [.runId, .runAttempt, .path] |
+              @tsv
+            ' \
+              "${EVIDENCE_DIR}/control-plane-gates.json"
+          )
+          test "${#gate_runs[@]}" = "3"
+          for gate in "${gate_runs[@]}"; do
+            IFS=$'\t' read -r run_id run_attempt workflow_path \
+              <<<"${gate}"
+            [[ "${run_id}" =~ ^[0-9]+$ ]]
+            [[ "${run_attempt}" =~ ^[1-9][0-9]*$ ]]
+            case "${workflow_path}" in
+              .github/workflows/ci.yml|\
+              .github/workflows/codeql.yml|\
+              .github/workflows/workflow-security.yml)
+                ;;
+              *)
+                echo "::error::A sealed workflow path is outside the gate allowlist"
+                exit 1
+                ;;
+            esac
+            workflow_file="${workflow_path##*/}"
+            runs_json="$(
+              gh api \
+                --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+                -f "head_sha=${CONTROL_PLANE_SHA}" \
+                -f branch=master \
+                -f event=push \
+                -f per_page=100
+            )"
+            jq -e \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${run_attempt}" \
+              --arg path "${workflow_path}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${CONTROL_PLANE_SHA}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_repository.full_name == $repository and
+                    .head_branch == "master" and
+                    .head_sha == $sha and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                .id == $runId and
+                .run_attempt == $runAttempt and
+                .status == "completed" and
+                .conclusion == "success"
+              ' <<<"${runs_json}" >/dev/null || {
+                echo "::error::A sealed control-plane workflow run/attempt is no longer the latest green gate"
+                exit 1
+              }
+          done
+
+      - name: Sign exact production posture predicate
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/production-posture-evidence/posture-subject.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/production-posture/v1
+          predicate-path: ${{ runner.temp }}/production-posture-evidence/attestation-predicate.json
+
+      - name: Retain sanitized production posture evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-posture-${{ needs.control-plane.outputs.control_plane_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/production-posture-evidence
+          if-no-files-found: error
+          retention-days: 90

@@ -26,6 +26,7 @@ function environment(): Record<string, string> {
     CANARY_SOURCE_WORKFLOW_RUN_ID: "12345",
     CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: "1",
     CANARY_DEPLOYMENT_RUN_ID: "98765",
+    CANARY_CONTROL_PLANE_GATES_SHA256: "c".repeat(64),
     CANARY_RELEASE_SHA: "a".repeat(40),
     CANARY_APPLICATION_URL: "https://example.cloudfront.net",
     CANARY_EVIDENCE_BUCKET: "archon-governed-canary-evidence",
@@ -58,11 +59,12 @@ function recovery(identity: CanaryIdentity): RecoveryManifest {
     tags: ["urn:li:tag:PII"],
   });
   const unsigned = {
-    schemaVersion: "archon.governed-canary-recovery/v1" as const,
+    schemaVersion: "archon.governed-canary-recovery/v2" as const,
     repository: identity.repository,
     workflowRunId: identity.workflowRunId,
     workflowRunAttempt: identity.workflowRunAttempt,
     deploymentRunId: identity.deploymentRunId,
+    controlPlaneGatesSha256: identity.controlPlaneGatesSha256,
     releaseSha: identity.releaseSha,
     applicationUrl: identity.applicationUrl,
     evidenceBucket: identity.evidenceBucket,
@@ -194,6 +196,17 @@ test("rollback recovery is content-addressed and rejects target tampering", () =
       verifyRecoveryManifest(
         manifest,
         parseCanaryIdentity(differentClient)
+    ),
+    /invalid or does not match/u
+  );
+
+  const differentControlPlane = environment();
+  differentControlPlane["CANARY_CONTROL_PLANE_GATES_SHA256"] = "d".repeat(64);
+  assert.throws(
+    () =>
+      verifyRecoveryManifest(
+        manifest,
+        parseCanaryIdentity(differentControlPlane)
       ),
     /invalid or does not match/u
   );

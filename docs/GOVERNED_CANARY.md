@@ -1,13 +1,18 @@
 # Governed write-and-rollback canary
 
 `.github/workflows/governed-canary.yml` is the only supported live mutation proof. It is
-manual-only and pipeline-native. Local commands, workstation browser sessions, and scanner
-output are not accepted as evidence.
+workflow-dispatch-only and pipeline-native. The immutable deployment workflow dispatches
+it after staging and requires its signed rollback evidence before the production
+environment can be entered. An operator may also dispatch it for an already successful
+deployment. Local commands, workstation browser sessions, and scanner output are not
+accepted as evidence.
 
 The workflow targets only the deployed `Archon-staging` stack. Before an approval is
 possible it binds the requested full release SHA and application URL to a successful
 immutable deployment receipt, the live CloudFormation parameters and outputs, a
-content-addressed audit object, and one exact non-production fixture:
+content-addressed audit object, and one exact non-production fixture. The workflow driver
+must still be the current `master` commit, and the deployment's canonical CI / CodeQL /
+workflow-security receipt must still be the latest successful exact-SHA control plane:
 
 ```text
 dataset name: archon_governed_canary_fixture[...]
@@ -40,7 +45,12 @@ governed state machine and read immutable evidence, but it cannot authenticate a
 or call DataHub mutation tools. Its only handoff is the content-addressed recovery artifact
 and its `planDigest` / `recoveryDigest` job outputs. The artifact also seals an
 `authBindingsDigest` derived from the staging CloudFormation application URL, Cognito user
-pool client ID, Hosted UI origin, and exact authorization/token endpoints.
+pool client ID, Hosted UI origin, and exact authorization/token endpoints. It additionally
+stores `controlPlaneGatesSha256` inside the content-addressed
+`archon.governed-canary-recovery/v2` manifest and carries the exact canonical
+`control-plane-security-gates.json` beside it. This historical receipt remains recoverable
+even if a later rerun for the old SHA fails. Version 2 is the first supported
+default-branch recovery format; no legacy v1 canary was deployed.
 
 `governed-canary` owns the write approval and contains:
 
@@ -59,6 +69,16 @@ The prepare role needs `cloudformation:DescribeStacks` on `Archon-staging` and
 the same stack read, `s3:GetObject` only on `v1/execution/sha256/*`, and
 `cognito-idp:AdminGetUser` plus `cognito-idp:AdminListGroupsForUser` for the dedicated
 canary steward. Neither role may have DataHub or production deployment permissions.
+
+Every privileged boundary invokes the repository's CI-only control-plane verifier again.
+The prepare and approval jobs revalidate the exact deployment gate digest immediately
+before AWS OIDC. The approval job repeats it immediately before exposing the Cognito
+username and again immediately before the password-backed approval mutation. These forward
+checks use the current-master view, so a moved default branch, a newer queued/failed
+attempt, or any receipt change fails closed. The rollback job instead authenticates the
+canonical receipt sealed before mutation and its exact successful attempts immediately
+before exposing either DataHub token. That preserves compensation after routine branch
+movement without accepting a different control plane.
 
 `governed-canary-rollback` owns the separately approved inverse and contains:
 
@@ -93,20 +113,25 @@ to match before it reads the password or starts Chrome.
 
 ## Evidence sequence
 
-1. The unprivileged preparation job validates environment protection, the successful
-   deployment run, CloudFormation release/URL/endpoints, the isolated fixture contract,
-   and the exact deployed application binding.
+1. The unprivileged preparation job validates the current `master` ref, the latest exact-SHA
+   CI / CodeQL / workflow-security attempts, environment protection, and either the
+   successful deployment run or the same active deployment attempt with completed,
+   successful staging and production not started. It then validates CloudFormation
+   release/URL/endpoints, the isolated fixture contract, and the exact deployed
+   application binding.
 2. Archon starts `GOVERNED`, reaches `AWAITING_APPROVAL`, and exposes the immutable audit
    evidence digest. The driver validates the exact dossier, plan, pre-state, and inverse.
-3. A content-addressed recovery manifest is uploaded **before** any protected approval or
-   mutation. The completed prepare-job summary shows the fixed target, tag, inverse, and
-   pre/post-state digests.
+3. A content-addressed recovery manifest and its exact canonical deployment-gate receipt
+   are uploaded **before** any protected approval or mutation. The gate-file hash is inside
+   the manifest and therefore inside `recoveryDigest`. The completed prepare-job summary
+   shows the fixed target, tag, inverse, and pre/post-state digests.
 4. The first environment gate is created only after preparation. Its pending job name
    includes the exact `planDigest` and `recoveryDigest`; the reviewer therefore approves
    the sealed plan, not an earlier generic workflow dispatch. After approval, the job
    re-downloads and re-verifies that artifact, both environment-protection policies, the
-   live release/endpoints, and the Cognito user's sole `archon-approvers` group before
-   those secrets are used to submit `APPROVE`.
+   exact current control-plane receipt, the live release/endpoints, and the Cognito user's
+   sole `archon-approvers` group. The same receipt is checked again at the username and
+   password/mutation boundaries before those secrets are used to submit `APPROVE`.
 5. The driver uses Cognito Hosted UI authorization code + PKCE S256 in headless Chrome.
    It does not enable or call `USER_PASSWORD_AUTH`. The callback is intercepted before the
    SPA consumes the code, then exchanged at the runtime-config-bound token endpoint.
@@ -115,11 +140,17 @@ to match before it reads the password or starts Chrome.
    content-addressed rollback proposal.
 7. The second environment reviewer sees the proposal digest (or the pre-mutation recovery
    digest after a failed write job) in the rollback job name and separately authorizes it;
-   its required-reviewer, self-review, and branch policy are checked again before recovery.
+   its required-reviewer, self-review, branch policy, and exact sealed control-plane receipt
+   are checked again before the DataHub tokens or recovery mutation are exposed.
 8. The rollback driver accepts only the exact expected post-state, calls `remove_tags` for
    the sealed inverse, and performs a direct read-after-rollback. The restored digest and
    tags must equal the original pre-state. A successful full write/rollback run signs the
    exact sanitized rollback evidence with a GitHub artifact attestation.
+9. The deployment gate waits for that exact workflow run, requires a successful
+   default-branch/exact-control-plane result, safely extracts the unique rollback
+   artifact, verifies its GitHub-recorded archive digest, subject checksum, predicate
+   bindings, and GitHub attestation, and seals those digests into final production
+   deployment evidence.
 
 Rollback is deliberately idempotent. Even when a verified rollback manifest is present,
 an observed digest already equal to its sealed exact pre-state succeeds as
@@ -140,10 +171,28 @@ present, and rejects every divergent state.
 `.github/workflows/governed-canary-recovery.yml` closes the force-cancellation gap. A
 separate, non-cancelling `workflow_run` execution starts only when the exact
 `.github/workflows/governed-canary.yml` parent on `master` finishes as `failure` or
-`cancelled`. It validates the parent repository, path, run ID and attempt, downloads only
-that attempt's sealed recovery and optional verified-write artifacts, revalidates the
-deployment and live staging bindings, then enters the dedicated protected recovery
-environment. Exact pre-state is an attested idempotent success; exact post-state runs only
-the sealed inverse and proves restoration; every other state fails closed. A parent that
-stopped before sealing recovery could not yet authorize mutation, so the compensator
-records that no recovery is required. Successful parent runs never enter the recovery job.
+`cancelled`. An idempotent manual fallback accepts only an exact parent run ID and attempt
+plus the literal `RECOVER SEALED GOVERNED CANARY` confirmation, and then applies the same
+validation. The workflow derives parent coordinates from the exact-attempt API response,
+cross-checks the automatic event payload, downloads only that attempt's sealed recovery and
+optional verified-write artifacts, and verifies every historical workflow run ID/attempt
+named by the sealed gate receipt directly. It does not ask which attempt is now latest for
+the old parent SHA, because a later failed rerun must not strand an already authorized
+mutation.
+
+Before protected approval, the unprivileged `resolve-parent` job binds its own
+`GITHUB_SHA` to the then-current `master`, double-reads the latest exact successful CI,
+CodeQL, and workflow-security attempts, and seals their canonical receipt, digest, and
+driver SHA as job outputs. That job has no AWS OIDC permission and consumes no repository
+secrets. After approval, the protected job materializes and digest-checks that receipt,
+checks out only the sealed driver SHA, and authenticates the receipt's exact attempts in
+sealed mode before AWS OIDC and again before the DataHub token mutation. It never resolves
+or executes a new current head after approval, so routine `master` advancement while a
+review is pending cannot strand recovery or swap the reviewed implementation. The
+immutable parent SHA remains the deployment and attestation binding. The workflow then
+rechecks deployment and live staging bindings and performs the protected recovery. Exact
+pre-state is an attested idempotent success; exact post-state runs only the sealed inverse
+and proves restoration; every other state fails closed. A parent that stopped before
+sealing recovery could not yet authorize mutation, so the compensator records that no
+recovery is required. Successful parent runs never enter the automatic recovery job and
+cannot pass the manual fallback's failed-or-cancelled parent validation.

@@ -22,7 +22,8 @@ const env = {
 
 const registry = new ArchonRegistryStack(app, "Archon-Registry", {
   env,
-  description: "Shared immutable container registry for Archon build-once promotion"
+  description: "Shared immutable container registry for Archon build-once promotion",
+  terminationProtection: true
 });
 
 const edge = new ArchonEdgeStack(app, `Archon-${stage}-Edge`, {
@@ -31,14 +32,16 @@ const edge = new ArchonEdgeStack(app, `Archon-${stage}-Edge`, {
     region: "us-east-1"
   },
   stage,
-  description: `Archon DataHub ${stage} global CloudFront certificate and WAF`
+  description: `Archon DataHub ${stage} global CloudFront certificate and WAF`,
+  terminationProtection: stage === "production"
 });
 
 const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
   env,
   stage,
   repository: registry.repository,
-  description: `Archon DataHub ${stage} control plane`
+  description: `Archon DataHub ${stage} control plane`,
+  terminationProtection: stage === "production"
 });
 platform.addStackDependency(registry);
 

@@ -86,9 +86,21 @@ The five official Stage Two criteria are equally weighted.
 
 - Push the final branch and retain the exact commit and run URLs.
 - Require the ordinary CI, CodeQL, and supply-chain workflows to finish for that commit.
-- Retain the automatic v4 supply-chain attestation; before promotion, use the daily rescan
-  or dispatch the supply-chain workflow with the exact successful CI run ID and 40-character
-  SHA so the original three artifacts have vulnerability intelligence no older than 24 hours.
+- Retain the automatic v4 supply-chain attestation; the daily path resolves the exact live
+  `Archon-production` deployment through the protected `production-observer` environment
+  and dedicated `AWS_RUNTIME_READ_ROLE_ARN`. It verifies the exact deployment artifact,
+  embedded CI artifact digests, ECS/Lambda/versioned-S3 live bytes, scans the same three
+  inner subjects, repeats the AWS byte observation, and revalidates the sealed current
+  observer whole-snapshot receipt immediately before signing. It then reads the latest
+  CodeQL and workflow-security runs for the exact deployed historical source SHA twice and
+  requires both snapshots to equal the sealed source-gate receipt; the deployed SHA need
+  not still be current `master`. Before promotion, alternatively dispatch the workflow with
+  the exact successful CI run ID and 40-character SHA so the original three artifacts have
+  vulnerability intelligence no older than 24 hours.
+- Configure and run the signed production-posture gate documented in
+  [`docs/PRODUCTION_POSTURE.md`](PRODUCTION_POSTURE.md); all three stacks must have
+  termination protection, be `IN_SYNC`, retain the exact confirmed alarm subscription,
+  and remain unchanged across the bounded check.
 - Retain only CI-generated coverage/readiness, container, deterministic web archive, CDK
   assembly/templates, Guard results, Trivy/CodeQL SARIF, SBOM, CVE scan, and attestation
   evidence.
@@ -106,11 +118,12 @@ The five official Stage Two criteria are equally weighted.
 - Prove the instance actually retains the aspect versions Archon needs.
 - Run `.github/workflows/live-datahub-proof.yml` and retain the sanitized result.
 - Configure the three protected canary environments in
-  [`docs/GOVERNED_CANARY.md`](GOVERNED_CANARY.md), then run the manual-only
-  `.github/workflows/governed-canary.yml`. It fails closed unless the exact staging
-  release, disposable TEST/DEV fixture, dedicated tenant endpoints, pre-approval sealed
-  plan/recovery digests, Cognito PKCE approval, terminal receipt, separately approved
-  inverse, and read-after-rollback are all bound.
+  [`docs/GOVERNED_CANARY.md`](GOVERNED_CANARY.md). The immutable deployment pipeline
+  dispatches `.github/workflows/governed-canary.yml` after staging and blocks production
+  until its exact signed rollback proof is verified. It fails closed unless the exact
+  staging release, disposable TEST/DEV fixture, dedicated tenant endpoints,
+  pre-approval sealed plan/recovery digests, Cognito PKCE approval, terminal receipt,
+  separately approved inverse, and read-after-rollback are all bound.
   Never expose write tools on the public Archon MCP/API surface.
 
 ### 3. AWS deployment evidence
@@ -146,6 +159,10 @@ The five official Stage Two criteria are equally weighted.
 - Configure a trimmed, non-wildcard `DATAHUB_DEMO_QUERY` in staging and production that
   resolves to exactly one safe demo dataset; retain its digest-bound smoke evidence.
 - Allow deployment only from a successful default-branch CI run and matching full SHA.
+- Revalidate the current default-branch control-plane SHA and latest exact CI, CodeQL, and
+  workflow-security receipts after approval, before AWS OIDC, before mutation, and after
+  the live production byte observation immediately before promotion evidence is sealed;
+  retain the canonical receipt in deployment evidence.
 - Promote the verified inner container, SPA, and Lambda archive digests; do not rebuild
   application artifacts during deployment.
 - Verify CloudFront/S3, Cognito code + PKCE, the exact no-store

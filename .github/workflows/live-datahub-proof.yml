@@ -92,6 +92,26 @@ jobs:
           default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
           test "${default_branch}" = "master"
           test "${GITHUB_REF}" = "refs/heads/${default_branch}"
+          default_branch_ref="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}"
+          )"
+          test "$(
+            jq -er \
+              --arg ref "refs/heads/${default_branch}" '
+                select(
+                  .ref == $ref and
+                  .object.type == "commit" and
+                  (.object.sha | test("^[0-9a-f]{40}$"))
+                ) |
+                .object.sha
+              ' <<<"${default_branch_ref}"
+          )" = "${RELEASE_SHA}" || {
+            echo "::error::The live-proof control plane is no longer the default-branch head"
+            exit 1
+          }
 
           workflow_success() {
             local workflow_file="$1"
@@ -106,7 +126,6 @@ jobs:
               -f "head_sha=${RELEASE_SHA}" \
               -f "branch=${default_branch}" \
               -f event=push \
-              -f status=completed \
               -f per_page=100)"
             match="$(jq -ce \
               --arg path "${expected_path}" \
@@ -120,13 +139,16 @@ jobs:
                     .head_sha == $sha and
                     .head_branch == $branch and
                     .head_repository.full_name == $repository and
-                    .event == "push" and
-                    .status == "completed" and
-                    .conclusion == "success"
+                    .event == "push"
                   )
                 ] |
-                sort_by(.run_attempt, .id) |
-                last
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  . != null and
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
               ' <<<"${response}")"
             control_plane_runs="$(
               jq -cn \
@@ -181,6 +203,19 @@ jobs:
 
           evidence_dir="${RUNNER_TEMP}/live-datahub-proof"
           mkdir -p "${evidence_dir}"
+          deployment_control_plane_gates="$(
+            printf '%s' \
+              "${evidence_dir}/control-plane-security-gates.json"
+          )"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${deployment_control_plane_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          deployment_control_plane_gate_sha="$(
+            sha256sum "${deployment_control_plane_gates}" |
+              awk '{print $1}'
+          )"
+          echo "control_plane_gate_sha=${deployment_control_plane_gate_sha}" \
+            >>"${GITHUB_OUTPUT}"
           control_plane_gates="${evidence_dir}/control-plane-gates.json"
           jq -cnS \
             --arg sha "${RELEASE_SHA}" \
@@ -474,6 +509,17 @@ jobs:
             echo "python_version=${python_version}"
           } >>"${GITHUB_OUTPUT}"
 
+      - name: Revalidate exact control plane immediately before DataHub secrets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTPUT_PATH="${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
       - name: Prove one-dataset MCP, retention, provenance, and contradiction path
         env:
           DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
@@ -521,6 +567,56 @@ jobs:
             >"${RUNNER_TEMP}/live-datahub-proof/proof.json"
           rm "${raw}"
 
+      - name: Revalidate and bind the exact control plane after live proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exact_gates="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
+          )"
+          enriched_gates="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/live-datahub-proof/control-plane-gates.json"
+          )"
+          test -f "${enriched_gates}"
+          test ! -L "${enriched_gates}"
+          OUTPUT_PATH="${exact_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
+            "${EXPECTED_GATE_SHA256}"
+          jq -en \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile exact "${exact_gates}" \
+            --slurpfile enriched "${enriched_gates}" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              $exact[0].schemaVersion ==
+                "archon.deployment-control-plane-gates/v1" and
+              $exact[0].sourceSha == $sha and
+              $exact[0].branch == "master" and
+              $enriched[0].schemaVersion ==
+                "archon.live-proof-control-plane/v1" and
+              $enriched[0].sourceSha == $sha and
+              $enriched[0].branch == "master" and
+              ($exact[0].workflows | receipt) ==
+                ($enriched[0].workflows | receipt)
+            ' >/dev/null || {
+            echo "::error::The enriched live-proof receipt differs from the enforced exact gate"
+            exit 1
+          }
+
       - name: Prepare digest-bound proof evidence
         id: evidence
         env:
@@ -529,6 +625,7 @@ jobs:
           QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
           CONTROL_PLANE_GATES: ${{ steps.gate.outputs.control_plane_gates }}
           DEPLOYMENT_BINDING: ${{ steps.deployment.outputs.binding }}
+          MCP_PROJECT: ${{ steps.mcp.outputs.project }}
         shell: bash
         run: |
           set -euo pipefail
@@ -538,14 +635,38 @@ jobs:
             "${evidence_dir}/proof.json"
           cp "${CONTROL_PLANE_GATES}" \
             "${evidence_dir}/control-plane-gates.json"
+          cp \
+            "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" \
+            "${evidence_dir}/control-plane-security-gates.json"
           cp "${DEPLOYMENT_BINDING}" \
             "${evidence_dir}/deployment-binding.json"
           cp .github/locks/datahub-mcp-v0.6.0.json \
             "${evidence_dir}/mcp-lock-contract.json"
+          cp "${MCP_PROJECT}/.archon-evidence/pyperclip-1.9.0.tar.gz" \
+            "${evidence_dir}/mcp-allowed-source-build.tar.gz"
+          cp "${MCP_PROJECT}/.archon-evidence/build-constraints.txt" \
+            "${evidence_dir}/mcp-build-constraints.txt"
+          cp "${MCP_PROJECT}/.archon-evidence/no-build-packages.txt" \
+            "${evidence_dir}/mcp-no-build-packages.txt"
+          cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
+            "${evidence_dir}/mcp-pypi-provenance.json"
+          backend_filename="$(
+            jq -er \
+              '.sourceBuildPolicy.buildBackend.wheel.filename' \
+              .github/locks/datahub-mcp-v0.6.0.json
+          )"
+          cp "${MCP_PROJECT}/.archon-evidence/${backend_filename}" \
+            "${evidence_dir}/mcp-build-backend.whl"
           for artifact in \
             control-plane-gates.json \
+            control-plane-security-gates.json \
             deployment-binding.json \
+            mcp-allowed-source-build.tar.gz \
+            mcp-build-backend.whl \
+            mcp-build-constraints.txt \
             mcp-lock-contract.json \
+            mcp-no-build-packages.txt \
+            mcp-pypi-provenance.json \
             proof.json; do
             test -f "${evidence_dir}/${artifact}"
             test ! -L "${evidence_dir}/${artifact}"
@@ -554,8 +675,14 @@ jobs:
             cd "${evidence_dir}"
             sha256sum \
               control-plane-gates.json \
+              control-plane-security-gates.json \
               deployment-binding.json \
+              mcp-allowed-source-build.tar.gz \
+              mcp-build-backend.whl \
+              mcp-build-constraints.txt \
               mcp-lock-contract.json \
+              mcp-no-build-packages.txt \
+              mcp-pypi-provenance.json \
               proof.json >proof-subject.sha256
             sha256sum --check proof-subject.sha256
           )
@@ -568,6 +695,16 @@ jobs:
           )"
           gates_sha="$(
             sha256sum "${evidence_dir}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          exact_gates_sha="$(
+            sha256sum \
+              "${evidence_dir}/control-plane-security-gates.json" |
+              awk '{print $1}'
+          )"
+          test "${exact_gates_sha}" = "$(
+            sha256sum \
+              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" |
               awk '{print $1}'
           )"
           lock_sha="$(
@@ -585,6 +722,7 @@ jobs:
             --arg proofSha256 "${proof_sha}" \
             --arg deploymentBindingSha256 "${binding_sha}" \
             --arg controlPlaneGatesSha256 "${gates_sha}" \
+            --arg controlPlaneSecurityGatesSha256 "${exact_gates_sha}" \
             --arg mcpLockContractSha256 "${lock_sha}" \
             --slurpfile proof "${evidence_dir}/proof.json" '
               {
@@ -602,6 +740,8 @@ jobs:
                   proofSha256: $proofSha256,
                   deploymentBindingSha256: $deploymentBindingSha256,
                   controlPlaneGatesSha256: $controlPlaneGatesSha256,
+                  controlPlaneSecurityGatesSha256:
+                    $controlPlaneSecurityGatesSha256,
                   mcpLockContractSha256: $mcpLockContractSha256
                 },
                 result: $proof[0].result,
@@ -614,6 +754,70 @@ jobs:
             echo "predicate=${evidence_dir}/attestation-predicate.json"
             echo "proof_sha=${proof_sha}"
           } >>"${GITHUB_OUTPUT}"
+
+      - name: Revalidate exact control plane immediately before proof attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
+          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exact_gates="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
+          )"
+          OUTPUT_PATH="${exact_gates}" \
+            bash scripts/verify-github-control-plane.sh
+          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
+            "${EXPECTED_GATE_SHA256}"
+          test -f "${EVIDENCE_DIR}/control-plane-security-gates.json"
+          test ! -L "${EVIDENCE_DIR}/control-plane-security-gates.json"
+          cmp --silent \
+            "${exact_gates}" \
+            "${EVIDENCE_DIR}/control-plane-security-gates.json" || {
+            echo "::error::The signed live-proof gate subject is no longer current"
+            exit 1
+          }
+          jq -en \
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --slurpfile exact \
+              "${EVIDENCE_DIR}/control-plane-security-gates.json" \
+            --slurpfile enriched \
+              "${EVIDENCE_DIR}/control-plane-gates.json" '
+              def receipt:
+                map({
+                  path,
+                  workflowId,
+                  runId,
+                  runAttempt,
+                  conclusion
+                }) |
+                sort_by(.path);
+              $exact[0].sourceSha == $sha and
+              $enriched[0].sourceSha == $sha and
+              ($exact[0].workflows | receipt) ==
+                ($enriched[0].workflows | receipt)
+            ' >/dev/null || {
+            echo "::error::The signed exact and enriched live-proof receipts differ"
+            exit 1
+          }
+          enriched_sha="$(
+            sha256sum "${EVIDENCE_DIR}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg exact "${EXPECTED_GATE_SHA256}" \
+            --arg enriched "${enriched_sha}" '
+              .schemaVersion ==
+                "archon.live-datahub-proof-attestation/v1" and
+              .evidence.controlPlaneSecurityGatesSha256 == $exact and
+              .evidence.controlPlaneGatesSha256 == $enriched
+            ' "${EVIDENCE_DIR}/attestation-predicate.json" >/dev/null || {
+            echo "::error::The live-proof predicate lost its exact control-plane bindings"
+            exit 1
+          }
 
       - name: Attest exact live proof evidence
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0

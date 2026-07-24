@@ -55,6 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           for script in \
+            scripts/observe-aws-live-runtime.sh \
+            scripts/verify-github-control-plane.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
             scripts/validate-aws-waf-contract.sh \
@@ -83,7 +85,7 @@ jobs:
           name: coverage-${{ github.sha }}
           path: coverage/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 90
 
   web:
     name: Web typecheck, test, build
@@ -147,7 +149,7 @@ jobs:
             ${{ runner.temp }}/archon-web.tar.gz
             ${{ runner.temp }}/archon-web.tar.gz.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   infra:
     name: AWS CDK build, test, synth, IaC gate
@@ -244,7 +246,7 @@ jobs:
             ${{ runner.temp }}/archon-lambdas.tar.gz
             ${{ runner.temp }}/archon-lambdas.tar.gz.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
       - name: Synthesize staging and production CloudFormation
         shell: bash
         run: |
@@ -354,7 +356,7 @@ jobs:
             ${{ runner.temp }}/cfn-guard-results.txt
             ${{ runner.temp }}/trivy-iac.sarif
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
       - name: Fail on any IaC finding or malformed scan evidence
         shell: bash
         run: |
@@ -395,7 +397,7 @@ jobs:
           name: readiness-${{ github.sha }}
           path: readiness.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
 
   contrib:
     name: DataHub ecosystem contribution contract
@@ -521,19 +523,48 @@ jobs:
           cp "${contract}" "${evidence_dir}/lock-contract.json"
           cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
             "${evidence_dir}/pypi-provenance.json"
+          cp "${MCP_PROJECT}/.archon-evidence/pyperclip-1.9.0.tar.gz" \
+            "${evidence_dir}/allowed-source-build.tar.gz"
+          cp "${MCP_PROJECT}/.archon-evidence/build-constraints.txt" \
+            "${evidence_dir}/build-constraints.txt"
+          cp "${MCP_PROJECT}/.archon-evidence/no-build-packages.txt" \
+            "${evidence_dir}/no-build-packages.txt"
+          backend_filename="$(
+            jq -er \
+              '.sourceBuildPolicy.buildBackend.wheel.filename' \
+              "${contract}"
+          )"
+          cp "${MCP_PROJECT}/.archon-evidence/${backend_filename}" \
+            "${evidence_dir}/build-backend.whl"
           cp "${MCP_PROJECT}/uv.lock" "${evidence_dir}/uv.lock"
           cp "${audit}" "${evidence_dir}/audit.sarif"
           cp "${installed}" "${evidence_dir}/installed-packages.json"
           cp "${sbom}" "${evidence_dir}/sbom.cdx.json"
           test "$(sha256sum "${evidence_dir}/uv.lock" | awk '{print $1}')" = \
             "$(jq -er '.files["uv.lock"].sha256' "${contract}")"
+          test "$(
+            sha256sum "${evidence_dir}/allowed-source-build.tar.gz" |
+              awk '{print $1}'
+          )" = "$(
+            jq -er '.sourceBuildPolicy.allowed[0].sdist.sha256' "${contract}"
+          )"
           jq -cnS \
             --arg sourceSha "${GITHUB_SHA}" \
             --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg uvVersion "$(uv --version | awk '{print $2}')" \
             --arg auditStatus "${AUDIT_STATUS}" \
             --arg lockSha256 "$(jq -er '.files["uv.lock"].sha256' "${contract}")" \
-            --arg wheelSha256 "$(jq -er '.package.wheel.sha256' "${contract}")" '
+            --arg wheelSha256 "$(jq -er '.package.wheel.sha256' "${contract}")" \
+            --arg allowedSdistSha256 "$(
+              jq -er \
+                '.sourceBuildPolicy.allowed[0].sdist.sha256' \
+                "${contract}"
+            )" \
+            --arg buildBackendWheelSha256 "$(
+              jq -er \
+                '.sourceBuildPolicy.buildBackend.wheel.sha256' \
+                "${contract}"
+            )" '
               {
                 schemaVersion: "archon.datahub-mcp-security-evidence/v1",
                 sourceSha: $sourceSha,
@@ -546,6 +577,8 @@ jobs:
                 dependencyInputs: {
                   uvLockSha256: $lockSha256,
                   mcpWheelSha256: $wheelSha256,
+                  allowedSourceBuildSha256: $allowedSdistSha256,
+                  buildBackendWheelSha256: $buildBackendWheelSha256,
                   pypiTrustedPublisherProvenance:
                     "matched-pinned-pypi-record"
                 },
@@ -558,10 +591,14 @@ jobs:
           (
             cd "${evidence_dir}"
             sha256sum \
+              allowed-source-build.tar.gz \
               audit.sarif \
+              build-backend.whl \
+              build-constraints.txt \
               installed-packages.json \
               lock-contract.json \
               metadata.json \
+              no-build-packages.txt \
               pypi-provenance.json \
               sbom.cdx.json \
               uv.lock >evidence.manifest.sha256
@@ -712,7 +749,7 @@ jobs:
           name: container-security-${{ github.sha }}
           path: ${{ runner.temp }}/trivy-container.sarif
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
       - name: Fail on high or critical container findings or malformed evidence
         run: |
           set -euo pipefail
@@ -746,7 +783,7 @@ jobs:
             ${{ runner.temp }}/image-inspect.json
             ${{ runner.temp }}/health.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
       - name: Candidate logs
         if: failure()
         run: docker logs archon-candidate
