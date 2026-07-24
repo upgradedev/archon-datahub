@@ -721,12 +721,16 @@
         Type: AWS::ApiGateway::Stage
         Properties:
           TracingEnabled: false
+          CacheClusterEnabled: true
           MethodSettings:
-            - ResourcePath: /*
-              HttpMethod: "*"
-              LoggingLevel: "OFF"
-              MetricsEnabled: false
-              DataTraceEnabled: true
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
   expectations:
     rules:
       api_gateway_stages_are_observable: FAIL
