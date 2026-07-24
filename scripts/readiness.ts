@@ -515,11 +515,13 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/security/governed-canary-boundary.test.ts",
   ].every((f) => existsSync(p(f)));
   const ciHasPenTest =
-    /^\s{2}security:\s*$/m.test(ci) && ci.includes("test:security") && /npm audit/.test(ci);
+    /^\s{2}security:\s*$/m.test(ci) &&
+    ci.includes("test:security") &&
+    /npm-audit-retry/.test(ci);
   checks.push(
     check("SEC3", "security", 3, "Security suite + dedicated CI job (with SCA/CVE gate) present", () => ({
       ok: secSuitePresent && ciHasPenTest,
-      evidence: `security suite present=${secSuitePresent}; CI security job (+npm audit SCA)=${ciHasPenTest}`,
+      evidence: `security suite present=${secSuitePresent}; CI security job (+fail-closed npm audit SCA)=${ciHasPenTest}`,
     }))
   );
 

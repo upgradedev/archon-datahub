@@ -112,7 +112,9 @@ jobs:
         run: npm test
       - name: Web SCA gate
         working-directory: web
-        run: npm audit --audit-level=high
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --audit-level=high
       - name: Build immutable SPA candidate
         working-directory: web
         env:
@@ -200,13 +202,21 @@ jobs:
         run: npm test -- --ci --coverage
       - name: Infrastructure SCA gate
         working-directory: infra/aws
-        run: npm audit --audit-level=high
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --audit-level=high
       - name: Approval Lambda SCA gate
         working-directory: infra/aws/lambda/approval
-        run: npm audit --omit=dev --audit-level=high
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --omit=dev
+          --audit-level=high
       - name: Control Lambda SCA gate
         working-directory: infra/aws/lambda/control
-        run: npm audit --omit=dev --audit-level=high
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --omit=dev
+          --audit-level=high
       - name: Package deterministic Lambda release candidate
         shell: bash
         run: |
@@ -431,7 +441,9 @@ jobs:
       - name: Application-security suite
         run: npm run test:security
       - name: SCA gate
-        run: npm audit --audit-level=high
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --audit-level=high
 
   mcp-dependency:
     name: Locked DataHub MCP SCA and SBOM

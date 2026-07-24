@@ -268,6 +268,12 @@ readonly upstream_pyproject="${destination}/pyproject.toml"
 readonly upstream_pyproject_sha="$(
   jq -er '.files["pyproject.toml"].sha256' "${contract}"
 )"
+readonly pristine_upstream_pyproject="${provenance_dir}/upstream-pyproject.toml"
+cp -- "${upstream_pyproject}" "${pristine_upstream_pyproject}"
+test -f "${pristine_upstream_pyproject}"
+test ! -L "${pristine_upstream_pyproject}"
+test "$(sha256sum "${pristine_upstream_pyproject}" | awk '{print $1}')" = \
+  "${upstream_pyproject_sha}"
 readonly build_constraint_requirement="$(
   printf '%s @ %s#sha256=%s' \
     "${backend_name}" \
@@ -418,14 +424,31 @@ while IFS= read -r dependency; do
 done <"${no_build_packages}"
 test "${#no_build_args[@]}" -gt 20
 
+# The pristine lock was checked before the build-only overlay was added. Frozen
+# mode consumes that exact lock without attempting to rewrite it, while still
+# applying the workspace-root build constraint to the one allowed sdist.
 uv sync \
   --project "${destination}" \
-  --locked \
+  --frozen \
   --no-dev \
   --no-install-project \
   --no-cache \
   "${no_build_args[@]}" \
   --python "${python_version}"
+
+# Restore the byte-identical upstream project metadata immediately after the
+# isolated build. All downstream audit/export commands therefore run with the
+# original, lock-current project while the overlay remains in retained evidence.
+readonly restored_upstream_pyproject="${destination}/.pyproject.toml.restore"
+cp -- "${pristine_upstream_pyproject}" "${restored_upstream_pyproject}"
+test -f "${restored_upstream_pyproject}"
+test ! -L "${restored_upstream_pyproject}"
+test "$(sha256sum "${restored_upstream_pyproject}" | awk '{print $1}')" = \
+  "${upstream_pyproject_sha}"
+mv -- "${restored_upstream_pyproject}" "${upstream_pyproject}"
+test "$(sha256sum "${upstream_pyproject}" | awk '{print $1}')" = \
+  "${upstream_pyproject_sha}"
+
 printf '%s @ %s --hash=sha256:%s\n' \
   "${package_name}" \
   "${wheel_url}" \
