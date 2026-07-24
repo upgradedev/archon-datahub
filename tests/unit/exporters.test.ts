@@ -18,7 +18,7 @@ test("report exporters produce JSON, safe Markdown, and SARIF with stable finger
     narrative: "<script>alert(1)</script>",
   });
   assert.match(markdown, /## Findings/);
-  assert.doesNotMatch(markdown, /<script>/);
+  assert.doesNotMatch(markdown, /<script>/iu);
   assert.match(markdown, /&lt;script&gt;/);
 
   const first = auditReportToSarif(report);

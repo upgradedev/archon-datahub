@@ -60,7 +60,7 @@ test("DASHSCOPE_API_KEY → Qwen via Alibaba Model Studio", () => {
   withEnv({ DASHSCOPE_API_KEY: "test-qwen-key" }, () => {
     const p = resolveLlmProvider()!;
     assert.equal(p.name, "qwen");
-    assert.match(p.baseURL, /dashscope/);
+    assert.equal(p.baseURL, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1");
     assert.equal(p.model, "qwen-plus");
   });
 });
@@ -69,7 +69,7 @@ test("GEMINI_API_KEY → Gemini OpenAI-compatible gateway", () => {
   withEnv({ GEMINI_API_KEY: "g-key" }, () => {
     const p = resolveLlmProvider()!;
     assert.equal(p.name, "gemini");
-    assert.match(p.baseURL, /generativelanguage\.googleapis\.com/);
+    assert.equal(p.baseURL, "https://generativelanguage.googleapis.com/v1beta/openai/");
   });
 });
 

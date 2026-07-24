@@ -1591,21 +1591,21 @@ export class ArchonPlatformStack extends Stack {
         resourceArn: webAcl.attrArn,
         logDestinationConfigs: [apiWafLogGroupResourceArn],
         loggingFilter: {
-          defaultBehavior: "DROP",
-          filters: [
+          DefaultBehavior: "DROP",
+          Filters: [
             {
-              behavior: "KEEP",
-              conditions: [
-                { actionCondition: { action: "BLOCK" } },
-                { actionCondition: { action: "COUNT" } }
+              Behavior: "KEEP",
+              Conditions: [
+                { ActionCondition: { Action: "BLOCK" } },
+                { ActionCondition: { Action: "COUNT" } }
               ],
-              requirement: "MEETS_ANY"
+              Requirement: "MEETS_ANY"
             }
           ]
         },
         redactedFields: [
-          { singleHeader: { name: "authorization" } },
-          { singleHeader: { name: "cookie" } }
+          { singleHeader: { Name: "authorization" } },
+          { singleHeader: { Name: "cookie" } }
         ]
       }
     );

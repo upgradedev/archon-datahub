@@ -27,7 +27,7 @@ import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 import { buildMcpServer } from "../../src/mcp/server.js";
 import { defaultAuditLoop } from "../../src/ap/loop.js";
 import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
-import { FIXTURE_REPORTS, FIXTURE_CLEAN_REPORTS, FIXTURE_VERSION_HISTORY } from "../../src/datahub/fixtures.js";
+import { FIXTURE_CLEAN_REPORTS, FIXTURE_VERSION_HISTORY } from "../../src/datahub/fixtures.js";
 import { validateSnapshot } from "../../src/governance/validator.js";
 import {
   auditVersionHistory,
