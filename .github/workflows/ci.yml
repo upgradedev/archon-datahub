@@ -301,6 +301,7 @@ jobs:
         run: |
           set -euo pipefail
           "${GUARD_BIN}" test \
+            --verbose \
             --rules-file infra/aws/policy/archon.guard \
             --test-data infra/aws/policy/archon_tests.yaml
       - name: Enforce preventive controls on synthesized templates
