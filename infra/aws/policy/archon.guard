@@ -14,9 +14,33 @@ let s3_buckets = Resources.*[
   Type == 'AWS::S3::Bucket'
 ]
 
+let application_s3_buckets = Resources.*[
+  Type == 'AWS::S3::Bucket'
+  some Properties.Tags[*] {
+    Key == 'ArchonBucketRole'
+    Value == 'application'
+  }
+]
+
+let access_log_sink_buckets = Resources.*[
+  Type == 'AWS::S3::Bucket'
+  some Properties.Tags[*] {
+    Key == 'ArchonBucketRole'
+    Value == 'access-log-sink'
+  }
+]
+
 let object_locked_buckets = Resources.*[
   Type == 'AWS::S3::Bucket'
   Properties.ObjectLockEnabled == true
+]
+
+let evidence_buckets = Resources.*[
+  Type == 'AWS::S3::Bucket'
+  some Properties.Tags[*] {
+    Key == 'ArchonBucketPurpose'
+    Value == 'evidence'
+  }
 ]
 
 let kms_keys = Resources.*[
@@ -25,6 +49,58 @@ let kms_keys = Resources.*[
 
 let log_groups = Resources.*[
   Type == 'AWS::Logs::LogGroup'
+]
+
+let waf_data_protections = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
+].Properties.DataProtectionConfig.DataProtections[*]
+
+let waf_authorization_data_protections = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
+].Properties.DataProtectionConfig.DataProtections.*[
+  Field.FieldKeys == ['authorization']
+]
+
+let waf_cookie_data_protections = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
+].Properties.DataProtectionConfig.DataProtections.*[
+  Field.FieldKeys == ['cookie']
+]
+
+let waf_logging_filters = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.LoggingFilter.Filters[*]
+
+let waf_logging_conditions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.LoggingFilter.Filters[*].Conditions[*]
+
+let waf_block_logging_conditions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.LoggingFilter.Filters[*].Conditions.*[
+  ActionCondition.Action == 'BLOCK'
+]
+
+let waf_count_logging_conditions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.LoggingFilter.Filters[*].Conditions.*[
+  ActionCondition.Action == 'COUNT'
+]
+
+let waf_redacted_fields = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.RedactedFields[*]
+
+let waf_authorization_redactions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.RedactedFields.*[
+  SingleHeader.Name == 'authorization'
+]
+
+let waf_cookie_redactions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.RedactedFields.*[
+  SingleHeader.Name == 'cookie'
 ]
 
 let dynamodb_tables = Resources.*[
@@ -37,7 +113,12 @@ let sqs_queues = Resources.*[
 
 let source_queues = Resources.*[
   Type == 'AWS::SQS::Queue'
-  Properties.RedrivePolicy exists
+  Properties.QueueName == /-(audit-jobs|approval-events|remediation-jobs)$/
+]
+
+let dead_letter_queues = Resources.*[
+  Type == 'AWS::SQS::Queue'
+  Properties.QueueName == /-(audit|approval|remediation)-dlq$/
 ]
 
 let ecs_task_definitions = Resources.*[
@@ -49,8 +130,22 @@ let approval_lambdas = Resources.*[
   Properties.Environment.Variables.APPROVER_GROUP exists
 ]
 
+let lambda_functions = Resources.*[
+  Type == 'AWS::Lambda::Function'
+]
+
+let subnets = Resources.*[
+  Type == 'AWS::EC2::Subnet'
+]
+
 let api_gateway_stages = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
+]
+
+let cached_api_method_settings = Resources.*[
+  Type == 'AWS::ApiGateway::Stage'
+].Properties.MethodSettings[*][
+  CachingEnabled == true
 ]
 
 let cloudfront_distributions = Resources.*[
@@ -63,6 +158,14 @@ let secrets = Resources.*[
 
 let waf_associations = Resources.*[
   Type == 'AWS::WAFv2::WebACLAssociation'
+]
+
+let waf_web_acls = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
+]
+
+let waf_logging_configurations = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
 ]
 
 rule ecr_repositories_are_hardened when %ecr_repositories !empty {
@@ -90,13 +193,54 @@ rule s3_buckets_are_private_and_encrypted when %s3_buckets !empty {
         'aws:kms'
       ]
     }
+    VersioningConfiguration.Status == 'Enabled'
+  }
+}
+
+rule platform_has_s3_server_access_logging
+  when %platform_markers !empty {
+  let s3_bucket_count = count(%s3_buckets)
+  let application_s3_bucket_count = count(%application_s3_buckets)
+  let access_log_sink_bucket_count = count(%access_log_sink_buckets)
+
+  %application_s3_buckets !empty
+  %access_log_sink_buckets !empty
+  %s3_bucket_count == 3
+  %application_s3_bucket_count == 2
+  %access_log_sink_bucket_count == 1
+  %application_s3_buckets.Properties {
+    some OwnershipControls.Rules[*] {
+      ObjectOwnership == 'BucketOwnerEnforced'
+    }
+    BucketEncryption.ServerSideEncryptionConfiguration[*] {
+      BucketKeyEnabled == true
+      ServerSideEncryptionByDefault.SSEAlgorithm == 'aws:kms'
+      ServerSideEncryptionByDefault.KMSMasterKeyID exists
+    }
+    LoggingConfiguration exists
+    LoggingConfiguration {
+      DestinationBucketName exists
+      LogFilePrefix exists
+      LogFilePrefix != ''
+    }
+  }
+  %access_log_sink_buckets.Properties {
+    some OwnershipControls.Rules[*] {
+      ObjectOwnership == 'ObjectWriter'
+    }
+    LoggingConfiguration not exists
   }
 }
 
 rule platform_has_versioned_object_locked_evidence_store
   when %platform_markers !empty {
+  let evidence_bucket_count = count(%evidence_buckets)
+  let object_locked_bucket_count = count(%object_locked_buckets)
+  %evidence_bucket_count == 1
+  %object_locked_bucket_count == 1
   %object_locked_buckets !empty
-  %object_locked_buckets.Properties {
+  %evidence_buckets.Properties {
+    ObjectLockEnabled == true
     VersioningConfiguration.Status == 'Enabled'
     ObjectLockConfiguration.ObjectLockEnabled == 'Enabled'
     ObjectLockConfiguration.Rule.DefaultRetention.Mode IN [
@@ -141,11 +285,20 @@ rule sqs_queues_are_encrypted when %sqs_queues !empty {
 
 rule platform_source_queues_use_dead_letter_queues
   when %platform_markers !empty {
+  let sqs_queue_count = count(%sqs_queues)
+  let source_queue_count = count(%source_queues)
+  let dead_letter_queue_count = count(%dead_letter_queues)
+
   %source_queues !empty
+  %dead_letter_queues !empty
+  %sqs_queue_count == 6
+  %source_queue_count == 3
+  %dead_letter_queue_count == 3
   %source_queues.Properties.RedrivePolicy {
     deadLetterTargetArn exists
     maxReceiveCount >= 1
   }
+  %dead_letter_queues.Properties.RedrivePolicy not exists
 }
 
 rule ecs_task_containers_are_hardened
@@ -174,11 +327,24 @@ rule platform_approval_lambda_is_hardened
   }
 }
 
+rule lambda_functions_enable_active_xray when %lambda_functions !empty {
+  %lambda_functions.Properties.TracingConfig.Mode == 'Active'
+}
+
+rule subnets_never_auto_assign_public_ips when %subnets !empty {
+  %subnets.Properties.MapPublicIpOnLaunch == false
+}
+
 rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
+  let cached_api_method_count = count(%cached_api_method_settings)
+
+  %cached_api_method_settings !empty
+  %cached_api_method_count == 1
   %api_gateway_stages.Properties {
     AccessLogSetting.DestinationArn exists
     AccessLogSetting.Format exists
     TracingEnabled == true
+    CacheClusterEnabled == true
     MethodSettings !empty
     some MethodSettings[*] {
       LoggingLevel IN [
@@ -189,6 +355,14 @@ rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
       DataTraceEnabled == false
     }
   }
+  %cached_api_method_settings {
+    ResourcePath == '/~1api~1control-loops~1{auditId}'
+    HttpMethod == 'GET'
+    CachingEnabled == true
+    CacheDataEncrypted == true
+    CacheTtlInSeconds > 0
+    CacheTtlInSeconds <= 5
+  }
 }
 
 rule cloudfront_distributions_enforce_tls_logging_and_oac
@@ -198,6 +372,7 @@ rule cloudfront_distributions_enforce_tls_logging_and_oac
     Logging.Bucket exists
     Aliases exists
     Aliases !empty
+    WebACLId exists
     ViewerCertificate.AcmCertificateArn exists
     ViewerCertificate.MinimumProtocolVersion == 'TLSv1.3_2025'
     ViewerCertificate.SslSupportMethod == 'sni-only'
@@ -230,8 +405,86 @@ rule secrets_use_customer_managed_kms when %secrets !empty {
   }
 }
 
+rule waf_web_acls_protect_sensitive_sampled_data
+  when %waf_web_acls !empty {
+  let waf_data_protection_count = count(%waf_data_protections)
+  let waf_authorization_data_protection_count =
+    count(%waf_authorization_data_protections)
+  let waf_cookie_data_protection_count =
+    count(%waf_cookie_data_protections)
+  %waf_data_protection_count == 2
+  %waf_authorization_data_protection_count == 1
+  %waf_cookie_data_protection_count == 1
+  %waf_web_acls.Properties {
+    DataProtectionConfig.DataProtections !empty
+    DataProtectionConfig.DataProtections[*] {
+      Action == 'SUBSTITUTION'
+      ExcludeRateBasedDetails == false
+      ExcludeRuleMatchDetails == false
+      Field.FieldType == 'SINGLE_HEADER'
+    }
+    some DataProtectionConfig.DataProtections[*] {
+      Field.FieldKeys == ['authorization']
+    }
+    some DataProtectionConfig.DataProtections[*] {
+      Field.FieldKeys == ['cookie']
+    }
+  }
+}
+
+rule waf_logging_is_filtered_and_redacted
+  when %waf_logging_configurations !empty {
+  let waf_logging_configuration_count = count(%waf_logging_configurations)
+  let waf_logging_filter_count = count(%waf_logging_filters)
+  let waf_logging_condition_count = count(%waf_logging_conditions)
+  let waf_block_logging_condition_count =
+    count(%waf_block_logging_conditions)
+  let waf_count_logging_condition_count =
+    count(%waf_count_logging_conditions)
+  let waf_redacted_field_count = count(%waf_redacted_fields)
+  let waf_authorization_redaction_count =
+    count(%waf_authorization_redactions)
+  let waf_cookie_redaction_count = count(%waf_cookie_redactions)
+  %waf_logging_configuration_count == 1
+  %waf_logging_filter_count == 1
+  %waf_logging_condition_count == 2
+  %waf_block_logging_condition_count == 1
+  %waf_count_logging_condition_count == 1
+  %waf_redacted_field_count == 2
+  %waf_authorization_redaction_count == 1
+  %waf_cookie_redaction_count == 1
+  %waf_logging_configurations.Properties {
+    ResourceArn exists
+    LogDestinationConfigs !empty
+    LoggingFilter.DefaultBehavior == 'DROP'
+    LoggingFilter.Filters[*] {
+      Behavior == 'KEEP'
+      Requirement == 'MEETS_ANY'
+      Conditions !empty
+    }
+    RedactedFields !empty
+    some RedactedFields[*] {
+      SingleHeader.Name == 'authorization'
+    }
+    some RedactedFields[*] {
+      SingleHeader.Name == 'cookie'
+    }
+  }
+}
+
 rule platform_has_regional_waf when %platform_markers !empty {
+  let waf_association_count = count(%waf_associations)
+  let waf_web_acl_count = count(%waf_web_acls)
+  let waf_logging_configuration_count = count(%waf_logging_configurations)
+  %waf_association_count == 1
+  %waf_web_acl_count == 1
+  %waf_logging_configuration_count == 1
   %waf_associations !empty
+  %waf_web_acls !empty
+  %waf_logging_configurations !empty
+  %waf_web_acls.Properties {
+    Scope == 'REGIONAL'
+  }
   %waf_associations.Properties {
     ResourceArn exists
     WebACLArn exists

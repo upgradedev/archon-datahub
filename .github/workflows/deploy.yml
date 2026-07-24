@@ -21,8 +21,10 @@ on:
 #
 # Configure these values in BOTH `staging` and `production` GitHub environments:
 #   vars:    AWS_DEPLOY_ROLE_ARN, AWS_ACCOUNT_ID, AWS_REGION,
-#            ARCHON_CLOUDFRONT_DOMAIN_NAME, ARCHON_CLOUDFRONT_CERTIFICATE_ARN,
-#            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID,
+#            ARCHON_CLOUDFRONT_DOMAIN_NAME, ARCHON_CLOUDFRONT_HOSTED_ZONE_ID,
+#            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID,
+#            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID,
+#            ARCHON_LLM_EGRESS_PREFIX_LIST_ID,
 #            DATAHUB_READ_GMS_URL, DATAHUB_READ_MCP_URL, DATAHUB_WRITE_GMS_URL,
 #            DATAHUB_WRITE_MCP_URL, DATAHUB_DEMO_QUERY, LLM_BASE_URL, LLM_MODEL
 #   secrets: DATAHUB_READ_GMS_TOKEN, DATAHUB_WRITE_GMS_TOKEN, LLM_API_KEY
@@ -40,6 +42,8 @@ concurrency:
 
 env:
   NODE_VERSION: "24.18.0"
+  CFN_GUARD_VERSION: "3.2.0"
+  CFN_GUARD_ARCHIVE_SHA256: 9f8c4d9f15f7dd54a37ea70a5237ba00aba682fb1e6521a744d12259961dfc13
   AWS_PAGER: ""
 
 defaults:
@@ -79,6 +83,10 @@ jobs:
       attestation_sha: ${{ steps.attestation.outputs.sha }}
       control_plane_gate_sha: ${{ steps.source.outputs.control_plane_gate_sha }}
       runtime_config_sha: ${{ steps.spa.outputs.runtime_config_sha }}
+      iac_assembly_manifest_sha: ${{ steps.deploy.outputs.iac_assembly_manifest_sha }}
+      edge_security_contract_sha: ${{ steps.deploy.outputs.edge_security_contract_sha }}
+      regional_waf_contract_sha: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+      network_egress_contract_sha: ${{ steps.deploy.outputs.network_egress_contract_sha }}
     steps:
       - name: Validate immutable source run
         id: source
@@ -476,7 +484,7 @@ jobs:
           verification_dir="${RUNNER_TEMP}/attestation-verification"
           mkdir -p "${verification_dir}"
           ci_predicate="https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1"
-          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3"
+          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v4"
           ci_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml"
           security_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/supply-chain.yml"
           source_ref="refs/heads/${DEFAULT_BRANCH}"
@@ -601,11 +609,41 @@ jobs:
                   ) as $retrievedAtEpoch |
                   .verificationResult.statement.predicateType == $predicate and
                   .verificationResult.statement.predicate.schemaVersion ==
-                    "archon.verified-ci-artifact/v3" and
+                    "archon.verified-ci-artifact/v4" and
                   .verificationResult.statement.predicate.source.repository ==
                     $repository and
                   .verificationResult.statement.predicate.source.commit == $sha and
                   .verificationResult.statement.predicate.source.event == "push" and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.syft //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.spdx //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.cyclonedx //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  .verificationResult.statement.predicate.sbom.web.dependencyMetadata.sourceCommit ==
+                    $sha and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.dependencyMetadata.packageLock //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
                   .verificationResult.statement.predicate.scanners.grype.version ==
                     "0.116.0" and
                   .verificationResult.statement.predicate.scanners.grype.database.maxAllowedBuiltAge ==
@@ -760,14 +798,155 @@ jobs:
       - name: Verify AWS identity and CDK bootstrap
         env:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          DEPLOY_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
           test -n "${EXPECTED_ACCOUNT_ID}"
+          test -n "${DEPLOY_REGION}"
           test "$(aws sts get-caller-identity --query Account --output text)" = \
             "${EXPECTED_ACCOUNT_ID}"
           aws cloudformation describe-stacks --stack-name CDKToolkit >/dev/null
+          verify_bootstrap_version() {
+            local region="$1"
+            local version
+            aws cloudformation describe-stacks \
+              --region "${region}" \
+              --stack-name CDKToolkit >/dev/null
+            version="$(
+              aws ssm get-parameter \
+                --region "${region}" \
+                --name /cdk-bootstrap/hnb659fds/version \
+                --query 'Parameter.Value' \
+                --output text
+            )"
+            if [[ ! "${version}" =~ ^[0-9]+$ ]] || (( version < 6 )); then
+              echo "::error::CDK bootstrap in ${region} must use modern bootstrap version 6 or later"
+              exit 1
+            fi
+          }
+          verify_bootstrap_version "${DEPLOY_REGION}"
+          verify_bootstrap_version us-east-1
 
-      - name: Deploy registry, push verified image, and deploy staging
+      - name: Synthesize the exact staging deployment assembly
+        run: |
+          set -euo pipefail
+          assembly="${RUNNER_TEMP}/deploy-cdk.out/staging"
+          mkdir -p "$(dirname "${assembly}")"
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk synth \
+              --all \
+              --no-lookups \
+              --output "${assembly}" \
+              --context stage=staging
+          )
+          test -f "${assembly}/manifest.json"
+          mapfile -d '' templates < <(
+            find "${assembly}" -maxdepth 1 -name '*.template.json' -print0
+          )
+          test "${#templates[@]}" -ge 3
+          for template in "${templates[@]}"; do
+            jq --exit-status \
+              'type == "object" and (.Resources | type == "object")' \
+              "${template}" >/dev/null
+          done
+          (
+            cd "${assembly}"
+            find . -type f -print0 |
+              sort -z |
+              xargs -0 sha256sum >"${RUNNER_TEMP}/staging-deploy-assembly.sha256"
+          )
+          test -s "${RUNNER_TEMP}/staging-deploy-assembly.sha256"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum staging-deploy-assembly.sha256 \
+              >staging-deploy-assembly.manifest.sha256
+          )
+          test -s "${RUNNER_TEMP}/staging-deploy-assembly.manifest.sha256"
+
+      - name: Install checksum-pinned CloudFormation Guard for staging
+        id: staging_guard
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/staging-cfn-guard.tar.gz"
+          tool_dir="${RUNNER_TEMP}/staging-cfn-guard"
+          mkdir -p "${tool_dir}"
+          curl --fail --silent --show-error --location \
+            --output "${archive}" \
+            "https://github.com/aws-cloudformation/cloudformation-guard/releases/download/${CFN_GUARD_VERSION}/cfn-guard-v3-x86_64-ubuntu-latest.tar.gz"
+          echo "${CFN_GUARD_ARCHIVE_SHA256}  ${archive}" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" --directory "${tool_dir}"
+          guard_bin="$(find "${tool_dir}" -type f -name cfn-guard -print -quit)"
+          test -n "${guard_bin}"
+          chmod 0755 "${guard_bin}"
+          "${guard_bin}" --version
+          echo "bin=${guard_bin}" >>"${GITHUB_OUTPUT}"
+
+      - name: Enforce staging deployment IaC controls
+        env:
+          GUARD_BIN: ${{ steps.staging_guard.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "${GUARD_BIN}" test \
+            --rules-file infra/aws/policy/archon.guard \
+            --test-data infra/aws/policy/archon_tests.yaml
+          report="${RUNNER_TEMP}/staging-cfn-guard-results.txt"
+          : >"${report}"
+          for template in \
+            "${RUNNER_TEMP}"/deploy-cdk.out/staging/*.template.json; do
+            "${GUARD_BIN}" validate \
+              --data "${template}" \
+              --rules infra/aws/policy/archon.guard \
+              --type CFNTemplate \
+              --show-summary all |
+              tee --append "${report}"
+          done
+
+      - name: Scan the exact staging deployment assembly
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ runner.temp }}/deploy-cdk.out/staging
+          format: sarif
+          output: ${{ runner.temp }}/staging-trivy-iac.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Retain exact staging deployment IaC evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-deploy-iac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/deploy-cdk.out/staging
+            ${{ runner.temp }}/staging-deploy-assembly.sha256
+            ${{ runner.temp }}/staging-deploy-assembly.manifest.sha256
+            ${{ runner.temp }}/staging-cfn-guard-results.txt
+            ${{ runner.temp }}/staging-trivy-iac.sarif
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail on any staging deployment IaC finding
+        run: |
+          set -euo pipefail
+          jq --exit-status \
+            '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length > 0) and
+              all(
+                .runs[];
+                (.tool.driver.name | ascii_downcase | contains("trivy")) and
+                (.results | type == "array")
+              ) and
+              ([.runs[].results[]] | length) == 0
+            ' \
+            "${RUNNER_TEMP}/staging-trivy-iac.sarif" >/dev/null
+
+      - name: Deploy edge, registry, verified image, and staging platform
         id: deploy
         env:
           RELEASE_SHA: ${{ inputs.release_sha }}
@@ -783,10 +962,25 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
-          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ vars.ARCHON_CLOUDFRONT_CERTIFICATE_ARN }}
           ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
+          ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID }}
+          ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID }}
+          ARCHON_LLM_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_LLM_EGRESS_PREFIX_LIST_ID }}
         run: |
           set -euo pipefail
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum --check staging-deploy-assembly.manifest.sha256
+          )
+          (
+            cd "${RUNNER_TEMP}/deploy-cdk.out/staging"
+            sha256sum --check \
+              "${RUNNER_TEMP}/staging-deploy-assembly.sha256"
+          )
+          deployment_iac_manifest_sha="$(
+            sha256sum "${RUNNER_TEMP}/staging-deploy-assembly.sha256" |
+              awk '{print $1}'
+          )"
           : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?staging DATAHUB_READ_MCP_URL is required}"
           : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
@@ -796,21 +990,23 @@ jobs:
           : "${LLM_MODEL:?staging LLM_MODEL is required}"
           : "${EXPECTED_ACCOUNT_ID:?staging AWS_ACCOUNT_ID is required}"
           : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
-          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
           : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?staging ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
+          if [[ "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" ||
+            "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" ||
+            "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" ]]; then
+            echo "::error::staging customer-managed egress prefix lists must be pairwise distinct"
+            exit 1
+          fi
           if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
             ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
             [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
             echo "::error::staging ARCHON_CLOUDFRONT_DOMAIN_NAME must be a lowercase concrete DNS hostname"
-            exit 1
-          fi
-          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-            echo "::error::staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN must identify an ACM certificate in us-east-1"
-            exit 1
-          fi
-          if [[ "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" !=
-            "arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/"* ]]; then
-            echo "::error::staging CloudFront certificate must belong to AWS_ACCOUNT_ID"
             exit 1
           fi
           if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
@@ -822,9 +1018,22 @@ jobs:
               --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --output json
           )"
-          jq -e '.HostedZone.Config.PrivateZone == false' \
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '
+              .HostedZone.Id == $id and
+              .HostedZone.Config.PrivateZone == false
+            ' \
             <<<"${hosted_zone_json}" >/dev/null || {
             echo "::error::staging CloudFront alias requires a public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zones_json="$(aws route53 list-hosted-zones --output json)"
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '[.HostedZones[] | select(.Id == $id)] | length == 1' \
+            <<<"${hosted_zones_json}" >/dev/null || {
+            echo "::error::staging hosted zone must be owned by the deployment AWS account"
             exit 1
           }
           hosted_zone_name="$(
@@ -836,30 +1045,348 @@ jobs:
             echo "::error::staging CloudFront domain is outside the configured hosted zone"
             exit 1
           fi
+
+          validate_customer_prefix_list() {
+            local prefix_list_id="$1"
+            local expected_scope="$2"
+            local label="$3"
+            local max_entries_var="$4"
+            local version_var="$5"
+            local entries_digest_var="$6"
+            local metadata
+            local entries
+            local version
+            local max_entries
+            local entries_digest
+            local stable_metadata
+            if [[ ! "${prefix_list_id}" =~ ^pl-([0-9a-f]{8}|[0-9a-f]{17})$ ]]; then
+              echo "::error::staging ${label} must be a valid managed prefix-list ID"
+              exit 1
+            fi
+            metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --prefix-list-ids "${prefix_list_id}" \
+                --output json
+            )"
+            jq -e \
+              --arg id "${prefix_list_id}" \
+              --arg owner "${EXPECTED_ACCOUNT_ID}" \
+              --arg scope "${expected_scope}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .PrefixListId == $id and
+                  .OwnerId == $owner and
+                  .AddressFamily == "IPv4" and
+                  (.Version | type) == "number" and
+                  .Version > 0 and
+                  (.Version | floor) == .Version and
+                  (.MaxEntries | type) == "number" and
+                  .MaxEntries > 0 and
+                  (.MaxEntries | floor) == .MaxEntries and
+                  (
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  ) and
+                  (
+                    [.Tags[]? |
+                      select(.Key == "ArchonEgressScope") |
+                      .Value] == [$scope]
+                  )
+                )
+              ' <<<"${metadata}" >/dev/null || {
+              echo "::error::staging ${label} must be an account-owned, complete IPv4 list with positive-integer MaxEntries and ArchonEgressScope=${expected_scope}"
+              exit 1
+            }
+            version="$(jq -er '.PrefixLists[0].Version' <<<"${metadata}")"
+            max_entries="$(
+              jq -er '.PrefixLists[0].MaxEntries' <<<"${metadata}"
+            )"
+            if [[ ! "${max_entries}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::staging ${label} MaxEntries must be a positive integer"
+              exit 1
+            fi
+            if [[ ! "${version}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::staging ${label} Version must be a positive integer"
+              exit 1
+            fi
+            entries="$(
+              aws ec2 get-managed-prefix-list-entries \
+                --prefix-list-id "${prefix_list_id}" \
+                --target-version "${version}" \
+                --output json
+            )"
+            jq -e \
+              '
+                (.Entries | length) > 0 and
+                all(
+                  .Entries[];
+                  (.Cidr | type) == "string" and
+                  ((.Cidr | contains(":")) | not) and
+                  .Cidr != "0.0.0.0/0" and
+                  (.Cidr | split("/") | length) == 2 and
+                  ((.Cidr | split("/")[1] | tonumber) >= 8) and
+                  ((.Cidr | split("/")[1] | tonumber) <= 32)
+                )
+              ' <<<"${entries}" >/dev/null || {
+              echo "::error::staging ${label} must be non-empty and may not contain 0.0.0.0/0 or a prefix broader than /8"
+              exit 1
+            }
+            entries_digest="$(
+              jq --compact-output --sort-keys \
+                '[
+                  .Entries[] |
+                  {
+                    cidr: .Cidr,
+                    description: (.Description // "")
+                  }
+                ] | sort_by(.cidr, .description)' \
+                <<<"${entries}" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            [[ "${entries_digest}" =~ ^[0-9a-f]{64}$ ]]
+            stable_metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --prefix-list-ids "${prefix_list_id}" \
+                --output json
+            )"
+            jq -e \
+              --arg id "${prefix_list_id}" \
+              --arg owner "${EXPECTED_ACCOUNT_ID}" \
+              --arg scope "${expected_scope}" \
+              --argjson version "${version}" \
+              --argjson max_entries "${max_entries}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .PrefixListId == $id and
+                  .OwnerId == $owner and
+                  .AddressFamily == "IPv4" and
+                  .Version == $version and
+                  .MaxEntries == $max_entries and
+                  (
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  ) and
+                  (
+                    [.Tags[]? |
+                      select(.Key == "ArchonEgressScope") |
+                      .Value] == [$scope]
+                  )
+                )
+              ' <<<"${stable_metadata}" >/dev/null || {
+              echo "::error::staging ${label} changed while it was being validated"
+              exit 1
+            }
+            printf -v "${max_entries_var}" '%s' "${max_entries}"
+            printf -v "${version_var}" '%s' "${version}"
+            printf -v "${entries_digest_var}" '%s' "${entries_digest}"
+          }
+
+          resolve_aws_prefix_list() {
+            local service="$1"
+            local id_var="$2"
+            local weight_var="$3"
+            local expected_name="com.amazonaws.${AWS_REGION}.${service}"
+            local documented_weight
+            local metadata
+            local prefix_list_id
+            case "${service}" in
+              s3 | dynamodb)
+                documented_weight=1
+                ;;
+              *)
+                echo "::error::staging unsupported AWS-managed prefix-list service ${service}"
+                exit 1
+                ;;
+            esac
+            metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --filters \
+                  "Name=owner-id,Values=AWS" \
+                  "Name=prefix-list-name,Values=${expected_name}" \
+                --output json
+            )"
+            jq -e \
+              --arg name "${expected_name}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .OwnerId == "AWS" and
+                  .PrefixListName == $name and
+                  .AddressFamily == "IPv4" and
+                  (
+                    .State == null or
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  )
+                )
+              ' <<<"${metadata}" >/dev/null || {
+              echo "::error::staging could not resolve the exact AWS-owned ${expected_name} IPv4 prefix list"
+              exit 1
+            }
+            prefix_list_id="$(
+              jq -er '.PrefixLists[0].PrefixListId' <<<"${metadata}"
+            )"
+            if [[ ! "${prefix_list_id}" =~ ^pl-([0-9a-f]{8}|[0-9a-f]{17})$ ]]; then
+              echo "::error::staging AWS-owned ${expected_name} returned an invalid prefix-list ID"
+              exit 1
+            fi
+            printf -v "${id_var}" '%s' "${prefix_list_id}"
+            printf -v "${weight_var}" '%s' "${documented_weight}"
+          }
+
+          validate_customer_prefix_list \
+            "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            datahub-read \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_VERSION \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          validate_customer_prefix_list \
+            "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            datahub-write \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_VERSION \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          validate_customer_prefix_list \
+            "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+            llm \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID \
+            LLM_EGRESS_PREFIX_LIST_WEIGHT \
+            LLM_EGRESS_PREFIX_LIST_VERSION \
+            LLM_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          resolve_aws_prefix_list \
+            s3 \
+            S3_PREFIX_LIST_ID \
+            S3_PREFIX_LIST_WEIGHT
+          resolve_aws_prefix_list \
+            dynamodb \
+            DYNAMODB_PREFIX_LIST_ID \
+            DYNAMODB_PREFIX_LIST_WEIGHT
+
+          outbound_rule_quota=60
+          audit_api_rule_weight="$((
+            1 +
+            S3_PREFIX_LIST_WEIGHT +
+            DYNAMODB_PREFIX_LIST_WEIGHT +
+            DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT +
+            LLM_EGRESS_PREFIX_LIST_WEIGHT
+          ))"
+          remediation_rule_weight="$((
+            1 +
+            S3_PREFIX_LIST_WEIGHT +
+            DYNAMODB_PREFIX_LIST_WEIGHT +
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT
+          ))"
+          if (( audit_api_rule_weight > outbound_rule_quota )); then
+            echo "::error::staging audit/API outbound SG weight ${audit_api_rule_weight}/60 (shared=1,s3=${S3_PREFIX_LIST_WEIGHT},dynamodb=${DYNAMODB_PREFIX_LIST_WEIGHT},datahub-read=${DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT},llm=${LLM_EGRESS_PREFIX_LIST_WEIGHT})"
+            exit 1
+          fi
+          if (( remediation_rule_weight > outbound_rule_quota )); then
+            echo "::error::staging remediation outbound SG weight ${remediation_rule_weight}/60 (shared=1,s3=${S3_PREFIX_LIST_WEIGHT},dynamodb=${DYNAMODB_PREFIX_LIST_WEIGHT},datahub-write=${DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT})"
+            exit 1
+          fi
+
+          stack_name="Archon-staging"
+          edge_stack_name="Archon-staging-Edge"
+          edge_outputs="${RUNNER_TEMP}/staging-edge-outputs.json"
+          registry_outputs="${RUNNER_TEMP}/staging-registry-outputs.json"
+          stack_outputs="${RUNNER_TEMP}/staging-stack-outputs.json"
+
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${edge_stack_name}" \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/staging" \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${edge_stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${edge_stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --outputs-file "${edge_outputs}"
+          )
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontCertificateArn' "${edge_outputs}"
+          )"
+          ARCHON_CLOUDFRONT_WEB_ACL_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontWebAclArn' "${edge_outputs}"
+          )"
+          ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontWafLogKeyArn' "${edge_outputs}"
+          )"
+          certificate_algorithm='EC_''prime256v1'
+          if [[ ! "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_ACCOUNT_ID}:key/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::staging edge stack returned an invalid account-owned us-east-1 KMS key ARN"
+            exit 1
+          fi
+          edge_waf_log_key_json="$(
+            aws kms describe-key \
+              --region us-east-1 \
+              --key-id "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            '
+              .KeyMetadata.Arn == $arn and
+              .KeyMetadata.AWSAccountId == $account and
+              .KeyMetadata.Enabled == true and
+              .KeyMetadata.KeyState == "Enabled" and
+              .KeyMetadata.KeyManager == "CUSTOMER" and
+              .KeyMetadata.KeyUsage == "ENCRYPT_DECRYPT" and
+              .KeyMetadata.Origin == "AWS_KMS" and
+              .KeyMetadata.KeySpec == "SYMMETRIC_DEFAULT" and
+              .KeyMetadata.MultiRegion == false
+            ' <<<"${edge_waf_log_key_json}" >/dev/null || {
+            echo "::error::staging CloudFront WAF log key violates the KMS metadata contract"
+            exit 1
+          }
+          edge_waf_log_key_rotation_json="$(
+            aws kms get-key-rotation-status \
+              --region us-east-1 \
+              --key-id "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              --output json
+          )"
+          jq -e '.KeyRotationEnabled == true' \
+            <<<"${edge_waf_log_key_rotation_json}" >/dev/null || {
+            echo "::error::staging CloudFront WAF log key rotation is not enabled"
+            exit 1
+          }
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::staging edge stack returned an invalid account-owned ACM certificate ARN"
+            exit 1
+          fi
           certificate_json="$(
             aws acm describe-certificate \
               --region us-east-1 \
               --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --output json
           )"
-          wildcard_name="*.${ARCHON_CLOUDFRONT_DOMAIN_NAME#*.}"
           jq -e \
             --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-            --arg wildcard "${wildcard_name}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg certificateAlgorithm "${certificate_algorithm}" \
             '
+              .Certificate.CertificateArn == $certificate and
               .Certificate.Status == "ISSUED" and
-              (
-                .Certificate.KeyAlgorithm == "RSA_2048" or
-                .Certificate.KeyAlgorithm ==
-                  (["EC", "prime256v1"] | join("_"))
-              ) and
-              (
-                ([.Certificate.DomainName] +
-                  (.Certificate.SubjectAlternativeNames // [])) |
-                any(. == $domain or . == $wildcard)
-              )
+              .Certificate.Type == "AMAZON_ISSUED" and
+              .Certificate.DomainName == $domain and
+              .Certificate.KeyAlgorithm == $certificateAlgorithm and
+              ((.Certificate.SubjectAlternativeNames // []) == [$domain])
             ' <<<"${certificate_json}" >/dev/null || {
-            echo "::error::staging certificate must be issued, CloudFront-compatible, and cover the exact domain"
+            echo "::error::staging edge certificate must be Amazon-issued, issued, P-256, and scoped to the exact hostname"
             exit 1
           }
           certificate_expiry_epoch="$(
@@ -872,14 +1399,252 @@ jobs:
             echo "::error::staging CloudFront certificate expires within 30 days"
             exit 1
           fi
-          stack_name="Archon-staging"
-          registry_outputs="${RUNNER_TEMP}/staging-registry-outputs.json"
-          stack_outputs="${RUNNER_TEMP}/staging-stack-outputs.json"
+
+          web_acl_name="archon-staging-cloudfront"
+          if [[ ! "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" =~ ^arn:aws:wafv2:us-east-1:${EXPECTED_ACCOUNT_ID}:global/webacl/archon-staging-cloudfront/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::staging edge stack returned an invalid account-owned CLOUDFRONT Web ACL ARN"
+            exit 1
+          fi
+          web_acl_id="${ARCHON_CLOUDFRONT_WEB_ACL_ARN##*/}"
+          web_acl_json="$(
+            aws wafv2 get-web-acl \
+              --region us-east-1 \
+              --scope CLOUDFRONT \
+              --name "${web_acl_name}" \
+              --id "${web_acl_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            --arg name "${web_acl_name}" \
+            --argjson rate_limit 300 \
+            '
+              .WebACL as $web_acl |
+              $web_acl.ARN == $arn and
+              $web_acl.Name == $name and
+              $web_acl.DefaultAction == {"Allow": {}} and
+              $web_acl.VisibilityConfig.CloudWatchMetricsEnabled == true and
+              $web_acl.VisibilityConfig.MetricName == ($name + "-waf") and
+              $web_acl.VisibilityConfig.SampledRequestsEnabled == true and
+              (
+                [
+                  $web_acl.DataProtectionConfig.DataProtections[] |
+                  {
+                    action: .Action,
+                    fieldType: .Field.FieldType,
+                    fieldKeys: .Field.FieldKeys,
+                    excludeRateBasedDetails: .ExcludeRateBasedDetails,
+                    excludeRuleMatchDetails: .ExcludeRuleMatchDetails
+                  }
+                ] |
+                sort_by(.fieldKeys[0])
+              ) == [
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["authorization"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
+                },
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["cookie"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
+                }
+              ] and
+              ($web_acl.Rules | length) == 4 and
+              all(
+                $web_acl.Rules[];
+                .VisibilityConfig.CloudWatchMetricsEnabled == true and
+                .VisibilityConfig.SampledRequestsEnabled == true
+              ) and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesAmazonIpReputationList" and
+                    .Priority == 0 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesAmazonIpReputationList" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesAmazonIpReputationList"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesCommonRuleSet" and
+                    .Priority == 10 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesCommonRuleSet" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesCommonRuleSet"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesKnownBadInputsRuleSet" and
+                    .Priority == 20 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesKnownBadInputsRuleSet" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesKnownBadInputsRuleSet"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "PerIpRateLimit" and
+                    .Priority == 30 and
+                    .Action == {"Block": {}} and
+                    (has("OverrideAction") | not) and
+                    (.Statement | keys) == ["RateBasedStatement"] and
+                    .Statement.RateBasedStatement.AggregateKeyType == "IP" and
+                    .Statement.RateBasedStatement.Limit == $rate_limit and
+                    .Statement.RateBasedStatement.EvaluationWindowSec == 300 and
+                    (.Statement.RateBasedStatement |
+                      has("ScopeDownStatement") | not) and
+                    .VisibilityConfig.MetricName == ($name + "-rate-limit")
+                  )
+                ] | length
+          ) == 1
+            ' <<<"${web_acl_json}" >/dev/null || {
+            echo "::error::staging CloudFront Web ACL ARN or core rule contract is invalid"
+            exit 1
+          }
+          waf_logging_json="$(
+            aws wafv2 get-logging-configuration \
+              --region us-east-1 \
+              --resource-arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            --arg destination \
+              "arn:aws:logs:us-east-1:${EXPECTED_ACCOUNT_ID}:log-group:aws-waf-logs-archon-staging-cloudfront" \
+            '
+              .LoggingConfiguration as $logging |
+              $logging.ResourceArn == $arn and
+              $logging.LogDestinationConfigs == [$destination] and
+              ($logging.LogScope // "CUSTOMER") == "CUSTOMER" and
+              ($logging.LogType // "WAF_LOGS") == "WAF_LOGS" and
+              $logging.LoggingFilter.DefaultBehavior == "DROP" and
+              ($logging.LoggingFilter.Filters | length) == 1 and
+              (
+                $logging.LoggingFilter.Filters[0] |
+                .Behavior == "KEEP" and
+                .Requirement == "MEETS_ANY" and
+                (.Conditions | length) == 2 and
+                (
+                  [.Conditions[].ActionCondition.Action] | sort
+                ) == ["BLOCK", "COUNT"]
+              ) and
+              (
+                [
+                  $logging.RedactedFields[]? |
+                  .SingleHeader.Name
+                ] | sort
+              ) == ["authorization", "cookie"]
+            ' <<<"${waf_logging_json}" >/dev/null || {
+            echo "::error::staging CloudFront WAF logging or redaction contract is invalid"
+            exit 1
+          }
+          edge_waf_log_group_name="aws-waf-logs-archon-staging-cloudfront"
+          edge_waf_log_groups="$(
+            aws logs describe-log-groups \
+              --region us-east-1 \
+              --log-group-name-prefix "${edge_waf_log_group_name}" \
+              --output json
+          )"
+          edge_waf_log_contract="$(
+            jq --compact-output --sort-keys --exit-status \
+              --arg name "${edge_waf_log_group_name}" \
+              --arg kms_key_arn "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              '
+                [.logGroups[] | select(.logGroupName == $name)] as $groups |
+                if (
+                  ($groups | length) == 1 and
+                  $groups[0].retentionInDays == 365 and
+                  $groups[0].kmsKeyId == $kms_key_arn
+                ) then
+                  {
+                    name: $groups[0].logGroupName,
+                    kmsKey: {
+                      arn: $groups[0].kmsKeyId,
+                      state: "Enabled",
+                      keyManager: "CUSTOMER",
+                      keyUsage: "ENCRYPT_DECRYPT",
+                      origin: "AWS_KMS",
+                      multiRegion: false,
+                      rotationEnabled: true
+                    },
+                    retentionDays: $groups[0].retentionInDays,
+                    filter: "BLOCK_OR_COUNT",
+                    sensitiveFields: ["authorization", "cookie"]
+                  }
+                else
+                  error(
+                    "CloudFront WAF log group is not uniquely retained and KMS encrypted"
+                  )
+                end
+              ' <<<"${edge_waf_log_groups}"
+          )"
 
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy Archon-Registry \
-              -c stage=staging \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/staging" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -959,7 +1724,7 @@ jobs:
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy "${stack_name}" \
-              -c stage=staging \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/staging" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -969,6 +1734,12 @@ jobs:
               --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --parameters "${stack_name}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --parameters "${stack_name}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DataHubReadEgressPrefixListId=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DataHubWriteEgressPrefixListId=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:LlmEgressPrefixListId=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
               --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -978,6 +1749,35 @@ jobs:
               --parameters "${stack_name}:WorkerDesiredCount=0" \
               --outputs-file "${stack_outputs}"
           )
+
+          live_security_group_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            S3_PREFIX_LIST_ID="${S3_PREFIX_LIST_ID}" \
+            DYNAMODB_PREFIX_LIST_ID="${DYNAMODB_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID="${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              bash scripts/validate-aws-network-contract.sh
+          )"
+          live_security_group_contract_sha="$(
+            printf '%s' "${live_security_group_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          regional_waf_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+            EXPECTED_RATE_LIMIT=300 \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-waf-contract.sh
+          )"
+          regional_waf_contract_sha="$(
+            printf '%s' "${regional_waf_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
 
           distribution_id="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
@@ -989,6 +1789,7 @@ jobs:
           jq -e \
             --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
             --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg web_acl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
             '
               .DistributionConfig |
               .Enabled == true and
@@ -997,6 +1798,7 @@ jobs:
               .Aliases.Quantity == 1 and
               ((.Aliases.Items // []) == [$domain]) and
               .ViewerCertificate.ACMCertificateArn == $certificate and
+              .WebACLId == $web_acl and
               .ViewerCertificate.SSLSupportMethod == "sni-only" and
               .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
               .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
@@ -1060,15 +1862,165 @@ jobs:
             echo "::error::staging Route 53 dual-stack aliases violate the edge contract"
             exit 1
           }
+          edge_outputs_sha="$(sha256sum "${edge_outputs}" | awk '{print $1}')"
+          edge_security_contract="$(
+            jq -cnS \
+              --arg stackName "${edge_stack_name}" \
+              --arg cdkOutputsSha256 "${edge_outputs_sha}" \
+              --arg domainName "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --arg hostedZoneId "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --arg certificateArn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --arg webAclArn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --arg certificateAlgorithm "${certificate_algorithm}" \
+              --argjson logging "${edge_waf_log_contract}" \
+              --argjson rateLimit 300 \
+              '{
+                schemaVersion: "archon.edge-security-contract/v2",
+                stackName: $stackName,
+                cdkOutputsSha256: $cdkOutputsSha256,
+                domainName: $domainName,
+                hostedZoneId: $hostedZoneId,
+                certificate: {
+                  arn: $certificateArn,
+                  region: "us-east-1",
+                  keyAlgorithm: $certificateAlgorithm,
+                  status: "ISSUED"
+                },
+                webAcl: {
+                  arn: $webAclArn,
+                  scope: "CLOUDFRONT",
+                  rateLimit: $rateLimit,
+                  rateEvaluationWindowSeconds: 300,
+                  ruleCount: 4,
+                  sampledDataProtection: "validated",
+                  loggingContract: "validated",
+                  logging: $logging
+                },
+                validation: "passed"
+              }'
+          )"
+          edge_security_contract_sha="$(
+            printf '%s' "${edge_security_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          network_egress_contract="$(
+            jq -cnS \
+              --arg s3PrefixListId "${S3_PREFIX_LIST_ID}" \
+              --arg dynamodbPrefixListId "${DYNAMODB_PREFIX_LIST_ID}" \
+              --arg datahubReadPrefixListId \
+                "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --arg datahubWritePrefixListId \
+                "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --arg llmPrefixListId "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              --arg datahubReadEntriesSha \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --arg datahubWriteEntriesSha \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --arg llmEntriesSha \
+                "${LLM_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --argjson s3Weight "${S3_PREFIX_LIST_WEIGHT}" \
+              --argjson dynamodbWeight "${DYNAMODB_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubReadWeight \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubWriteWeight \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson llmWeight "${LLM_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubReadVersion \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson datahubWriteVersion \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson llmVersion \
+                "${LLM_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson auditApiWeight "${audit_api_rule_weight}" \
+              --argjson remediationWeight "${remediation_rule_weight}" \
+              --argjson liveSecurityGroups \
+                "${live_security_group_contract}" \
+              '{
+                schemaVersion: "archon.network-egress-contract/v2",
+                securityGroupRuleQuota: 60,
+                sharedEndpointRuleWeight: 1,
+                awsManagedPrefixLists: {
+                  s3: {
+                    id: $s3PrefixListId,
+                    name: ("com.amazonaws." + env.AWS_REGION + ".s3"),
+                    owner: "AWS",
+                    ruleWeight: $s3Weight
+                  },
+                  dynamodb: {
+                    id: $dynamodbPrefixListId,
+                    name: ("com.amazonaws." + env.AWS_REGION + ".dynamodb"),
+                    owner: "AWS",
+                    ruleWeight: $dynamodbWeight
+                  }
+                },
+                accountManagedPrefixLists: {
+                  datahubRead: {
+                    id: $datahubReadPrefixListId,
+                    scope: "datahub-read",
+                    owner: "deployment-account",
+                    version: $datahubReadVersion,
+                    maxEntries: $datahubReadWeight,
+                    ruleWeight: $datahubReadWeight,
+                    entriesSha256: ("sha256:" + $datahubReadEntriesSha)
+                  },
+                  datahubWrite: {
+                    id: $datahubWritePrefixListId,
+                    scope: "datahub-write",
+                    owner: "deployment-account",
+                    version: $datahubWriteVersion,
+                    maxEntries: $datahubWriteWeight,
+                    ruleWeight: $datahubWriteWeight,
+                    entriesSha256: ("sha256:" + $datahubWriteEntriesSha)
+                  },
+                  llm: {
+                    id: $llmPrefixListId,
+                    scope: "llm",
+                    owner: "deployment-account",
+                    version: $llmVersion,
+                    maxEntries: $llmWeight,
+                    ruleWeight: $llmWeight,
+                    entriesSha256: ("sha256:" + $llmEntriesSha)
+                  }
+                },
+                calculatedSecurityGroupWeights: {
+                  auditAndApi: $auditApiWeight,
+                  remediation: $remediationWeight
+                },
+                liveSecurityGroups: $liveSecurityGroups,
+                validation: "passed"
+              }'
+          )"
+          network_egress_contract_sha="$(
+            printf '%s' "${network_egress_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           {
             echo "image_digest=${image_digest}"
             echo "application_url=${application_url}"
             echo "api_url=${api_url}"
             echo "stack_name=${stack_name}"
             echo "stack_outputs=${stack_outputs}"
+            echo "edge_stack_name=${edge_stack_name}"
+            echo "edge_outputs=${edge_outputs}"
             echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
             echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
             echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
+            echo "cloudfront_web_acl_arn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}"
+            echo "s3_prefix_list_id=${S3_PREFIX_LIST_ID}"
+            echo "dynamodb_prefix_list_id=${DYNAMODB_PREFIX_LIST_ID}"
+            echo "datahub_read_egress_prefix_list_id=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}"
+            echo "datahub_write_egress_prefix_list_id=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}"
+            echo "llm_egress_prefix_list_id=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}"
+            echo "iac_assembly_manifest_sha=${deployment_iac_manifest_sha}"
+            echo "edge_security_contract=${edge_security_contract}"
+            echo "edge_security_contract_sha=${edge_security_contract_sha}"
+            echo "regional_waf_contract=${regional_waf_contract}"
+            echo "regional_waf_contract_sha=${regional_waf_contract_sha}"
+            echo "network_egress_contract=${network_egress_contract}"
+            echo "network_egress_contract_sha=${network_egress_contract_sha}"
+            echo "live_security_group_contract_sha=${live_security_group_contract_sha}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Update environment-scoped secrets without logging values
@@ -1083,6 +2035,12 @@ jobs:
           : "${DATAHUB_READ_GMS_TOKEN:?staging read token is required}"
           : "${DATAHUB_WRITE_GMS_TOKEN:?staging write token is required}"
           : "${LLM_API_KEY:?staging LLM key is required}"
+          if [[ "${DATAHUB_READ_GMS_TOKEN}" == "${DATAHUB_WRITE_GMS_TOKEN}" ||
+                "${DATAHUB_READ_GMS_TOKEN}" == "${LLM_API_KEY}" ||
+                "${DATAHUB_WRITE_GMS_TOKEN}" == "${LLM_API_KEY}" ]]; then
+            echo "::error::Staging read, write, and LLM credentials must be pairwise distinct"
+            exit 1
+          fi
           umask 077
           secret_dir="${RUNNER_TEMP}/staging-secret-payloads"
           mkdir -p "${secret_dir}"
@@ -1184,7 +2142,7 @@ jobs:
             echo "cognito_origin=${cognito_origin}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Restart private API and worker tasks after secret rotation
+      - name: Restart private API and worker tasks after versioned secret refresh
         env:
           STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
@@ -1200,8 +2158,26 @@ jobs:
           ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
           ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
           ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
+          ARCHON_CLOUDFRONT_WEB_ACL_ARN: ${{ steps.deploy.outputs.cloudfront_web_acl_arn }}
+          S3_PREFIX_LIST_ID: ${{ steps.deploy.outputs.s3_prefix_list_id }}
+          DYNAMODB_PREFIX_LIST_ID: ${{ steps.deploy.outputs.dynamodb_prefix_list_id }}
+          ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.datahub_read_egress_prefix_list_id }}
+          ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.datahub_write_egress_prefix_list_id }}
+          ARCHON_LLM_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.llm_egress_prefix_list_id }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA: ${{ steps.deploy.outputs.live_security_group_contract_sha }}
+          EXPECTED_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
         run: |
           set -euo pipefail
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum --check staging-deploy-assembly.manifest.sha256
+          )
+          (
+            cd "${RUNNER_TEMP}/deploy-cdk.out/staging"
+            sha256sum --check \
+              "${RUNNER_TEMP}/staging-deploy-assembly.sha256"
+          )
           : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?staging DATAHUB_READ_MCP_URL is required}"
           : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
@@ -1211,13 +2187,19 @@ jobs:
           : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
           : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
           : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${ARCHON_CLOUDFRONT_WEB_ACL_ARN:?staging ARCHON_CLOUDFRONT_WEB_ACL_ARN is required}"
+          : "${S3_PREFIX_LIST_ID:?staging S3_PREFIX_LIST_ID is required}"
+          : "${DYNAMODB_PREFIX_LIST_ID:?staging DYNAMODB_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?staging ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
 
           # Reconcile desired count through CloudFormation so activation creates
-          # no drift, then force all services to consume the rotated secrets.
+          # no drift, then force all services to consume the refreshed secret versions.
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy "${STACK_NAME}" \
-              -c stage=staging \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/staging" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -1227,6 +2209,12 @@ jobs:
               --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --parameters "${STACK_NAME}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --parameters "${STACK_NAME}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DataHubReadEgressPrefixListId=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DataHubWriteEgressPrefixListId=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:LlmEgressPrefixListId=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
               --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -1236,6 +2224,30 @@ jobs:
               --parameters "${STACK_NAME}:WorkerDesiredCount=1" \
               --outputs-file "${STACK_OUTPUTS}"
           )
+          final_network_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            S3_PREFIX_LIST_ID="${S3_PREFIX_LIST_ID}" \
+            DYNAMODB_PREFIX_LIST_ID="${DYNAMODB_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID="${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              bash scripts/validate-aws-network-contract.sh
+          )"
+          test "$(printf '%s' "${final_network_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA}"
+          final_regional_waf_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+            EXPECTED_RATE_LIMIT=300 \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-waf-contract.sh
+          )"
+          test "$(printf '%s' "${final_regional_waf_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_REGIONAL_WAF_CONTRACT_SHA}"
 
           cluster="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
@@ -1751,6 +2763,15 @@ jobs:
           ATTESTATION_PATH: ${{ steps.attestation.outputs.path }}
           RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
           RUNTIME_CONFIG_PATH: ${{ steps.spa.outputs.runtime_config }}
+          IAC_ASSEMBLY_MANIFEST_SHA: ${{ steps.deploy.outputs.iac_assembly_manifest_sha }}
+          STACK_OUTPUTS_PATH: ${{ steps.deploy.outputs.stack_outputs }}
+          EDGE_OUTPUTS_PATH: ${{ steps.deploy.outputs.edge_outputs }}
+          EDGE_SECURITY_CONTRACT: ${{ steps.deploy.outputs.edge_security_contract }}
+          EDGE_SECURITY_CONTRACT_SHA: ${{ steps.deploy.outputs.edge_security_contract_sha }}
+          REGIONAL_WAF_CONTRACT: ${{ steps.deploy.outputs.regional_waf_contract }}
+          REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
+          NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
           ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
         run: |
           set -euo pipefail
@@ -1784,6 +2805,13 @@ jobs:
             --arg attestationVerificationSha256 "${ATTESTATION_SHA}" \
             --arg runtimeConfigSha256 "${RUNTIME_CONFIG_SHA}" \
             --arg zapImage "${ZAP_IMAGE}" \
+            --arg iacAssemblyManifestSha256 "${IAC_ASSEMBLY_MANIFEST_SHA}" \
+            --arg edgeSecurityContractSha256 "${EDGE_SECURITY_CONTRACT_SHA}" \
+            --arg regionalWafContractSha256 "${REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg networkEgressContractSha256 "${NETWORK_EGRESS_CONTRACT_SHA}" \
+            --argjson edgeSecurity "${EDGE_SECURITY_CONTRACT}" \
+            --argjson regionalWaf "${REGIONAL_WAF_CONTRACT}" \
+            --argjson networkEgress "${NETWORK_EGRESS_CONTRACT}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
               schemaVersion: 1,
@@ -1801,6 +2829,17 @@ jobs:
                 stackName: $stackName,
                 applicationUrl: $applicationUrl,
                 apiUrl: $apiUrl
+              },
+              infrastructureSecurity: {
+                iacAssemblyManifestSha256: $iacAssemblyManifestSha256,
+                edgeContractSha256: $edgeSecurityContractSha256,
+                edge: $edgeSecurity,
+                regionalWafContractSha256:
+                  $regionalWafContractSha256,
+                regionalWaf: $regionalWaf,
+                networkEgressContractSha256:
+                  $networkEgressContractSha256,
+                networkEgress: $networkEgress
               },
               immutableArtifacts: {
                 containerArtifactSha256: $containerArtifactSha256,
@@ -1841,6 +2880,18 @@ jobs:
             "${CONTROL_LOOP_RESPONSE_SHA}"
           test "$(sha256sum "${AUDIT_EVIDENCE_PATH}" | awk '{print $1}')" = \
             "${AUDIT_EVIDENCE_SHA}"
+          test "$(sha256sum "${EDGE_OUTPUTS_PATH}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' <<<"${EDGE_SECURITY_CONTRACT}")"
+          test "$(printf '%s' "${EDGE_SECURITY_CONTRACT}" | sha256sum |
+            awk '{print $1}')" = "${EDGE_SECURITY_CONTRACT_SHA}"
+          test "$(sha256sum "${STACK_OUTPUTS_PATH}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' <<<"${REGIONAL_WAF_CONTRACT}")"
+          test "$(printf '%s' "${REGIONAL_WAF_CONTRACT}" | sha256sum |
+            awk '{print $1}')" = "${REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(printf '%s' "${NETWORK_EGRESS_CONTRACT}" | sha256sum |
+            awk '{print $1}')" = "${NETWORK_EGRESS_CONTRACT_SHA}"
+          test "$(sha256sum "${RUNNER_TEMP}/staging-deploy-assembly.sha256" |
+            awk '{print $1}')" = "${IAC_ASSEMBLY_MANIFEST_SHA}"
           cp "${RUNNER_TEMP}/control-plane-security-gates.json" \
             "${evidence_dir}/control-plane-security-gates.json"
           cp "${ATTESTATION_PATH}" \
@@ -1851,6 +2902,32 @@ jobs:
             "${evidence_dir}/read-only-control-loop-status.json"
           cp "${AUDIT_EVIDENCE_PATH}" \
             "${evidence_dir}/audit-smoke-evidence.json"
+          cp "${STACK_OUTPUTS_PATH}" \
+            "${evidence_dir}/staging-cdk-outputs.json"
+          cp "${EDGE_OUTPUTS_PATH}" \
+            "${evidence_dir}/edge-cdk-outputs.json"
+          printf '%s' "${EDGE_SECURITY_CONTRACT}" \
+            >"${evidence_dir}/edge-security-contract.json"
+          printf '%s' "${REGIONAL_WAF_CONTRACT}" \
+            >"${evidence_dir}/regional-waf-security-contract.json"
+          printf '%s' "${NETWORK_EGRESS_CONTRACT}" \
+            >"${evidence_dir}/network-egress-security-contract.json"
+          test "$(sha256sum "${evidence_dir}/edge-security-contract.json" |
+            awk '{print $1}')" = "${EDGE_SECURITY_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/regional-waf-security-contract.json" |
+            awk '{print $1}')" = "${REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/network-egress-security-contract.json" |
+            awk '{print $1}')" = "${NETWORK_EGRESS_CONTRACT_SHA}"
+          cp "${RUNNER_TEMP}/staging-deploy-assembly.sha256" \
+            "${evidence_dir}/staging-deploy-assembly.sha256"
+          cp "${RUNNER_TEMP}/staging-deploy-assembly.manifest.sha256" \
+            "${evidence_dir}/staging-deploy-assembly.manifest.sha256"
+          (
+            cd "${evidence_dir}"
+            sha256sum --check staging-deploy-assembly.manifest.sha256
+          )
           echo "path=${evidence_dir}" >>"${GITHUB_OUTPUT}"
 
       - name: Upload staging deployment evidence
@@ -2216,7 +3293,7 @@ jobs:
           mkdir -p "${verification_dir}"
           source_ref="refs/heads/master"
           ci_predicate="https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1"
-          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3"
+          security_predicate="https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v4"
 
           for subject_name in image web lambda; do
             if [[ "${subject_name}" == "image" ]]; then
@@ -2271,11 +3348,41 @@ jobs:
                   ) as $retrievedAtEpoch |
                   .verificationResult.statement.predicateType == $predicate and
                   .verificationResult.statement.predicate.schemaVersion ==
-                    "archon.verified-ci-artifact/v3" and
+                    "archon.verified-ci-artifact/v4" and
                   .verificationResult.statement.predicate.source.repository ==
                     $repository and
                   .verificationResult.statement.predicate.source.commit == $sha and
                   .verificationResult.statement.predicate.source.event == "push" and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.syft //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.spdx //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.cyclonedx //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
+                  .verificationResult.statement.predicate.sbom.web.dependencyMetadata.sourceCommit ==
+                    $sha and
+                  (
+                    (
+                      .verificationResult.statement.predicate.sbom.web.dependencyMetadata.packageLock //
+                      ""
+                    ) |
+                    test("^sha256:[a-f0-9]{64}$")
+                  ) and
                   .verificationResult.statement.predicate.scanners.grype.version ==
                     "0.116.0" and
                   .verificationResult.statement.predicate.scanners.grype.database.maxAllowedBuiltAge ==
@@ -2428,14 +3535,155 @@ jobs:
       - name: Verify production AWS identity and CDK bootstrap
         env:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          DEPLOY_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
           test -n "${EXPECTED_ACCOUNT_ID}"
+          test -n "${DEPLOY_REGION}"
           test "$(aws sts get-caller-identity --query Account --output text)" = \
             "${EXPECTED_ACCOUNT_ID}"
           aws cloudformation describe-stacks --stack-name CDKToolkit >/dev/null
+          verify_bootstrap_version() {
+            local region="$1"
+            local version
+            aws cloudformation describe-stacks \
+              --region "${region}" \
+              --stack-name CDKToolkit >/dev/null
+            version="$(
+              aws ssm get-parameter \
+                --region "${region}" \
+                --name /cdk-bootstrap/hnb659fds/version \
+                --query 'Parameter.Value' \
+                --output text
+            )"
+            if [[ ! "${version}" =~ ^[0-9]+$ ]] || (( version < 6 )); then
+              echo "::error::CDK bootstrap in ${region} must use modern bootstrap version 6 or later"
+              exit 1
+            fi
+          }
+          verify_bootstrap_version "${DEPLOY_REGION}"
+          verify_bootstrap_version us-east-1
 
-      - name: Deploy registry, verify identical image, and deploy production
+      - name: Synthesize the exact production deployment assembly
+        run: |
+          set -euo pipefail
+          assembly="${RUNNER_TEMP}/deploy-cdk.out/production"
+          mkdir -p "$(dirname "${assembly}")"
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk synth \
+              --all \
+              --no-lookups \
+              --output "${assembly}" \
+              --context stage=production
+          )
+          test -f "${assembly}/manifest.json"
+          mapfile -d '' templates < <(
+            find "${assembly}" -maxdepth 1 -name '*.template.json' -print0
+          )
+          test "${#templates[@]}" -ge 3
+          for template in "${templates[@]}"; do
+            jq --exit-status \
+              'type == "object" and (.Resources | type == "object")' \
+              "${template}" >/dev/null
+          done
+          (
+            cd "${assembly}"
+            find . -type f -print0 |
+              sort -z |
+              xargs -0 sha256sum >"${RUNNER_TEMP}/production-deploy-assembly.sha256"
+          )
+          test -s "${RUNNER_TEMP}/production-deploy-assembly.sha256"
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum production-deploy-assembly.sha256 \
+              >production-deploy-assembly.manifest.sha256
+          )
+          test -s "${RUNNER_TEMP}/production-deploy-assembly.manifest.sha256"
+
+      - name: Install checksum-pinned CloudFormation Guard for production
+        id: production_guard
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/production-cfn-guard.tar.gz"
+          tool_dir="${RUNNER_TEMP}/production-cfn-guard"
+          mkdir -p "${tool_dir}"
+          curl --fail --silent --show-error --location \
+            --output "${archive}" \
+            "https://github.com/aws-cloudformation/cloudformation-guard/releases/download/${CFN_GUARD_VERSION}/cfn-guard-v3-x86_64-ubuntu-latest.tar.gz"
+          echo "${CFN_GUARD_ARCHIVE_SHA256}  ${archive}" |
+            sha256sum --check --strict
+          tar --extract --gzip --file "${archive}" --directory "${tool_dir}"
+          guard_bin="$(find "${tool_dir}" -type f -name cfn-guard -print -quit)"
+          test -n "${guard_bin}"
+          chmod 0755 "${guard_bin}"
+          "${guard_bin}" --version
+          echo "bin=${guard_bin}" >>"${GITHUB_OUTPUT}"
+
+      - name: Enforce production deployment IaC controls
+        env:
+          GUARD_BIN: ${{ steps.production_guard.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "${GUARD_BIN}" test \
+            --rules-file infra/aws/policy/archon.guard \
+            --test-data infra/aws/policy/archon_tests.yaml
+          report="${RUNNER_TEMP}/production-cfn-guard-results.txt"
+          : >"${report}"
+          for template in \
+            "${RUNNER_TEMP}"/deploy-cdk.out/production/*.template.json; do
+            "${GUARD_BIN}" validate \
+              --data "${template}" \
+              --rules infra/aws/policy/archon.guard \
+              --type CFNTemplate \
+              --show-summary all |
+              tee --append "${report}"
+          done
+
+      - name: Scan the exact production deployment assembly
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: ${{ runner.temp }}/deploy-cdk.out/production
+          format: sarif
+          output: ${{ runner.temp }}/production-trivy-iac.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Retain exact production deployment IaC evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-deploy-iac-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/deploy-cdk.out/production
+            ${{ runner.temp }}/production-deploy-assembly.sha256
+            ${{ runner.temp }}/production-deploy-assembly.manifest.sha256
+            ${{ runner.temp }}/production-cfn-guard-results.txt
+            ${{ runner.temp }}/production-trivy-iac.sarif
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail on any production deployment IaC finding
+        run: |
+          set -euo pipefail
+          jq --exit-status \
+            '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length > 0) and
+              all(
+                .runs[];
+                (.tool.driver.name | ascii_downcase | contains("trivy")) and
+                (.results | type == "array")
+              ) and
+              ([.runs[].results[]] | length) == 0
+            ' \
+            "${RUNNER_TEMP}/production-trivy-iac.sarif" >/dev/null
+
+      - name: Deploy edge, registry, identical image, and production platform
         id: deploy
         env:
           RELEASE_SHA: ${{ inputs.release_sha }}
@@ -2453,10 +3701,25 @@ jobs:
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
-          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ vars.ARCHON_CLOUDFRONT_CERTIFICATE_ARN }}
           ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
+          ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID }}
+          ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID }}
+          ARCHON_LLM_EGRESS_PREFIX_LIST_ID: ${{ vars.ARCHON_LLM_EGRESS_PREFIX_LIST_ID }}
         run: |
           set -euo pipefail
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum --check production-deploy-assembly.manifest.sha256
+          )
+          (
+            cd "${RUNNER_TEMP}/deploy-cdk.out/production"
+            sha256sum --check \
+              "${RUNNER_TEMP}/production-deploy-assembly.sha256"
+          )
+          deployment_iac_manifest_sha="$(
+            sha256sum "${RUNNER_TEMP}/production-deploy-assembly.sha256" |
+              awk '{print $1}'
+          )"
           : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?production DATAHUB_READ_MCP_URL is required}"
           : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
@@ -2466,9 +3729,20 @@ jobs:
           : "${LLM_MODEL:?production LLM_MODEL is required}"
           : "${EXPECTED_ACCOUNT_ID:?production AWS_ACCOUNT_ID is required}"
           : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
-          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?production ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
           : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?production ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
           : "${STAGING_APPLICATION_URL:?verified staging application URL is required}"
+          if [[ "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" ||
+            "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" ||
+            "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" ==
+              "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" ]]; then
+            echo "::error::production customer-managed egress prefix lists must be pairwise distinct"
+            exit 1
+          fi
           if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
             ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
             [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
@@ -2480,15 +3754,6 @@ jobs:
             echo "::error::production and staging must use distinct CloudFront hostnames"
             exit 1
           fi
-          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-            echo "::error::production ARCHON_CLOUDFRONT_CERTIFICATE_ARN must identify an ACM certificate in us-east-1"
-            exit 1
-          fi
-          if [[ "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" !=
-            "arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/"* ]]; then
-            echo "::error::production CloudFront certificate must belong to AWS_ACCOUNT_ID"
-            exit 1
-          fi
           if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
             echo "::error::production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID must be a raw Route 53 hosted-zone ID"
             exit 1
@@ -2498,9 +3763,22 @@ jobs:
               --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --output json
           )"
-          jq -e '.HostedZone.Config.PrivateZone == false' \
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '
+              .HostedZone.Id == $id and
+              .HostedZone.Config.PrivateZone == false
+            ' \
             <<<"${hosted_zone_json}" >/dev/null || {
             echo "::error::production CloudFront alias requires a public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zones_json="$(aws route53 list-hosted-zones --output json)"
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '[.HostedZones[] | select(.Id == $id)] | length == 1' \
+            <<<"${hosted_zones_json}" >/dev/null || {
+            echo "::error::production hosted zone must be owned by the deployment AWS account"
             exit 1
           }
           hosted_zone_name="$(
@@ -2512,30 +3790,348 @@ jobs:
             echo "::error::production CloudFront domain is outside the configured hosted zone"
             exit 1
           fi
+
+          validate_customer_prefix_list() {
+            local prefix_list_id="$1"
+            local expected_scope="$2"
+            local label="$3"
+            local max_entries_var="$4"
+            local version_var="$5"
+            local entries_digest_var="$6"
+            local metadata
+            local entries
+            local version
+            local max_entries
+            local entries_digest
+            local stable_metadata
+            if [[ ! "${prefix_list_id}" =~ ^pl-([0-9a-f]{8}|[0-9a-f]{17})$ ]]; then
+              echo "::error::production ${label} must be a valid managed prefix-list ID"
+              exit 1
+            fi
+            metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --prefix-list-ids "${prefix_list_id}" \
+                --output json
+            )"
+            jq -e \
+              --arg id "${prefix_list_id}" \
+              --arg owner "${EXPECTED_ACCOUNT_ID}" \
+              --arg scope "${expected_scope}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .PrefixListId == $id and
+                  .OwnerId == $owner and
+                  .AddressFamily == "IPv4" and
+                  (.Version | type) == "number" and
+                  .Version > 0 and
+                  (.Version | floor) == .Version and
+                  (.MaxEntries | type) == "number" and
+                  .MaxEntries > 0 and
+                  (.MaxEntries | floor) == .MaxEntries and
+                  (
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  ) and
+                  (
+                    [.Tags[]? |
+                      select(.Key == "ArchonEgressScope") |
+                      .Value] == [$scope]
+                  )
+                )
+              ' <<<"${metadata}" >/dev/null || {
+              echo "::error::production ${label} must be an account-owned, complete IPv4 list with positive-integer MaxEntries and ArchonEgressScope=${expected_scope}"
+              exit 1
+            }
+            version="$(jq -er '.PrefixLists[0].Version' <<<"${metadata}")"
+            max_entries="$(
+              jq -er '.PrefixLists[0].MaxEntries' <<<"${metadata}"
+            )"
+            if [[ ! "${max_entries}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::production ${label} MaxEntries must be a positive integer"
+              exit 1
+            fi
+            if [[ ! "${version}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::production ${label} Version must be a positive integer"
+              exit 1
+            fi
+            entries="$(
+              aws ec2 get-managed-prefix-list-entries \
+                --prefix-list-id "${prefix_list_id}" \
+                --target-version "${version}" \
+                --output json
+            )"
+            jq -e \
+              '
+                (.Entries | length) > 0 and
+                all(
+                  .Entries[];
+                  (.Cidr | type) == "string" and
+                  ((.Cidr | contains(":")) | not) and
+                  .Cidr != "0.0.0.0/0" and
+                  (.Cidr | split("/") | length) == 2 and
+                  ((.Cidr | split("/")[1] | tonumber) >= 8) and
+                  ((.Cidr | split("/")[1] | tonumber) <= 32)
+                )
+              ' <<<"${entries}" >/dev/null || {
+              echo "::error::production ${label} must be non-empty and may not contain 0.0.0.0/0 or a prefix broader than /8"
+              exit 1
+            }
+            entries_digest="$(
+              jq --compact-output --sort-keys \
+                '[
+                  .Entries[] |
+                  {
+                    cidr: .Cidr,
+                    description: (.Description // "")
+                  }
+                ] | sort_by(.cidr, .description)' \
+                <<<"${entries}" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            [[ "${entries_digest}" =~ ^[0-9a-f]{64}$ ]]
+            stable_metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --prefix-list-ids "${prefix_list_id}" \
+                --output json
+            )"
+            jq -e \
+              --arg id "${prefix_list_id}" \
+              --arg owner "${EXPECTED_ACCOUNT_ID}" \
+              --arg scope "${expected_scope}" \
+              --argjson version "${version}" \
+              --argjson max_entries "${max_entries}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .PrefixListId == $id and
+                  .OwnerId == $owner and
+                  .AddressFamily == "IPv4" and
+                  .Version == $version and
+                  .MaxEntries == $max_entries and
+                  (
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  ) and
+                  (
+                    [.Tags[]? |
+                      select(.Key == "ArchonEgressScope") |
+                      .Value] == [$scope]
+                  )
+                )
+              ' <<<"${stable_metadata}" >/dev/null || {
+              echo "::error::production ${label} changed while it was being validated"
+              exit 1
+            }
+            printf -v "${max_entries_var}" '%s' "${max_entries}"
+            printf -v "${version_var}" '%s' "${version}"
+            printf -v "${entries_digest_var}" '%s' "${entries_digest}"
+          }
+
+          resolve_aws_prefix_list() {
+            local service="$1"
+            local id_var="$2"
+            local weight_var="$3"
+            local expected_name="com.amazonaws.${AWS_REGION}.${service}"
+            local documented_weight
+            local metadata
+            local prefix_list_id
+            case "${service}" in
+              s3 | dynamodb)
+                documented_weight=1
+                ;;
+              *)
+                echo "::error::production unsupported AWS-managed prefix-list service ${service}"
+                exit 1
+                ;;
+            esac
+            metadata="$(
+              aws ec2 describe-managed-prefix-lists \
+                --filters \
+                  "Name=owner-id,Values=AWS" \
+                  "Name=prefix-list-name,Values=${expected_name}" \
+                --output json
+            )"
+            jq -e \
+              --arg name "${expected_name}" \
+              '
+                (.PrefixLists | length) == 1 and
+                (
+                  .PrefixLists[0] |
+                  .OwnerId == "AWS" and
+                  .PrefixListName == $name and
+                  .AddressFamily == "IPv4" and
+                  (
+                    .State == null or
+                    .State == "create-complete" or
+                    .State == "modify-complete" or
+                    .State == "restore-complete"
+                  )
+                )
+              ' <<<"${metadata}" >/dev/null || {
+              echo "::error::production could not resolve the exact AWS-owned ${expected_name} IPv4 prefix list"
+              exit 1
+            }
+            prefix_list_id="$(
+              jq -er '.PrefixLists[0].PrefixListId' <<<"${metadata}"
+            )"
+            if [[ ! "${prefix_list_id}" =~ ^pl-([0-9a-f]{8}|[0-9a-f]{17})$ ]]; then
+              echo "::error::production AWS-owned ${expected_name} returned an invalid prefix-list ID"
+              exit 1
+            fi
+            printf -v "${id_var}" '%s' "${prefix_list_id}"
+            printf -v "${weight_var}" '%s' "${documented_weight}"
+          }
+
+          validate_customer_prefix_list \
+            "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            datahub-read \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_VERSION \
+            DATAHUB_READ_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          validate_customer_prefix_list \
+            "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            datahub-write \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_VERSION \
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          validate_customer_prefix_list \
+            "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+            llm \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID \
+            LLM_EGRESS_PREFIX_LIST_WEIGHT \
+            LLM_EGRESS_PREFIX_LIST_VERSION \
+            LLM_EGRESS_PREFIX_LIST_ENTRIES_SHA
+          resolve_aws_prefix_list \
+            s3 \
+            S3_PREFIX_LIST_ID \
+            S3_PREFIX_LIST_WEIGHT
+          resolve_aws_prefix_list \
+            dynamodb \
+            DYNAMODB_PREFIX_LIST_ID \
+            DYNAMODB_PREFIX_LIST_WEIGHT
+
+          outbound_rule_quota=60
+          audit_api_rule_weight="$((
+            1 +
+            S3_PREFIX_LIST_WEIGHT +
+            DYNAMODB_PREFIX_LIST_WEIGHT +
+            DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT +
+            LLM_EGRESS_PREFIX_LIST_WEIGHT
+          ))"
+          remediation_rule_weight="$((
+            1 +
+            S3_PREFIX_LIST_WEIGHT +
+            DYNAMODB_PREFIX_LIST_WEIGHT +
+            DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT
+          ))"
+          if (( audit_api_rule_weight > outbound_rule_quota )); then
+            echo "::error::production audit/API outbound SG weight ${audit_api_rule_weight}/60 (shared=1,s3=${S3_PREFIX_LIST_WEIGHT},dynamodb=${DYNAMODB_PREFIX_LIST_WEIGHT},datahub-read=${DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT},llm=${LLM_EGRESS_PREFIX_LIST_WEIGHT})"
+            exit 1
+          fi
+          if (( remediation_rule_weight > outbound_rule_quota )); then
+            echo "::error::production remediation outbound SG weight ${remediation_rule_weight}/60 (shared=1,s3=${S3_PREFIX_LIST_WEIGHT},dynamodb=${DYNAMODB_PREFIX_LIST_WEIGHT},datahub-write=${DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT})"
+            exit 1
+          fi
+
+          stack_name="Archon-production"
+          edge_stack_name="Archon-production-Edge"
+          edge_outputs="${RUNNER_TEMP}/production-edge-outputs.json"
+          registry_outputs="${RUNNER_TEMP}/production-registry-outputs.json"
+          stack_outputs="${RUNNER_TEMP}/production-stack-outputs.json"
+
+          (
+            cd infra/aws
+            ./node_modules/.bin/cdk deploy "${edge_stack_name}" \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/production" \
+              --exclusively \
+              --ci \
+              --require-approval never \
+              --parameters "${edge_stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${edge_stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --outputs-file "${edge_outputs}"
+          )
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontCertificateArn' "${edge_outputs}"
+          )"
+          ARCHON_CLOUDFRONT_WEB_ACL_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontWebAclArn' "${edge_outputs}"
+          )"
+          ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontWafLogKeyArn' "${edge_outputs}"
+          )"
+          certificate_algorithm='EC_''prime256v1'
+          if [[ ! "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_ACCOUNT_ID}:key/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::production edge stack returned an invalid account-owned us-east-1 KMS key ARN"
+            exit 1
+          fi
+          edge_waf_log_key_json="$(
+            aws kms describe-key \
+              --region us-east-1 \
+              --key-id "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            '
+              .KeyMetadata.Arn == $arn and
+              .KeyMetadata.AWSAccountId == $account and
+              .KeyMetadata.Enabled == true and
+              .KeyMetadata.KeyState == "Enabled" and
+              .KeyMetadata.KeyManager == "CUSTOMER" and
+              .KeyMetadata.KeyUsage == "ENCRYPT_DECRYPT" and
+              .KeyMetadata.Origin == "AWS_KMS" and
+              .KeyMetadata.KeySpec == "SYMMETRIC_DEFAULT" and
+              .KeyMetadata.MultiRegion == false
+            ' <<<"${edge_waf_log_key_json}" >/dev/null || {
+            echo "::error::production CloudFront WAF log key violates the KMS metadata contract"
+            exit 1
+          }
+          edge_waf_log_key_rotation_json="$(
+            aws kms get-key-rotation-status \
+              --region us-east-1 \
+              --key-id "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              --output json
+          )"
+          jq -e '.KeyRotationEnabled == true' \
+            <<<"${edge_waf_log_key_rotation_json}" >/dev/null || {
+            echo "::error::production CloudFront WAF log key rotation is not enabled"
+            exit 1
+          }
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::production edge stack returned an invalid account-owned ACM certificate ARN"
+            exit 1
+          fi
           certificate_json="$(
             aws acm describe-certificate \
               --region us-east-1 \
               --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --output json
           )"
-          wildcard_name="*.${ARCHON_CLOUDFRONT_DOMAIN_NAME#*.}"
           jq -e \
             --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-            --arg wildcard "${wildcard_name}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg certificateAlgorithm "${certificate_algorithm}" \
             '
+              .Certificate.CertificateArn == $certificate and
               .Certificate.Status == "ISSUED" and
-              (
-                .Certificate.KeyAlgorithm == "RSA_2048" or
-                .Certificate.KeyAlgorithm ==
-                  (["EC", "prime256v1"] | join("_"))
-              ) and
-              (
-                ([.Certificate.DomainName] +
-                  (.Certificate.SubjectAlternativeNames // [])) |
-                any(. == $domain or . == $wildcard)
-              )
+              .Certificate.Type == "AMAZON_ISSUED" and
+              .Certificate.DomainName == $domain and
+              .Certificate.KeyAlgorithm == $certificateAlgorithm and
+              ((.Certificate.SubjectAlternativeNames // []) == [$domain])
             ' <<<"${certificate_json}" >/dev/null || {
-            echo "::error::production certificate must be issued, CloudFront-compatible, and cover the exact domain"
+            echo "::error::production edge certificate must be Amazon-issued, issued, P-256, and scoped to the exact hostname"
             exit 1
           }
           certificate_expiry_epoch="$(
@@ -2548,14 +4144,252 @@ jobs:
             echo "::error::production CloudFront certificate expires within 30 days"
             exit 1
           fi
-          stack_name="Archon-production"
-          registry_outputs="${RUNNER_TEMP}/production-registry-outputs.json"
-          stack_outputs="${RUNNER_TEMP}/production-stack-outputs.json"
+
+          web_acl_name="archon-production-cloudfront"
+          if [[ ! "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" =~ ^arn:aws:wafv2:us-east-1:${EXPECTED_ACCOUNT_ID}:global/webacl/archon-production-cloudfront/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::production edge stack returned an invalid account-owned CLOUDFRONT Web ACL ARN"
+            exit 1
+          fi
+          web_acl_id="${ARCHON_CLOUDFRONT_WEB_ACL_ARN##*/}"
+          web_acl_json="$(
+            aws wafv2 get-web-acl \
+              --region us-east-1 \
+              --scope CLOUDFRONT \
+              --name "${web_acl_name}" \
+              --id "${web_acl_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            --arg name "${web_acl_name}" \
+            --argjson rate_limit 1000 \
+            '
+              .WebACL as $web_acl |
+              $web_acl.ARN == $arn and
+              $web_acl.Name == $name and
+              $web_acl.DefaultAction == {"Allow": {}} and
+              $web_acl.VisibilityConfig.CloudWatchMetricsEnabled == true and
+              $web_acl.VisibilityConfig.MetricName == ($name + "-waf") and
+              $web_acl.VisibilityConfig.SampledRequestsEnabled == true and
+              (
+                [
+                  $web_acl.DataProtectionConfig.DataProtections[] |
+                  {
+                    action: .Action,
+                    fieldType: .Field.FieldType,
+                    fieldKeys: .Field.FieldKeys,
+                    excludeRateBasedDetails: .ExcludeRateBasedDetails,
+                    excludeRuleMatchDetails: .ExcludeRuleMatchDetails
+                  }
+                ] |
+                sort_by(.fieldKeys[0])
+              ) == [
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["authorization"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
+                },
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["cookie"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
+                }
+              ] and
+              ($web_acl.Rules | length) == 4 and
+              all(
+                $web_acl.Rules[];
+                .VisibilityConfig.CloudWatchMetricsEnabled == true and
+                .VisibilityConfig.SampledRequestsEnabled == true
+              ) and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesAmazonIpReputationList" and
+                    .Priority == 0 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesAmazonIpReputationList" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesAmazonIpReputationList"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesCommonRuleSet" and
+                    .Priority == 10 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesCommonRuleSet" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesCommonRuleSet"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "AWSManagedRulesKnownBadInputsRuleSet" and
+                    .Priority == 20 and
+                    .OverrideAction == {"None": {}} and
+                    (has("Action") | not) and
+                    (.Statement | keys) == ["ManagedRuleGroupStatement"] and
+                    .Statement.ManagedRuleGroupStatement.VendorName == "AWS" and
+                    .Statement.ManagedRuleGroupStatement.Name ==
+                      "AWSManagedRulesKnownBadInputsRuleSet" and
+                    ((.Statement.ManagedRuleGroupStatement.ExcludedRules // []) |
+                      length) == 0 and
+                    ((.Statement.ManagedRuleGroupStatement.RuleActionOverrides // []) |
+                      length) == 0 and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ScopeDownStatement") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("Version") | not) and
+                    (.Statement.ManagedRuleGroupStatement |
+                      has("ManagedRuleGroupConfigs") | not) and
+                    .VisibilityConfig.MetricName ==
+                      "AWSManagedRulesKnownBadInputsRuleSet"
+                  )
+                ] | length
+              ) == 1 and
+              (
+                [
+                  $web_acl.Rules[] |
+                  select(
+                    .Name == "PerIpRateLimit" and
+                    .Priority == 30 and
+                    .Action == {"Block": {}} and
+                    (has("OverrideAction") | not) and
+                    (.Statement | keys) == ["RateBasedStatement"] and
+                    .Statement.RateBasedStatement.AggregateKeyType == "IP" and
+                    .Statement.RateBasedStatement.Limit == $rate_limit and
+                    .Statement.RateBasedStatement.EvaluationWindowSec == 300 and
+                    (.Statement.RateBasedStatement |
+                      has("ScopeDownStatement") | not) and
+                    .VisibilityConfig.MetricName == ($name + "-rate-limit")
+                  )
+                ] | length
+          ) == 1
+            ' <<<"${web_acl_json}" >/dev/null || {
+            echo "::error::production CloudFront Web ACL ARN or core rule contract is invalid"
+            exit 1
+          }
+          waf_logging_json="$(
+            aws wafv2 get-logging-configuration \
+              --region us-east-1 \
+              --resource-arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg arn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            --arg destination \
+              "arn:aws:logs:us-east-1:${EXPECTED_ACCOUNT_ID}:log-group:aws-waf-logs-archon-production-cloudfront" \
+            '
+              .LoggingConfiguration as $logging |
+              $logging.ResourceArn == $arn and
+              $logging.LogDestinationConfigs == [$destination] and
+              ($logging.LogScope // "CUSTOMER") == "CUSTOMER" and
+              ($logging.LogType // "WAF_LOGS") == "WAF_LOGS" and
+              $logging.LoggingFilter.DefaultBehavior == "DROP" and
+              ($logging.LoggingFilter.Filters | length) == 1 and
+              (
+                $logging.LoggingFilter.Filters[0] |
+                .Behavior == "KEEP" and
+                .Requirement == "MEETS_ANY" and
+                (.Conditions | length) == 2 and
+                (
+                  [.Conditions[].ActionCondition.Action] | sort
+                ) == ["BLOCK", "COUNT"]
+              ) and
+              (
+                [
+                  $logging.RedactedFields[]? |
+                  .SingleHeader.Name
+                ] | sort
+              ) == ["authorization", "cookie"]
+            ' <<<"${waf_logging_json}" >/dev/null || {
+            echo "::error::production CloudFront WAF logging or redaction contract is invalid"
+            exit 1
+          }
+          edge_waf_log_group_name="aws-waf-logs-archon-production-cloudfront"
+          edge_waf_log_groups="$(
+            aws logs describe-log-groups \
+              --region us-east-1 \
+              --log-group-name-prefix "${edge_waf_log_group_name}" \
+              --output json
+          )"
+          edge_waf_log_contract="$(
+            jq --compact-output --sort-keys --exit-status \
+              --arg name "${edge_waf_log_group_name}" \
+              --arg kms_key_arn "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" \
+              '
+                [.logGroups[] | select(.logGroupName == $name)] as $groups |
+                if (
+                  ($groups | length) == 1 and
+                  $groups[0].retentionInDays == 365 and
+                  $groups[0].kmsKeyId == $kms_key_arn
+                ) then
+                  {
+                    name: $groups[0].logGroupName,
+                    kmsKey: {
+                      arn: $groups[0].kmsKeyId,
+                      state: "Enabled",
+                      keyManager: "CUSTOMER",
+                      keyUsage: "ENCRYPT_DECRYPT",
+                      origin: "AWS_KMS",
+                      multiRegion: false,
+                      rotationEnabled: true
+                    },
+                    retentionDays: $groups[0].retentionInDays,
+                    filter: "BLOCK_OR_COUNT",
+                    sensitiveFields: ["authorization", "cookie"]
+                  }
+                else
+                  error(
+                    "CloudFront WAF log group is not uniquely retained and KMS encrypted"
+                  )
+                end
+              ' <<<"${edge_waf_log_groups}"
+          )"
 
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy Archon-Registry \
-              -c stage=production \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/production" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -2634,7 +4468,7 @@ jobs:
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy "${stack_name}" \
-              -c stage=production \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/production" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -2644,6 +4478,12 @@ jobs:
               --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --parameters "${stack_name}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --parameters "${stack_name}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DataHubReadEgressPrefixListId=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:DataHubWriteEgressPrefixListId=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${stack_name}:LlmEgressPrefixListId=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
               --parameters "${stack_name}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${stack_name}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${stack_name}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -2653,6 +4493,35 @@ jobs:
               --parameters "${stack_name}:WorkerDesiredCount=0" \
               --outputs-file "${stack_outputs}"
           )
+
+          live_security_group_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            S3_PREFIX_LIST_ID="${S3_PREFIX_LIST_ID}" \
+            DYNAMODB_PREFIX_LIST_ID="${DYNAMODB_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID="${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              bash scripts/validate-aws-network-contract.sh
+          )"
+          live_security_group_contract_sha="$(
+            printf '%s' "${live_security_group_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          regional_waf_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+            EXPECTED_RATE_LIMIT=1000 \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-waf-contract.sh
+          )"
+          regional_waf_contract_sha="$(
+            printf '%s' "${regional_waf_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
 
           distribution_id="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
@@ -2664,6 +4533,7 @@ jobs:
           jq -e \
             --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
             --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg web_acl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
             '
               .DistributionConfig |
               .Enabled == true and
@@ -2672,6 +4542,7 @@ jobs:
               .Aliases.Quantity == 1 and
               ((.Aliases.Items // []) == [$domain]) and
               .ViewerCertificate.ACMCertificateArn == $certificate and
+              .WebACLId == $web_acl and
               .ViewerCertificate.SSLSupportMethod == "sni-only" and
               .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
               .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
@@ -2735,15 +4606,165 @@ jobs:
             echo "::error::production Route 53 dual-stack aliases violate the edge contract"
             exit 1
           }
+          edge_outputs_sha="$(sha256sum "${edge_outputs}" | awk '{print $1}')"
+          edge_security_contract="$(
+            jq -cnS \
+              --arg stackName "${edge_stack_name}" \
+              --arg cdkOutputsSha256 "${edge_outputs_sha}" \
+              --arg domainName "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --arg hostedZoneId "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --arg certificateArn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --arg webAclArn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --arg certificateAlgorithm "${certificate_algorithm}" \
+              --argjson logging "${edge_waf_log_contract}" \
+              --argjson rateLimit 1000 \
+              '{
+                schemaVersion: "archon.edge-security-contract/v2",
+                stackName: $stackName,
+                cdkOutputsSha256: $cdkOutputsSha256,
+                domainName: $domainName,
+                hostedZoneId: $hostedZoneId,
+                certificate: {
+                  arn: $certificateArn,
+                  region: "us-east-1",
+                  keyAlgorithm: $certificateAlgorithm,
+                  status: "ISSUED"
+                },
+                webAcl: {
+                  arn: $webAclArn,
+                  scope: "CLOUDFRONT",
+                  rateLimit: $rateLimit,
+                  rateEvaluationWindowSeconds: 300,
+                  ruleCount: 4,
+                  sampledDataProtection: "validated",
+                  loggingContract: "validated",
+                  logging: $logging
+                },
+                validation: "passed"
+              }'
+          )"
+          edge_security_contract_sha="$(
+            printf '%s' "${edge_security_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          network_egress_contract="$(
+            jq -cnS \
+              --arg s3PrefixListId "${S3_PREFIX_LIST_ID}" \
+              --arg dynamodbPrefixListId "${DYNAMODB_PREFIX_LIST_ID}" \
+              --arg datahubReadPrefixListId \
+                "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --arg datahubWritePrefixListId \
+                "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --arg llmPrefixListId "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              --arg datahubReadEntriesSha \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --arg datahubWriteEntriesSha \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --arg llmEntriesSha \
+                "${LLM_EGRESS_PREFIX_LIST_ENTRIES_SHA}" \
+              --argjson s3Weight "${S3_PREFIX_LIST_WEIGHT}" \
+              --argjson dynamodbWeight "${DYNAMODB_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubReadWeight \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubWriteWeight \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson llmWeight "${LLM_EGRESS_PREFIX_LIST_WEIGHT}" \
+              --argjson datahubReadVersion \
+                "${DATAHUB_READ_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson datahubWriteVersion \
+                "${DATAHUB_WRITE_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson llmVersion \
+                "${LLM_EGRESS_PREFIX_LIST_VERSION}" \
+              --argjson auditApiWeight "${audit_api_rule_weight}" \
+              --argjson remediationWeight "${remediation_rule_weight}" \
+              --argjson liveSecurityGroups \
+                "${live_security_group_contract}" \
+              '{
+                schemaVersion: "archon.network-egress-contract/v2",
+                securityGroupRuleQuota: 60,
+                sharedEndpointRuleWeight: 1,
+                awsManagedPrefixLists: {
+                  s3: {
+                    id: $s3PrefixListId,
+                    name: ("com.amazonaws." + env.AWS_REGION + ".s3"),
+                    owner: "AWS",
+                    ruleWeight: $s3Weight
+                  },
+                  dynamodb: {
+                    id: $dynamodbPrefixListId,
+                    name: ("com.amazonaws." + env.AWS_REGION + ".dynamodb"),
+                    owner: "AWS",
+                    ruleWeight: $dynamodbWeight
+                  }
+                },
+                accountManagedPrefixLists: {
+                  datahubRead: {
+                    id: $datahubReadPrefixListId,
+                    scope: "datahub-read",
+                    owner: "deployment-account",
+                    version: $datahubReadVersion,
+                    maxEntries: $datahubReadWeight,
+                    ruleWeight: $datahubReadWeight,
+                    entriesSha256: ("sha256:" + $datahubReadEntriesSha)
+                  },
+                  datahubWrite: {
+                    id: $datahubWritePrefixListId,
+                    scope: "datahub-write",
+                    owner: "deployment-account",
+                    version: $datahubWriteVersion,
+                    maxEntries: $datahubWriteWeight,
+                    ruleWeight: $datahubWriteWeight,
+                    entriesSha256: ("sha256:" + $datahubWriteEntriesSha)
+                  },
+                  llm: {
+                    id: $llmPrefixListId,
+                    scope: "llm",
+                    owner: "deployment-account",
+                    version: $llmVersion,
+                    maxEntries: $llmWeight,
+                    ruleWeight: $llmWeight,
+                    entriesSha256: ("sha256:" + $llmEntriesSha)
+                  }
+                },
+                calculatedSecurityGroupWeights: {
+                  auditAndApi: $auditApiWeight,
+                  remediation: $remediationWeight
+                },
+                liveSecurityGroups: $liveSecurityGroups,
+                validation: "passed"
+              }'
+          )"
+          network_egress_contract_sha="$(
+            printf '%s' "${network_egress_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           {
             echo "image_digest=${image_digest}"
             echo "application_url=${application_url}"
             echo "api_url=${api_url}"
             echo "stack_name=${stack_name}"
             echo "stack_outputs=${stack_outputs}"
+            echo "edge_stack_name=${edge_stack_name}"
+            echo "edge_outputs=${edge_outputs}"
             echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
             echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
             echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
+            echo "cloudfront_web_acl_arn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}"
+            echo "s3_prefix_list_id=${S3_PREFIX_LIST_ID}"
+            echo "dynamodb_prefix_list_id=${DYNAMODB_PREFIX_LIST_ID}"
+            echo "datahub_read_egress_prefix_list_id=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}"
+            echo "datahub_write_egress_prefix_list_id=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}"
+            echo "llm_egress_prefix_list_id=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}"
+            echo "iac_assembly_manifest_sha=${deployment_iac_manifest_sha}"
+            echo "edge_security_contract=${edge_security_contract}"
+            echo "edge_security_contract_sha=${edge_security_contract_sha}"
+            echo "regional_waf_contract=${regional_waf_contract}"
+            echo "regional_waf_contract_sha=${regional_waf_contract_sha}"
+            echo "network_egress_contract=${network_egress_contract}"
+            echo "network_egress_contract_sha=${network_egress_contract_sha}"
+            echo "live_security_group_contract_sha=${live_security_group_contract_sha}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Update production-scoped secrets without logging values
@@ -2758,6 +4779,12 @@ jobs:
           : "${DATAHUB_READ_GMS_TOKEN:?production read token is required}"
           : "${DATAHUB_WRITE_GMS_TOKEN:?production write token is required}"
           : "${LLM_API_KEY:?production LLM key is required}"
+          if [[ "${DATAHUB_READ_GMS_TOKEN}" == "${DATAHUB_WRITE_GMS_TOKEN}" ||
+                "${DATAHUB_READ_GMS_TOKEN}" == "${LLM_API_KEY}" ||
+                "${DATAHUB_WRITE_GMS_TOKEN}" == "${LLM_API_KEY}" ]]; then
+            echo "::error::Production read, write, and LLM credentials must be pairwise distinct"
+            exit 1
+          fi
           umask 077
           secret_dir="${RUNNER_TEMP}/production-secret-payloads"
           mkdir -p "${secret_dir}"
@@ -2856,7 +4883,7 @@ jobs:
             echo "cognito_origin=${cognito_origin}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Restart production API and worker tasks after secret rotation
+      - name: Restart production API and worker tasks after versioned secret refresh
         env:
           STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
@@ -2872,8 +4899,26 @@ jobs:
           ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
           ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
           ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
+          ARCHON_CLOUDFRONT_WEB_ACL_ARN: ${{ steps.deploy.outputs.cloudfront_web_acl_arn }}
+          S3_PREFIX_LIST_ID: ${{ steps.deploy.outputs.s3_prefix_list_id }}
+          DYNAMODB_PREFIX_LIST_ID: ${{ steps.deploy.outputs.dynamodb_prefix_list_id }}
+          ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.datahub_read_egress_prefix_list_id }}
+          ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.datahub_write_egress_prefix_list_id }}
+          ARCHON_LLM_EGRESS_PREFIX_LIST_ID: ${{ steps.deploy.outputs.llm_egress_prefix_list_id }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA: ${{ steps.deploy.outputs.live_security_group_contract_sha }}
+          EXPECTED_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
         run: |
           set -euo pipefail
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum --check production-deploy-assembly.manifest.sha256
+          )
+          (
+            cd "${RUNNER_TEMP}/deploy-cdk.out/production"
+            sha256sum --check \
+              "${RUNNER_TEMP}/production-deploy-assembly.sha256"
+          )
           : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?production DATAHUB_READ_MCP_URL is required}"
           : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
@@ -2883,13 +4928,19 @@ jobs:
           : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
           : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?production ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
           : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${ARCHON_CLOUDFRONT_WEB_ACL_ARN:?production ARCHON_CLOUDFRONT_WEB_ACL_ARN is required}"
+          : "${S3_PREFIX_LIST_ID:?production S3_PREFIX_LIST_ID is required}"
+          : "${DYNAMODB_PREFIX_LIST_ID:?production DYNAMODB_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
+          : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?production ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
 
           # Reconcile desired count through CloudFormation so activation creates
-          # no drift, then force all services to consume the rotated secrets.
+          # no drift, then force all services to consume the refreshed secret versions.
           (
             cd infra/aws
             ./node_modules/.bin/cdk deploy "${STACK_NAME}" \
-              -c stage=production \
+              --app "${RUNNER_TEMP}/deploy-cdk.out/production" \
               --exclusively \
               --ci \
               --require-approval never \
@@ -2899,6 +4950,12 @@ jobs:
               --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --parameters "${STACK_NAME}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+              --parameters "${STACK_NAME}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DataHubReadEgressPrefixListId=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:DataHubWriteEgressPrefixListId=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+              --parameters "${STACK_NAME}:LlmEgressPrefixListId=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
               --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
               --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
               --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -2908,6 +4965,30 @@ jobs:
               --parameters "${STACK_NAME}:WorkerDesiredCount=1" \
               --outputs-file "${STACK_OUTPUTS}"
           )
+          final_network_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            S3_PREFIX_LIST_ID="${S3_PREFIX_LIST_ID}" \
+            DYNAMODB_PREFIX_LIST_ID="${DYNAMODB_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID="${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
+            ARCHON_LLM_EGRESS_PREFIX_LIST_ID="${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+              bash scripts/validate-aws-network-contract.sh
+          )"
+          test "$(printf '%s' "${final_network_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA}"
+          final_regional_waf_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            EXPECTED_ACCOUNT_ID="${EXPECTED_ACCOUNT_ID}" \
+            EXPECTED_RATE_LIMIT=1000 \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-waf-contract.sh
+          )"
+          test "$(printf '%s' "${final_regional_waf_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_REGIONAL_WAF_CONTRACT_SHA}"
 
           cluster="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
@@ -3209,10 +5290,48 @@ jobs:
           PRODUCTION_REVIEWER: ${{ steps.source.outputs.production_reviewer }}
           PRODUCTION_APPROVAL_RECORD_SHA: ${{ steps.source.outputs.approval_record_sha }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          PRODUCTION_EDGE_OUTPUTS: ${{ steps.deploy.outputs.edge_outputs }}
+          STAGING_IAC_ASSEMBLY_MANIFEST_SHA: ${{ needs.staging.outputs.iac_assembly_manifest_sha }}
+          PRODUCTION_IAC_ASSEMBLY_MANIFEST_SHA: ${{ steps.deploy.outputs.iac_assembly_manifest_sha }}
+          STAGING_EDGE_SECURITY_CONTRACT_SHA: ${{ needs.staging.outputs.edge_security_contract_sha }}
+          STAGING_REGIONAL_WAF_CONTRACT_SHA: ${{ needs.staging.outputs.regional_waf_contract_sha }}
+          STAGING_NETWORK_EGRESS_CONTRACT_SHA: ${{ needs.staging.outputs.network_egress_contract_sha }}
+          PRODUCTION_EDGE_SECURITY_CONTRACT: ${{ steps.deploy.outputs.edge_security_contract }}
+          PRODUCTION_EDGE_SECURITY_CONTRACT_SHA: ${{ steps.deploy.outputs.edge_security_contract_sha }}
+          PRODUCTION_REGIONAL_WAF_CONTRACT: ${{ steps.deploy.outputs.regional_waf_contract }}
+          PRODUCTION_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          PRODUCTION_NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
+          PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
         run: |
           set -euo pipefail
           test "${STAGING_IMAGE_DIGEST}" = "${PRODUCTION_IMAGE_DIGEST}"
           test "${STAGING_DEMO_QUERY_SHA}" = "${PRODUCTION_DEMO_QUERY_SHA}"
+          [[ "${STAGING_EDGE_SECURITY_CONTRACT_SHA}" =~ ^[a-f0-9]{64}$ ]] || {
+            echo "::error::staging edge-security contract digest is invalid"
+            exit 1
+          }
+          for digest in \
+            "${STAGING_IAC_ASSEMBLY_MANIFEST_SHA}" \
+            "${PRODUCTION_IAC_ASSEMBLY_MANIFEST_SHA}" \
+            "${STAGING_REGIONAL_WAF_CONTRACT_SHA}" \
+            "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}" \
+            "${STAGING_NETWORK_EGRESS_CONTRACT_SHA}" \
+            "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}"; do
+            [[ "${digest}" =~ ^[a-f0-9]{64}$ ]] || {
+              echo "::error::deployment evidence contains an invalid SHA-256 digest"
+              exit 1
+            }
+          done
+          test "$(printf '%s' "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" |
+            sha256sum | awk '{print $1}')" = \
+            "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}"
+          test "$(printf '%s' "${PRODUCTION_REGIONAL_WAF_CONTRACT}" |
+            sha256sum | awk '{print $1}')" = \
+            "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${RUNNER_TEMP}/production-deploy-assembly.sha256" |
+            awk '{print $1}')" = \
+            "${PRODUCTION_IAC_ASSEMBLY_MANIFEST_SHA}"
           evidence_dir="${RUNNER_TEMP}/deployment-evidence"
           mkdir -p "${evidence_dir}"
           evidence="${evidence_dir}/deployment-evidence.json"
@@ -3251,6 +5370,24 @@ jobs:
             --arg productionRuntimeConfigSha256 "${PRODUCTION_RUNTIME_CONFIG_SHA}" \
             --arg productionReviewer "${PRODUCTION_REVIEWER}" \
             --arg productionApprovalRecordSha256 "${PRODUCTION_APPROVAL_RECORD_SHA}" \
+            --arg stagingIacAssemblyManifestSha256 \
+              "${STAGING_IAC_ASSEMBLY_MANIFEST_SHA}" \
+            --arg productionIacAssemblyManifestSha256 \
+              "${PRODUCTION_IAC_ASSEMBLY_MANIFEST_SHA}" \
+            --arg stagingEdgeSecuritySha256 "${STAGING_EDGE_SECURITY_CONTRACT_SHA}" \
+            --arg stagingRegionalWafSha256 \
+              "${STAGING_REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg stagingNetworkEgressSha256 \
+              "${STAGING_NETWORK_EGRESS_CONTRACT_SHA}" \
+            --arg productionEdgeSecuritySha256 \
+              "${PRODUCTION_EDGE_SECURITY_CONTRACT_SHA}" \
+            --arg productionRegionalWafSha256 \
+              "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg productionNetworkEgressSha256 \
+              "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}" \
+            --argjson productionEdgeSecurity "${PRODUCTION_EDGE_SECURITY_CONTRACT}" \
+            --argjson productionRegionalWaf "${PRODUCTION_REGIONAL_WAF_CONTRACT}" \
+            --argjson productionNetworkEgress "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
               schemaVersion: 1,
@@ -3295,6 +5432,15 @@ jobs:
                   $stagingControlLoopSmokeSha256,
                 runtimeConfigSha256: $stagingRuntimeConfigSha256,
                 dastReportSha256: $stagingDastReportSha256,
+                infrastructureSecurity: {
+                  iacAssemblyManifestSha256:
+                    $stagingIacAssemblyManifestSha256,
+                  edgeContractSha256: $stagingEdgeSecuritySha256,
+                  regionalWafContractSha256:
+                    $stagingRegionalWafSha256,
+                  networkEgressContractSha256:
+                    $stagingNetworkEgressSha256
+                },
                 result: "passed"
               },
               production: {
@@ -3310,11 +5456,57 @@ jobs:
                 sanitizedSmokeEvidenceSha256:
                   $productionSmokeEvidenceSha256,
                 runtimeConfigSha256: $productionRuntimeConfigSha256,
+                infrastructureSecurity: {
+                  iacAssemblyManifestSha256:
+                    $productionIacAssemblyManifestSha256,
+                  edgeContractSha256: $productionEdgeSecuritySha256,
+                  edge: $productionEdgeSecurity,
+                  regionalWafContractSha256:
+                    $productionRegionalWafSha256,
+                  regionalWaf: $productionRegionalWaf,
+                  networkEgressContractSha256:
+                    $productionNetworkEgressSha256,
+                  networkEgress: $productionNetworkEgress
+                },
                 result: "passed"
               }
             }' >"${evidence}"
           cp "${STACK_OUTPUTS}" \
             "${evidence_dir}/production-cdk-outputs.json"
+          test "$(sha256sum "${PRODUCTION_EDGE_OUTPUTS}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' \
+              <<<"${PRODUCTION_EDGE_SECURITY_CONTRACT}")"
+          test "$(printf '%s' "${PRODUCTION_EDGE_SECURITY_CONTRACT}" |
+            sha256sum | awk '{print $1}')" = \
+            "${PRODUCTION_EDGE_SECURITY_CONTRACT_SHA}"
+          test "$(sha256sum "${STACK_OUTPUTS}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' \
+              <<<"${PRODUCTION_REGIONAL_WAF_CONTRACT}")"
+          cp "${PRODUCTION_EDGE_OUTPUTS}" \
+            "${evidence_dir}/production-edge-cdk-outputs.json"
+          printf '%s' "${PRODUCTION_EDGE_SECURITY_CONTRACT}" \
+            >"${evidence_dir}/production-edge-security-contract.json"
+          printf '%s' "${PRODUCTION_REGIONAL_WAF_CONTRACT}" \
+            >"${evidence_dir}/production-regional-waf-security-contract.json"
+          printf '%s' "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" \
+            >"${evidence_dir}/production-network-egress-security-contract.json"
+          test "$(sha256sum \
+            "${evidence_dir}/production-edge-security-contract.json" |
+            awk '{print $1}')" = "${PRODUCTION_EDGE_SECURITY_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/production-regional-waf-security-contract.json" |
+            awk '{print $1}')" = "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/production-network-egress-security-contract.json" |
+            awk '{print $1}')" = "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}"
+          cp "${RUNNER_TEMP}/production-deploy-assembly.sha256" \
+            "${evidence_dir}/production-deploy-assembly.sha256"
+          cp "${RUNNER_TEMP}/production-deploy-assembly.manifest.sha256" \
+            "${evidence_dir}/production-deploy-assembly.manifest.sha256"
+          (
+            cd "${evidence_dir}"
+            sha256sum --check production-deploy-assembly.manifest.sha256
+          )
           test "$(sha256sum "${PRODUCTION_ATTESTATION_PATH}" |
             awk '{print $1}')" = "${PRODUCTION_ATTESTATION_SHA}"
           test "$(sha256sum "${PRODUCTION_RUNTIME_CONFIG_PATH}" |

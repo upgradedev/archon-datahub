@@ -1,7 +1,11 @@
 import {
+  ArnFormat,
   Aws,
   CfnOutput,
   CfnParameter,
+  CfnResource,
+  CfnRule,
+  CustomResourceProviderBase,
   Duration,
   Fn,
   RemovalPolicy,
@@ -38,6 +42,12 @@ import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
 import { join } from "node:path";
+
+// CloudFormation config scanners resolve parameter Refs from Default. This sentinel
+// keeps the exact deploy template analyzable, while the unconditional Rule below
+// rejects it before any create/update unless the edge stack's live ARN is supplied.
+const REQUIRED_CLOUDFRONT_WEB_ACL_ARN =
+  "arn:aws:wafv2:us-east-1:000000000000:global/webacl/required-override/00000000-0000-0000-0000-000000000000";
 
 export class ArchonRegistryStack extends Stack {
   readonly repository: ecr.Repository;
@@ -162,6 +172,66 @@ export class ArchonPlatformStack extends Stack {
           "must be a Route 53 hosted-zone ID without the /hostedzone/ prefix"
       }
     );
+    const cloudFrontWebAclArn = new CfnParameter(
+      this,
+      "CloudFrontWebAclArn",
+      {
+        type: "String",
+        description:
+          "CLOUDFRONT-scope WAFv2 Web ACL ARN created by the us-east-1 Archon edge stack",
+        default: REQUIRED_CLOUDFRONT_WEB_ACL_ARN,
+        allowedPattern:
+          "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]{1,128}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+        constraintDescription:
+          "must be a CLOUDFRONT-scope WAFv2 Web ACL ARN from us-east-1"
+      }
+    );
+    const requireCloudFrontWebAclOverride = new CfnRule(
+      this,
+      "RequireCloudFrontWebAclOverride",
+      {
+        assertions: [
+          {
+            assert: Fn.conditionNot(
+              Fn.conditionEquals(
+                cloudFrontWebAclArn.valueAsString,
+                REQUIRED_CLOUDFRONT_WEB_ACL_ARN
+              )
+            ),
+            assertDescription:
+              "CloudFrontWebAclArn must be overridden with the deployed Archon edge-stack Web ACL ARN"
+          }
+        ]
+      }
+    );
+    requireCloudFrontWebAclOverride.overrideLogicalId(
+      "RequireCloudFrontWebAclOverride"
+    );
+    const s3PrefixListId = prefixListIdParameter(
+      this,
+      "S3PrefixListId",
+      "AWS-managed regional S3 prefix list used by the gateway endpoint"
+    );
+    const dynamoDbPrefixListId = prefixListIdParameter(
+      this,
+      "DynamoDbPrefixListId",
+      "AWS-managed regional DynamoDB prefix list used by the gateway endpoint"
+    );
+    const dataHubReadEgressPrefixListId = prefixListIdParameter(
+      this,
+      "DataHubReadEgressPrefixListId",
+      "Customer-managed CIDR allowlist for read-only DataHub GMS and MCP endpoints"
+    );
+    const dataHubWriteEgressPrefixListId = prefixListIdParameter(
+      this,
+      "DataHubWriteEgressPrefixListId",
+      "Customer-managed CIDR allowlist for write-enabled DataHub GMS and MCP endpoints"
+    );
+    const llmEgressPrefixListId = prefixListIdParameter(
+      this,
+      "LlmEgressPrefixListId",
+      "Customer-managed CIDR allowlist for the configured inference endpoint"
+    );
     const dataHubReadUrl = httpsUrlParameter(
       this,
       "DataHubReadGmsUrl",
@@ -207,6 +277,10 @@ export class ArchonPlatformStack extends Stack {
     const dataKey = retainedKey(this, "DataKey", `alias/archon/${stage}/data`);
     const spaKey = retainedKey(this, "SpaKey", `alias/archon/${stage}/spa`);
     const logsKey = retainedKey(this, "LogsKey", `alias/archon/${stage}/logs`);
+    grantCloudWatchLogsKeyAccess(this, logsKey, [
+      `/archon/${stage}/*`,
+      `aws-waf-logs-archon-${stage}-api`
+    ]);
     const queueKey = retainedKey(this, "QueueKey", `alias/archon/${stage}/queues`);
     const secretsKey = retainedKey(this, "SecretsKey", `alias/archon/${stage}/secrets`);
 
@@ -219,6 +293,7 @@ export class ArchonPlatformStack extends Stack {
         {
           name: "public-ingress",
           subnetType: ec2.SubnetType.PUBLIC,
+          mapPublicIpOnLaunch: false,
           cidrMask: 24
         },
         {
@@ -233,6 +308,100 @@ export class ArchonPlatformStack extends Stack {
         }
       ]
     });
+    const defaultSecurityGroupProvider = this.node.tryFindChild(
+      "Custom::VpcRestrictDefaultSGCustomResourceProvider"
+    );
+    if (!(defaultSecurityGroupProvider instanceof CustomResourceProviderBase)) {
+      throw new Error("CDK default-security-group restriction provider was not created");
+    }
+    defaultSecurityGroupProvider.addToRolePolicy({
+      Effect: "Allow",
+      Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+      Resource: "*"
+    });
+    const defaultSecurityGroupHandler =
+      defaultSecurityGroupProvider.node.tryFindChild("Handler");
+    if (!(defaultSecurityGroupHandler instanceof CfnResource)) {
+      throw new Error("CDK default-security-group restriction handler was not created");
+    }
+    defaultSecurityGroupHandler.addPropertyOverride("TracingConfig", {
+      Mode: "Active"
+    });
+
+    const apiSecurityGroup = workloadSecurityGroup(
+      this,
+      "ApiSecurityGroup",
+      vpc,
+      "Only the private NLB security group reaches the Archon API"
+    );
+    const nlbSecurityGroup = workloadSecurityGroup(
+      this,
+      "NlbSecurityGroup",
+      vpc,
+      "Identity boundary for the API Gateway VPC Link network load balancer"
+    );
+    const auditWorkerSecurityGroup = workloadSecurityGroup(
+      this,
+      "AuditWorkerSecurityGroup",
+      vpc,
+      "Read-only audit worker has no inbound path"
+    );
+    const remediationWorkerSecurityGroup = workloadSecurityGroup(
+      this,
+      "RemediationWorkerSecurityGroup",
+      vpc,
+      "Write-capable remediation worker has no inbound path"
+    );
+    const vpcEndpointSecurityGroup = workloadSecurityGroup(
+      this,
+      "VpcEndpointSecurityGroup",
+      vpc,
+      "Shared stateful ingress boundary for AWS PrivateLink endpoints"
+    );
+    for (const workloadGroup of [
+      apiSecurityGroup,
+      auditWorkerSecurityGroup,
+      remediationWorkerSecurityGroup
+    ]) {
+      workloadGroup.connections.allowTo(
+        vpcEndpointSecurityGroup,
+        ec2.Port.tcp(443),
+        "AWS PrivateLink HTTPS"
+      );
+      workloadGroup.addEgressRule(
+        ec2.Peer.prefixList(s3PrefixListId.valueAsString),
+        ec2.Port.tcp(443),
+        "S3 gateway endpoint and ECR image layers"
+      );
+    }
+    for (const workerGroup of [
+      auditWorkerSecurityGroup,
+      remediationWorkerSecurityGroup
+    ]) {
+      workerGroup.addEgressRule(
+        ec2.Peer.prefixList(dynamoDbPrefixListId.valueAsString),
+        ec2.Port.tcp(443),
+        "DynamoDB gateway endpoint"
+      );
+    }
+    for (const readGroup of [apiSecurityGroup, auditWorkerSecurityGroup]) {
+      readGroup.addEgressRule(
+        ec2.Peer.prefixList(dataHubReadEgressPrefixListId.valueAsString),
+        ec2.Port.tcp(443),
+        "Allowlisted read-only DataHub endpoints"
+      );
+      readGroup.addEgressRule(
+        ec2.Peer.prefixList(llmEgressPrefixListId.valueAsString),
+        ec2.Port.tcp(443),
+        "Allowlisted inference endpoint"
+      );
+    }
+    remediationWorkerSecurityGroup.addEgressRule(
+      ec2.Peer.prefixList(dataHubWriteEgressPrefixListId.valueAsString),
+      ec2.Port.tcp(443),
+      "Allowlisted write-enabled DataHub endpoints"
+    );
+
     vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3
     });
@@ -250,7 +419,9 @@ export class ArchonPlatformStack extends Stack {
     ] as const) {
       vpc.addInterfaceEndpoint(name, {
         service,
+        open: false,
         privateDnsEnabled: true,
+        securityGroups: [vpcEndpointSecurityGroup],
         subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }
       });
     }
@@ -266,6 +437,28 @@ export class ArchonPlatformStack extends Stack {
       trafficType: ec2.FlowLogTrafficType.REJECT
     });
 
+    const cloudFrontLogBucket = new s3.Bucket(this, "CloudFrontLogBucket", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
+      accessControl: s3.BucketAccessControl.LOG_DELIVERY_WRITE,
+      versioned: true,
+      lifecycleRules: [
+        {
+          expiration: Duration.days(400),
+          noncurrentVersionExpiration: Duration.days(30)
+        }
+      ],
+      removalPolicy: RemovalPolicy.RETAIN,
+      autoDeleteObjects: false
+    });
+    Tags.of(cloudFrontLogBucket).add(
+      "ArchonBucketRole",
+      "access-log-sink"
+    );
+    Tags.of(cloudFrontLogBucket).add("ArchonBucketPurpose", "access-logs");
+
     const spaBucket = new s3.Bucket(this, "SpaBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.KMS,
@@ -274,6 +467,8 @@ export class ArchonPlatformStack extends Stack {
       enforceSSL: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       versioned: true,
+      serverAccessLogsBucket: cloudFrontLogBucket,
+      serverAccessLogsPrefix: "s3-access/spa/",
       lifecycleRules: [
         {
           noncurrentVersionTransitions: [
@@ -287,6 +482,8 @@ export class ArchonPlatformStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       autoDeleteObjects: false
     });
+    Tags.of(spaBucket).add("ArchonBucketRole", "application");
+    Tags.of(spaBucket).add("ArchonBucketPurpose", "spa");
     Tags.of(spaBucket).add("ArtifactSha256", spaArtifactSha256.valueAsString);
 
     const evidenceBucket = new s3.Bucket(this, "EvidenceBucket", {
@@ -297,6 +494,8 @@ export class ArchonPlatformStack extends Stack {
       enforceSSL: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       versioned: true,
+      serverAccessLogsBucket: cloudFrontLogBucket,
+      serverAccessLogsPrefix: "s3-access/evidence/",
       objectLockEnabled: true,
       objectLockDefaultRetention: s3.ObjectLockRetention.governance(Duration.days(30)),
       lifecycleRules: [
@@ -318,17 +517,8 @@ export class ArchonPlatformStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       autoDeleteObjects: false
     });
-
-    const cloudFrontLogBucket = new s3.Bucket(this, "CloudFrontLogBucket", {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
-      objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
-      accessControl: s3.BucketAccessControl.LOG_DELIVERY_WRITE,
-      lifecycleRules: [{ expiration: Duration.days(400) }],
-      removalPolicy: RemovalPolicy.RETAIN,
-      autoDeleteObjects: false
-    });
+    Tags.of(evidenceBucket).add("ArchonBucketRole", "application");
+    Tags.of(evidenceBucket).add("ArchonBucketPurpose", "evidence");
 
     const approvalTable = retainedTable(this, "ApprovalTable", `${stage}-approvals`, dataKey);
     const idempotencyTable = retainedTable(
@@ -487,15 +677,10 @@ export class ArchonPlatformStack extends Stack {
     llmSecret.grantRead(apiTaskDefinition.executionRole!);
     repository.grantPull(apiTaskDefinition.executionRole!);
 
-    const apiSecurityGroup = new ec2.SecurityGroup(this, "ApiSecurityGroup", {
-      vpc,
-      description: "Only private VPC Link/NLB traffic reaches the Archon API",
-      allowAllOutbound: true
-    });
-    apiSecurityGroup.addIngressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+    nlbSecurityGroup.connections.allowTo(
+      apiSecurityGroup,
       ec2.Port.tcp(8080),
-      "NLB targets preserve a private VPC source address"
+      "Only the private NLB may reach API targets and health checks"
     );
     const apiService = new ecs.FargateService(this, "ApiService", {
       cluster,
@@ -525,6 +710,8 @@ export class ArchonPlatformStack extends Stack {
       vpc,
       internetFacing: false,
       crossZoneEnabled: true,
+      securityGroups: [nlbSecurityGroup],
+      enforceSecurityGroupInboundRulesOnPrivateLinkTraffic: false,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       deletionProtection: isProduction
     });
@@ -719,24 +906,6 @@ export class ArchonPlatformStack extends Stack {
       callbackPolicy(workerCallbackActions)
     );
 
-    const auditWorkerSecurityGroup = new ec2.SecurityGroup(
-      this,
-      "AuditWorkerSecurityGroup",
-      {
-        vpc,
-        description: "Read-only audit worker has no inbound path",
-        allowAllOutbound: true
-      }
-    );
-    const remediationWorkerSecurityGroup = new ec2.SecurityGroup(
-      this,
-      "RemediationWorkerSecurityGroup",
-      {
-      vpc,
-      description: "Write-capable remediation worker has no inbound path",
-      allowAllOutbound: true
-      }
-    );
     const auditWorkerService = new ecs.FargateService(this, "AuditWorkerService", {
       cluster,
       taskDefinition: auditWorkerTaskDefinition,
@@ -1144,6 +1313,15 @@ export class ArchonPlatformStack extends Stack {
       endpointTypes: [apigateway.EndpointType.REGIONAL],
       deployOptions: {
         stageName: stage,
+        cacheClusterEnabled: true,
+        cacheClusterSize: "0.5",
+        methodOptions: {
+          "/api/control-loops/{auditId}/GET": {
+            cacheDataEncrypted: true,
+            cacheTtl: Duration.seconds(2),
+            cachingEnabled: true
+          }
+        },
         accessLogDestination: new apigateway.LogGroupLogDestination(apiAccessLogGroup),
         accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields({
           caller: false,
@@ -1296,7 +1474,9 @@ export class ArchonPlatformStack extends Stack {
         "GET",
         new apigateway.LambdaIntegration(controlFunction, {
           proxy: true,
-          allowTestInvoke: false
+          allowTestInvoke: false,
+          cacheKeyParameters: ["method.request.path.auditId"],
+          cacheNamespace: "audit-status"
         }),
         {
           authorizationType: apigateway.AuthorizationType.NONE,
@@ -1332,6 +1512,28 @@ export class ArchonPlatformStack extends Stack {
       name: `archon-${stage}-api`,
       scope: "REGIONAL",
       defaultAction: { allow: {} },
+      dataProtectionConfig: {
+        dataProtections: [
+          {
+            action: "SUBSTITUTION",
+            excludeRateBasedDetails: false,
+            excludeRuleMatchDetails: false,
+            field: {
+              fieldType: "SINGLE_HEADER",
+              fieldKeys: ["authorization"]
+            }
+          },
+          {
+            action: "SUBSTITUTION",
+            excludeRateBasedDetails: false,
+            excludeRuleMatchDetails: false,
+            field: {
+              fieldType: "SINGLE_HEADER",
+              fieldKeys: ["cookie"]
+            }
+          }
+        ]
+      },
       visibilityConfig: {
         cloudWatchMetricsEnabled: true,
         metricName: `archon-${stage}-api-waf`,
@@ -1348,6 +1550,7 @@ export class ArchonPlatformStack extends Stack {
           statement: {
             rateBasedStatement: {
               aggregateKeyType: "IP",
+              evaluationWindowSec: 300,
               limit: isProduction ? 1_000 : 300
             }
           },
@@ -1359,11 +1562,54 @@ export class ArchonPlatformStack extends Stack {
         }
       ]
     });
-    const webAclAssociation = new wafv2.CfnWebACLAssociation(this, "WebAclAssociation", {
-      resourceArn: `arn:${Aws.PARTITION}:apigateway:${Aws.REGION}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`,
-      webAclArn: webAcl.attrArn
-    });
+    const apiStageArn = `arn:${Aws.PARTITION}:apigateway:${Aws.REGION}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`;
+    const webAclAssociation = new wafv2.CfnWebACLAssociation(
+      this,
+      "WebAclAssociation",
+      {
+        resourceArn: apiStageArn,
+        webAclArn: webAcl.attrArn
+      }
+    );
     webAclAssociation.node.addDependency(api.deploymentStage);
+    const apiWafLogGroup = retainedLogGroup(
+      this,
+      "ApiWafLogGroup",
+      `aws-waf-logs-archon-${stage}-api`,
+      logsKey
+    );
+    const apiWafLogGroupResourceArn = this.formatArn({
+      service: "logs",
+      resource: "log-group",
+      resourceName: apiWafLogGroup.logGroupName,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME
+    });
+    const apiWafLogging = new wafv2.CfnLoggingConfiguration(
+      this,
+      "ApiWafLogging",
+      {
+        resourceArn: webAcl.attrArn,
+        logDestinationConfigs: [apiWafLogGroupResourceArn],
+        loggingFilter: {
+          defaultBehavior: "DROP",
+          filters: [
+            {
+              behavior: "KEEP",
+              conditions: [
+                { actionCondition: { action: "BLOCK" } },
+                { actionCondition: { action: "COUNT" } }
+              ],
+              requirement: "MEETS_ANY"
+            }
+          ]
+        },
+        redactedFields: [
+          { singleHeader: { name: "authorization" } },
+          { singleHeader: { name: "cookie" } }
+        ]
+      }
+    );
+    apiWafLogging.node.addDependency(webAcl, apiWafLogGroup);
 
     const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(
       this,
@@ -1460,6 +1706,7 @@ export class ArchonPlatformStack extends Stack {
       defaultRootObject: "index.html",
       certificate: viewerCertificate,
       domainNames: [cloudFrontDomainName.valueAsString],
+      webAclId: cloudFrontWebAclArn.valueAsString,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_3_2025,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
@@ -1742,6 +1989,10 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonApplicationUrl", `https://${cloudFrontDomainName.valueAsString}`);
     output(this, "ArchonApiUrl", preferredApiUrl);
     output(this, "ArchonApiInvokeUrl", api.url);
+    output(this, "ArchonApiStageArn", apiStageArn);
+    output(this, "ArchonRegionalWebAclArn", webAcl.attrArn);
+    output(this, "ArchonRegionalWafLogGroupName", apiWafLogGroup.logGroupName);
+    output(this, "ArchonRegionalWafLogKeyArn", logsKey.keyArn);
     output(this, "ArchonUserPoolId", userPool.userPoolId);
     output(this, "ArchonUserPoolClientId", userPoolClient.userPoolClientId);
     output(this, "ArchonCognitoHostedUiOrigin", userPoolDomain.baseUrl());
@@ -1778,6 +2029,25 @@ export class ArchonPlatformStack extends Stack {
       "ArchonRemediationWorkerServiceName",
       remediationWorkerService.serviceName
     );
+    output(this, "ArchonApiSecurityGroupId", apiSecurityGroup.securityGroupId);
+    output(this, "ArchonNlbSecurityGroupId", nlbSecurityGroup.securityGroupId);
+    output(this, "ArchonPrivateNlbArn", loadBalancer.loadBalancerArn);
+    output(this, "ArchonVpcId", vpc.vpcId);
+    output(
+      this,
+      "ArchonAuditWorkerSecurityGroupId",
+      auditWorkerSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonRemediationWorkerSecurityGroupId",
+      remediationWorkerSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonVpcEndpointSecurityGroupId",
+      vpcEndpointSecurityGroup.securityGroupId
+    );
     output(this, "ArchonReadSecretArn", readSecret.secretArn);
     output(this, "ArchonWriteSecretArn", writeSecret.secretArn);
     output(this, "ArchonLlmSecretArn", llmSecret.secretArn);
@@ -1809,6 +2079,43 @@ function retainedLogGroup(
     retention: logs.RetentionDays.ONE_YEAR,
     removalPolicy: RemovalPolicy.RETAIN
   });
+}
+
+function grantCloudWatchLogsKeyAccess(
+  scope: Construct,
+  key: kms.Key,
+  logGroupNamePatterns: readonly string[]
+): void {
+  const stack = Stack.of(scope);
+  const logGroupArnPatterns = logGroupNamePatterns.map((logGroupName) =>
+    stack.formatArn({
+      service: "logs",
+      resource: "log-group",
+      resourceName: logGroupName,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME
+    })
+  );
+  key.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: "AllowCloudWatchLogsEncryption",
+      principals: [
+        new iam.ServicePrincipal(`logs.${Aws.REGION}.${Aws.URL_SUFFIX}`)
+      ],
+      actions: [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:Describe*"
+      ],
+      resources: ["*"],
+      conditions: {
+        ArnLike: {
+          "kms:EncryptionContext:aws:logs:arn": logGroupArnPatterns
+        }
+      }
+    })
+  );
 }
 
 function retainedTable(
@@ -1975,6 +2282,35 @@ function httpsUrlParameter(
     maxLength: 2048,
     allowedPattern: "^https://[^\\s]+$",
     constraintDescription: "must be an HTTPS URL"
+  });
+}
+
+function prefixListIdParameter(
+  scope: Construct,
+  id: string,
+  description: string
+): CfnParameter {
+  return new CfnParameter(scope, id, {
+    type: "String",
+    description,
+    allowedPattern: "^pl-(?:[0-9a-f]{8}|[0-9a-f]{17})$",
+    constraintDescription:
+      "must be a managed prefix-list ID such as pl-0123456789abcdef0"
+  });
+}
+
+function workloadSecurityGroup(
+  scope: Construct,
+  id: string,
+  vpc: ec2.IVpc,
+  description: string
+): ec2.SecurityGroup {
+  return new ec2.SecurityGroup(scope, id, {
+    vpc,
+    description,
+    allowAllOutbound: false,
+    allowAllIpv6Outbound: false,
+    disableInlineRules: true
   });
 }
 

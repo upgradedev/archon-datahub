@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { App, Tags } from "aws-cdk-lib";
+import { ArchonEdgeStack } from "../lib/archon-edge-stack";
 import { ArchonPlatformStack, ArchonRegistryStack } from "../lib/archon-stack";
 
 const app = new App();
@@ -24,6 +25,15 @@ const registry = new ArchonRegistryStack(app, "Archon-Registry", {
   description: "Shared immutable container registry for Archon build-once promotion"
 });
 
+const edge = new ArchonEdgeStack(app, `Archon-${stage}-Edge`, {
+  env: {
+    account: env.account,
+    region: "us-east-1"
+  },
+  stage,
+  description: `Archon DataHub ${stage} global CloudFront certificate and WAF`
+});
+
 const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
   env,
   stage,
@@ -32,7 +42,7 @@ const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
 });
 platform.addStackDependency(registry);
 
-for (const stack of [registry, platform]) {
+for (const stack of [registry, edge, platform]) {
   Tags.of(stack).add("Application", "archon-datahub");
   Tags.of(stack).add("ManagedBy", "aws-cdk");
   Tags.of(stack).add("Environment", stack === registry ? "shared" : stage);

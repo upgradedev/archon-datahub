@@ -83,6 +83,48 @@ describe("Archon AWS reference architecture", () => {
         AllowedPattern: "^Z[A-Z0-9]{1,31}$"
       })
     );
+    expect(json.Parameters.CloudFrontWebAclArn).toEqual(
+      expect.objectContaining({
+        Default:
+          "arn:aws:wafv2:us-east-1:000000000000:global/webacl/required-override/00000000-0000-0000-0000-000000000000",
+        AllowedPattern:
+          "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]{1,128}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      })
+    );
+    expect(json.Rules.RequireCloudFrontWebAclOverride).toEqual({
+      Assertions: [
+        {
+          Assert: {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  { Ref: "CloudFrontWebAclArn" },
+                  "arn:aws:wafv2:us-east-1:000000000000:global/webacl/required-override/00000000-0000-0000-0000-000000000000"
+                ]
+              }
+            ]
+          },
+          AssertDescription:
+            "CloudFrontWebAclArn must be overridden with the deployed Archon edge-stack Web ACL ARN"
+        }
+      ]
+    });
+    expect(json.Parameters.CloudFrontWebAclArn.Default).toMatch(
+      new RegExp(json.Parameters.CloudFrontWebAclArn.AllowedPattern)
+    );
+    for (const parameterName of [
+      "S3PrefixListId",
+      "DynamoDbPrefixListId",
+      "DataHubReadEgressPrefixListId",
+      "DataHubWriteEgressPrefixListId",
+      "LlmEgressPrefixListId"
+    ]) {
+      expect(json.Parameters[parameterName]).toEqual(
+        expect.objectContaining({
+          AllowedPattern: "^pl-(?:[0-9a-f]{8}|[0-9a-f]{17})$"
+        })
+      );
+    }
     expect(json.Parameters.DataHubReadMcpUrl).toEqual(
       expect.objectContaining({
         AllowedPattern: "^https://[^\\s]+$"
@@ -110,9 +152,12 @@ describe("Archon AWS reference architecture", () => {
 
   test("resolves exactly two VPC availability zones at deploy time", () => {
     const { platform } = templates();
+    const subnets = Object.values(
+      platform.findResources("AWS::EC2::Subnet")
+    ) as any[];
     const subnetAvailabilityZones = new Set(
-      Object.values(platform.findResources("AWS::EC2::Subnet")).map(
-        (resource: any) => JSON.stringify(resource.Properties.AvailabilityZone)
+      subnets.map((resource) =>
+        JSON.stringify(resource.Properties.AvailabilityZone)
       )
     );
     expect(subnetAvailabilityZones).toEqual(
@@ -125,9 +170,14 @@ describe("Archon AWS reference architecture", () => {
         })
       ])
     );
+    expect(
+      subnets.every(
+        (resource) => resource.Properties.MapPublicIpOnLaunch === false
+      )
+    ).toBe(true);
   });
 
-  test("keeps SPA and evidence private, encrypted, versioned, and retained", () => {
+  test("keeps every S3 store private, versioned, retained, and audit logged", () => {
     const { platform } = templates();
     platform.hasResourceProperties("AWS::S3::Bucket", {
       PublicAccessBlockConfiguration: {
@@ -156,6 +206,64 @@ describe("Archon AWS reference architecture", () => {
         (resource: any) => resource.DeletionPolicy === "Retain"
       )
     ).toHaveLength(3);
+    const buckets = Object.values(
+      platform.findResources("AWS::S3::Bucket")
+    ) as any[];
+    expect(
+      buckets.every(
+        (resource) =>
+          resource.Properties.VersioningConfiguration?.Status === "Enabled"
+      )
+    ).toBe(true);
+    const serverAccessLoggedBuckets = buckets.filter(
+      (resource) => resource.Properties.LoggingConfiguration
+    );
+    expect(serverAccessLoggedBuckets).toHaveLength(2);
+    expect(
+      serverAccessLoggedBuckets
+        .map(
+          (resource) =>
+            resource.Properties.LoggingConfiguration.LogFilePrefix
+        )
+        .sort()
+    ).toEqual(["s3-access/evidence/", "s3-access/spa/"]);
+    expect(
+      buckets
+        .map((resource) =>
+          resource.Properties.Tags?.find(
+            (tag: { Key: string }) => tag.Key === "ArchonBucketRole"
+          )?.Value
+        )
+        .sort()
+    ).toEqual(["access-log-sink", "application", "application"]);
+    expect(
+      buckets
+        .map((resource) =>
+          resource.Properties.Tags?.find(
+            (tag: { Key: string }) => tag.Key === "ArchonBucketPurpose"
+          )?.Value
+        )
+        .sort()
+    ).toEqual(["access-logs", "evidence", "spa"]);
+    const applicationBuckets = buckets.filter((resource) =>
+      resource.Properties.Tags?.some(
+        (tag: { Key: string; Value: string }) =>
+          tag.Key === "ArchonBucketRole" && tag.Value === "application"
+      )
+    );
+    expect(applicationBuckets).toHaveLength(2);
+    expect(
+      applicationBuckets.every(
+        (resource) =>
+          resource.Properties.BucketEncryption.ServerSideEncryptionConfiguration.every(
+            (configuration: any) =>
+              configuration.BucketKeyEnabled === true &&
+              configuration.ServerSideEncryptionByDefault.SSEAlgorithm ===
+                "aws:kms" &&
+              configuration.ServerSideEncryptionByDefault.KMSMasterKeyID
+          )
+      )
+    ).toBe(true);
   });
 
   test("serves the private SPA through CloudFront OAC and routes same-origin API", () => {
@@ -184,6 +292,7 @@ describe("Archon AWS reference architecture", () => {
         HttpVersion: "http2and3",
         Enabled: true,
         Aliases: [{ Ref: "CloudFrontDomainName" }],
+        WebACLId: { Ref: "CloudFrontWebAclArn" },
         ViewerCertificate: Match.objectLike({
           AcmCertificateArn: Match.anyValue(),
           SslSupportMethod: "sni-only",
@@ -250,6 +359,108 @@ describe("Archon AWS reference architecture", () => {
     expect(runtimeConfigBehavior.TargetOriginId).toEqual(
       distribution.Properties.DistributionConfig.DefaultCacheBehavior
         .TargetOriginId
+    );
+  });
+
+  test("uses workload-specific prefix-list egress and one locked PrivateLink boundary", () => {
+    const { platform } = templates();
+    const securityGroups = Object.values(
+      platform.findResources("AWS::EC2::SecurityGroup")
+    ) as any[];
+    const standaloneEgress = Object.values(
+      platform.findResources("AWS::EC2::SecurityGroupEgress")
+    ) as any[];
+    const serializedSecurityRules = JSON.stringify([
+      ...securityGroups.map((resource) => resource.Properties.SecurityGroupEgress),
+      ...standaloneEgress.map((resource) => resource.Properties)
+    ]);
+    expect(serializedSecurityRules).not.toContain('"CidrIp":"0.0.0.0/0"');
+    expect(serializedSecurityRules).not.toContain('"CidrIpv6":"::/0"');
+    const noTrafficEgress = standaloneEgress.filter(
+      (resource) =>
+        resource.Properties.CidrIp === "255.255.255.255/32" &&
+        resource.Properties.IpProtocol === "icmp"
+    );
+    expect(noTrafficEgress).toHaveLength(1);
+    expect(noTrafficEgress[0]!.Properties).toEqual(
+      expect.objectContaining({
+        CidrIp: "255.255.255.255/32",
+        FromPort: 252,
+        IpProtocol: "icmp",
+        ToPort: 86
+      })
+    );
+    platform.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      {
+        Scheme: "internal",
+        Type: "network",
+        EnforceSecurityGroupInboundRulesOnPrivateLinkTraffic: "off",
+        SecurityGroups: [Match.anyValue()]
+      }
+    );
+    const apiIngressRules = Object.values(
+      platform.findResources("AWS::EC2::SecurityGroupIngress")
+    ).filter(
+      (resource: any) =>
+        resource.Properties.IpProtocol === "tcp" &&
+        resource.Properties.FromPort === 8080 &&
+        resource.Properties.ToPort === 8080
+    ) as any[];
+    expect(apiIngressRules).toHaveLength(1);
+    expect(JSON.stringify(apiIngressRules[0]!.Properties)).toContain(
+      "NlbSecurityGroup"
+    );
+    expect(apiIngressRules[0]!.Properties.CidrIp).toBeUndefined();
+    const nlbTargetEgressRules = standaloneEgress.filter(
+      (resource) =>
+        resource.Properties.IpProtocol === "tcp" &&
+        resource.Properties.FromPort === 8080 &&
+        resource.Properties.ToPort === 8080
+    );
+    expect(nlbTargetEgressRules).toHaveLength(1);
+    expect(JSON.stringify(nlbTargetEgressRules[0]!.Properties)).toContain(
+      "ApiSecurityGroup"
+    );
+    expect(nlbTargetEgressRules[0]!.Properties.CidrIp).toBeUndefined();
+
+    const prefixListRefs = standaloneEgress
+      .map((resource) => resource.Properties.DestinationPrefixListId?.Ref)
+      .filter(Boolean);
+    expect(
+      prefixListRefs.filter((value) => value === "S3PrefixListId")
+    ).toHaveLength(3);
+    expect(
+      prefixListRefs.filter((value) => value === "DynamoDbPrefixListId")
+    ).toHaveLength(2);
+    expect(
+      prefixListRefs.filter(
+        (value) => value === "DataHubReadEgressPrefixListId"
+      )
+    ).toHaveLength(2);
+    expect(
+      prefixListRefs.filter(
+        (value) => value === "DataHubWriteEgressPrefixListId"
+      )
+    ).toHaveLength(1);
+    expect(
+      prefixListRefs.filter((value) => value === "LlmEgressPrefixListId")
+    ).toHaveLength(2);
+
+    const interfaceEndpoints = Object.values(
+      platform.findResources("AWS::EC2::VPCEndpoint")
+    ).filter(
+      (resource: any) => resource.Properties.VpcEndpointType === "Interface"
+    ) as any[];
+    expect(interfaceEndpoints).toHaveLength(7);
+    const endpointSecurityGroupRefs = new Set(
+      interfaceEndpoints.map((resource) =>
+        JSON.stringify(resource.Properties.SecurityGroupIds)
+      )
+    );
+    expect(endpointSecurityGroupRefs.size).toBe(1);
+    expect([...endpointSecurityGroupRefs][0]).toContain(
+      "VpcEndpointSecurityGroup"
     );
   });
 
@@ -326,6 +537,21 @@ describe("Archon AWS reference architecture", () => {
       }
     });
     platform.resourceCountIs("Custom::VpcRestrictDefaultSG", 1);
+    const functions = Object.values(
+      platform.findResources("AWS::Lambda::Function")
+    ) as any[];
+    expect(functions).toHaveLength(4);
+    expect(
+      functions.every(
+        (resource) => resource.Properties.TracingConfig?.Mode === "Active"
+      )
+    ).toBe(true);
+    expect(
+      JSON.stringify(platform.findResources("AWS::IAM::Role"))
+    ).toContain("xray:PutTraceSegments");
+    expect(
+      JSON.stringify(platform.findResources("AWS::IAM::Role"))
+    ).toContain("xray:PutTelemetryRecords");
   });
 
   test("exposes capability-scoped async start and status through a read-only control Lambda", () => {
@@ -364,6 +590,25 @@ describe("Archon AWS reference architecture", () => {
     );
     expect(statusMethod.Properties.RequestParameters).toEqual({
       "method.request.path.auditId": true
+    });
+    expect(statusMethod.Properties.Integration).toEqual(
+      expect.objectContaining({
+        CacheKeyParameters: ["method.request.path.auditId"],
+        CacheNamespace: "audit-status"
+      })
+    );
+    platform.hasResourceProperties("AWS::ApiGateway::Stage", {
+      CacheClusterEnabled: true,
+      CacheClusterSize: "0.5",
+      MethodSettings: Match.arrayWith([
+        Match.objectLike({
+          ResourcePath: "/~1api~1control-loops~1{auditId}",
+          HttpMethod: "GET",
+          CacheDataEncrypted: true,
+          CacheTtlInSeconds: 2,
+          CachingEnabled: true
+        })
+      ])
     });
 
     const iamPolicies = Object.values(
@@ -537,14 +782,40 @@ describe("Archon AWS reference architecture", () => {
       KmsMasterKeyId: Match.anyValue(),
       RedrivePolicy: Match.anyValue()
     });
-    for (const queueName of [
+    const queues = platform.findResources("AWS::SQS::Queue") as Record<
+      string,
+      any
+    >;
+    const queueByName = new Map(
+      Object.entries(queues).map(([logicalId, resource]) => [
+        resource.Properties.QueueName,
+        { logicalId, resource }
+      ])
+    );
+    expect([...queueByName.keys()].sort()).toEqual([
+      "archon-staging-approval-dlq",
+      "archon-staging-approval-events",
+      "archon-staging-audit-dlq",
       "archon-staging-audit-jobs",
+      "archon-staging-remediation-dlq",
       "archon-staging-remediation-jobs"
-    ]) {
-      platform.hasResourceProperties("AWS::SQS::Queue", {
-        QueueName: queueName,
-        VisibilityTimeout: 300
+    ]);
+    for (const [sourceName, dlqName] of [
+      ["archon-staging-audit-jobs", "archon-staging-audit-dlq"],
+      ["archon-staging-approval-events", "archon-staging-approval-dlq"],
+      [
+        "archon-staging-remediation-jobs",
+        "archon-staging-remediation-dlq"
+      ]
+    ] as const) {
+      const source = queueByName.get(sourceName)!;
+      const dlq = queueByName.get(dlqName)!;
+      expect(source.resource.Properties.VisibilityTimeout).toBe(300);
+      expect(source.resource.Properties.RedrivePolicy).toEqual({
+        deadLetterTargetArn: { "Fn::GetAtt": [dlq.logicalId, "Arn"] },
+        maxReceiveCount: 5
       });
+      expect(dlq.resource.Properties.RedrivePolicy).toBeUndefined();
     }
     platform.resourceCountIs("AWS::DynamoDB::Table", 2);
     platform.hasResourceProperties("AWS::DynamoDB::Table", {
@@ -701,6 +972,122 @@ describe("Archon AWS reference architecture", () => {
       ).toBe("DISABLED");
     }
     platform.resourceCountIs("AWS::WAFv2::WebACL", 1);
+    platform.hasResourceProperties("AWS::WAFv2::WebACL", {
+      Scope: "REGIONAL",
+      DataProtectionConfig: {
+        DataProtections: [
+          {
+            Action: "SUBSTITUTION",
+            ExcludeRateBasedDetails: false,
+            ExcludeRuleMatchDetails: false,
+            Field: {
+              FieldType: "SINGLE_HEADER",
+              FieldKeys: ["authorization"]
+            }
+          },
+          {
+            Action: "SUBSTITUTION",
+            ExcludeRateBasedDetails: false,
+            ExcludeRuleMatchDetails: false,
+            Field: {
+              FieldType: "SINGLE_HEADER",
+              FieldKeys: ["cookie"]
+            }
+          }
+        ]
+      }
+    });
+    const regionalWebAcl = Object.values(
+      platform.findResources("AWS::WAFv2::WebACL")
+    )[0] as any;
+    for (const name of [
+      "AWSManagedRulesAmazonIpReputationList",
+      "AWSManagedRulesCommonRuleSet",
+      "AWSManagedRulesKnownBadInputsRuleSet"
+    ]) {
+      const managedRule = regionalWebAcl.Properties.Rules.find(
+        (rule: any) => rule.Name === name
+      );
+      expect(managedRule.Statement.ManagedRuleGroupStatement).toEqual({
+        Name: name,
+        VendorName: "AWS"
+      });
+    }
+    const stagingRateRule = regionalWebAcl.Properties.Rules.find(
+      (rule: any) => rule.Name === "PerIpRateLimit"
+    );
+    expect(stagingRateRule.Statement.RateBasedStatement).toEqual({
+      AggregateKeyType: "IP",
+      EvaluationWindowSec: 300,
+      Limit: 300
+    });
+    platform.hasResourceProperties("AWS::Logs::LogGroup", {
+      LogGroupName: "aws-waf-logs-archon-staging-api",
+      KmsKeyId: Match.anyValue(),
+      RetentionInDays: 365
+    });
+    platform.hasResourceProperties("AWS::WAFv2::LoggingConfiguration", {
+      LogDestinationConfigs: [Match.anyValue()],
+      LoggingFilter: {
+        DefaultBehavior: "DROP",
+        Filters: [
+          {
+            Behavior: "KEEP",
+            Conditions: [
+              { ActionCondition: { Action: "BLOCK" } },
+              { ActionCondition: { Action: "COUNT" } }
+            ],
+            Requirement: "MEETS_ANY"
+          }
+        ]
+      },
+      RedactedFields: [
+        { SingleHeader: { Name: "authorization" } },
+        { SingleHeader: { Name: "cookie" } }
+      ],
+      ResourceArn: Match.anyValue()
+    });
+    const logsKeyAlias = Object.values(
+      platform.findResources("AWS::KMS::Alias")
+    ).find(
+      (resource: any) =>
+        resource.Properties.AliasName === "alias/archon/staging/logs"
+    ) as any;
+    expect(logsKeyAlias).toBeDefined();
+    const logsKeyLogicalId =
+      logsKeyAlias.Properties.TargetKeyId.Ref ??
+      logsKeyAlias.Properties.TargetKeyId["Fn::GetAtt"]?.[0];
+    const logsKey = platform.findResources("AWS::KMS::Key")[
+      logsKeyLogicalId
+    ] as any;
+    expect(logsKey).toBeDefined();
+    const logsKeyStatements = logsKey.Properties.KeyPolicy.Statement;
+    const cloudWatchLogsStatement = logsKeyStatements.find(
+      (statement: any) => statement.Sid === "AllowCloudWatchLogsEncryption"
+    );
+    expect(cloudWatchLogsStatement).toBeDefined();
+    expect(cloudWatchLogsStatement.Action).toEqual([
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*"
+    ]);
+    expect(JSON.stringify(cloudWatchLogsStatement.Principal)).toContain(
+      "logs."
+    );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
+      "kms:EncryptionContext:aws:logs:arn"
+    );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
+      "aws-waf-logs-archon-staging-api"
+    );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
+      "/archon/staging/*"
+    );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).not.toContain(
+      "kms:ViaService"
+    );
     // Ten explicit operational alarms plus upper/lower alarms generated by
     // each of the two worker step-scaling policies.
     platform.resourceCountIs("AWS::CloudWatch::Alarm", 14);
@@ -714,6 +1101,10 @@ describe("Archon AWS reference architecture", () => {
       "ArchonApplicationUrl",
       "ArchonApiUrl",
       "ArchonApiInvokeUrl",
+      "ArchonApiStageArn",
+      "ArchonRegionalWebAclArn",
+      "ArchonRegionalWafLogGroupName",
+      "ArchonRegionalWafLogKeyArn",
       "ArchonUserPoolId",
       "ArchonUserPoolClientId",
       "ArchonCognitoHostedUiOrigin",
@@ -734,6 +1125,13 @@ describe("Archon AWS reference architecture", () => {
       "ArchonApiServiceName",
       "ArchonAuditWorkerServiceName",
       "ArchonRemediationWorkerServiceName",
+      "ArchonApiSecurityGroupId",
+      "ArchonNlbSecurityGroupId",
+      "ArchonPrivateNlbArn",
+      "ArchonVpcId",
+      "ArchonAuditWorkerSecurityGroupId",
+      "ArchonRemediationWorkerSecurityGroupId",
+      "ArchonVpcEndpointSecurityGroupId",
       "ArchonReadSecretArn",
       "ArchonWriteSecretArn",
       "ArchonLlmSecretArn",
@@ -804,6 +1202,10 @@ describe("Archon AWS reference architecture", () => {
     const rateLimitRule = webAcl.Properties.Rules.find(
       (rule: any) => rule.Name === "PerIpRateLimit"
     );
-    expect(rateLimitRule.Statement.RateBasedStatement.Limit).toBe(1_000);
+    expect(rateLimitRule.Statement.RateBasedStatement).toEqual({
+      AggregateKeyType: "IP",
+      EvaluationWindowSec: 300,
+      Limit: 1_000
+    });
   });
 });

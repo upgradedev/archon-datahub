@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import {
   canaryAuthBindingsDigest,
   canaryEndpointBindingsDigest,
+  parseCanaryApprovalBindings,
   parseCanaryIdentity,
   parseRuntimeConfig,
   rollbackDispositionForObservedDigest,
+  verifyCanaryApprovalBindings,
   verifyRecoveryManifest,
   type CanaryIdentity,
   type RecoveryManifest,
@@ -195,6 +197,64 @@ test("rollback recovery is content-addressed and rejects target tampering", () =
       ),
     /invalid or does not match/u
   );
+});
+
+test("protected approval bindings match the exact recovery artifact", () => {
+  const identity = parseCanaryIdentity(environment());
+  const manifest = recovery(identity);
+  const source = {
+    CANARY_EXPECTED_AUDIT_ID: manifest.auditId,
+    CANARY_EXPECTED_PLAN_DIGEST: manifest.planDigest,
+    CANARY_EXPECTED_RECOVERY_DIGEST: manifest.recoveryDigest,
+  };
+  const bindings = parseCanaryApprovalBindings(source);
+  assert.deepEqual(bindings, {
+    auditId: manifest.auditId,
+    planDigest: manifest.planDigest,
+    recoveryDigest: manifest.recoveryDigest,
+  });
+  assert.doesNotThrow(() =>
+    verifyCanaryApprovalBindings(manifest, bindings)
+  );
+
+  assert.throws(
+    () =>
+      parseCanaryApprovalBindings({
+        ...source,
+        CANARY_EXPECTED_AUDIT_ID: "not-an-audit-id",
+      }),
+    /protected approval bindings are invalid/u
+  );
+  const mismatches: Array<{
+    label: string;
+    bindings: typeof bindings;
+  }> = [
+    {
+      label: "audit ID",
+      bindings: { ...bindings, auditId: "c".repeat(64) },
+    },
+    {
+      label: "plan digest",
+      bindings: {
+        ...bindings,
+        planDigest: digest("different-approved-plan"),
+      },
+    },
+    {
+      label: "recovery digest",
+      bindings: {
+        ...bindings,
+        recoveryDigest: digest("different-recovery-artifact"),
+      },
+    },
+  ];
+  for (const mismatch of mismatches) {
+    assert.throws(
+      () => verifyCanaryApprovalBindings(manifest, mismatch.bindings),
+      /does not match the protected approval bindings/u,
+      `${mismatch.label} must remain bound to the protected gate`
+    );
+  }
 });
 
 test("rollback is idempotent for exact before state and rejects divergence", () => {

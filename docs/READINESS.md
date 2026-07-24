@@ -59,7 +59,7 @@ The five official Stage Two criteria are equally weighted.
 | Official criterion | Present in source | Current status | Proof still required |
 |---|---|---|---|
 | **1. Use of DataHub** | Official MCP read adapter; direct GMS aspect-version read; stable-source provenance handling; lineage blast radius; separate official `add_tags`/`remove_tags` write adapter; G6 governed writeback loop. | **Implemented / source-complete; CI-unverified; live path user-gated.** | Run against a real DataHub with retained aspect versions and stable pipeline identities; plant both a cross-source contradiction and a G6 gap; retain sanitized evidence of MCP reads, version recovery, blast radius, approval-bound canary tag write, read-after-write verification, and separately approved rollback. |
-| **2. Technical Execution** | Deterministic audit/remediation code; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, continued lifecycle polling, and sanitized terminal proof in `web/`; deployment-generated no-store auth runtime config; CI, CodeQL, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; CI/CD execution unverified.** | Obtain branch CI, CodeQL, container, web, worker, infra, security, load, SBOM, scan, and attestation evidence. Configure protected environments, narrow one-dataset `DATAHUB_DEMO_QUERY` values, separate hosted DataHub read/write MCP endpoints, distinct tokens, and AWS OIDC. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
+| **2. Technical Execution** | Deterministic audit/remediation code; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, continued lifecycle polling, and sanitized terminal proof in `web/`; deployment-generated no-store auth runtime config; self-contained `us-east-1` certificate/CloudFront-WAF edge stack; regional API WAF; default-deny prefix-list-scoped workload networking with no Fargate public IP; versioned S3 access logging; encrypted two-second status cache; active X-Ray; CI, CodeQL, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; CI/CD execution unverified.** | Obtain branch CI, CodeQL, container, web, worker, infra, security, load, SBOM, scan, and attestation evidence. Configure protected environments, narrow one-dataset `DATAHUB_DEMO_QUERY` values, separate hosted DataHub read/write MCP endpoints, distinct tokens, the three external endpoint prefix lists, and AWS OIDC. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
 | **3. Originality** | “Audit the catalog itself” positioning; temporal/provenance contradictions rather than generic catalog chat; lineage-aware blast radius; evidence dossier, human approval, exact-action catalog, verified writeback, and hash-chained receipt. | **Implemented / source-complete; evaluation proof missing.** | Demonstrate the same planted defects against DataHub’s out-of-box behavior and Archon; document what Analytics Agent/MCP already provide versus Archon’s added control loop; retain a reproducible before/after result without claiming statistical quality that has not been measured. |
 | **4. Real-World Usefulness** | Governance checks, current-view drift, version-history conflict detection, blast radius, JSON/Markdown/SARIF exporters, safe remediation contracts, dashboard source, and production-oriented AWS topology. | **Implemented / source-complete; operational value user-gated.** | Complete one realistic catalog incident end-to-end on live infrastructure; show a practitioner-readable report and verified remediation receipt; prove authentication, least-privilege read/write separation, failure behavior, audit retention, and rollback. |
 | **5. Submission Quality** | Public-facing README and design/research documents; UI source; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Partially source-complete; final artifacts deferred-to-end.** | Public working-project URL, final screenshots, concise English setup/testing instructions, sample outputs, sub-three-minute public demo video, required Devpost text, and consistency review across every claim. |
@@ -86,14 +86,15 @@ The five official Stage Two criteria are equally weighted.
 
 - Push the final branch and retain the exact commit and run URLs.
 - Require the ordinary CI, CodeQL, and supply-chain workflows to finish for that commit.
-- Retain the automatic v3 supply-chain attestation; before promotion, use the daily rescan
+- Retain the automatic v4 supply-chain attestation; before promotion, use the daily rescan
   or dispatch the supply-chain workflow with the exact successful CI run ID and 40-character
   SHA so the original three artifacts have vulnerability intelligence no older than 24 hours.
 - Retain only CI-generated coverage/readiness, container, deterministic web archive, CDK
   assembly/templates, Guard results, Trivy/CodeQL SARIF, SBOM, CVE scan, and attestation
   evidence.
-- Treat every security result as a pipeline result; workstation and manual scanner output
-  must not substitute for a CI/CD gate.
+- Treat every security result as a pipeline result. Security verification and release
+  evidence are produced exclusively by CI/CD; workstation builds, local synths, manual
+  scanners, and copied reports must not substitute for or supplement a CI/CD gate.
 
 ### 2. Real DataHub evidence
 
@@ -116,9 +117,32 @@ The five official Stage Two criteria are equally weighted.
 
 - Configure an AWS account, GitHub OIDC trust, protected environments, budgets, and
   deployment secrets.
-- Configure `ARCHON_CLOUDFRONT_DOMAIN_NAME`, a matching validated
-  `ARCHON_CLOUDFRONT_CERTIFICATE_ARN` from `us-east-1`, and the owning public
-  `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` in both protected GitHub environments.
+- Ensure each environment's OIDC deployment role can perform the live, read-only
+  evidence calls used by the fail-closed gates, including `ec2:DescribeVpcs`,
+  `ec2:DescribeSecurityGroups`, `ec2:DescribeSecurityGroupRules`,
+  `elasticloadbalancing:DescribeLoadBalancers`, the required WAFv2 getters, and
+  `logs:DescribeLogGroups`, `kms:DescribeKey`, and
+  `kms:GetKeyRotationStatus`. A successful CloudFormation deployment without
+  these independently observed contracts is not promotable.
+- CDK-bootstrap that account in both the selected workload region and `us-east-1`; the
+  edge-first deployment cannot create its global certificate/WAF resources otherwise.
+- Configure `ARCHON_CLOUDFRONT_DOMAIN_NAME` and its owning public
+  `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` in both protected GitHub environments. Do not
+  configure a certificate ARN: `Archon-<stage>-Edge` creates and DNS-validates the ACM
+  certificate in `us-east-1`, creates the CloudFront-scope WAF/logging resources, and
+  hands their validated outputs to the regional platform deployment.
+- Configure the account-owned customer-managed
+  `ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID`,
+  `ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID`, and
+  `ARCHON_LLM_EGRESS_PREFIX_LIST_ID` values in both protected environments. Each must
+  be a complete, non-empty IPv4 list with entries no broader than `/8` and the exact
+  `ArchonEgressScope` tag expected by the deployment gate; their `MaxEntries` weights,
+  together with the AWS service lists, must remain within the pipeline's conservative
+  60-rule outbound security-group quota.
+- Do not configure S3/DynamoDB prefix-list variables. The pipeline must resolve the exact
+  AWS-owned regional `com.amazonaws.<region>.s3` and
+  `com.amazonaws.<region>.dynamodb` IDs and pass them to the platform stack separately
+  from the three external endpoint allowlists.
 - Configure a trimmed, non-wildcard `DATAHUB_DEMO_QUERY` in staging and production that
   resolves to exactly one safe demo dataset; retain its digest-bound smoke evidence.
 - Allow deployment only from a successful default-branch CI run and matching full SHA.
@@ -127,10 +151,14 @@ The five official Stage Two criteria are equally weighted.
 - Verify CloudFront/S3, Cognito code + PKCE, the exact no-store
   `/runtime-config.json`, scoped API Gateway authorization, Fargate,
   queues/state machine, 90-day decided-approval retention, evidence retention, terminal
-  receipt/evidence projection, alarms, public audit, negative authorization/schema cases,
-  and rollback.
-- Retain the public application URL and sanitized deployment receipt. Keep the service
-  available for the full judging period.
+  receipt/evidence projection, both WAF associations, sampled-data protection, filtered
+  logging configurations and encrypted retained log groups, least-privilege
+  security-group egress, disabled public-IP assignment, versioning/server-access logging,
+  the encrypted two-second status cache, active X-Ray, alarms, public audit, negative
+  authorization/schema cases, and rollback.
+- Retain the public application URL and sanitized deployment receipt, including its
+  digest-bound edge-security, regional-WAF, and network-egress contracts plus edge and
+  regional CDK outputs. Keep the service available for the full judging period.
 
 ### 4. Judge evidence and final submission
 
@@ -145,13 +173,15 @@ The five official Stage Two criteria are equally weighted.
 CI definitions now cover application build/test, web build/test and deterministic packaging,
 CDK typecheck/assertions/coverage/synth, nested Lambda packaging, dependency audits,
 project-owned CloudFormation Guard policy tests, Trivy IaC SARIF, container checks, CodeQL,
-load/SLO, exact-artifact daily/manual SBOM/CVE rescans, and freshness-bound v3 attestations.
+load/SLO, exact-artifact daily/manual SBOM/CVE rescans, and freshness-bound v4 attestations.
 **None is declared green for this branch until the corresponding remote run completes.**
 
 The CD definition now covers a successful-default-branch source gate, artifact-envelope and
 inner-digest verification, short-lived AWS OIDC credentials, account allow-listing,
-semantic v3 attestation verification with a 24-hour database-retrieval limit,
-staging deployment, secret rotation, ECR scan, exact no-store auth
+semantic v4 attestation verification with a 24-hour database-retrieval limit,
+edge-first certificate/WAF deployment and validated platform handoff, AWS-owned regional
+S3/DynamoDB prefix-list resolution, validation of the three account-owned external egress
+lists, staging deployment, versioned secret refresh, ECR scan, exact no-store auth
 runtime-config publication, control-Lambda dependency/SCA gates, fail-closed hosted
 start/status smoke contracts, protected OWASP
 ZAP DAST, production approval, same-digest promotion, rollback selection, and

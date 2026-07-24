@@ -39,6 +39,7 @@ const CONTROL_START_SCHEMA = "archon.control-loop-start/v1";
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const RELEASE_SHA = /^[a-f0-9]{40}$/u;
 const AUDIT_ID = /^[a-f0-9]{64}$/u;
+const APPROVAL_ID = /^[A-Za-z0-9._:-]{8,160}$/u;
 const STAGING_EXECUTION_ARN =
   /^arn:aws:states:[a-z0-9-]+:[0-9]{12}:execution:archon-staging-control-loop:[a-f0-9]{64}$/u;
 const DATASET_URN =
@@ -76,6 +77,12 @@ export interface CanaryIdentity {
   dataHubReadMcpUrl: string;
   dataHubWriteGmsUrl: string;
   dataHubWriteMcpUrl: string;
+}
+
+export interface CanaryApprovalBindings {
+  auditId: string;
+  planDigest: Sha256Digest;
+  recoveryDigest: Sha256Digest;
 }
 
 export interface RecoveryManifest {
@@ -217,6 +224,46 @@ function required(
     fail(`${name} is missing or invalid.`);
   }
   return value;
+}
+
+export function parseCanaryApprovalBindings(
+  source: NodeJS.ProcessEnv | Record<string, string | undefined>
+): CanaryApprovalBindings {
+  const auditId = required(source, "CANARY_EXPECTED_AUDIT_ID", 64);
+  const planDigest = required(source, "CANARY_EXPECTED_PLAN_DIGEST", 71);
+  const recoveryDigest = required(
+    source,
+    "CANARY_EXPECTED_RECOVERY_DIGEST",
+    71
+  );
+  if (
+    !AUDIT_ID.test(auditId) ||
+    !SHA256.test(planDigest) ||
+    !SHA256.test(recoveryDigest)
+  ) {
+    fail("the protected approval bindings are invalid.");
+  }
+  return {
+    auditId,
+    planDigest: planDigest as Sha256Digest,
+    recoveryDigest: recoveryDigest as Sha256Digest,
+  };
+}
+
+export function verifyCanaryApprovalBindings(
+  recovery: Pick<
+    RecoveryManifest,
+    "auditId" | "planDigest" | "recoveryDigest"
+  >,
+  expected: Readonly<CanaryApprovalBindings>
+): void {
+  if (
+    recovery.auditId !== expected.auditId ||
+    recovery.planDigest !== expected.planDigest ||
+    recovery.recoveryDigest !== expected.recoveryDigest
+  ) {
+    fail("the recovery artifact does not match the protected approval bindings.");
+  }
 }
 
 function exactHttpsUrl(value: string, label: string, rootOnly = false): string {
@@ -463,6 +510,7 @@ function parseControlStatus(value: unknown, expectedAuditId: string): ControlSta
     const approval = record(parsed.approval, "approval projection");
     if (
       typeof approval["approvalId"] !== "string" ||
+      !APPROVAL_ID.test(approval["approvalId"]) ||
       !["PENDING", "DECIDED"].includes(String(approval["status"])) ||
       typeof approval["planDigest"] !== "string" ||
       !SHA256.test(approval["planDigest"]) ||
@@ -1188,13 +1236,13 @@ function terminate(child: ChildProcess): void {
 
 async function submitApproval(
   identity: CanaryIdentity,
-  manifest: RecoveryManifest,
+  approval: Pick<ControlApproval, "approvalId" | "planDigest">,
   token: string
 ): Promise<void> {
   const value = record(
     await apiJson(
       `${identity.applicationUrl}/api/approvals/${encodeURIComponent(
-        manifest.approvalId
+        approval.approvalId
       )}/decisions`,
       {
         method: "POST",
@@ -1205,7 +1253,7 @@ async function submitApproval(
         },
         body: JSON.stringify({
           decision: "APPROVE",
-          comment: `Governed canary run ${identity.workflowRunId}; plan ${manifest.planDigest}`,
+          comment: `Governed canary run ${identity.workflowRunId}; plan ${approval.planDigest}`,
         }),
       },
       "approval decision",
@@ -1214,7 +1262,7 @@ async function submitApproval(
     "approval decision"
   );
   if (
-    value["approvalId"] !== manifest.approvalId ||
+    value["approvalId"] !== approval.approvalId ||
     value["decision"] !== "APPROVE" ||
     !["recorded", "queued"].includes(String(value["status"]))
   ) {
@@ -1399,16 +1447,18 @@ async function prepare(): Promise<void> {
 
 async function approve(): Promise<void> {
   const identity = parseCanaryIdentity(process.env);
+  const expected = parseCanaryApprovalBindings(process.env);
   const recoveryPath = required(process.env, "CANARY_RECOVERY_PATH", 4_096);
   const rollbackPath = required(process.env, "CANARY_ROLLBACK_PATH", 4_096);
   const recovery = verifyRecoveryManifest(
     JSON.parse(await readFile(recoveryPath, "utf8")),
     identity
   );
+  verifyCanaryApprovalBindings(recovery, expected);
   if (Date.parse(recovery.approvalExpiresAt) - Date.now() < 120_000) {
     fail("the sealed approval has less than two minutes remaining.");
   }
-  const current = await readStatus(identity, recovery.auditId);
+  const current = await readStatus(identity, expected.auditId);
   const approval = current.approval;
   if (
     current.status !== "AWAITING_APPROVAL" ||
@@ -1434,10 +1484,10 @@ async function approve(): Promise<void> {
     chromeBin,
     chromeProfile
   );
-  await submitApproval(identity, recovery, token);
+  await submitApproval(identity, approval, token);
   const terminal = await waitForStatus(
     identity,
-    recovery.auditId,
+    expected.auditId,
     "SUCCEEDED",
     TERMINAL_TIMEOUT_MS
   );

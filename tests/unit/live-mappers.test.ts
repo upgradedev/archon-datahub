@@ -24,12 +24,59 @@ import {
   type DhLineageResponse,
   type DhSearchResponse,
 } from "../../src/datahub/live-mappers.js";
-import { DataHubHarvestError } from "../../src/datahub/harvest-policy.js";
+import {
+  DataHubHarvestError,
+  harvestPolicy,
+  type LiveHarvestPolicy,
+} from "../../src/datahub/harvest-policy.js";
 import { LiveDataHubMcpClient } from "../../src/datahub/mcp-client-live.js";
 
 const SALES = "urn:li:dataset:(urn:li:dataPlatform:snowflake,db.public.sales_orders,PROD)";
 const RAW = "urn:li:dataset:(urn:li:dataPlatform:snowflake,db.public.raw_orders,PROD)";
 const EXTERNAL = "urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD)";
+
+type LiveSearchHarness = {
+  call(
+    name: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs: number
+  ): Promise<unknown>;
+  searchWithinPolicy(
+    query: string | undefined,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<string[]>;
+};
+
+function mockedLiveSearch(pages: readonly DhSearchResponse[]): {
+  search(): Promise<string[]>;
+  offsets: number[];
+  remaining(): number;
+} {
+  const pending = [...pages];
+  const offsets: number[] = [];
+  const client = new LiveDataHubMcpClient() as unknown as LiveSearchHarness;
+  client.call = async (name, args) => {
+    assert.equal(name, "search");
+    assert.equal(args["num_results"], 50);
+    assert.equal(typeof args["offset"], "number");
+    offsets.push(args["offset"] as number);
+    const page = pending.shift();
+    assert.ok(page, "live search made an unexpected extra MCP request");
+    return page;
+  };
+  return {
+    search: () =>
+      client.searchWithinPolicy(
+        undefined,
+        harvestPolicy("async-worker"),
+        new AbortController().signal
+      ),
+    offsets,
+    remaining: () => pending.length,
+  };
+}
 
 // A fully-populated cleaned dataset entity, exactly as get_entities returns it.
 const salesEntity: DhCleanedEntity = {
@@ -459,5 +506,82 @@ test("MCP-only live hosted audits fail before harvesting without direct GMS hist
     else process.env.DATAHUB_GMS_URL = saved.gms;
     if (saved.mcp === undefined) delete process.env.DATAHUB_MCP_URL;
     else process.env.DATAHUB_MCP_URL = saved.mcp;
+  }
+});
+
+test("live search accepts zero-total and complete multi-page results", async () => {
+  const empty = mockedLiveSearch([
+    { start: 0, count: 0, total: 0, searchResults: [] },
+  ]);
+  assert.deepEqual(await empty.search(), []);
+  assert.deepEqual(empty.offsets, [0]);
+  assert.equal(empty.remaining(), 0);
+
+  const complete = mockedLiveSearch([
+    {
+      start: 0,
+      count: 1,
+      total: 2,
+      searchResults: [{ entity: { urn: SALES } }],
+    },
+    {
+      start: 1,
+      count: 1,
+      total: 2,
+      searchResults: [{ entity: { urn: RAW } }],
+    },
+  ]);
+  assert.deepEqual(await complete.search(), [SALES, RAW]);
+  assert.deepEqual(complete.offsets, [0, 1]);
+  assert.equal(complete.remaining(), 0);
+});
+
+test("live search rejects truncated pages and totals that change mid-harvest", async () => {
+  const cases: Array<{
+    label: string;
+    pages: DhSearchResponse[];
+  }> = [
+    {
+      label: "truncated result set",
+      pages: [
+        {
+          start: 0,
+          count: 1,
+          total: 2,
+          searchResults: [{ entity: { urn: SALES } }],
+        },
+        { start: 1, count: 0, total: 2, searchResults: [] },
+      ],
+    },
+    {
+      label: "changed declared total",
+      pages: [
+        {
+          start: 0,
+          count: 1,
+          total: 2,
+          searchResults: [{ entity: { urn: SALES } }],
+        },
+        {
+          start: 1,
+          count: 1,
+          total: 3,
+          searchResults: [{ entity: { urn: RAW } }],
+        },
+      ],
+    },
+  ];
+
+  for (const scenario of cases) {
+    const mocked = mockedLiveSearch(scenario.pages);
+    await assert.rejects(
+      mocked.search(),
+      (error: unknown) =>
+        error instanceof DataHubHarvestError &&
+        error.code === "SEARCH_RESPONSE_INCOMPLETE",
+      scenario.label
+    );
+    assert.deepEqual(mocked.offsets, [0, 1], scenario.label);
+    assert.equal(mocked.remaining(), 0, scenario.label);
   }
 });

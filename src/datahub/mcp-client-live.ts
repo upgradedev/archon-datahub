@@ -306,7 +306,9 @@ export class LiveDataHubMcpClient implements DataHubClient {
       }
       offset += page.urns.length;
     }
-    if (declaredTotal === undefined || urns.length !== declaredTotal) {
+    // A normal loop exit proves the first page established declaredTotal;
+    // all pre-assignment failure paths throw instead of reaching this point.
+    if (urns.length !== declaredTotal) {
       throw new DataHubHarvestError(
         "SEARCH_RESPONSE_INCOMPLETE",
         "DataHub search did not return its complete declared result set."

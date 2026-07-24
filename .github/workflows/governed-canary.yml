@@ -435,6 +435,7 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           CANARY_COGNITO_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
           CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
+          EXPECTED_AUDIT_ID: ${{ needs.prepare.outputs.audit_id }}
           EXPECTED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
           EXPECTED_RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
         run: |
@@ -445,6 +446,8 @@ jobs:
           echo "::add-mask::${CANARY_COGNITO_USERNAME}"
           test -f "${CANARY_RECOVERY_PATH}"
           test ! -L "${CANARY_RECOVERY_PATH}"
+          test "$(jq -er '.auditId' "${CANARY_RECOVERY_PATH}")" = \
+            "${EXPECTED_AUDIT_ID}"
           test "$(jq -er '.planDigest' "${CANARY_RECOVERY_PATH}")" = \
             "${EXPECTED_PLAN_DIGEST}"
           test "$(jq -er '.recoveryDigest' "${CANARY_RECOVERY_PATH}")" = \
@@ -543,6 +546,9 @@ jobs:
         env:
           CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
           CANARY_ROLLBACK_PATH: ${{ runner.temp }}/governed-canary/rollback.json
+          CANARY_EXPECTED_AUDIT_ID: ${{ needs.prepare.outputs.audit_id }}
+          CANARY_EXPECTED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          CANARY_EXPECTED_RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
           CANARY_COGNITO_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
           CANARY_COGNITO_PASSWORD: ${{ secrets.CANARY_COGNITO_PASSWORD }}
           CANARY_CHROME_PROFILE: ${{ runner.temp }}/governed-canary/chrome-profile

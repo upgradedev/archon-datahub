@@ -203,11 +203,18 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 [infra/aws](infra/aws) contains the deployment-grade reference:
 
-- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC, Route 53
-  dual-stack aliases, and a custom ACM certificate enforcing `TLSv1.3_2025`;
-- same-origin API Gateway with WAF, throttling, strict schemas, access logs, and tracing;
+- a self-contained `Archon-<stage>-Edge` stack in `us-east-1` that requests and
+  DNS-validates the environment's ACM certificate, creates a CloudFront-scope WAF with
+  encrypted retained logs, and hands both ARNs to the regional platform deployment;
+- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC and Route 53 dual-stack
+  aliases, with `TLSv1.3_2025`, CloudFront access logging, and S3 server-access logging;
+- same-origin API Gateway with its own regional WAF, throttling, strict schemas, access
+  logs, active X-Ray, and a two-second encrypted cache limited to the capability-scoped
+  status GET;
 - private ECS Fargate API/worker services behind an internal NLB and VPC Link;
-- separate read/write/LLM secrets, KMS keys, IAM roles, and network paths;
+- separate read/write/LLM secrets, KMS keys, IAM roles, and default-deny security groups;
+  Fargate never receives a public IP, public subnets disable automatic public-IP
+  assignment, and HTTPS egress is limited to AWS service or customer-managed prefix lists;
 - Cognito Hosted UI with browser PKCE S256, an `archon/approve`-scoped approval
   Lambda, DynamoDB conditional state, Standard Step Functions, encrypted
   SQS/DLQs, and an Object-Lock evidence bucket;
@@ -224,16 +231,32 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 The deployment workflow accepts only a **successful default-branch CI run ID** and its
 matching full commit SHA. It verifies GitHub's artifact envelope digests plus the inner
 container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
-staging via GitHub OIDC, runs security/smoke contracts, then waits at the protected
-`production` environment before promoting those same three immutable artifacts. Selecting
-an older retained CI run is the rollback path; no application artifact is rebuilt during
-deploy.
+the `us-east-1` edge stack before the regional platform stack, passes the edge certificate
+and CloudFront WAF outputs into that platform deployment, deploys staging via GitHub OIDC,
+runs security/smoke contracts, then waits at the protected `production` environment before
+promoting those same three immutable artifacts. Selecting an older retained CI run is the
+rollback path; no application artifact is rebuilt during deploy.
+Infrastructure is deliberately reconciled from the current default-branch deployment
+control plane only after that exact commit has successful CI, CodeQL, and workflow-security
+push runs. An application rollback therefore cannot silently roll back newer IaC security
+controls.
 
 AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
-DNS names, validated `us-east-1` ACM certificates, Route 53 public hosted zones, and a
-narrow `DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. Staging and
-production smoke evidence bind the query digest and reject `{}` / wildcard catalog
-sweeps. Source code does not imply that a public endpoint has already been deployed.
+DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
+external DataHub read, DataHub write, and LLM endpoints, and a narrow
+`DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. The edge stack owns ACM
+issuance and DNS validation; operators do not pre-provision a CloudFront certificate.
+The target AWS account must be CDK-bootstrapped in both the workload region and
+`us-east-1` before the edge-first deployment can run.
+The deployment pipeline resolves the regional AWS-managed S3 and DynamoDB prefix-list IDs
+itself and keeps them distinct from those three external allowlists. Staging and production
+smoke evidence bind the query digest and reject `{}` / wildcard catalog sweeps. Each
+deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
+contracts, including the exact ACM/WAF identities, KMS-encrypted retained WAF log groups,
+sampled-data protection, five-minute rate windows, exact enabled/rotating customer KMS
+keys, CDK-output digest, prefix-list identities, versions and entry digests, plus the
+exact live active IPv4 NLB/workload security-group rules. Source code does not imply that
+a public endpoint has already been deployed.
 
 ## Pipeline-only security and CI/CD
 
@@ -247,12 +270,12 @@ output is not accepted as release evidence:
 | Application abuse cases | AuthZ/tool-boundary, prompt-injection, provenance injection, data-exposure, and remediation-boundary tests |
 | Dependency security | Root, web, infra, approval-Lambda, and control-Lambda `npm audit`; PR dependency review; Dependabot |
 | IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
-| IaC scanner | Trivy config scan with HIGH/CRITICAL fail gate and SARIF |
+| IaC scanner | Trivy config scan with an all-severity, zero-finding fail gate plus structurally validated SARIF |
 | Container hardening | Non-root/read-only runtime contract and isolated health boot |
-| Supply chain | Exact CI container/SPA/Lambda subjects, Syft SPDX/CycloneDX SBOM, Grype gate with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v3 attestation, trusted-main SARIF, and daily or exact-run rescans |
+| Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, and daily or exact-run rescans |
 | Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
-| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, secret rotation, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks |
+| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/regional-WAF/network contracts |
 
 Workflows:
 
@@ -263,9 +286,9 @@ Workflows:
   validation of the workflows themselves.
 - [Production supply chain](.github/workflows/supply-chain.yml) — automatic, daily, and
   exact-run rescans of the original CI container, SPA, and Lambda bytes; fresh-DB
-  vulnerability gates, SARIF, and v3 attestations.
+  vulnerability gates, SARIF, and v4 attestations.
 - [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
-  a ≤24-hour v3 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then
+  a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then
   protected same-artifact production promotion.
 - [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
   flagship retained-history path.

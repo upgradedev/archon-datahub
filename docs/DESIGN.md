@@ -191,19 +191,30 @@ hard deployment boundaries. The source is not evidence of a running deployment.
 
 ## 6. Hosted reference architecture
 
-The AWS CDK app separates a retained shared registry from each environment:
+The AWS CDK app separates a retained shared registry, an environment-specific global edge
+stack, and an environment-specific regional platform stack:
 
-- immutable KMS ECR repository;
-- private versioned KMS S3 SPA with CloudFront OAC, Route 53 A/AAAA aliases,
-  and an environment-owned ACM certificate enforcing `TLSv1.3_2025`;
-- same-origin API Gateway, WAF, strict request models, throttling, logs, and X-Ray;
-- private Fargate services through an internal NLB/VPC Link;
+- `Archon-Registry`: immutable KMS ECR repository;
+- `Archon-<stage>-Edge` in `us-east-1`: DNS-validated ACM certificate,
+  CloudFront-scope WAF, and KMS-encrypted retained WAF logs;
+- `Archon-<stage>` in the selected platform region: private versioned KMS S3 SPA with
+  CloudFront OAC, Route 53 A/AAAA aliases, the certificate/WAF handoff from the edge stack,
+  access logging, and `TLSv1.3_2025`;
+- same-origin API Gateway with its own regional WAF, strict request models, throttling,
+  access logs, active X-Ray, and an encrypted two-second cache limited to the
+  capability-scoped status GET;
+- private Fargate services with public IP assignment disabled through an internal
+  NLB/VPC Link;
 - Cognito Hosted UI, public PKCE code client, scoped approval boundary, and Node.js 24
   Lambda with locked AWS SDK clients;
 - KMS SQS/DLQs, DynamoDB PITR/deletion protection, Standard Step Functions;
 - separate read/write/model secrets;
-- Object-Lock evidence storage;
-- VPC endpoints, flow logs, alarms, dashboard, and retained encrypted logs.
+- Object-Lock evidence storage, S3 versioning, CloudFront access logs, and S3
+  server-access logs for the SPA/evidence buckets;
+- default-deny security groups, controlled PrivateLink/gateway endpoints, rejected-traffic
+  VPC flow logs, alarms, dashboard, and retained encrypted logs;
+- active X-Ray on API Gateway, Step Functions, application Lambdas, and the CDK
+  default-security-group restriction provider.
 
 The hardened container has no `uvx` runtime. Hosted deployments therefore require an HTTPS
 GMS URL for aspect history and exact field-tag projections, a hosted Streamable HTTP
@@ -217,11 +228,35 @@ behavior with `no-store`, and is smoke-verified byte for byte.
 
 The distribution has no default-certificate fallback: AWS fixes the generated
 `*.cloudfront.net` certificate to the legacy `TLSv1` policy. Each environment therefore
-provides its exact hostname, a matching validated ACM certificate from `us-east-1`, and
-the owning Route 53 public hosted-zone ID; CDK creates both IPv4 and IPv6 aliases. Every
-cache behavior also runs the same viewer-request function, which returns `421` for a
+provides its exact hostname and owning Route 53 public hosted-zone ID. The edge stack
+requests the viewer certificate in `us-east-1`, completes DNS validation in that zone,
+creates the CloudFront-scope WAF, and exports both ARNs. The deployment workflow validates
+and hands those outputs to the regional platform stack; no operator-provisioned
+certificate ARN is required. The account must be CDK-bootstrapped in both `us-east-1` and
+the selected workload region. CDK then creates both IPv4 and IPv6 aliases. Every cache
+behavior also runs the same viewer-request function, which returns `421` for a
 non-canonical Host before CloudFront can expose an origin response through its generated
-distribution hostname.
+distribution hostname. The CloudFront WAF protects every cache behavior, while the
+separate regional WAF remains bound to API Gateway for direct callers.
+
+Network egress is capability-specific. Public subnets disable automatic public-IP
+assignment and all three Fargate services explicitly disable public IPs. Workload security
+groups begin with IPv4/IPv6 outbound disabled. The API target accepts TCP 8080 only by
+security-group reference from the internal NLB; inbound evaluation is bypassed only for
+the API Gateway PrivateLink path. The API and audit worker receive only the
+customer-managed DataHub-read and LLM prefix lists; the remediation worker receives only
+the customer-managed DataHub-write prefix list. PrivateLink, S3, and worker-only DynamoDB
+paths use dedicated TCP 443 rules. The deployment pipeline validates the three
+account-owned external lists and independently resolves the AWS-owned regional
+`com.amazonaws.<region>.s3` and `com.amazonaws.<region>.dynamodb` lists, so cloud-service
+identity is never confused with an operator-maintained endpoint allowlist. Prefix-list
+`MaxEntries` weights are included in a fail-closed 60-rule security-group quota check
+before either environment is deployed.
+
+The SPA, evidence, and CloudFront log buckets are versioned and retained. SPA and evidence
+requests are server-access-logged to the log bucket, while CloudFront delivery uses a
+separate prefix and lifecycle. The status endpoint's cache key is the opaque `auditId`;
+the API cache is encrypted and its two-second TTL bounds both replay and staleness.
 
 ## 7. Build-once promotion
 
@@ -235,10 +270,16 @@ CI creates:
 - reviewed synthesized CloudFormation and policy/scanner evidence.
 
 The deploy workflow accepts a successful default-branch CI run ID and its exact full source
-SHA. It verifies GitHub's artifact-envelope digest and each inner artifact digest. Staging
+SHA. It verifies GitHub's artifact-envelope digest and each inner artifact digest. For each
+stage it deploys the edge stack first, validates the certificate/WAF outputs, and deploys
+the regional platform with those outputs and the five resolved prefix-list IDs. Staging
 receives the exact image, SPA, and Lambda code; production receives the same ECR digest,
 SPA archive, and Lambda archive after a protected-environment approval. Selecting an older
 retained CI run is rollback. Application artifacts are never rebuilt during deployment.
+The IaC control plane is not rolled back with those application bytes: deployment checks
+out the current default-branch workflow commit only after successful CI, CodeQL, and
+workflow-security push runs for that exact commit. This separates safe application
+rollback from forward-only reconciliation of current infrastructure security controls.
 
 Environment-specific URLs and Secrets Manager values are configuration, not application
 build inputs. The immutable SPA remains identical between stages; each deployment creates
@@ -253,12 +294,12 @@ Security evidence is accepted only when generated by reproducible CI/CD:
 - root/web/infra/Lambda SCA and PR dependency review;
 - application AuthZ, injection, data-exposure, and remediation-boundary tests;
 - unit-tested project-owned CloudFormation Guard controls;
-- Trivy IaC SARIF and HIGH/CRITICAL gate;
+- Trivy IaC SARIF with an all-severity, zero-finding gate;
 - non-root/read-only container boot contract;
 - exact CI container/SPA/Lambda subject rescans with no rebuild divergence;
 - Syft SBOMs and a Grype CVE gate that fails without current (≤24h), hash-validated
   vulnerability intelligence, sealing its retrieval time, exact DB manifest, status,
-  policy, provenance, and v3 attestations;
+  policy, provenance, and v4 attestations;
 - a daily latest-successful-master rescan plus an exact CI-run/SHA manual rescan path,
   with staging and production rejecting attestations older than 24 hours;
 - actionlint and zizmor checks on the workflow definitions themselves;

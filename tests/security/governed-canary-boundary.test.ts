@@ -122,6 +122,43 @@ test("Cognito runtime auth is sealed to the staging stack before credential use"
   );
 });
 
+test("the recovery artifact is verified locally but never drives approval HTTP", () => {
+  assert.match(
+    workflow,
+    /CANARY_EXPECTED_AUDIT_ID: \$\{\{ needs\.prepare\.outputs\.audit_id \}\}/u
+  );
+  assert.match(
+    workflow,
+    /CANARY_EXPECTED_PLAN_DIGEST: \$\{\{ needs\.prepare\.outputs\.plan_digest \}\}/u
+  );
+  assert.match(
+    workflow,
+    /CANARY_EXPECTED_RECOVERY_DIGEST: \$\{\{ needs\.prepare\.outputs\.recovery_digest \}\}/u
+  );
+  assert.match(
+    driver,
+    /verifyCanaryApprovalBindings\(recovery, expected\)/u
+  );
+  assert.match(driver, /readStatus\(identity, expected\.auditId\)/u);
+  assert.match(driver, /submitApproval\(identity, approval, token\)/u);
+  assert.match(
+    driver,
+    /waitForStatus\(\s+identity,\s+expected\.auditId,/u
+  );
+  assert.doesNotMatch(
+    driver,
+    /readStatus\(identity,\s*recovery\.auditId\)/u
+  );
+  assert.doesNotMatch(
+    driver,
+    /submitApproval\(identity,\s*recovery,/u
+  );
+  assert.doesNotMatch(
+    driver,
+    /waitForStatus\(\s+identity,\s+recovery\.auditId,/u
+  );
+});
+
 test("governed canary seals recovery before approval and proves rollback by read", () => {
   const recoveryUpload = workflow.indexOf("Seal recovery state before approval");
   const approval = workflow.indexOf(

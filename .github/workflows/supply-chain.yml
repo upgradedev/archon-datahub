@@ -1,8 +1,8 @@
 name: Production Supply Chain
 
 # Trusted default-branch pushes arrive here through the completed CI workflow so this
-# workflow scans and attests the exact container and Lambda artifacts CI already built
-# against vulnerability intelligence refreshed and sealed during the attesting run.
+# workflow scans and attests the exact container, SPA, and Lambda artifacts CI already
+# built against vulnerability intelligence refreshed and sealed during the attesting run.
 # Pull requests are gated inside CI itself, avoiding workflow_run merge-SHA ambiguity and
 # privileged processing of fork artifacts. The daily path resolves the latest successful
 # master CI run; manual rescans require an exact successful CI run ID and commit SHA.
@@ -195,12 +195,21 @@ jobs:
             echo "SOURCE_RUN_ID=${source_run_id}"
           } >>"${GITHUB_ENV}"
 
+      - name: Check out the exact successful CI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Prepare ephemeral directories
         shell: bash
         run: |
           set -euo pipefail
           candidate_dir="${RUNNER_TEMP}/candidate"
           web_candidate_dir="${RUNNER_TEMP}/web-candidate"
+          web_content_dir="${RUNNER_TEMP}/web-content"
+          web_scan_dir="${RUNNER_TEMP}/web-scan"
           lambda_candidate_dir="${RUNNER_TEMP}/lambda-candidate"
           lambda_content_dir="${RUNNER_TEMP}/lambda-content"
           evidence_dir="${RUNNER_TEMP}/supply-chain-evidence"
@@ -209,6 +218,8 @@ jobs:
           {
             echo "CANDIDATE_DIR=${candidate_dir}"
             echo "WEB_CANDIDATE_DIR=${web_candidate_dir}"
+            echo "WEB_CONTENT_DIR=${web_content_dir}"
+            echo "WEB_SCAN_DIR=${web_scan_dir}"
             echo "LAMBDA_CANDIDATE_DIR=${lambda_candidate_dir}"
             echo "LAMBDA_CONTENT_DIR=${lambda_content_dir}"
             echo "EVIDENCE_DIR=${evidence_dir}"
@@ -218,6 +229,8 @@ jobs:
           mkdir -p \
             "${candidate_dir}" \
             "${web_candidate_dir}" \
+            "${web_content_dir}" \
+            "${web_scan_dir}" \
             "${lambda_candidate_dir}" \
             "${lambda_content_dir}" \
             "${evidence_dir}" \
@@ -254,6 +267,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$SOURCE_SHA" != ""
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test -f "$CANDIDATE_DIR/archon-image.tar.gz"
           test -f "$CANDIDATE_DIR/archon-image.tar.gz.sha256"
 
@@ -287,7 +301,60 @@ jobs:
           )"
           test "$expected_web" = "$actual_web"
           test "${#actual_web}" -eq 64
+          if tar --list --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+            awk '
+              /^\// { unsafe=1 }
+              /(^|\/)\.\.(\/|$)/ { unsafe=1 }
+              END { exit unsafe ? 0 : 1 }
+            '; then
+            echo "::error::SPA archive contains an unsafe path"
+            exit 1
+          fi
+          if tar --list --verbose --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" |
+            awk '
+              substr($1, 1, 1) !~ /^[-d]$/ { unsafe=1 }
+              END { exit unsafe ? 0 : 1 }
+            '; then
+            echo "::error::SPA archive may contain only regular files and directories"
+            exit 1
+          fi
+          tar --extract --gzip \
+            --file "$WEB_CANDIDATE_DIR/archon-web.tar.gz" \
+            --directory "$WEB_CONTENT_DIR" \
+            --no-same-owner \
+            --no-same-permissions
+          if find "$WEB_CONTENT_DIR" -mindepth 1 \
+            ! -type f ! -type d -print -quit | grep -q .; then
+            echo "::error::Extracted SPA contains a non-regular member"
+            exit 1
+          fi
+          test -f "$WEB_CONTENT_DIR/index.html"
+          test -f web/package.json
+          test -f web/package-lock.json
+          jq --exit-status \
+            '.name == "archon-datahub-web" and
+             (.dependencies.react | type == "string") and
+             (.dependencies["react-dom"] | type == "string")' \
+            web/package.json >/dev/null
+          jq --exit-status \
+            '.name == "archon-datahub-web" and
+             .lockfileVersion == 3 and
+             (.packages[""].dependencies.react | type == "string") and
+             (.packages[""].dependencies["react-dom"] | type == "string")' \
+            web/package-lock.json >/dev/null
+          mkdir -p "$WEB_SCAN_DIR/dist"
+          cp -a -- "$WEB_CONTENT_DIR/." "$WEB_SCAN_DIR/dist/"
+          cp -- web/package.json web/package-lock.json "$WEB_SCAN_DIR/"
+          (
+            cd web
+            sha256sum package.json package-lock.json
+          ) >"$EVIDENCE_DIR/web-source-metadata.sha256"
+          test -s "$EVIDENCE_DIR/web-source-metadata.sha256"
           printf '%s  %s\n' "$actual_web" archon-web.tar.gz \
+            >"$EVIDENCE_DIR/web-subject.sha256"
+          cat "$EVIDENCE_DIR/web-subject.sha256" \
             >>"$EVIDENCE_DIR/release-subjects.sha256"
 
           test -f "$LAMBDA_CANDIDATE_DIR/archon-lambdas.tar.gz"
@@ -355,7 +422,7 @@ jobs:
           printf '%s\n' "$image_id" > "$EVIDENCE_DIR/image-id.txt"
           {
             echo "source_sha=$SOURCE_SHA"
-            echo "evidence_artifact=supply-chain-$SOURCE_SHA-$GITHUB_RUN_ID"
+            echo "evidence_artifact=supply-chain-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >>"$GITHUB_OUTPUT"
 
       - name: Install checksum-pinned Syft and Grype
@@ -437,8 +504,27 @@ jobs:
           jq --exit-status '.components | type == "array"' \
             "$EVIDENCE_DIR/archon-lambda.cyclonedx.json" >/dev/null
 
+      - name: Generate SPA SPDX, CycloneDX, and native SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/syft/syft" "dir:$WEB_SCAN_DIR" \
+            --output "syft-json=$EVIDENCE_DIR/archon-web.syft.json" \
+            --output "spdx-json=$EVIDENCE_DIR/archon-web.spdx.json" \
+            --output "cyclonedx-json=$EVIDENCE_DIR/archon-web.cyclonedx.json"
+          jq --exit-status '
+            (.artifacts | type == "array" and length > 0) and
+            ([.artifacts[].name] as $names |
+              ($names | index("react")) != null and
+              ($names | index("react-dom")) != null)
+          ' \
+            "$EVIDENCE_DIR/archon-web.syft.json" >/dev/null
+          jq --exit-status '.packages | type == "array" and length > 0' \
+            "$EVIDENCE_DIR/archon-web.spdx.json" >/dev/null
+          jq --exit-status '.components | type == "array" and length > 0' \
+            "$EVIDENCE_DIR/archon-web.cyclonedx.json" >/dev/null
+
       - name: Produce vulnerability reports
-        id: reports
         shell: bash
         run: |
           set -euo pipefail
@@ -447,8 +533,12 @@ jobs:
             --output "sarif=$EVIDENCE_DIR/grype-report.sarif" \
             --output "table=$EVIDENCE_DIR/grype-report.txt"
           jq --exit-status '.matches | type == "array"' "$EVIDENCE_DIR/grype-report.json" >/dev/null
-          jq --exit-status '.runs | type == "array"' "$EVIDENCE_DIR/grype-report.sarif" >/dev/null
-          echo "sarif_ready=true" >>"${GITHUB_OUTPUT}"
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-report.sarif" >/dev/null
 
       - name: Produce Lambda vulnerability reports
         shell: bash
@@ -461,8 +551,32 @@ jobs:
             --output "table=$EVIDENCE_DIR/grype-lambda-report.txt"
           jq --exit-status '.matches | type == "array"' \
             "$EVIDENCE_DIR/grype-lambda-report.json" >/dev/null
-          jq --exit-status '.runs | type == "array"' \
-            "$EVIDENCE_DIR/grype-lambda-report.sarif" >/dev/null
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-lambda-report.sarif" >/dev/null
+
+      - name: Produce SPA vulnerability reports
+        id: reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-web.syft.json" --by-cve \
+            --output "json=$EVIDENCE_DIR/grype-web-report.json" \
+            --output "sarif=$EVIDENCE_DIR/grype-web-report.sarif" \
+            --output "table=$EVIDENCE_DIR/grype-web-report.txt"
+          jq --exit-status '.matches | type == "array"' \
+            "$EVIDENCE_DIR/grype-web-report.json" >/dev/null
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array") and
+            (.runs | length > 0) and
+            all(.runs[]; (.results | type == "array"))
+          ' "$EVIDENCE_DIR/grype-web-report.sarif" >/dev/null
+          echo "sarif_ready=true" >>"${GITHUB_OUTPUT}"
 
       - name: Bind source, image, SBOM, scanner, and CI provenance
         shell: bash
@@ -498,6 +612,23 @@ jobs:
           syft_sha="$(sha256sum "$EVIDENCE_DIR/archon.syft.json" | cut -d ' ' -f 1)"
           spdx_sha="$(sha256sum "$EVIDENCE_DIR/archon.spdx.json" | cut -d ' ' -f 1)"
           cyclonedx_sha="$(sha256sum "$EVIDENCE_DIR/archon.cyclonedx.json" | cut -d ' ' -f 1)"
+          web_syft_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.syft.json" |
+              cut -d ' ' -f 1
+          )"
+          web_spdx_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.spdx.json" |
+              cut -d ' ' -f 1
+          )"
+          web_cyclonedx_sha="$(
+            sha256sum "$EVIDENCE_DIR/archon-web.cyclonedx.json" |
+              cut -d ' ' -f 1
+          )"
+          web_package_lock_sha="$(
+            awk '$2 == "package-lock.json" { print $1 }' \
+              "$EVIDENCE_DIR/web-source-metadata.sha256"
+          )"
+          [[ "${web_package_lock_sha}" =~ ^[0-9a-f]{64}$ ]]
           lambda_syft_sha=""
           lambda_spdx_sha=""
           lambda_cyclonedx_sha=""
@@ -534,7 +665,7 @@ jobs:
           source_run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID"
 
           jq --null-input \
-            --arg schemaVersion "archon.verified-ci-artifact/v3" \
+            --arg schemaVersion "archon.verified-ci-artifact/v4" \
             --arg sourceRepository "$SOURCE_REPOSITORY" \
             --arg sourceSha "$SOURCE_SHA" \
             --arg sourceEvent "$SOURCE_EVENT" \
@@ -546,6 +677,10 @@ jobs:
             --arg syftDigest "sha256:$syft_sha" \
             --arg spdxDigest "sha256:$spdx_sha" \
             --arg cyclonedxDigest "sha256:$cyclonedx_sha" \
+            --arg webSyftDigest "sha256:$web_syft_sha" \
+            --arg webSpdxDigest "sha256:$web_spdx_sha" \
+            --arg webCyclonedxDigest "sha256:$web_cyclonedx_sha" \
+            --arg webPackageLockDigest "sha256:$web_package_lock_sha" \
             --arg lambdaSyftDigest "${lambda_syft_sha:+sha256:$lambda_syft_sha}" \
             --arg lambdaSpdxDigest "${lambda_spdx_sha:+sha256:$lambda_spdx_sha}" \
             --arg lambdaCyclonedxDigest "${lambda_cyclonedx_sha:+sha256:$lambda_cyclonedx_sha}" \
@@ -597,6 +732,15 @@ jobs:
                 syft: $syftDigest,
                 spdx: $spdxDigest,
                 cyclonedx: $cyclonedxDigest,
+                web: {
+                  syft: $webSyftDigest,
+                  spdx: $webSpdxDigest,
+                  cyclonedx: $webCyclonedxDigest,
+                  dependencyMetadata: {
+                    sourceCommit: $sourceSha,
+                    packageLock: $webPackageLockDigest
+                  }
+                },
                 lambda: (
                   if $lambdaSyftDigest == "" then
                     null
@@ -633,18 +777,26 @@ jobs:
               archon.cyclonedx.json
               archon.spdx.json
               archon.syft.json
+              archon-web.cyclonedx.json
+              archon-web.spdx.json
+              archon-web.syft.json
               grype-db-files.sha256
               grype-db-policy.txt
               grype-db-status.txt
               grype-report.json
               grype-report.sarif
               grype-report.txt
+              grype-web-report.json
+              grype-web-report.sarif
+              grype-web-report.txt
               grype-version.txt
               image-id.txt
               provenance.json
               container-subject.sha256
               release-subjects.sha256
               syft-version.txt
+              web-subject.sha256
+              web-source-metadata.sha256
             )
             if [[ -f archon-lambda.syft.json ]]; then
               evidence_files+=(
@@ -666,7 +818,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.subject.outputs.evidence_artifact || format('supply-chain-failed-{0}', github.run_id) }}
+          name: ${{ steps.subject.outputs.evidence_artifact || format('supply-chain-failed-{0}-{1}', github.run_id, github.run_attempt) }}
           path: ${{ runner.temp }}/supply-chain-evidence/
           if-no-files-found: error
           retention-days: 14
@@ -685,6 +837,14 @@ jobs:
           set -euo pipefail
           "$TOOLS_DIR/grype/grype" \
             "sbom:$EVIDENCE_DIR/archon-lambda.syft.json" \
+            --by-cve --fail-on high --output table
+
+      - name: Fail on high or critical SPA vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TOOLS_DIR/grype/grype" \
+            "sbom:$EVIDENCE_DIR/archon-web.syft.json" \
             --by-cve --fail-on high --output table
 
   publish-sarif:
@@ -727,6 +887,12 @@ jobs:
         with:
           sarif_file: ${{ runner.temp }}/evidence/grype-lambda-report.sarif
           category: grype-production-lambdas
+
+      - name: Upload SPA Grype SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/evidence/grype-web-report.sarif
+          category: grype-production-spa
 
   attest:
     name: Sign provenance and SBOM attestations
@@ -904,7 +1070,7 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-checksums: ${{ runner.temp }}/evidence/release-subjects.sha256
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v3
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v4
           predicate-path: ${{ runner.temp }}/evidence/attested-provenance.json
 
       - name: Sign container SPDX SBOM attestation
@@ -912,6 +1078,12 @@ jobs:
         with:
           subject-checksums: ${{ runner.temp }}/evidence/container-subject.sha256
           sbom-path: ${{ runner.temp }}/evidence/archon.spdx.json
+
+      - name: Sign SPA SPDX SBOM attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/evidence/web-subject.sha256
+          sbom-path: ${{ runner.temp }}/evidence/archon-web.spdx.json
 
       - name: Sign Lambda SPDX SBOM attestation
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
