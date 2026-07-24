@@ -1319,7 +1319,12 @@ export class ArchonPlatformStack extends Stack {
           "/api/control-loops/{auditId}/GET": {
             cacheDataEncrypted: true,
             cacheTtl: Duration.seconds(2),
-            cachingEnabled: true
+            cachingEnabled: true,
+            dataTraceEnabled: false,
+            loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+            metricsEnabled: true,
+            throttlingBurstLimit: isProduction ? 100 : 20,
+            throttlingRateLimit: isProduction ? 50 : 10
           }
         },
         accessLogDestination: new apigateway.LogGroupLogDestination(apiAccessLogGroup),
@@ -1334,12 +1339,7 @@ export class ArchonPlatformStack extends Stack {
           status: true,
           user: false
         }),
-        loggingLevel: apigateway.MethodLoggingLevel.ERROR,
-        dataTraceEnabled: false,
-        metricsEnabled: true,
-        tracingEnabled: true,
-        throttlingBurstLimit: isProduction ? 100 : 20,
-        throttlingRateLimit: isProduction ? 50 : 10
+        tracingEnabled: true
       },
       cloudWatchRole: true,
       binaryMediaTypes: [],

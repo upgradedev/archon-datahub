@@ -142,6 +142,10 @@ let api_gateway_stages = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
 ]
 
+let api_method_settings = Resources.*[
+  Type == 'AWS::ApiGateway::Stage'
+].Properties.MethodSettings.*
+
 let cached_api_method_settings = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
 ].Properties.MethodSettings[
@@ -336,8 +340,11 @@ rule subnets_never_auto_assign_public_ips when %subnets !empty {
 }
 
 rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
+  let api_method_setting_count = count(%api_method_settings)
   let cached_api_method_count = count(%cached_api_method_settings)
 
+  %api_method_settings !empty
+  %api_method_setting_count == 1
   %cached_api_method_settings !empty
   %cached_api_method_count == 1
   %api_gateway_stages.Properties {

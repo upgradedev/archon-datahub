@@ -187,13 +187,11 @@
           TracingEnabled: true
           CacheClusterEnabled: true
           MethodSettings:
-            - ResourcePath: /*
-              HttpMethod: "*"
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
               LoggingLevel: ERROR
               MetricsEnabled: true
               DataTraceEnabled: false
-            - ResourcePath: /~1api~1control-loops~1{auditId}
-              HttpMethod: GET
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 2
@@ -745,13 +743,11 @@
           TracingEnabled: true
           CacheClusterEnabled: true
           MethodSettings:
-            - ResourcePath: /*
-              HttpMethod: "*"
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: POST
               LoggingLevel: ERROR
               MetricsEnabled: true
               DataTraceEnabled: false
-            - ResourcePath: /~1api~1control-loops~1{auditId}
-              HttpMethod: POST
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 2
@@ -771,13 +767,11 @@
           TracingEnabled: true
           CacheClusterEnabled: true
           MethodSettings:
-            - ResourcePath: /*
-              HttpMethod: "*"
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
               LoggingLevel: ERROR
               MetricsEnabled: true
               DataTraceEnabled: false
-            - ResourcePath: /~1api~1control-loops~1{auditId}
-              HttpMethod: GET
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 0
@@ -797,13 +791,11 @@
           TracingEnabled: true
           CacheClusterEnabled: true
           MethodSettings:
-            - ResourcePath: /*
-              HttpMethod: "*"
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
               LoggingLevel: ERROR
               MetricsEnabled: true
               DataTraceEnabled: false
-            - ResourcePath: /~1api~1control-loops~1{auditId}
-              HttpMethod: GET
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 2
@@ -812,6 +804,35 @@
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 2
+  expectations:
+    rules:
+      api_gateway_stages_are_observable: FAIL
+
+- name: an uncached wildcard method setting cannot bypass the exact cache contract
+  input:
+    Resources:
+      ApiStage:
+        Type: AWS::ApiGateway::Stage
+        Properties:
+          AccessLogSetting:
+            DestinationArn: arn:aws:logs:eu-west-1:111111111111:log-group:api
+            Format: '{"requestId":"$context.requestId"}'
+          TracingEnabled: true
+          CacheClusterEnabled: true
+          MethodSettings:
+            - ResourcePath: /~1api~1control-loops~1{auditId}
+              HttpMethod: GET
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
+              CachingEnabled: true
+              CacheDataEncrypted: true
+              CacheTtlInSeconds: 2
+            - ResourcePath: /*
+              HttpMethod: "*"
+              LoggingLevel: ERROR
+              MetricsEnabled: true
+              DataTraceEnabled: false
   expectations:
     rules:
       api_gateway_stages_are_observable: FAIL

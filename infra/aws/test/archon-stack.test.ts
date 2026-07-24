@@ -606,10 +606,19 @@ describe("Archon AWS reference architecture", () => {
           HttpMethod: "GET",
           CacheDataEncrypted: true,
           CacheTtlInSeconds: 2,
-          CachingEnabled: true
+          CachingEnabled: true,
+          DataTraceEnabled: false,
+          LoggingLevel: "ERROR",
+          MetricsEnabled: true,
+          ThrottlingBurstLimit: 20,
+          ThrottlingRateLimit: 10
         })
       ])
     });
+    const apiStage = Object.values(
+      platform.findResources("AWS::ApiGateway::Stage")
+    )[0] as any;
+    expect(apiStage.Properties.MethodSettings).toHaveLength(1);
 
     const iamPolicies = Object.values(
       platform.findResources("AWS::IAM::Policy")
