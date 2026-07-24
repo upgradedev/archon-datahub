@@ -67,6 +67,12 @@ let waf_cookie_data_protections = Resources.*[
   Field.FieldKeys == ['cookie']
 ]
 
+let waf_api_key_data_protections = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
+].Properties.DataProtectionConfig.DataProtections[
+  Field.FieldKeys == ['x-api-key']
+]
+
 let waf_logging_filters = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
 ].Properties.LoggingFilter.Filters.*
@@ -101,6 +107,12 @@ let waf_cookie_redactions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
 ].Properties.RedactedFields[
   SingleHeader.Name == 'cookie'
+]
+
+let waf_api_key_redactions = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
+].Properties.RedactedFields[
+  SingleHeader.Name == 'x-api-key'
 ]
 
 let dynamodb_tables = Resources.*[
@@ -142,6 +154,51 @@ let api_gateway_stages = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
 ]
 
+let api_gateway_rest_apis = Resources.*[
+  Type == 'AWS::ApiGateway::RestApi'
+]
+
+let api_gateway_methods = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+]
+
+let lambda_api_methods = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+  Properties.Integration.Type == 'AWS'
+]
+
+let lambda_api_request_templates = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+  Properties.Integration.Type == 'AWS'
+].Properties.Integration.RequestTemplates.*
+
+let http_proxy_api_methods = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+  Properties.Integration.Type == 'HTTP_PROXY'
+]
+
+let http_proxy_request_parameters = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+  Properties.Integration.Type == 'HTTP_PROXY'
+].Properties.Integration.RequestParameters.*
+
+let public_api_methods = Resources.*[
+  Type == 'AWS::ApiGateway::Method'
+  Properties.AuthorizationType == 'NONE'
+]
+
+let api_gateway_api_keys = Resources.*[
+  Type == 'AWS::ApiGateway::ApiKey'
+]
+
+let api_gateway_usage_plans = Resources.*[
+  Type == 'AWS::ApiGateway::UsagePlan'
+]
+
+let api_gateway_usage_plan_keys = Resources.*[
+  Type == 'AWS::ApiGateway::UsagePlanKey'
+]
+
 let api_method_settings = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
 ].Properties.MethodSettings.*
@@ -156,8 +213,33 @@ let cloudfront_distributions = Resources.*[
   Type == 'AWS::CloudFront::Distribution'
 ]
 
+let cloudfront_origin_request_policies = Resources.*[
+  Type == 'AWS::CloudFront::OriginRequestPolicy'
+]
+
+let cloudfront_origin_custom_headers = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins.*.OriginCustomHeaders.*
+
+let cloudfront_api_key_origin_headers = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[*].OriginCustomHeaders[
+  HeaderName == 'x-api-key'
+]
+
+let api_cache_behaviors = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.CacheBehaviors[
+  PathPattern == 'api/*'
+]
+
 let secrets = Resources.*[
   Type == 'AWS::SecretsManager::Secret'
+]
+
+let origin_api_key_secrets = Resources.*[
+  Type == 'AWS::SecretsManager::Secret'
+  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
 ]
 
 let waf_associations = Resources.*[
@@ -372,6 +454,99 @@ rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
   }
 }
 
+rule public_api_methods_require_cloudfront_origin_gate
+  when %public_api_methods !empty {
+  let api_key_count = count(%api_gateway_api_keys)
+  let usage_plan_count = count(%api_gateway_usage_plans)
+  let usage_plan_key_count = count(%api_gateway_usage_plan_keys)
+  let origin_custom_header_count = count(%cloudfront_origin_custom_headers)
+  let api_key_origin_header_count = count(%cloudfront_api_key_origin_headers)
+  let origin_request_policy_count = count(%cloudfront_origin_request_policies)
+  let origin_api_key_secret_count = count(%origin_api_key_secrets)
+  let api_method_count = count(%api_gateway_methods)
+  let public_api_method_count = count(%public_api_methods)
+  let lambda_api_method_count = count(%lambda_api_methods)
+  let lambda_request_template_count = count(%lambda_api_request_templates)
+  let http_proxy_api_method_count = count(%http_proxy_api_methods)
+  let http_proxy_request_parameter_count =
+    count(%http_proxy_request_parameters)
+  let api_cache_behavior_count = count(%api_cache_behaviors)
+
+  %api_gateway_rest_apis !empty
+  %api_gateway_rest_apis.Properties.ApiKeySourceType == 'HEADER'
+  %api_method_count == 4
+  %public_api_method_count == 3
+  %api_gateway_methods.Properties.ApiKeyRequired == true
+  %lambda_api_method_count == 3
+  %lambda_api_methods.Properties.Integration {
+    PassthroughBehavior == 'NEVER'
+    RequestParameters not exists
+    RequestTemplates !empty
+  }
+  %lambda_request_template_count == 3
+  some %lambda_api_request_templates == /"operation"\s*:\s*"start"/
+  some %lambda_api_request_templates == /"operation"\s*:\s*"status"/
+  some %lambda_api_request_templates == /"operation"\s*:\s*"decide"/
+  %lambda_api_request_templates != /(?i)(x-api-key|authorization|cookie)/
+  %http_proxy_api_method_count == 1
+  %http_proxy_request_parameter_count == 1
+  %http_proxy_request_parameters == /^'redacted'$/
+  %api_gateway_api_keys !empty
+  %api_key_count == 1
+  %api_gateway_api_keys.Properties {
+    Enabled == true
+    Value exists
+  }
+  %api_gateway_usage_plans !empty
+  %usage_plan_count == 1
+  %api_gateway_usage_plans.Properties {
+    ApiStages !empty
+    Quota.Limit > 0
+    Quota.Limit <= 250000
+    Quota.Period == 'DAY'
+    Throttle.BurstLimit > 0
+    Throttle.BurstLimit <= 100
+    Throttle.RateLimit > 0
+    Throttle.RateLimit <= 50
+  }
+  %api_gateway_usage_plan_keys !empty
+  %usage_plan_key_count == 1
+  %api_gateway_usage_plan_keys.Properties {
+    KeyId exists
+    KeyType == 'API_KEY'
+    UsagePlanId exists
+  }
+  %cloudfront_origin_custom_headers !empty
+  %origin_custom_header_count == 1
+  %cloudfront_api_key_origin_headers !empty
+  %api_key_origin_header_count == 1
+  %cloudfront_api_key_origin_headers.HeaderValue exists
+  %api_gateway_api_keys.Properties.Value == %cloudfront_api_key_origin_headers.HeaderValue
+  %origin_api_key_secrets !empty
+  %origin_api_key_secret_count == 1
+  %origin_api_key_secrets.Properties {
+    KmsKeyId exists
+    GenerateSecretString.ExcludePunctuation == true
+    GenerateSecretString.GenerateStringKey == 'apiKey'
+    GenerateSecretString.IncludeSpace == false
+    GenerateSecretString.PasswordLength == 64
+  }
+  %cloudfront_origin_request_policies !empty
+  %origin_request_policy_count == 1
+  %cloudfront_origin_request_policies.Properties.OriginRequestPolicyConfig {
+    CookiesConfig.CookieBehavior == 'all'
+    HeadersConfig.HeaderBehavior == 'allExcept'
+    HeadersConfig.Headers == ['host']
+    QueryStringsConfig.QueryStringBehavior == 'all'
+  }
+  %api_cache_behaviors !empty
+  %api_cache_behavior_count == 1
+  %api_cache_behaviors {
+    OriginRequestPolicyId exists
+    TargetOriginId exists
+  }
+}
+
 rule cloudfront_distributions_enforce_tls_logging_and_oac
   when %cloudfront_distributions !empty {
   %cloudfront_distributions.Properties.DistributionConfig {
@@ -419,9 +594,12 @@ rule waf_web_acls_protect_sensitive_sampled_data
     count(%waf_authorization_data_protections)
   let waf_cookie_data_protection_count =
     count(%waf_cookie_data_protections)
-  %waf_data_protection_count == 2
+  let waf_api_key_data_protection_count =
+    count(%waf_api_key_data_protections)
+  %waf_data_protection_count == 3
   %waf_authorization_data_protection_count == 1
   %waf_cookie_data_protection_count == 1
+  %waf_api_key_data_protection_count == 1
   %waf_web_acls.Properties {
     DataProtectionConfig.DataProtections !empty
     DataProtectionConfig.DataProtections[*] {
@@ -435,6 +613,9 @@ rule waf_web_acls_protect_sensitive_sampled_data
     }
     some DataProtectionConfig.DataProtections[*] {
       Field.FieldKeys == ['cookie']
+    }
+    some DataProtectionConfig.DataProtections[*] {
+      Field.FieldKeys == ['x-api-key']
     }
   }
 }
@@ -452,14 +633,16 @@ rule waf_logging_is_filtered_and_redacted
   let waf_authorization_redaction_count =
     count(%waf_authorization_redactions)
   let waf_cookie_redaction_count = count(%waf_cookie_redactions)
+  let waf_api_key_redaction_count = count(%waf_api_key_redactions)
   %waf_logging_configuration_count == 1
   %waf_logging_filter_count == 1
   %waf_logging_condition_count == 2
   %waf_block_logging_condition_count == 1
   %waf_count_logging_condition_count == 1
-  %waf_redacted_field_count == 2
+  %waf_redacted_field_count == 3
   %waf_authorization_redaction_count == 1
   %waf_cookie_redaction_count == 1
+  %waf_api_key_redaction_count == 1
   %waf_logging_configurations.Properties {
     ResourceArn exists
     LogDestinationConfigs !empty
@@ -475,6 +658,9 @@ rule waf_logging_is_filtered_and_redacted
     }
     some RedactedFields[*] {
       SingleHeader.Name == 'cookie'
+    }
+    some RedactedFields[*] {
+      SingleHeader.Name == 'x-api-key'
     }
   }
 }

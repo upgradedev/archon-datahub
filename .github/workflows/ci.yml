@@ -55,6 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           for script in \
+            scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
             scripts/validate-aws-waf-contract.sh \
             tests/pipeline/aws-security-contracts.test.sh; do
@@ -430,6 +431,175 @@ jobs:
       - name: SCA gate
         run: npm audit --audit-level=high
 
+  mcp-dependency:
+    name: Locked DataHub MCP SCA and SBOM
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: true
+          cache-dependency-glob: .github/locks/datahub-mcp-v0.6.0.json
+      - name: Materialize and verify the immutable upstream lock
+        id: lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/materialize-datahub-mcp-lock.sh
+          project="${RUNNER_TEMP}/datahub-mcp-v0.6.0"
+          bash scripts/materialize-datahub-mcp-lock.sh "${project}"
+          test -x "${project}/.venv/bin/mcp-server-datahub"
+          echo "project=${project}" >>"${GITHUB_OUTPUT}"
+      - name: Audit the exact MCP dependency closure
+        id: audit
+        shell: bash
+        env:
+          MCP_PROJECT: ${{ steps.lock.outputs.project }}
+        run: |
+          set -euo pipefail
+          sarif="${RUNNER_TEMP}/datahub-mcp-audit.sarif"
+          set +e
+          uv audit \
+            --project "${MCP_PROJECT}" \
+            --locked \
+            --no-dev \
+            --output-format sarif >"${sarif}"
+          status=$?
+          set -e
+          echo "status=${status}" >>"${GITHUB_OUTPUT}"
+          test -s "${sarif}"
+      - name: Export the frozen CycloneDX dependency inventory
+        shell: bash
+        env:
+          MCP_PROJECT: ${{ steps.lock.outputs.project }}
+        run: |
+          set -euo pipefail
+          uv export \
+            --project "${MCP_PROJECT}" \
+            --locked \
+            --no-dev \
+            --format cyclonedx1.5 \
+            --output-file "${RUNNER_TEMP}/datahub-mcp.cdx.json"
+          uv pip list \
+            --python "${MCP_PROJECT}/.venv/bin/python" \
+            --format json >"${RUNNER_TEMP}/datahub-mcp-installed.json"
+          jq --exit-status '
+            .bomFormat == "CycloneDX" and
+            .specVersion == "1.5" and
+            (.components | type == "array" and length > 10)
+          ' "${RUNNER_TEMP}/datahub-mcp.cdx.json" >/dev/null
+          jq --exit-status '
+            (type == "array" and length > 10) and
+            any(.[];
+              .name == "mcp-server-datahub" and
+              .version == "0.6.0"
+            )
+          ' "${RUNNER_TEMP}/datahub-mcp-installed.json" >/dev/null
+      - name: Bind MCP lock, audit, and SBOM evidence
+        shell: bash
+        env:
+          AUDIT_STATUS: ${{ steps.audit.outputs.status }}
+          MCP_PROJECT: ${{ steps.lock.outputs.project }}
+        run: |
+          set -euo pipefail
+          audit="${RUNNER_TEMP}/datahub-mcp-audit.sarif"
+          sbom="${RUNNER_TEMP}/datahub-mcp.cdx.json"
+          installed="${RUNNER_TEMP}/datahub-mcp-installed.json"
+          contract=".github/locks/datahub-mcp-v0.6.0.json"
+          evidence_dir="${RUNNER_TEMP}/datahub-mcp-security"
+          mkdir -p "${evidence_dir}"
+          cp "${contract}" "${evidence_dir}/lock-contract.json"
+          cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
+            "${evidence_dir}/pypi-provenance.json"
+          cp "${MCP_PROJECT}/uv.lock" "${evidence_dir}/uv.lock"
+          cp "${audit}" "${evidence_dir}/audit.sarif"
+          cp "${installed}" "${evidence_dir}/installed-packages.json"
+          cp "${sbom}" "${evidence_dir}/sbom.cdx.json"
+          test "$(sha256sum "${evidence_dir}/uv.lock" | awk '{print $1}')" = \
+            "$(jq -er '.files["uv.lock"].sha256' "${contract}")"
+          jq -cnS \
+            --arg sourceSha "${GITHUB_SHA}" \
+            --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg uvVersion "$(uv --version | awk '{print $2}')" \
+            --arg auditStatus "${AUDIT_STATUS}" \
+            --arg lockSha256 "$(jq -er '.files["uv.lock"].sha256' "${contract}")" \
+            --arg wheelSha256 "$(jq -er '.package.wheel.sha256' "${contract}")" '
+              {
+                schemaVersion: "archon.datahub-mcp-security-evidence/v1",
+                sourceSha: $sourceSha,
+                generatedAt: $generatedAt,
+                scanner: {
+                  name: "uv audit",
+                  version: $uvVersion,
+                  exitCode: ($auditStatus | tonumber)
+                },
+                dependencyInputs: {
+                  uvLockSha256: $lockSha256,
+                  mcpWheelSha256: $wheelSha256,
+                  pypiTrustedPublisherProvenance:
+                    "matched-pinned-pypi-record"
+                },
+                sbom: {
+                  format: "CycloneDX",
+                  specVersion: "1.5"
+                }
+              }
+            ' >"${evidence_dir}/metadata.json"
+          (
+            cd "${evidence_dir}"
+            sha256sum \
+              audit.sarif \
+              installed-packages.json \
+              lock-contract.json \
+              metadata.json \
+              pypi-provenance.json \
+              sbom.cdx.json \
+              uv.lock >evidence.manifest.sha256
+            sha256sum --check evidence.manifest.sha256
+          )
+          jq --exit-status '
+            .version == "2.1.0" and
+            (.runs | type == "array" and length > 0) and
+            all(
+              .runs[];
+              (.tool.driver.name | ascii_downcase | contains("uv")) and
+              (.results | type == "array")
+            ) and
+            ([.runs[].results[]] | length) == 0
+          ' "${audit}" >/dev/null
+          test "${AUDIT_STATUS}" = "0"
+      - name: Upload trusted MCP SCA SARIF
+        if: >-
+          always() &&
+          steps.audit.outcome == 'success' &&
+          (
+            github.event_name == 'push' ||
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/datahub-mcp-audit.sarif
+          category: uv-datahub-mcp
+      - name: Retain locked MCP SCA and SBOM evidence
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-mcp-security-${{ github.sha }}
+          path: ${{ runner.temp }}/datahub-mcp-security/
+          if-no-files-found: error
+          retention-days: 90
+
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
@@ -595,6 +765,7 @@ jobs:
       - infra
       - readiness
       - security
+      - mcp-dependency
       - load
       - container
     runs-on: ubuntu-24.04
@@ -630,6 +801,8 @@ jobs:
           CONTRIB_RESULT: ${{ needs.contrib.result }}
           INFRA_RESULT: ${{ needs.infra.result }}
           LOAD_RESULT: ${{ needs.load.result }}
+          MCP_DEPENDENCY_ARTIFACT_DIGEST: ${{ needs.mcp-dependency.outputs.artifact_digest }}
+          MCP_DEPENDENCY_RESULT: ${{ needs.mcp-dependency.result }}
           READINESS_RESULT: ${{ needs.readiness.result }}
           SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
           SECURITY_RESULT: ${{ needs.security.result }}
@@ -677,6 +850,9 @@ jobs:
             --arg readiness "${READINESS_RESULT}" \
             --arg security "${SECURITY_RESULT}" \
             --arg load "${LOAD_RESULT}" \
+            --arg mcpDependencyArtifactDigest \
+              "${MCP_DEPENDENCY_ARTIFACT_DIGEST}" \
+            --arg mcpDependency "${MCP_DEPENDENCY_RESULT}" \
             --arg container "${CONTAINER_RESULT}" '
               {
                 schemaVersion: "archon.ci-release/v1",
@@ -695,14 +871,21 @@ jobs:
                   infrastructure: $infra,
                   readiness: $readiness,
                   security: $security,
+                  dataHubMcpDependency: $mcpDependency,
                   load: $load,
                   container: $container
+                },
+                dependencyEvidence: {
+                  dataHubMcpSecurityArtifactDigest:
+                    $mcpDependencyArtifactDigest
                 }
               }
             ' >"${evidence_dir}/predicate.json"
           jq -e '
             .source.ref == "refs/heads/master" and
-            ([.gates[]] | all(. == "success"))
+            ([.gates[]] | all(. == "success")) and
+            (.dependencyEvidence.dataHubMcpSecurityArtifactDigest |
+              test("^sha256:[0-9a-f]{64}$"))
           ' "${evidence_dir}/predicate.json" >/dev/null
 
       - name: Sign exact CI release candidates

@@ -123,6 +123,13 @@ jq --exit-status \
         fieldKeys: ["cookie"],
         excludeRateBasedDetails: false,
         excludeRuleMatchDetails: false
+      },
+      {
+        action: "SUBSTITUTION",
+        fieldType: "SINGLE_HEADER",
+        fieldKeys: ["x-api-key"],
+        excludeRateBasedDetails: false,
+        excludeRuleMatchDetails: false
       }
     ] and
     ($webAcl.Rules | length) == 4 and
@@ -194,7 +201,7 @@ jq --exit-status \
         .LoggingConfiguration.RedactedFields[].SingleHeader.Name
       ] |
       sort
-    ) == ["authorization", "cookie"]
+    ) == ["authorization", "cookie", "x-api-key"]
   ' <<<"${logging_json}" >/dev/null || {
   echo "::error::Regional WAF logging/filter/redaction violates the contract" >&2
   exit 1
@@ -312,7 +319,7 @@ jq --null-input --compact-output --sort-keys \
     logging: (
       $logGroup + {
         filter: "BLOCK_OR_COUNT",
-        sensitiveFields: ["authorization", "cookie"]
+        sensitiveFields: ["authorization", "cookie", "x-api-key"]
       }
     ),
     association: "validated",

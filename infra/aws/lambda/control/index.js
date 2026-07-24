@@ -59,7 +59,7 @@ function response(statusCode, body, extraHeaders = {}) {
       "x-content-type-options": "nosniff",
       ...extraHeaders
     },
-    body: `${JSON.stringify(body)}\n`
+    payload: body
   };
 }
 
@@ -108,19 +108,23 @@ function sameCanonical(left, right) {
   }
 }
 
-function parseStartBody(event) {
-  if (event.isBase64Encoded === true) {
-    return { error: response(400, { error: "invalid_request" }) };
+function parseStartBody(input) {
+  let body = input;
+  let text;
+  if (record(input)) {
+    text = JSON.stringify(input);
+  } else if (typeof input === "string") {
+    text = input;
+    try {
+      body = JSON.parse(text || "{}");
+    } catch {
+      return { error: response(400, { error: "invalid_json" }) };
+    }
+  } else {
+    return { error: response(400, { error: "invalid_body" }) };
   }
-  const text = typeof event.body === "string" ? event.body : "{}";
   if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
     return { error: response(413, { error: "request_too_large" }) };
-  }
-  let body;
-  try {
-    body = JSON.parse(text || "{}");
-  } catch {
-    return { error: response(400, { error: "invalid_json" }) };
   }
   if (!record(body)) {
     return { error: response(400, { error: "invalid_body" }) };
@@ -1292,8 +1296,8 @@ async function resultProjection(
   return projection;
 }
 
-async function start(event) {
-  const parsed = parseStartBody(event);
+async function start(body) {
+  const parsed = parseStartBody(body);
   if (parsed.error) return parsed.error;
 
   const auditId = randomBytes(32).toString("hex");
@@ -1324,7 +1328,7 @@ async function start(event) {
     },
     {
       location: pollUrl,
-      "retry-after": "2"
+      retryAfter: "2"
     }
   );
 }
@@ -1409,18 +1413,25 @@ async function status(auditId) {
 
 exports.handler = async (event) => {
   try {
-    if (event?.httpMethod === "POST" && event?.resource === "/api/control-loops") {
-      return await start(event);
+    if (
+      exactKeys(event, ["operation", "requestId", "body"]) &&
+      event.operation === "start"
+    ) {
+      return await start(event.body);
     }
     if (
-      event?.httpMethod === "GET" &&
-      event?.resource === "/api/control-loops/{auditId}"
+      exactKeys(event, ["operation", "requestId", "auditId"]) &&
+      event.operation === "status"
     ) {
-      return await status(event.pathParameters?.auditId);
+      return await status(event.auditId);
     }
     return response(404, { error: "not_found" });
   } catch {
-    const requestId = event?.requestContext?.requestId;
+    const requestId =
+      typeof event?.requestId === "string" &&
+      /^[A-Za-z0-9=+/_-]{1,256}$/.test(event.requestId)
+        ? event.requestId
+        : undefined;
     process.stderr.write(
       `[control] request_failed${requestId ? ` request_id=${requestId}` : ""}\n`
     );

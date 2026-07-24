@@ -154,8 +154,9 @@ The five official Stage Two criteria are equally weighted.
   receipt/evidence projection, both WAF associations, sampled-data protection, filtered
   logging configurations and encrypted retained log groups, least-privilege
   security-group egress, disabled public-IP assignment, versioning/server-access logging,
-  the encrypted two-second status cache, active X-Ray, alarms, public audit, negative
-  authorization/schema cases, and rollback.
+  the CloudFront origin key/usage-plan binding and backend credential non-propagation,
+  direct-origin rejection, the encrypted two-second status cache, active X-Ray, alarms,
+  public audit, negative authorization/schema cases, and rollback.
 - Retain the public application URL and sanitized deployment receipt, including its
   digest-bound edge-security, regional-WAF, and network-egress contracts plus edge and
   regional CDK outputs. Keep the service available for the full judging period.

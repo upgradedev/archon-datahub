@@ -59,25 +59,23 @@ const { handler } = require("../lambda/control/index.js") as {
   handler: (event: Record<string, any>) => Promise<{
     statusCode: number;
     headers: Record<string, string>;
-    body: string;
+    payload: Record<string, any>;
   }>;
 };
 
 function startEvent(body: unknown): Record<string, unknown> {
   return {
-    httpMethod: "POST",
-    resource: "/api/control-loops",
-    requestContext: { requestId: "request-123" },
-    body: JSON.stringify(body)
+    operation: "start",
+    requestId: "request-123",
+    body
   };
 }
 
 function statusEvent(auditId: string): Record<string, unknown> {
   return {
-    httpMethod: "GET",
-    resource: "/api/control-loops/{auditId}",
-    pathParameters: { auditId },
-    requestContext: { requestId: "request-456" }
+    operation: "status",
+    requestId: "request-456",
+    auditId
   };
 }
 
@@ -461,7 +459,7 @@ describe("async audit control Lambda", () => {
     });
 
     const result = await handler(startEvent({ query: "domain:Commerce" }));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(202);
     expect(body).toEqual(
@@ -502,12 +500,27 @@ describe("async audit control Lambda", () => {
     const wildcard = await handler(startEvent({ query: "*" }));
 
     expect(unexpected.statusCode).toBe(400);
-    expect(JSON.parse(unexpected.body)).toEqual({ error: "unexpected_field" });
+    expect(unexpected.payload).toEqual({ error: "unexpected_field" });
     expect(tooLong.statusCode).toBe(400);
-    expect(JSON.parse(missing.body)).toEqual({ error: "query_required" });
-    expect(JSON.parse(wildcard.body)).toEqual({
+    expect(missing.payload).toEqual({ error: "query_required" });
+    expect(wildcard.payload).toEqual({
       error: "query_must_be_narrow"
     });
+    expect(mockSfnSend).not.toHaveBeenCalled();
+  });
+
+  test("rejects any gateway event that carries raw request headers", async () => {
+    const unsafeEvent = {
+      ...startEvent({ query: "domain:Commerce" }),
+      headers: {
+        "x-api-key": "must-never-reach-the-lambda",
+        authorization: "must-never-reach-the-lambda"
+      }
+    };
+    const result = await handler(unsafeEvent);
+
+    expect(result.statusCode).toBe(404);
+    expect(result.payload).toEqual({ error: "not_found" });
     expect(mockSfnSend).not.toHaveBeenCalled();
   });
 
@@ -521,7 +534,7 @@ describe("async audit control Lambda", () => {
     mockDdbSend.mockResolvedValue({});
 
     const result = await handler(statusEvent(auditId));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(200);
     expect(body).toEqual(
@@ -649,7 +662,7 @@ describe("async audit control Lambda", () => {
     });
 
     const result = await handler(statusEvent(auditId));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(200);
     expect(body.status).toBe("AWAITING_APPROVAL");
@@ -731,7 +744,7 @@ describe("async audit control Lambda", () => {
     });
 
     const result = await handler(statusEvent(auditId));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(200);
     expect(body.result).toEqual({
@@ -844,11 +857,11 @@ describe("async audit control Lambda", () => {
     const result = await handler(statusEvent(auditId));
 
     expect(result.statusCode).toBe(502);
-    expect(JSON.parse(result.body)).toEqual({
+    expect(result.payload).toEqual({
       error: "control_plane_unavailable"
     });
-    expect(result.body).not.toContain("EVENT_4");
-    expect(result.body).not.toContain("eventHash");
+    expect(JSON.stringify(result.payload)).not.toContain("EVENT_4");
+    expect(JSON.stringify(result.payload)).not.toContain("eventHash");
   });
 
   test("verifies a durable rejection without inventing mutation checks", async () => {
@@ -913,7 +926,7 @@ describe("async audit control Lambda", () => {
     }));
 
     const result = await handler(statusEvent(auditId));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(200);
     expect(body.result).toEqual({
@@ -998,7 +1011,7 @@ describe("async audit control Lambda", () => {
     });
 
     const result = await handler(statusEvent(auditId));
-    const body = JSON.parse(result.body);
+    const body = result.payload;
 
     expect(result.statusCode).toBe(200);
     expect(body.result).toEqual({ outcome: "READ_ONLY_COMPLETE" });
@@ -1014,7 +1027,7 @@ describe("async audit control Lambda", () => {
     const result = await handler(statusEvent("not-an-audit-id"));
 
     expect(result.statusCode).toBe(400);
-    expect(JSON.parse(result.body)).toEqual({ error: "invalid_audit_id" });
+    expect(result.payload).toEqual({ error: "invalid_audit_id" });
     expect(mockSfnSend).not.toHaveBeenCalled();
     expect(mockDdbSend).not.toHaveBeenCalled();
   });

@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: archon-governed-canary
+  group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
 
 env:
@@ -61,6 +61,7 @@ jobs:
       recovery_digest: ${{ steps.prepare.outputs.recovery_digest }}
       plan_digest: ${{ steps.prepare.outputs.plan_digest }}
       audit_id: ${{ steps.prepare.outputs.audit_id }}
+      deployment_evidence_sha256: ${{ steps.source.outputs.deployment_evidence_sha256 }}
       application_url: ${{ steps.stack.outputs.application_url }}
       evidence_bucket: ${{ steps.stack.outputs.evidence_bucket }}
       cognito_client_id: ${{ steps.stack.outputs.cognito_client_id }}
@@ -89,12 +90,56 @@ jobs:
           }
           [[ "${CANARY_DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${CANARY_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
 
           repository_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}")"
           default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
           test "${GITHUB_REF}" = "refs/heads/${default_branch}"
+
+          workflow_success() {
+            local workflow_file="$1"
+            local expected_name="$2"
+            local expected_path=".github/workflows/${workflow_file}"
+            local response
+            response="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+              -f "head_sha=${GITHUB_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f status=completed \
+              -f per_page=100)"
+            jq -e \
+              --arg name "${expected_name}" \
+              --arg path "${expected_path}" \
+              --arg sha "${GITHUB_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                any(
+                  .workflow_runs[];
+                  .name == $name and
+                  .path == $path and
+                  .head_sha == $sha and
+                  .head_branch == $branch and
+                  .head_repository.full_name == $repository and
+                  .event == "push" and
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+
+          workflow_success ci.yml CI &&
+            workflow_success codeql.yml CodeQL &&
+            workflow_success workflow-security.yml "Workflow security" || {
+              echo "::error::The canary control plane requires successful exact-SHA CI, CodeQL, and Workflow security push runs"
+              exit 1
+            }
 
           for environment_name in governed-canary governed-canary-rollback; do
             environment_json="$(gh api \
@@ -131,17 +176,21 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
           jq -e \
+            --argjson runId "${CANARY_DEPLOYMENT_RUN_ID}" \
             --arg branch "${default_branch}" \
-            --arg repository "${GITHUB_REPOSITORY}" '
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg controlPlane "${GITHUB_SHA}" '
+            .id == $runId and
             .name == "Deploy immutable AWS release" and
             .path == ".github/workflows/deploy.yml" and
             .head_repository.full_name == $repository and
             .event == "workflow_dispatch" and
             .status == "completed" and
             .conclusion == "success" and
-            .head_branch == $branch
+            .head_branch == $branch and
+            .head_sha == $controlPlane
           ' <<<"${run_json}" >/dev/null || {
-            echo "::error::The source must be a successful default-branch immutable deployment"
+            echo "::error::The source must be an exact-control-plane successful default-branch immutable deployment"
             exit 1
           }
 
@@ -151,20 +200,27 @@ jobs:
           run_attempt="$(jq -er '.run_attempt | select(type == "number" and . >= 1)' \
             <<<"${run_json}")"
           expected_artifact="staging-deployment-evidence-${CANARY_RELEASE_SHA}-${run_attempt}"
-          mapfile -t names < <(jq -r --arg name "${expected_artifact}" '
-              .artifacts[] |
-              select(.expired == false and .name == $name) |
-              .name
-            ' <<<"${artifacts_json}")
-          test "${#names[@]}" = "1" || {
-            echo "::error::Exactly one retained staging deployment evidence artifact is required"
-            exit 1
-          }
+          artifact="$(jq -ce \
+            --arg name "${expected_artifact}" \
+            --argjson runId "${CANARY_DEPLOYMENT_RUN_ID}" '
+              [
+                .artifacts[] |
+                select(
+                  .expired == false and
+                  .name == $name and
+                  .workflow_run.id == $runId and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )
+              ] |
+              if length == 1 then .[0] else error(
+                "exactly one retained staging deployment evidence artifact is required"
+              ) end
+            ' <<<"${artifacts_json}")"
           evidence_dir="${RUNNER_TEMP}/source-deployment-evidence"
           mkdir -p "${evidence_dir}"
           gh run download "${CANARY_DEPLOYMENT_RUN_ID}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --name "${names[0]}" \
+            --name "$(jq -er '.name' <<<"${artifact}")" \
             --dir "${evidence_dir}"
           mapfile -t evidence_files < <(
             find "${evidence_dir}" -type f \
@@ -172,28 +228,110 @@ jobs:
           )
           test "${#evidence_files[@]}" = "1"
           evidence="${evidence_files[0]}"
+          test -f "${evidence}"
+          test ! -L "${evidence}"
           jq -e \
             --arg release "${CANARY_RELEASE_SHA}" \
+            --arg controlPlane "${GITHUB_SHA}" \
             --arg application "${CANARY_APPLICATION_URL}" \
             --arg runUrl \
               "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}" '
               .schemaVersion == 1 and
               .environment == "staging" and
+              (.source.ciRunId | test("^[1-9][0-9]{0,19}$")) and
               .source.releaseSha == $release and
+              .source.deploymentControlPlaneSha == $controlPlane and
               .deployment.stackName == "Archon-staging" and
               .deployment.deploymentRunUrl == $runUrl and
               .deployment.applicationUrl == $application and
+              (.verification.pipelineSecurity.deploymentControlPlaneGatesSha256 |
+                test("^[0-9a-f]{64}$")) and
               .verification.result == "passed" and
               .verification.dast.result == "passed"
             ' "${evidence}" >/dev/null || {
-            echo "::error::Staging evidence does not bind the requested release and URL"
+            echo "::error::Staging evidence does not bind the control plane, release, deployment, and URL"
             exit 1
           }
-          echo "deployment_evidence=${evidence}" >>"${GITHUB_OUTPUT}"
+
+          release_ci_run_id="$(jq -er '.source.ciRunId' "${evidence}")"
+          release_ci_run="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${release_ci_run_id}")"
+          jq -e \
+            --argjson runId "${release_ci_run_id}" \
+            --arg release "${CANARY_RELEASE_SHA}" \
+            --arg branch "${default_branch}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sourceUrl "$(jq -er '.source.sourceRunUrl' "${evidence}")" '
+              .id == $runId and
+              .name == "CI" and
+              .path == ".github/workflows/ci.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == $branch and
+              .head_sha == $release and
+              .event == "push" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .html_url == $sourceUrl
+            ' <<<"${release_ci_run}" >/dev/null || {
+            echo "::error::Staging evidence is not bound to successful exact-release CI"
+            exit 1
+          }
+
+          mapfile -t control_plane_files < <(
+            find "${evidence_dir}" -type f \
+              -name 'control-plane-security-gates.json' -print
+          )
+          test "${#control_plane_files[@]}" = "1"
+          control_plane_evidence="${control_plane_files[0]}"
+          test -f "${control_plane_evidence}"
+          test ! -L "${control_plane_evidence}"
+          expected_gate_sha="$(
+            jq -er \
+              '.verification.pipelineSecurity.deploymentControlPlaneGatesSha256' \
+              "${evidence}"
+          )"
+          test "$(sha256sum "${control_plane_evidence}" | awk '{print $1}')" = \
+            "${expected_gate_sha}"
+          jq -e \
+            --arg sha "${GITHUB_SHA}" \
+            --arg branch "${default_branch}" '
+              .schemaVersion == "archon.deployment-control-plane-gates/v1" and
+              .sourceSha == $sha and
+              .branch == $branch and
+              (.workflows | length) == 3 and
+              ([.workflows[].path] | sort) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .workflows[];
+                (.runId | type) == "number" and
+                (.runAttempt | type) == "number" and
+                .conclusion == "success"
+              )
+            ' "${control_plane_evidence}" >/dev/null || {
+            echo "::error::Deployment control-plane evidence is incomplete or mismatched"
+            exit 1
+          }
+          deployment_evidence_sha256="$(
+            sha256sum "${evidence}" | awk '{print $1}'
+          )"
+          {
+            echo "deployment_evidence=${evidence}"
+            echo "deployment_evidence_sha256=${deployment_evidence_sha256}"
+          } >>"${GITHUB_OUTPUT}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert exact reviewed canary control plane
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -372,7 +510,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert exact reviewed canary control plane
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -662,7 +805,12 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert exact reviewed canary control plane
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -737,6 +885,7 @@ jobs:
           RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
           ROLLBACK_PROPOSAL_DIGEST: ${{ needs.approval.outputs.rollback_proposal_digest }}
           ROLLBACK_EVIDENCE_DIGEST: ${{ steps.restore.outputs.evidence_digest }}
+          DEPLOYMENT_EVIDENCE_SHA256: ${{ needs.prepare.outputs.deployment_evidence_sha256 }}
         run: |
           set -euo pipefail
           evidence_dir="$(dirname "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
@@ -747,7 +896,9 @@ jobs:
           jq -n \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --arg controlPlaneSha "${GITHUB_SHA}" \
             --arg deploymentRunId "${CANARY_DEPLOYMENT_RUN_ID}" \
+            --arg deploymentEvidenceSha256 "${DEPLOYMENT_EVIDENCE_SHA256}" \
             --arg releaseSha "${CANARY_RELEASE_SHA}" \
             --arg recoveryDigest "${RECOVERY_DIGEST}" \
             --arg rollbackProposalDigest "${ROLLBACK_PROPOSAL_DIGEST}" \
@@ -756,7 +907,9 @@ jobs:
               schemaVersion: "archon.governed-canary-attestation/v1",
               repository: $repository,
               workflowRunId: $workflowRunId,
+              controlPlaneSha: $controlPlaneSha,
               deploymentRunId: $deploymentRunId,
+              deploymentEvidenceSha256: $deploymentEvidenceSha256,
               releaseSha: $releaseSha,
               recoveryDigest: $recoveryDigest,
               rollbackProposalDigest: $rollbackProposalDigest,

@@ -41,8 +41,12 @@ Archon MCP + synchronous read-only HTTP preview ◄──┤
                                               verify + receipt + rollback
 ```
 
-The public Archon MCP server and HTTP audit API expose no mutation dispatch. The write
-adapter is imported lazily by a separate, private worker with separate credentials.
+The public Archon MCP server and HTTP audit API expose no mutation dispatch. Browser
+requests reach the HTTP API only through CloudFront: a generated KMS-encrypted origin
+key is overwritten at the edge, required by every API Gateway method, redacted in both
+WAFs, replaced before the HTTP backend, and omitted entirely from narrow Lambda custom-
+integration events. The write adapter is imported lazily by a separate, private worker
+with separate credentials.
 
 The hosted SPA does not hold an HTTP connection open for that pipeline. It must post a
 narrow, non-wildcard query to `/api/control-loops`, receives a random 256-bit `auditId`, and polls its
@@ -201,8 +205,9 @@ stack, and an environment-specific regional platform stack:
   CloudFront OAC, Route 53 A/AAAA aliases, the certificate/WAF handoff from the edge stack,
   access logging, and `TLSv1.3_2025`;
 - same-origin API Gateway with its own regional WAF, strict request models, throttling,
-  access logs, active X-Ray, and an encrypted two-second cache limited to the
-  capability-scoped status GET;
+  access logs, active X-Ray, a CloudFront-only origin gate whose credential never reaches
+  a backend, and an encrypted two-second cache limited to the capability-scoped status
+  GET;
 - private Fargate services with public IP assignment disabled through an internal
   NLB/VPC Link;
 - Cognito Hosted UI, public PKCE code client, scoped approval boundary, and Node.js 24

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "archon.datahub-mcp-lock/v1",
+  "package": {
+    "name": "mcp-server-datahub",
+    "version": "0.6.0",
+    "wheel": {
+      "filename": "mcp_server_datahub-0.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/fb/5a/5573927ea69ff2a93b1957d6f128b9aacbee50df0b35e6410678d3b62d0b/mcp_server_datahub-0.6.0-py3-none-any.whl",
+      "sha256": "2679dcfafc0ae12724efbf0fc6a73014f9085a4e1303cba9b1e41776dab8f001",
+      "size": 119016
+    },
+    "pypiProvenance": {
+      "url": "https://pypi.org/integrity/mcp-server-datahub/0.6.0/mcp_server_datahub-0.6.0-py3-none-any.whl/provenance",
+      "publisher": {
+        "environment": "pypi",
+        "kind": "GitHub",
+        "repository": "acryldata/mcp-server-datahub",
+        "workflow": "wheels.yml"
+      },
+      "statementSha256": "bb73e64caa7b8fddcc01a42edd42cd4ad7d3c586fb31c386e6e3d502d2d5ff68",
+      "signatureSha256": "afca1b5a39995101a44c5ac088a8b7a4481c3dc2916365275586d6fb418205c9",
+      "certificateSha256": "789d1f72d1cfa20ef32a2c99e8573672830262f40b67bd64c63f22c44972a7a5",
+      "rekorLogIndex": "1568734253",
+      "integratedTime": "1779123580"
+    }
+  },
+  "runtime": {
+    "pythonVersion": "3.11.15",
+    "uvVersion": "0.11.31"
+  },
+  "source": {
+    "repository": "https://github.com/acryldata/mcp-server-datahub.git",
+    "commit": "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "tree": "37f04067731b7340020e711fb6075dfd8a1a0cfd",
+    "tag": "v0.6.0",
+    "githubCommitSignatureVerified": true
+  },
+  "files": {
+    "pyproject.toml": {
+      "gitBlob": "8eeb7df6d30f110b3a1fb5578c9687ffb23370a7",
+      "sha256": "18e8727d9ca0e0703d47d73d585ec530128bfbeb3d37a83754970d956e645ec2",
+      "size": 1743
+    },
+    "uv.lock": {
+      "gitBlob": "a693ad251efb6202a022588eb6d862e5b305680f",
+      "sha256": "54b2303ea3c3b11f1d23f60aac6c88084bba311d4c188c722c89e755d2b6c325",
+      "size": 418925
+    }
+  }
+}

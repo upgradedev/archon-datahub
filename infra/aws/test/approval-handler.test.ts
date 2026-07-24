@@ -39,7 +39,7 @@ process.env.APPROVER_GROUP = "archon-approvers";
 const { handler } = require("../lambda/approval/index.js") as {
   handler: (event: Record<string, any>) => Promise<{
     statusCode: number;
-    body: string;
+    payload: Record<string, any>;
   }>;
 };
 
@@ -48,14 +48,22 @@ function event(
   claims: Record<string, unknown> = {
     sub: "cognito-sub-123",
     iss: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_example",
-    email: "approver@example.test",
     "cognito:groups": "archon-approvers"
   }
 ): Record<string, unknown> {
   return {
-    pathParameters: { approvalId: "approval-1234" },
-    requestContext: { authorizer: { claims } },
-    body: JSON.stringify(body)
+    operation: "decide",
+    requestId: "request-approval-123",
+    approvalId: "approval-1234",
+    body,
+    identity: {
+      subject: claims.sub,
+      issuer: claims.iss,
+      groups:
+        typeof claims["cognito:groups"] === "string"
+          ? claims["cognito:groups"]
+          : ""
+    }
   };
 }
 
@@ -75,7 +83,24 @@ describe("approval control Lambda", () => {
       })
     );
     expect(result.statusCode).toBe(400);
-    expect(JSON.parse(result.body)).toEqual({ error: "unexpected_field" });
+    expect(result.payload).toEqual({ error: "unexpected_field" });
+    expect(mockDdbSend).not.toHaveBeenCalled();
+    expect(mockSfnSend).not.toHaveBeenCalled();
+  });
+
+  test("rejects gateway events that carry raw authorization or origin headers", async () => {
+    const result = await handler({
+      ...event({ decision: "APPROVE" }),
+      headers: {
+        authorization: "must-never-reach-the-lambda",
+        "x-api-key": "must-never-reach-the-lambda"
+      }
+    });
+
+    expect(result.statusCode).toBe(400);
+    expect(result.payload).toEqual({
+      error: "invalid_gateway_event"
+    });
     expect(mockDdbSend).not.toHaveBeenCalled();
     expect(mockSfnSend).not.toHaveBeenCalled();
   });
@@ -92,7 +117,7 @@ describe("approval control Lambda", () => {
       )
     );
     expect(result.statusCode).toBe(403);
-    expect(JSON.parse(result.body)).toEqual({ error: "approver_role_required" });
+    expect(result.payload).toEqual({ error: "approver_role_required" });
     expect(mockDdbSend).not.toHaveBeenCalled();
   });
 
@@ -149,7 +174,7 @@ describe("approval control Lambda", () => {
     );
 
     expect(result.statusCode).toBe(200);
-    expect(JSON.parse(result.body)).toEqual({
+    expect(result.payload).toEqual({
       approvalId: "approval-1234",
       decision: "APPROVE",
       status: "recorded",
@@ -264,7 +289,7 @@ describe("approval control Lambda", () => {
       event({ decision: "REJECT", comment: "not safe" })
     );
     expect(result.statusCode).toBe(200);
-    expect(JSON.parse(result.body).disposition).toBe("already_recorded");
+    expect(result.payload.disposition).toBe("already_recorded");
     expect(mockSfnSend).not.toHaveBeenCalled();
   });
 
@@ -333,7 +358,7 @@ describe("approval control Lambda", () => {
     );
 
     expect(result.statusCode).toBe(202);
-    expect(JSON.parse(result.body).disposition).toBe(
+    expect(result.payload.disposition).toBe(
       "recorded_callback_closed"
     );
     const closeWrite = mockDdbSend.mock.calls

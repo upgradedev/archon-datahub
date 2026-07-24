@@ -29,9 +29,9 @@ artifacts to an environment:
   dashboard.
 
 The Fargate API task is never granted the DataHub write secret. `POST /api/audits`
-is intentionally public, synchronous, and read-only; it is a bounded diagnostic
-preview rather than the SPA's production orchestration path. The judge-facing SPA
-uses:
+is publicly usable through CloudFront, synchronous, and read-only; it is a bounded
+diagnostic preview rather than the SPA's production orchestration path. The
+judge-facing SPA uses:
 
 ```text
 POST /api/control-loops
@@ -54,6 +54,19 @@ The Lambda's S3 read policy is limited to `v1/audit/*` and `v1/execution/*`; it 
 returns workflow input/output, task tokens, mutation responses, provider errors,
 identities, or secrets. WAF, schema validation, and throttling protect both public
 routes. Deploy them only against a sanitized demo DataHub tenant.
+
+Every API method also requires a generated 64-character origin key. Its value is held in
+KMS-encrypted Secrets Manager and referenced dynamically by both API Gateway and the
+CloudFront custom origin header; it is never present in a browser bundle, runtime config,
+stack output, or retained evidence. CloudFront overwrites a viewer-supplied `x-api-key`,
+while the custom origin request policy excludes `host` and forwards the remaining viewer
+context. API Gateway validates the overwritten edge key, then every HTTP/Lambda integration
+prevents it from propagating: the HTTP proxy overwrites it with the literal `redacted`,
+while custom Lambda mappings emit only the validated body, required path value, request
+identifier, and selected Cognito claims. The approval method additionally requires the
+Cognito access token, `archon/approve` scope, and approver group.
+API-key quotas are only a best-effort aggregate throttle; WAF, bounded workloads, reserved
+concurrency, alarms, and account budgets remain the abuse and cost controls.
 An explicit `mode: "READ_ONLY"` is reserved for safe hosted verification: the
 worker still seals the report evidence but cannot create a remediation plan.
 The staging pipeline exercises that mode to `READ_ONLY_COMPLETE` and retains the
@@ -77,11 +90,12 @@ CloudFront caching-disabled behavior with `Cache-Control:
 no-cache,no-store,must-revalidate`. Access tokens remain in browser memory.
 
 The request schema and Lambda both reject every field except `decision` and
-`comment`. The Lambda reads `sub`, email, and `cognito:groups` directly from the
-verified API Gateway authorizer context and requires membership in
-`archon-approvers`. API Gateway additionally requires the `archon/approve`
-access-token scope. A browser never sends action names, tool names, entity URNs,
-mutation arguments, digests, or callback tokens. The Lambda resolves the
+`comment`. A narrow API Gateway mapping projects only `sub`, `iss`, and
+`cognito:groups` from the verified access token; email is intentionally not
+projected because it is an ID-token identity claim. The Lambda requires membership
+in `archon-approvers`, while API Gateway additionally requires the
+`archon/approve` access-token scope. A browser never sends action names, tool
+names, entity URNs, mutation arguments, digests, or callback tokens. The Lambda resolves the
 already-digested plan by `approvalId`, performs a conditional DynamoDB update,
 and uses its server-held Step Functions token. It has no access to any DataHub
 or LLM secret. The handoff persists the immutable approval deadline as
@@ -386,8 +400,8 @@ Do not pipe an unpinned installer from the default branch into a shell.
    retain the terminal `VERIFIED` or `REJECTED` projection with receipt digest,
    execution-evidence digest, completion timestamp, and check/event/rollback summary.
    Create an operator in the output Cognito pool and add it to
-   `ArchonApproverGroupName`. The direct `ArchonApiInvokeUrl` is diagnostic only;
-   clients use `ArchonApiUrl`.
+   `ArchonApproverGroupName`. The direct `ArchonApiInvokeUrl` must reject calls without
+   the non-exported origin key; all clients use `ArchonApiUrl`.
 
 7. Run the protected manual canary in
    [`../../.github/workflows/governed-canary.yml`](../../.github/workflows/governed-canary.yml)
@@ -422,9 +436,13 @@ This stack keeps environment-dependent claims explicit:
   isolated audit/remediation consumers for durable scans;
 - durable live harvests permit at most 25 datasets and 12 retained versions per aspect,
   use eight-way bounded work, and fail on partial search, entity, or history responses;
-- the public audit remains usable without sign-in, while approval is disabled
+- the public audit remains usable through CloudFront without sign-in, while approval is disabled
   until the SPA completes Cognito authorization code + PKCE and holds a
   short-lived scoped access token in memory;
+- the retained CloudFront-origin secret must never be rotated independently of the API
+  key and distribution. Rotate with an overlap window: add a second API key to the usage
+  plan, switch CloudFront, prove propagation and direct-origin rejection, then remove the
+  old key;
 - enforced standard Cognito threat protection explicitly selects the billable
   `PLUS` feature plan; approve that environment cost and attach budget alerts
   before enabling a long-lived hosted environment;

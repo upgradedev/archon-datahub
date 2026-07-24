@@ -195,6 +195,89 @@
               CachingEnabled: true
               CacheDataEncrypted: true
               CacheTtlInSeconds: 2
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicAuditMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      CloudFrontOriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+      CloudFrontOriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      CloudFrontOriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
       PrivateSubnet:
         Type: AWS::EC2::Subnet
         Properties:
@@ -222,6 +305,9 @@
                   FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
             CacheBehaviors:
               - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
                 ViewerProtocolPolicy: https-only
                 FunctionAssociations:
                   - EventType: viewer-request
@@ -230,6 +316,22 @@
               - Id: SpaOrigin
                 DomainName: spa.s3.amazonaws.com
                 OriginAccessControlId: oac-123
+              - Id: ApiOrigin
+                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+      CloudFrontOriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
       ReadSecret:
         Type: AWS::SecretsManager::Secret
         Properties:
@@ -260,6 +362,13 @@
                   FieldType: SINGLE_HEADER
                   FieldKeys:
                     - cookie
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
+                    - x-api-key
       ApiWafLogging:
         Type: AWS::WAFv2::LoggingConfiguration
         Properties:
@@ -281,6 +390,8 @@
                 Name: authorization
             - SingleHeader:
                 Name: cookie
+            - SingleHeader:
+                Name: x-api-key
       ApiWafAssociation:
         Type: AWS::WAFv2::WebACLAssociation
         Properties:
@@ -302,6 +413,7 @@
       lambda_functions_enable_active_xray: PASS
       subnets_never_auto_assign_public_ips: PASS
       api_gateway_stages_are_observable: PASS
+      public_api_methods_require_cloudfront_origin_gate: PASS
       cloudfront_distributions_enforce_tls_logging_and_oac: PASS
       secrets_use_customer_managed_kms: PASS
       waf_web_acls_protect_sensitive_sampled_data: PASS
@@ -841,6 +953,271 @@
     rules:
       api_gateway_stages_are_observable: FAIL
 
+- name: a public API method without the CloudFront origin key is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: false
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+      OriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      OriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - archon.example.com
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            CacheBehaviors:
+              - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+              - Id: ApiOrigin
+                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+  expectations:
+    rules:
+      public_api_methods_require_cloudfront_origin_gate: FAIL
+
+- name: a public API method without the secret CloudFront origin header is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      PublicMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: HTTP_PROXY
+            RequestParameters:
+              integration.request.header.x-api-key: "'redacted'"
+      PublicControlStartMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"start","requestId":"request","body":{}}'
+      PublicControlStatusMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: NONE
+          HttpMethod: GET
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"status","requestId":"request","auditId":"abc"}'
+      ApprovalDecisionMethod:
+        Type: AWS::ApiGateway::Method
+        Properties:
+          ApiKeyRequired: true
+          AuthorizationType: COGNITO_USER_POOLS
+          HttpMethod: POST
+          Integration:
+            Type: AWS
+            PassthroughBehavior: NEVER
+            RequestTemplates:
+              application/json: '{"operation":"decide","requestId":"request","approvalId":"abc","body":{},"identity":{}}'
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+      OriginUsagePlan:
+        Type: AWS::ApiGateway::UsagePlan
+        Properties:
+          ApiStages:
+            - ApiId: api-123
+              Stage: staging
+          Quota:
+            Limit: 25000
+            Period: DAY
+          Throttle:
+            BurstLimit: 20
+            RateLimit: 10
+      OriginUsagePlanKey:
+        Type: AWS::ApiGateway::UsagePlanKey
+        Properties:
+          KeyId: key-123
+          KeyType: API_KEY
+          UsagePlanId: plan-123
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        Properties:
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+      ApiOriginRequestPolicy:
+        Type: AWS::CloudFront::OriginRequestPolicy
+        Properties:
+          OriginRequestPolicyConfig:
+            Name: archon-staging-api-origin
+            CookiesConfig:
+              CookieBehavior: all
+            HeadersConfig:
+              HeaderBehavior: allExcept
+              Headers:
+                - host
+            QueryStringsConfig:
+              QueryStringBehavior: all
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - archon.example.com
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
+            ViewerCertificate:
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
+            CacheBehaviors:
+              - PathPattern: api/*
+                OriginRequestPolicyId:
+                  Ref: ApiOriginRequestPolicy
+                TargetOriginId: ApiOrigin
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+              - Id: ApiOrigin
+                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+  expectations:
+    rules:
+      public_api_methods_require_cloudfront_origin_gate: FAIL
+
 - name: CloudFront custom domain with legacy TLS no logging and no OAC is rejected
   input:
     Resources:
@@ -937,6 +1314,13 @@
                 Field:
                   FieldType: SINGLE_HEADER
                   FieldKeys:
+                    - x-api-key
+              - Action: SUBSTITUTION
+                ExcludeRateBasedDetails: false
+                ExcludeRuleMatchDetails: false
+                Field:
+                  FieldType: SINGLE_HEADER
+                  FieldKeys:
                     - x-extra
   expectations:
     rules:
@@ -988,6 +1372,8 @@
                 Name: authorization
             - SingleHeader:
                 Name: cookie
+            - SingleHeader:
+                Name: x-api-key
   expectations:
     rules:
       waf_logging_is_filtered_and_redacted: FAIL

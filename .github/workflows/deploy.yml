@@ -87,6 +87,7 @@ jobs:
       edge_security_contract_sha: ${{ steps.deploy.outputs.edge_security_contract_sha }}
       regional_waf_contract_sha: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
       network_egress_contract_sha: ${{ steps.deploy.outputs.network_egress_contract_sha }}
+      api_origin_contract_sha: ${{ steps.deploy.outputs.api_origin_contract_sha }}
     steps:
       - name: Validate immutable source run
         id: source
@@ -1452,6 +1453,13 @@ jobs:
                   fieldKeys: ["cookie"],
                   excludeRateBasedDetails: false,
                   excludeRuleMatchDetails: false
+                },
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["x-api-key"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
                 }
               ] and
               ($web_acl.Rules | length) == 4 and
@@ -1595,7 +1603,7 @@ jobs:
                   $logging.RedactedFields[]? |
                   .SingleHeader.Name
                 ] | sort
-              ) == ["authorization", "cookie"]
+              ) == ["authorization", "cookie", "x-api-key"]
             ' <<<"${waf_logging_json}" >/dev/null || {
             echo "::error::staging CloudFront WAF logging or redaction contract is invalid"
             exit 1
@@ -1631,7 +1639,7 @@ jobs:
                     },
                     retentionDays: $groups[0].retentionInDays,
                     filter: "BLOCK_OR_COUNT",
-                    sensitiveFields: ["authorization", "cookie"]
+                    sensitiveFields: ["authorization", "cookie", "x-api-key"]
                   }
                 else
                   error(
@@ -1778,50 +1786,17 @@ jobs:
               sha256sum |
               awk '{print $1}'
           )"
-
-          distribution_id="$(jq -er --arg stack "${stack_name}" \
-            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
-          deployed_distribution="$(
-            aws cloudfront get-distribution-config \
-              --id "${distribution_id}" \
-              --output json
+          api_origin_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-api-origin-contract.sh
           )"
-          jq -e \
-            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
-            --arg web_acl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
-            '
-              .DistributionConfig |
-              .Enabled == true and
-              .IsIPV6Enabled == true and
-              .HttpVersion == "http2and3" and
-              .Aliases.Quantity == 1 and
-              ((.Aliases.Items // []) == [$domain]) and
-              .ViewerCertificate.ACMCertificateArn == $certificate and
-              .WebACLId == $web_acl and
-              .ViewerCertificate.SSLSupportMethod == "sni-only" and
-              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
-              .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
-              .DefaultCacheBehavior.FunctionAssociations.Quantity == 1 and
-              any(
-                .DefaultCacheBehavior.FunctionAssociations.Items[]?;
-                .EventType == "viewer-request"
-              ) and
-              all(
-                .CacheBehaviors.Items[]?;
-                .ViewerProtocolPolicy == "https-only" and
-                .FunctionAssociations.Quantity == 1 and
-                any(
-                  .FunctionAssociations.Items[]?;
-                  .EventType == "viewer-request"
-                )
-              ) and
-              .Logging.Enabled == true and
-              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
-            ' <<<"${deployed_distribution}" >/dev/null || {
-            echo "::error::staging CloudFront runtime configuration violates the edge security contract"
-            exit 1
-          }
+          api_origin_contract_sha="$(
+            printf '%s' "${api_origin_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
 
           application_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
@@ -2018,6 +1993,8 @@ jobs:
             echo "edge_security_contract_sha=${edge_security_contract_sha}"
             echo "regional_waf_contract=${regional_waf_contract}"
             echo "regional_waf_contract_sha=${regional_waf_contract_sha}"
+            echo "api_origin_contract=${api_origin_contract}"
+            echo "api_origin_contract_sha=${api_origin_contract_sha}"
             echo "network_egress_contract=${network_egress_contract}"
             echo "network_egress_contract_sha=${network_egress_contract_sha}"
             echo "live_security_group_contract_sha=${live_security_group_contract_sha}"
@@ -2167,6 +2144,7 @@ jobs:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA: ${{ steps.deploy.outputs.live_security_group_contract_sha }}
           EXPECTED_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          EXPECTED_API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
         run: |
           set -euo pipefail
           (
@@ -2248,6 +2226,15 @@ jobs:
           test "$(printf '%s' "${final_regional_waf_contract}" |
             sha256sum | awk '{print $1}')" = \
             "${EXPECTED_REGIONAL_WAF_CONTRACT_SHA}"
+          final_api_origin_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-api-origin-contract.sh
+          )"
+          test "$(printf '%s' "${final_api_origin_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_API_ORIGIN_CONTRACT_SHA}"
 
           cluster="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
@@ -2770,6 +2757,8 @@ jobs:
           EDGE_SECURITY_CONTRACT_SHA: ${{ steps.deploy.outputs.edge_security_contract_sha }}
           REGIONAL_WAF_CONTRACT: ${{ steps.deploy.outputs.regional_waf_contract }}
           REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          API_ORIGIN_CONTRACT: ${{ steps.deploy.outputs.api_origin_contract }}
+          API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
           NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
           NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
           ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
@@ -2808,9 +2797,11 @@ jobs:
             --arg iacAssemblyManifestSha256 "${IAC_ASSEMBLY_MANIFEST_SHA}" \
             --arg edgeSecurityContractSha256 "${EDGE_SECURITY_CONTRACT_SHA}" \
             --arg regionalWafContractSha256 "${REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg apiOriginContractSha256 "${API_ORIGIN_CONTRACT_SHA}" \
             --arg networkEgressContractSha256 "${NETWORK_EGRESS_CONTRACT_SHA}" \
             --argjson edgeSecurity "${EDGE_SECURITY_CONTRACT}" \
             --argjson regionalWaf "${REGIONAL_WAF_CONTRACT}" \
+            --argjson apiOrigin "${API_ORIGIN_CONTRACT}" \
             --argjson networkEgress "${NETWORK_EGRESS_CONTRACT}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
@@ -2837,6 +2828,9 @@ jobs:
                 regionalWafContractSha256:
                   $regionalWafContractSha256,
                 regionalWaf: $regionalWaf,
+                apiOriginContractSha256:
+                  $apiOriginContractSha256,
+                apiOrigin: $apiOrigin,
                 networkEgressContractSha256:
                   $networkEgressContractSha256,
                 networkEgress: $networkEgress
@@ -2888,6 +2882,10 @@ jobs:
             "$(jq -er '.cdkOutputsSha256' <<<"${REGIONAL_WAF_CONTRACT}")"
           test "$(printf '%s' "${REGIONAL_WAF_CONTRACT}" | sha256sum |
             awk '{print $1}')" = "${REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum "${STACK_OUTPUTS_PATH}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' <<<"${API_ORIGIN_CONTRACT}")"
+          test "$(printf '%s' "${API_ORIGIN_CONTRACT}" | sha256sum |
+            awk '{print $1}')" = "${API_ORIGIN_CONTRACT_SHA}"
           test "$(printf '%s' "${NETWORK_EGRESS_CONTRACT}" | sha256sum |
             awk '{print $1}')" = "${NETWORK_EGRESS_CONTRACT_SHA}"
           test "$(sha256sum "${RUNNER_TEMP}/staging-deploy-assembly.sha256" |
@@ -2910,6 +2908,8 @@ jobs:
             >"${evidence_dir}/edge-security-contract.json"
           printf '%s' "${REGIONAL_WAF_CONTRACT}" \
             >"${evidence_dir}/regional-waf-security-contract.json"
+          printf '%s' "${API_ORIGIN_CONTRACT}" \
+            >"${evidence_dir}/api-origin-security-contract.json"
           printf '%s' "${NETWORK_EGRESS_CONTRACT}" \
             >"${evidence_dir}/network-egress-security-contract.json"
           test "$(sha256sum "${evidence_dir}/edge-security-contract.json" |
@@ -2917,6 +2917,9 @@ jobs:
           test "$(sha256sum \
             "${evidence_dir}/regional-waf-security-contract.json" |
             awk '{print $1}')" = "${REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/api-origin-security-contract.json" |
+            awk '{print $1}')" = "${API_ORIGIN_CONTRACT_SHA}"
           test "$(sha256sum \
             "${evidence_dir}/network-egress-security-contract.json" |
             awk '{print $1}')" = "${NETWORK_EGRESS_CONTRACT_SHA}"
@@ -4197,6 +4200,13 @@ jobs:
                   fieldKeys: ["cookie"],
                   excludeRateBasedDetails: false,
                   excludeRuleMatchDetails: false
+                },
+                {
+                  action: "SUBSTITUTION",
+                  fieldType: "SINGLE_HEADER",
+                  fieldKeys: ["x-api-key"],
+                  excludeRateBasedDetails: false,
+                  excludeRuleMatchDetails: false
                 }
               ] and
               ($web_acl.Rules | length) == 4 and
@@ -4340,7 +4350,7 @@ jobs:
                   $logging.RedactedFields[]? |
                   .SingleHeader.Name
                 ] | sort
-              ) == ["authorization", "cookie"]
+              ) == ["authorization", "cookie", "x-api-key"]
             ' <<<"${waf_logging_json}" >/dev/null || {
             echo "::error::production CloudFront WAF logging or redaction contract is invalid"
             exit 1
@@ -4376,7 +4386,7 @@ jobs:
                     },
                     retentionDays: $groups[0].retentionInDays,
                     filter: "BLOCK_OR_COUNT",
-                    sensitiveFields: ["authorization", "cookie"]
+                    sensitiveFields: ["authorization", "cookie", "x-api-key"]
                   }
                 else
                   error(
@@ -4522,50 +4532,17 @@ jobs:
               sha256sum |
               awk '{print $1}'
           )"
-
-          distribution_id="$(jq -er --arg stack "${stack_name}" \
-            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
-          deployed_distribution="$(
-            aws cloudfront get-distribution-config \
-              --id "${distribution_id}" \
-              --output json
+          api_origin_contract="$(
+            ARCHON_STACK_NAME="${stack_name}" \
+            ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-api-origin-contract.sh
           )"
-          jq -e \
-            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
-            --arg web_acl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
-            '
-              .DistributionConfig |
-              .Enabled == true and
-              .IsIPV6Enabled == true and
-              .HttpVersion == "http2and3" and
-              .Aliases.Quantity == 1 and
-              ((.Aliases.Items // []) == [$domain]) and
-              .ViewerCertificate.ACMCertificateArn == $certificate and
-              .WebACLId == $web_acl and
-              .ViewerCertificate.SSLSupportMethod == "sni-only" and
-              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
-              .DefaultCacheBehavior.ViewerProtocolPolicy == "redirect-to-https" and
-              .DefaultCacheBehavior.FunctionAssociations.Quantity == 1 and
-              any(
-                .DefaultCacheBehavior.FunctionAssociations.Items[]?;
-                .EventType == "viewer-request"
-              ) and
-              all(
-                .CacheBehaviors.Items[]?;
-                .ViewerProtocolPolicy == "https-only" and
-                .FunctionAssociations.Quantity == 1 and
-                any(
-                  .FunctionAssociations.Items[]?;
-                  .EventType == "viewer-request"
-                )
-              ) and
-              .Logging.Enabled == true and
-              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
-            ' <<<"${deployed_distribution}" >/dev/null || {
-            echo "::error::production CloudFront runtime configuration violates the edge security contract"
-            exit 1
-          }
+          api_origin_contract_sha="$(
+            printf '%s' "${api_origin_contract}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
 
           application_url="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonApplicationUrl' "${stack_outputs}")"
@@ -4762,6 +4739,8 @@ jobs:
             echo "edge_security_contract_sha=${edge_security_contract_sha}"
             echo "regional_waf_contract=${regional_waf_contract}"
             echo "regional_waf_contract_sha=${regional_waf_contract_sha}"
+            echo "api_origin_contract=${api_origin_contract}"
+            echo "api_origin_contract_sha=${api_origin_contract_sha}"
             echo "network_egress_contract=${network_egress_contract}"
             echo "network_egress_contract_sha=${network_egress_contract_sha}"
             echo "live_security_group_contract_sha=${live_security_group_contract_sha}"
@@ -4908,6 +4887,7 @@ jobs:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           EXPECTED_LIVE_SECURITY_GROUP_CONTRACT_SHA: ${{ steps.deploy.outputs.live_security_group_contract_sha }}
           EXPECTED_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          EXPECTED_API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
         run: |
           set -euo pipefail
           (
@@ -4989,6 +4969,15 @@ jobs:
           test "$(printf '%s' "${final_regional_waf_contract}" |
             sha256sum | awk '{print $1}')" = \
             "${EXPECTED_REGIONAL_WAF_CONTRACT_SHA}"
+          final_api_origin_contract="$(
+            ARCHON_STACK_NAME="${STACK_NAME}" \
+            ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            AWS_REGION="${AWS_REGION}" \
+              bash scripts/validate-aws-api-origin-contract.sh
+          )"
+          test "$(printf '%s' "${final_api_origin_contract}" |
+            sha256sum | awk '{print $1}')" = \
+            "${EXPECTED_API_ORIGIN_CONTRACT_SHA}"
 
           cluster="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonEcsClusterName' "${STACK_OUTPUTS}")"
@@ -5296,10 +5285,13 @@ jobs:
           STAGING_EDGE_SECURITY_CONTRACT_SHA: ${{ needs.staging.outputs.edge_security_contract_sha }}
           STAGING_REGIONAL_WAF_CONTRACT_SHA: ${{ needs.staging.outputs.regional_waf_contract_sha }}
           STAGING_NETWORK_EGRESS_CONTRACT_SHA: ${{ needs.staging.outputs.network_egress_contract_sha }}
+          STAGING_API_ORIGIN_CONTRACT_SHA: ${{ needs.staging.outputs.api_origin_contract_sha }}
           PRODUCTION_EDGE_SECURITY_CONTRACT: ${{ steps.deploy.outputs.edge_security_contract }}
           PRODUCTION_EDGE_SECURITY_CONTRACT_SHA: ${{ steps.deploy.outputs.edge_security_contract_sha }}
           PRODUCTION_REGIONAL_WAF_CONTRACT: ${{ steps.deploy.outputs.regional_waf_contract }}
           PRODUCTION_REGIONAL_WAF_CONTRACT_SHA: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
+          PRODUCTION_API_ORIGIN_CONTRACT: ${{ steps.deploy.outputs.api_origin_contract }}
+          PRODUCTION_API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
           PRODUCTION_NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
           PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
         run: |
@@ -5315,6 +5307,8 @@ jobs:
             "${PRODUCTION_IAC_ASSEMBLY_MANIFEST_SHA}" \
             "${STAGING_REGIONAL_WAF_CONTRACT_SHA}" \
             "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}" \
+            "${STAGING_API_ORIGIN_CONTRACT_SHA}" \
+            "${PRODUCTION_API_ORIGIN_CONTRACT_SHA}" \
             "${STAGING_NETWORK_EGRESS_CONTRACT_SHA}" \
             "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}"; do
             [[ "${digest}" =~ ^[a-f0-9]{64}$ ]] || {
@@ -5328,6 +5322,9 @@ jobs:
           test "$(printf '%s' "${PRODUCTION_REGIONAL_WAF_CONTRACT}" |
             sha256sum | awk '{print $1}')" = \
             "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(printf '%s' "${PRODUCTION_API_ORIGIN_CONTRACT}" |
+            sha256sum | awk '{print $1}')" = \
+            "${PRODUCTION_API_ORIGIN_CONTRACT_SHA}"
           test "$(sha256sum \
             "${RUNNER_TEMP}/production-deploy-assembly.sha256" |
             awk '{print $1}')" = \
@@ -5377,16 +5374,21 @@ jobs:
             --arg stagingEdgeSecuritySha256 "${STAGING_EDGE_SECURITY_CONTRACT_SHA}" \
             --arg stagingRegionalWafSha256 \
               "${STAGING_REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg stagingApiOriginSha256 \
+              "${STAGING_API_ORIGIN_CONTRACT_SHA}" \
             --arg stagingNetworkEgressSha256 \
               "${STAGING_NETWORK_EGRESS_CONTRACT_SHA}" \
             --arg productionEdgeSecuritySha256 \
               "${PRODUCTION_EDGE_SECURITY_CONTRACT_SHA}" \
             --arg productionRegionalWafSha256 \
               "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}" \
+            --arg productionApiOriginSha256 \
+              "${PRODUCTION_API_ORIGIN_CONTRACT_SHA}" \
             --arg productionNetworkEgressSha256 \
               "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}" \
             --argjson productionEdgeSecurity "${PRODUCTION_EDGE_SECURITY_CONTRACT}" \
             --argjson productionRegionalWaf "${PRODUCTION_REGIONAL_WAF_CONTRACT}" \
+            --argjson productionApiOrigin "${PRODUCTION_API_ORIGIN_CONTRACT}" \
             --argjson productionNetworkEgress "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
@@ -5438,6 +5440,8 @@ jobs:
                   edgeContractSha256: $stagingEdgeSecuritySha256,
                   regionalWafContractSha256:
                     $stagingRegionalWafSha256,
+                  apiOriginContractSha256:
+                    $stagingApiOriginSha256,
                   networkEgressContractSha256:
                     $stagingNetworkEgressSha256
                 },
@@ -5464,6 +5468,9 @@ jobs:
                   regionalWafContractSha256:
                     $productionRegionalWafSha256,
                   regionalWaf: $productionRegionalWaf,
+                  apiOriginContractSha256:
+                    $productionApiOriginSha256,
+                  apiOrigin: $productionApiOrigin,
                   networkEgressContractSha256:
                     $productionNetworkEgressSha256,
                   networkEgress: $productionNetworkEgress
@@ -5482,12 +5489,17 @@ jobs:
           test "$(sha256sum "${STACK_OUTPUTS}" | awk '{print $1}')" = \
             "$(jq -er '.cdkOutputsSha256' \
               <<<"${PRODUCTION_REGIONAL_WAF_CONTRACT}")"
+          test "$(sha256sum "${STACK_OUTPUTS}" | awk '{print $1}')" = \
+            "$(jq -er '.cdkOutputsSha256' \
+              <<<"${PRODUCTION_API_ORIGIN_CONTRACT}")"
           cp "${PRODUCTION_EDGE_OUTPUTS}" \
             "${evidence_dir}/production-edge-cdk-outputs.json"
           printf '%s' "${PRODUCTION_EDGE_SECURITY_CONTRACT}" \
             >"${evidence_dir}/production-edge-security-contract.json"
           printf '%s' "${PRODUCTION_REGIONAL_WAF_CONTRACT}" \
             >"${evidence_dir}/production-regional-waf-security-contract.json"
+          printf '%s' "${PRODUCTION_API_ORIGIN_CONTRACT}" \
+            >"${evidence_dir}/production-api-origin-security-contract.json"
           printf '%s' "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" \
             >"${evidence_dir}/production-network-egress-security-contract.json"
           test "$(sha256sum \
@@ -5496,6 +5508,9 @@ jobs:
           test "$(sha256sum \
             "${evidence_dir}/production-regional-waf-security-contract.json" |
             awk '{print $1}')" = "${PRODUCTION_REGIONAL_WAF_CONTRACT_SHA}"
+          test "$(sha256sum \
+            "${evidence_dir}/production-api-origin-security-contract.json" |
+            awk '{print $1}')" = "${PRODUCTION_API_ORIGIN_CONTRACT_SHA}"
           test "$(sha256sum \
             "${evidence_dir}/production-network-egress-security-contract.json" |
             awk '{print $1}')" = "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}"

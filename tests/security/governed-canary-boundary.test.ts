@@ -40,6 +40,69 @@ test("governed canary is manual-only, staging-only, and independently approved",
   assert.doesNotMatch(workflow, /startsWith\(\$prefix\)|startswith\(\$prefix\)/u);
 });
 
+test("canary mutation and recovery require one exact green control plane", () => {
+  const sharedConcurrency =
+    /concurrency:\n  group: archon-governed-canary-mutation-recovery\n  cancel-in-progress: false/u;
+  assert.match(workflow, sharedConcurrency);
+  assert.match(recoveryWorkflow, sharedConcurrency);
+
+  assert.match(workflow, /-f "head_sha=\$\{GITHUB_SHA\}"/u);
+  assert.match(workflow, /workflow_success ci\.yml CI/u);
+  assert.match(workflow, /workflow_success codeql\.yml CodeQL/u);
+  assert.match(
+    workflow,
+    /workflow_success workflow-security\.yml "Workflow security"/u
+  );
+  assert.match(
+    workflow,
+    /\.head_sha == \$controlPlane[\s\S]+\.source\.deploymentControlPlaneSha == \$controlPlane/u
+  );
+  assert.match(
+    workflow,
+    /\.schemaVersion == "archon\.deployment-control-plane-gates\/v1"/u
+  );
+  assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/u);
+  assert.match(workflow, /controlPlaneSha: \$controlPlaneSha/u);
+  assert.match(
+    workflow,
+    /deploymentEvidenceSha256: \$deploymentEvidenceSha256/u
+  );
+
+  assert.match(
+    recoveryWorkflow,
+    /PARENT_HEAD_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/u
+  );
+  assert.match(recoveryWorkflow, /-f "head_sha=\$\{PARENT_HEAD_SHA\}"/u);
+  assert.match(recoveryWorkflow, /workflow_success ci\.yml CI/u);
+  assert.match(recoveryWorkflow, /workflow_success codeql\.yml CodeQL/u);
+  assert.match(
+    recoveryWorkflow,
+    /workflow_success workflow-security\.yml "Workflow security"/u
+  );
+  assert.match(recoveryWorkflow, /\.head_sha == \$headSha/u);
+  assert.match(
+    recoveryWorkflow,
+    /CANARY_CONTROL_PLANE_SHA: \$\{\{ needs\.resolve-parent\.outputs\.control_plane_sha \}\}/u
+  );
+  assert.match(
+    recoveryWorkflow,
+    /ref: \$\{\{ needs\.resolve-parent\.outputs\.control_plane_sha \}\}/u
+  );
+  assert.match(recoveryWorkflow, /\.head_sha == \$controlPlane/u);
+  assert.match(recoveryWorkflow, /controlPlaneSha: \$controlPlaneSha/u);
+
+  for (const privilegedWorkflow of [workflow, recoveryWorkflow]) {
+    assert.match(privilegedWorkflow, /\.path == \$path/u);
+    assert.match(privilegedWorkflow, /\.head_sha == \$sha/u);
+    assert.match(
+      privilegedWorkflow,
+      /\.head_repository\.full_name == \$repository/u
+    );
+    assert.match(privilegedWorkflow, /\.event == "push"/u);
+    assert.match(privilegedWorkflow, /\.conclusion == "success"/u);
+  }
+});
+
 test("a reviewer approves the sealed plan, not a generic pre-plan dispatch", () => {
   const prepare = workflow.indexOf("\n  prepare:");
   const approval = workflow.indexOf("\n  approval:");

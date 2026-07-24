@@ -163,6 +163,15 @@ export class ArchonEdgeStack extends Stack {
               fieldType: "SINGLE_HEADER",
               fieldKeys: ["cookie"]
             }
+          },
+          {
+            action: "SUBSTITUTION",
+            excludeRateBasedDetails: false,
+            excludeRuleMatchDetails: false,
+            field: {
+              fieldType: "SINGLE_HEADER",
+              fieldKeys: ["x-api-key"]
+            }
           }
         ]
       },
@@ -219,7 +228,8 @@ export class ArchonEdgeStack extends Stack {
         },
         redactedFields: [
           { singleHeader: { Name: "authorization" } },
-          { singleHeader: { Name: "cookie" } }
+          { singleHeader: { Name: "cookie" } },
+          { singleHeader: { Name: "x-api-key" } }
         ]
       }
     );

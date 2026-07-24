@@ -26,12 +26,17 @@ consistent:
   Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
   optional comment; it never sends a tool name, entity URN, or mutation arguments.
 
-The public audit APIs and normal DataHub client are read-only. The SPA starts the durable
-path with `POST /api/control-loops` and polls a random 256-bit capability URL; the status
-projection never exposes a Step Functions ARN, workflow input/output, task token, identity,
-or provider error. The legacy `POST /api/audits` route remains an explicitly synchronous,
-read-only, one-dataset diagnostic preview with a 25-second pipeline deadline. A separately
-deployed worker is the only component that may
+The judge-facing audit APIs are publicly usable only through CloudFront. A generated,
+KMS-encrypted origin credential is never delivered to the browser: CloudFront overwrites
+`x-api-key`, and API Gateway requires it on every method. The HTTP proxy replaces it with
+a static redacted value, while the Lambda custom integrations construct narrow events
+that contain no request headers at all. Direct API Gateway bypass therefore fails closed.
+The SPA starts the durable path with `POST /api/control-loops` and polls a random
+256-bit capability URL; the status projection never exposes a Step Functions ARN,
+workflow input/output, task token, identity, or provider error. The legacy
+`POST /api/audits` route remains an explicitly synchronous, read-only, one-dataset
+diagnostic preview with a 25-second pipeline deadline. A separately deployed worker is
+the only component that may
 receive a distinct write credential. Its action catalog is limited to the official
 `add_tags` / `remove_tags` tools, one entity, one column, and one policy tag.
 

@@ -1,11 +1,21 @@
 name: Live DataHub proof
 
+run-name: Prove deployed release ${{ inputs.release_sha }}
+
 on:
   workflow_dispatch:
     inputs:
+      release_sha:
+        description: Exact deployed 40-character default-branch commit SHA
+        required: true
+        type: string
+      deployment_run_id:
+        description: Successful Deploy immutable AWS release run for that SHA
+        required: true
+        type: string
       query:
-        description: Narrow demo dataset query (optional)
-        required: false
+        description: Narrow query that resolves exactly one demo dataset
+        required: true
         type: string
 
 permissions:
@@ -21,7 +31,12 @@ jobs:
       github.repository == 'upgradedev/archon-datahub' &&
       github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
     environment: datahub-demo
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,16 +49,605 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.11.31"
-          enable-cache: true
-      - name: Install locked dependencies
+          enable-cache: false
+
+      - name: Bind exact green control plane and deployed release
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          ARCHON_DEMO_QUERY: ${{ inputs.query }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release_sha must be a full lowercase commit SHA"
+            exit 1
+          }
+          [[ "${DEPLOYMENT_RUN_ID}" =~ ^[0-9]+$ ]] || {
+            echo "::error::deployment_run_id must be numeric"
+            exit 1
+          }
+          jq -en --arg query "${ARCHON_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::query must be trimmed, 1-256 characters, and non-wildcard"
+            exit 1
+          }
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}" || {
+            echo "::error::the deployed release must equal this workflow's exact dispatch SHA"
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+
+          repository_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
+          test "${GITHUB_REF}" = "refs/heads/${default_branch}"
+
+          workflow_success() {
+            local workflow_file="$1"
+            local expected_path=".github/workflows/${workflow_file}"
+            local response
+            local match
+            response="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f status=completed \
+              -f per_page=100)"
+            match="$(jq -ce \
+              --arg path "${expected_path}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .head_repository.full_name == $repository and
+                    .event == "push" and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )
+                ] |
+                sort_by(.run_attempt, .id) |
+                last
+              ' <<<"${response}")"
+            control_plane_runs="$(
+              jq -cn \
+                --argjson current "${control_plane_runs}" \
+                --argjson match "${match}" '
+                  $current + [{
+                    path: $match.path,
+                    workflowId: $match.workflow_id,
+                    runId: $match.id,
+                    runAttempt: $match.run_attempt,
+                    headSha: $match.head_sha,
+                    conclusion: $match.conclusion
+                  }]
+                '
+            )"
+          }
+
+          control_plane_runs="[]"
+          workflow_success ci.yml
+          workflow_success codeql.yml
+          workflow_success workflow-security.yml
+          test "$(jq 'length' <<<"${control_plane_runs}")" = "3"
+
+          ci_run_id="$(
+            jq -er '
+              .[] |
+              select(.path == ".github/workflows/ci.yml") |
+              .runId
+            ' <<<"${control_plane_runs}"
+          )"
+          ci_artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}/artifacts?per_page=100")"
+          mcp_security_name="datahub-mcp-security-${RELEASE_SHA}"
+          mcp_security_artifact="$(jq -ce \
+            --arg name "${mcp_security_name}" \
+            --argjson runId "${ci_run_id}" '
+              [
+                .artifacts[] |
+                select(
+                  .name == $name and
+                  .expired == false and
+                  .workflow_run.id == $runId and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )
+              ] |
+              if length == 1 then .[0] else error(
+                "expected exact locked MCP SCA/SBOM evidence from CI"
+              ) end
+            ' <<<"${ci_artifacts}")"
+
+          evidence_dir="${RUNNER_TEMP}/live-datahub-proof"
+          mkdir -p "${evidence_dir}"
+          control_plane_gates="${evidence_dir}/control-plane-gates.json"
+          jq -cnS \
+            --arg sha "${RELEASE_SHA}" \
+            --arg branch "${default_branch}" \
+            --argjson workflows "${control_plane_runs}" \
+            --argjson mcpArtifactId "$(jq -er '.id' <<<"${mcp_security_artifact}")" \
+            --arg mcpArtifactName "${mcp_security_name}" \
+            --arg mcpArtifactDigest "$(jq -er '.digest' <<<"${mcp_security_artifact}")" '
+              {
+                schemaVersion: "archon.live-proof-control-plane/v1",
+                sourceSha: $sha,
+                branch: $branch,
+                workflows: ($workflows | sort_by(.path)),
+                mcpDependencyEvidence: {
+                  artifactId: $mcpArtifactId,
+                  name: $mcpArtifactName,
+                  digest: $mcpArtifactDigest
+                }
+              }
+            ' >"${control_plane_gates}"
+
+          deployment_run="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}")"
+          jq --exit-status \
+            --argjson runId "${DEPLOYMENT_RUN_ID}" \
+            --arg sha "${RELEASE_SHA}" \
+            --arg branch "${default_branch}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .path == ".github/workflows/deploy.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .head_sha == $sha and
+              .head_branch == $branch and
+              .head_repository.full_name == $repository
+            ' <<<"${deployment_run}" >/dev/null || {
+              echo "::error::deployment_run_id is not a successful exact-SHA deployment"
+              exit 1
+            }
+          deployment_attempt="$(jq -er '.run_attempt' <<<"${deployment_run}")"
+          artifact_name="deployment-evidence-${RELEASE_SHA}-${deployment_attempt}"
+          artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}/artifacts?per_page=100")"
+          artifact="$(jq -ce \
+            --arg name "${artifact_name}" \
+            --argjson runId "${DEPLOYMENT_RUN_ID}" '
+              [
+                .artifacts[] |
+                select(
+                  .name == $name and
+                  .expired == false and
+                  .workflow_run.id == $runId and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )
+              ] |
+              if length == 1 then .[0] else error(
+                "expected exactly one unexpired deployment evidence artifact"
+              ) end
+            ' <<<"${artifacts}")"
+          query_sha="$(
+            printf '%s' "$(
+              jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query: $query}'
+            )" | sha256sum | awk '{print $1}'
+          )"
+
+          {
+            echo "artifact_id=$(jq -er '.id' <<<"${artifact}")"
+            echo "artifact_name=${artifact_name}"
+            echo "artifact_digest=$(jq -er '.digest' <<<"${artifact}")"
+            echo "deployment_attempt=${deployment_attempt}"
+            echo "query_sha=${query_sha}"
+            echo "control_plane_gates=${control_plane_gates}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact production deployment evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.gate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/selected-deployment-evidence
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.deployment_run_id }}
+
+      - name: Verify inner deployment evidence and query binding
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          DEPLOYMENT_RUN_ATTEMPT: ${{ steps.gate.outputs.deployment_attempt }}
+          DEPLOYMENT_ARTIFACT_ID: ${{ steps.gate.outputs.artifact_id }}
+          DEPLOYMENT_ARTIFACT_NAME: ${{ steps.gate.outputs.artifact_name }}
+          DEPLOYMENT_ARTIFACT_DIGEST: ${{ steps.gate.outputs.artifact_digest }}
+          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployment_evidence="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -type f -name deployment-evidence.json -print
+          )"
+          test -n "${deployment_evidence}"
+          test "$(wc -l <<<"${deployment_evidence}")" = "1"
+          test -f "${deployment_evidence}"
+          test ! -L "${deployment_evidence}"
+          ci_run_id="$(jq -er '.rollbackSelector.ciRunId' "${deployment_evidence}")"
+          [[ "${ci_run_id}" =~ ^[0-9]+$ ]] || {
+            echo "::error::deployment evidence has an invalid source CI run"
+            exit 1
+          }
+          release_ci_run="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}")"
+          jq --exit-status \
+            --argjson runId "${ci_run_id}" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .path == ".github/workflows/ci.yml" and
+              .event == "push" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${release_ci_run}" >/dev/null || {
+              echo "::error::deployed artifacts are not from successful exact-SHA CI"
+              exit 1
+            }
+          release_ci_artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}/artifacts?per_page=100")"
+          release_mcp_artifact_name="datahub-mcp-security-${RELEASE_SHA}"
+          release_mcp_artifact="$(jq -ce \
+            --arg name "${release_mcp_artifact_name}" \
+            --argjson runId "${ci_run_id}" '
+              [
+                .artifacts[] |
+                select(
+                  .name == $name and
+                  .expired == false and
+                  .workflow_run.id == $runId and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )
+              ] |
+              if length == 1 then .[0] else error(
+                "deployed CI run has no exact locked MCP SCA/SBOM evidence"
+              ) end
+            ' <<<"${release_ci_artifacts}")"
+          expected_deployment_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}"
+          jq --exit-status \
+            --arg release "${RELEASE_SHA}" \
+            --arg controlPlane "${GITHUB_SHA}" \
+            --arg querySha "${QUERY_SHA}" \
+            --arg deploymentUrl "${expected_deployment_url}" '
+              .schemaVersion == 1 and
+              .promotionPolicy == "build-once-promote-same-artifacts" and
+              .rollbackSelector.releaseSha == $release and
+              .source.deploymentControlPlaneSha == $controlPlane and
+              .source.deploymentRunUrl == $deploymentUrl and
+              .immutableArtifacts.identicalImageDigest == true and
+              (.immutableArtifacts.productionEcrImageDigest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              .staging.result == "passed" and
+              .production.result == "passed" and
+              .staging.demoQuerySha256 == $querySha and
+              .production.demoQuerySha256 == $querySha and
+              (.pipelineSecurity.deploymentControlPlaneGatesSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.pipelineSecurity.stagingAttestationVerificationSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.pipelineSecurity.productionAttestationReverificationSha256 |
+                test("^[0-9a-f]{64}$"))
+            ' "${deployment_evidence}" >/dev/null || {
+              echo "::error::deployment evidence is not bound to this release and query"
+              exit 1
+            }
+          production_attestation="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -type f -name production-attestation-verification.json -print
+          )"
+          test -n "${production_attestation}"
+          test "$(wc -l <<<"${production_attestation}")" = "1"
+          test -f "${production_attestation}"
+          test ! -L "${production_attestation}"
+          expected_attestation_sha="$(
+            jq -er '
+              .pipelineSecurity.productionAttestationReverificationSha256
+            ' "${deployment_evidence}"
+          )"
+          test "$(sha256sum "${production_attestation}" | awk '{print $1}')" = \
+            "${expected_attestation_sha}"
+          release_mcp_artifact_digest="$(
+            jq -er '.digest' <<<"${release_mcp_artifact}"
+          )"
+          jq --exit-status \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg mcpArtifactDigest "${release_mcp_artifact_digest}" '
+              .schemaVersion ==
+                "archon.production-attestation-reverification/v1" and
+              all(
+                [.ci.image, .ci.web, .ci.lambda][];
+                any(.[];
+                  .verificationResult.statement.predicateType ==
+                    "https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1" and
+                  .verificationResult.statement.predicate.schemaVersion ==
+                    "archon.ci-release/v1" and
+                  .verificationResult.statement.predicate.source.repository ==
+                    $repository and
+                  .verificationResult.statement.predicate.source.commit ==
+                    $release and
+                  .verificationResult.statement.predicate.gates.dataHubMcpDependency ==
+                    "success" and
+                  .verificationResult.statement.predicate.dependencyEvidence.dataHubMcpSecurityArtifactDigest ==
+                    $mcpArtifactDigest
+                )
+              )
+            ' "${production_attestation}" >/dev/null || {
+              echo "::error::signed deployed CI provenance lacks exact MCP security evidence"
+              exit 1
+            }
+
+          deployment_evidence_sha="$(
+            sha256sum "${deployment_evidence}" | awk '{print $1}'
+          )"
+          binding="${RUNNER_TEMP}/live-datahub-proof/deployment-binding.json"
+          jq -cnS \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --argjson releaseCiRunId "${ci_run_id}" \
+            --argjson releaseMcpArtifactId \
+              "$(jq -er '.id' <<<"${release_mcp_artifact}")" \
+            --arg releaseMcpArtifactName "${release_mcp_artifact_name}" \
+            --arg releaseMcpArtifactDigest "${release_mcp_artifact_digest}" \
+            --argjson deploymentRunId "${DEPLOYMENT_RUN_ID}" \
+            --argjson deploymentRunAttempt "${DEPLOYMENT_RUN_ATTEMPT}" \
+            --argjson artifactId "${DEPLOYMENT_ARTIFACT_ID}" \
+            --arg artifactName "${DEPLOYMENT_ARTIFACT_NAME}" \
+            --arg artifactDigest "${DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --arg evidenceSha256 "${deployment_evidence_sha}" \
+            --arg querySha256 "${QUERY_SHA}" '
+              {
+                schemaVersion: "archon.live-proof-deployment-binding/v1",
+                releaseSha: $releaseSha,
+                releaseCiRunId: $releaseCiRunId,
+                releaseMcpDependencyEvidence: {
+                  artifactId: $releaseMcpArtifactId,
+                  name: $releaseMcpArtifactName,
+                  digest: $releaseMcpArtifactDigest
+                },
+                deployment: {
+                  runId: $deploymentRunId,
+                  runAttempt: $deploymentRunAttempt,
+                  result: "production-passed"
+                },
+                artifact: {
+                  id: $artifactId,
+                  name: $artifactName,
+                  digest: $artifactDigest,
+                  deploymentEvidenceSha256: $evidenceSha256
+                },
+                querySha256: $querySha256
+              }
+            ' >"${binding}"
+          echo "binding=${binding}" >>"${GITHUB_OUTPUT}"
+
+      - name: Install locked application dependencies
         run: npm ci --ignore-scripts
       - name: Typecheck live-proof code
         run: npm run typecheck
-      - name: Verify MCP + retention + stable provenance + recovered contradiction
+      - name: Materialize exact locked DataHub MCP runtime
+        id: mcp
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/datahub-mcp-v0.6.0"
+          bash scripts/materialize-datahub-mcp-lock.sh "${project}"
+          python_version="$(
+            jq -er '.runtime.pythonVersion' \
+              .github/locks/datahub-mcp-v0.6.0.json
+          )"
+          test -x "${project}/.venv/bin/mcp-server-datahub"
+          {
+            echo "project=${project}"
+            echo "python_version=${python_version}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Prove one-dataset MCP, retention, provenance, and contradiction path
         env:
           DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
           DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_GMS_TOKEN }}
-          DATAHUB_MCP_URL: ${{ secrets.DATAHUB_MCP_URL }}
-          DATAHUB_MCP_ARGS: mcp-server-datahub@0.6.0
+          DATAHUB_MCP_COMMAND: uv
+          DATAHUB_MCP_ARGS: >-
+            run --project ${{ steps.mcp.outputs.project }}
+            --python ${{ steps.mcp.outputs.python_version }} --locked --no-sync
+            --no-dev mcp-server-datahub
           ARCHON_DEMO_QUERY: ${{ inputs.query }}
-        run: npm run verify:live
+          TOOLS_IS_MUTATION_ENABLED: "false"
+          TOOLS_IS_USER_ENABLED: "false"
+          DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED: "true"
+          SAVE_DOCUMENT_TOOL_ENABLED: "false"
+          SEMANTIC_SEARCH_ENABLED: "false"
+          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${DATAHUB_GMS_URL:-}" || {
+            echo "::error::DATAHUB_GMS_URL is required"
+            exit 1
+          }
+          test -n "${DATAHUB_GMS_TOKEN:-}" || {
+            echo "::error::DATAHUB_GMS_TOKEN is required"
+            exit 1
+          }
+          raw="${RUNNER_TEMP}/live-datahub-proof/proof.raw.json"
+          npm run --silent verify:live >"${raw}"
+          jq --exit-status \
+            --arg querySha "${QUERY_SHA}" '
+              .schemaVersion == "archon.live-datahub-proof/v1" and
+              .ok == true and
+              .result == "retained-history-contradiction-proven" and
+              .querySha256 == $querySha and
+              (.datasetUrnSha256 | test("^[0-9a-f]{64}$")) and
+              .datasetsDiscovered == 1 and
+              .aspectHistories > 0 and
+              .retainedHistories > 0 and
+              .stableSourceCount >= 2 and
+              .recoveredContradictions > 0 and
+              .contradictionAttributeCount > 0
+            ' "${raw}" >/dev/null
+          jq -cS . "${raw}" \
+            >"${RUNNER_TEMP}/live-datahub-proof/proof.json"
+          rm "${raw}"
+
+      - name: Prepare digest-bound proof evidence
+        id: evidence
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+          CONTROL_PLANE_GATES: ${{ steps.gate.outputs.control_plane_gates }}
+          DEPLOYMENT_BINDING: ${{ steps.deployment.outputs.binding }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/live-datahub-proof/evidence"
+          mkdir -p "${evidence_dir}"
+          cp "${RUNNER_TEMP}/live-datahub-proof/proof.json" \
+            "${evidence_dir}/proof.json"
+          cp "${CONTROL_PLANE_GATES}" \
+            "${evidence_dir}/control-plane-gates.json"
+          cp "${DEPLOYMENT_BINDING}" \
+            "${evidence_dir}/deployment-binding.json"
+          cp .github/locks/datahub-mcp-v0.6.0.json \
+            "${evidence_dir}/mcp-lock-contract.json"
+          for artifact in \
+            control-plane-gates.json \
+            deployment-binding.json \
+            mcp-lock-contract.json \
+            proof.json; do
+            test -f "${evidence_dir}/${artifact}"
+            test ! -L "${evidence_dir}/${artifact}"
+          done
+          (
+            cd "${evidence_dir}"
+            sha256sum \
+              control-plane-gates.json \
+              deployment-binding.json \
+              mcp-lock-contract.json \
+              proof.json >proof-subject.sha256
+            sha256sum --check proof-subject.sha256
+          )
+          proof_sha="$(
+            sha256sum "${evidence_dir}/proof.json" | awk '{print $1}'
+          )"
+          binding_sha="$(
+            sha256sum "${evidence_dir}/deployment-binding.json" |
+              awk '{print $1}'
+          )"
+          gates_sha="$(
+            sha256sum "${evidence_dir}/control-plane-gates.json" |
+              awk '{print $1}'
+          )"
+          lock_sha="$(
+            sha256sum "${evidence_dir}/mcp-lock-contract.json" |
+              awk '{print $1}'
+          )"
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
+            --arg provenAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg querySha256 "${QUERY_SHA}" \
+            --arg proofSha256 "${proof_sha}" \
+            --arg deploymentBindingSha256 "${binding_sha}" \
+            --arg controlPlaneGatesSha256 "${gates_sha}" \
+            --arg mcpLockContractSha256 "${lock_sha}" \
+            --slurpfile proof "${evidence_dir}/proof.json" '
+              {
+                schemaVersion: "archon.live-datahub-proof-attestation/v1",
+                repository: $repository,
+                workflow: {
+                  runId: $workflowRunId,
+                  runAttempt: $workflowRunAttempt
+                },
+                releaseSha: $releaseSha,
+                deploymentRunId: $deploymentRunId,
+                provenAt: $provenAt,
+                querySha256: $querySha256,
+                evidence: {
+                  proofSha256: $proofSha256,
+                  deploymentBindingSha256: $deploymentBindingSha256,
+                  controlPlaneGatesSha256: $controlPlaneGatesSha256,
+                  mcpLockContractSha256: $mcpLockContractSha256
+                },
+                result: $proof[0].result,
+                datasetUrnSha256: $proof[0].datasetUrnSha256
+              }
+            ' >"${evidence_dir}/attestation-predicate.json"
+          {
+            echo "directory=${evidence_dir}"
+            echo "checksums=${evidence_dir}/proof-subject.sha256"
+            echo "predicate=${evidence_dir}/attestation-predicate.json"
+            echo "proof_sha=${proof_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Attest exact live proof evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.evidence.outputs.checksums }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v1
+          predicate-path: ${{ steps.evidence.outputs.predicate }}
+
+      - name: Retain sanitized live proof evidence
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-datahub-proof-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: ${{ steps.evidence.outputs.directory }}/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish proof summary
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+          PROOF_SHA: ${{ steps.evidence.outputs.proof_sha }}
+          PROOF_ARTIFACT_DIGEST: ${{ steps.artifact.outputs['artifact-digest'] }}
+        shell: bash
+        run: |
+          {
+            echo "## Live DataHub proof complete"
+            echo
+            echo "- Release: \`${RELEASE_SHA}\`"
+            echo "- Deployment run: \`${DEPLOYMENT_RUN_ID}\`"
+            echo "- Sanitized query SHA-256: \`${QUERY_SHA}\`"
+            echo "- Canonical proof SHA-256: \`${PROOF_SHA}\`"
+            echo "- Proof artifact digest: \`${PROOF_ARTIFACT_DIGEST}\`"
+            echo "- Scope: exactly one dataset"
+            echo "- Result: retained history contradiction proven"
+          } >>"${GITHUB_STEP_SUMMARY}"

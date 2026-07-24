@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: governed-canary-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
 
 env:
@@ -46,6 +46,7 @@ jobs:
       recovery_artifact: ${{ steps.source.outputs.recovery_artifact }}
       write_artifact: ${{ steps.source.outputs.write_artifact }}
       has_write: ${{ steps.source.outputs.has_write }}
+      control_plane_sha: ${{ steps.source.outputs.control_plane_sha }}
       deployment_run_id: ${{ steps.manifest.outputs.deployment_run_id }}
       release_sha: ${{ steps.manifest.outputs.release_sha }}
       recovery_digest: ${{ steps.manifest.outputs.recovery_digest }}
@@ -56,6 +57,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PARENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           PARENT_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          PARENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           PARENT_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           PARENT_PATH: ${{ github.event.workflow_run.path }}
           PARENT_EVENT: ${{ github.event.workflow_run.event }}
@@ -63,11 +65,19 @@ jobs:
           set -euo pipefail
           [[ "${CANARY_SOURCE_WORKFLOW_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${PARENT_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${PARENT_CONCLUSION}" == "failure" || "${PARENT_CONCLUSION}" == "cancelled" ]]
-          test "${PARENT_HEAD_BRANCH}" = "master"
           test "${PARENT_HEAD_REPOSITORY}" = "${GITHUB_REPOSITORY}"
           test "${PARENT_PATH}" = ".github/workflows/governed-canary.yml"
           test "${PARENT_EVENT}" = "workflow_dispatch"
+
+          repository_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
+          test "${GITHUB_REF}" = "refs/heads/${default_branch}"
+          test "${PARENT_HEAD_BRANCH}" = "${default_branch}"
 
           parent_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -75,17 +85,63 @@ jobs:
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg conclusion "${PARENT_CONCLUSION}" \
-            --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" '
+            --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" \
+            --arg branch "${default_branch}" \
+            --arg headSha "${PARENT_HEAD_SHA}" '
               .id == (env.CANARY_SOURCE_WORKFLOW_RUN_ID | tonumber) and
               .run_attempt == ($attempt | tonumber) and
               .name == "Governed DataHub canary" and
               .path == ".github/workflows/governed-canary.yml" and
               .head_repository.full_name == $repository and
-              .head_branch == "master" and
+              .head_branch == $branch and
+              .head_sha == $headSha and
               .event == "workflow_dispatch" and
               .status == "completed" and
               .conclusion == $conclusion
             ' <<<"${parent_json}" >/dev/null
+
+          workflow_success() {
+            local workflow_file="$1"
+            local expected_name="$2"
+            local expected_path=".github/workflows/${workflow_file}"
+            local response
+            response="$(gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
+              -f "head_sha=${PARENT_HEAD_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f status=completed \
+              -f per_page=100)"
+            jq -e \
+              --arg name "${expected_name}" \
+              --arg path "${expected_path}" \
+              --arg sha "${PARENT_HEAD_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                any(
+                  .workflow_runs[];
+                  .name == $name and
+                  .path == $path and
+                  .head_sha == $sha and
+                  .head_branch == $branch and
+                  .head_repository.full_name == $repository and
+                  .event == "push" and
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+
+          workflow_success ci.yml CI &&
+            workflow_success codeql.yml CodeQL &&
+            workflow_success workflow-security.yml "Workflow security" || {
+              echo "::error::Independent recovery requires successful exact-parent-SHA CI, CodeQL, and Workflow security push runs"
+              exit 1
+            }
+          echo "control_plane_sha=${PARENT_HEAD_SHA}" >>"${GITHUB_OUTPUT}"
 
           recovery_name="governed-canary-recovery-${CANARY_SOURCE_WORKFLOW_RUN_ID}-${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}"
           write_name="governed-canary-write-${CANARY_SOURCE_WORKFLOW_RUN_ID}-${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}"
@@ -168,6 +224,7 @@ jobs:
       name: governed-canary-recovery
       url: ${{ vars.CANARY_APPLICATION_URL }}
     env:
+      CANARY_CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.control_plane_sha }}
       CANARY_DEPLOYMENT_RUN_ID: ${{ needs.resolve-parent.outputs.deployment_run_id }}
       CANARY_RELEASE_SHA: ${{ needs.resolve-parent.outputs.release_sha }}
       CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
@@ -212,7 +269,14 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.resolve-parent.outputs.control_plane_sha }}
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert exact reviewed parent control plane
+        env:
+          EXPECTED_CONTROL_PLANE_SHA: ${{ needs.resolve-parent.outputs.control_plane_sha }}
+        run: test "$(git rev-parse HEAD)" = "${EXPECTED_CONTROL_PLANE_SHA}"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -258,14 +322,23 @@ jobs:
           deployment="$(gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
-          jq -e --arg repository "${GITHUB_REPOSITORY}" '
+          jq -e \
+            --argjson runId "${CANARY_DEPLOYMENT_RUN_ID}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg controlPlane "${CANARY_CONTROL_PLANE_SHA}" '
+            .id == $runId and
+            .name == "Deploy immutable AWS release" and
             .path == ".github/workflows/deploy.yml" and
             .head_repository.full_name == $repository and
             .head_branch == "master" and
+            .head_sha == $controlPlane and
             .event == "workflow_dispatch" and
             .status == "completed" and
             .conclusion == "success"
-          ' <<<"${deployment}" >/dev/null
+          ' <<<"${deployment}" >/dev/null || {
+            echo "::error::Recovery deployment is not bound to the exact parent control-plane SHA"
+            exit 1
+          }
           test "$(aws sts get-caller-identity --query Account --output text)" = \
             "${AWS_ACCOUNT_ID}"
           stack="${RUNNER_TEMP}/recovery-stack.json"
@@ -340,12 +413,18 @@ jobs:
           jq -n \
             --arg parentRunId "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
             --arg parentRunAttempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" \
+            --arg controlPlaneSha "${CANARY_CONTROL_PLANE_SHA}" \
+            --arg deploymentRunId "${CANARY_DEPLOYMENT_RUN_ID}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" \
             --arg recoveryDigest "${RECOVERY_DIGEST}" \
             --arg evidenceDigest "${EVIDENCE_DIGEST}" \
             '{
               schemaVersion: "archon.governed-canary-recovery-attestation/v1",
               parentRunId: $parentRunId,
               parentRunAttempt: $parentRunAttempt,
+              controlPlaneSha: $controlPlaneSha,
+              deploymentRunId: $deploymentRunId,
+              releaseSha: $releaseSha,
               recoveryDigest: $recoveryDigest,
               rollbackEvidenceDigest: $evidenceDigest,
               result: "exact-state-restored"

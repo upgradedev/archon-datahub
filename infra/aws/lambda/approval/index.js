@@ -22,7 +22,7 @@ function response(statusCode, body) {
       "content-type": "application/json; charset=utf-8",
       "x-content-type-options": "nosniff"
     },
-    body: `${JSON.stringify(body)}\n`
+    payload: body
   };
 }
 
@@ -36,12 +36,41 @@ function groupsFrom(claim) {
     .filter(Boolean);
 }
 
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(value, required, optional = []) {
+  if (!record(value)) return false;
+  const keys = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+    keys.every((key) => allowed.has(key))
+  );
+}
+
 function canonicalDigest(value) {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 function parseRequest(event) {
-  const approvalId = event.pathParameters?.approvalId;
+  if (
+    !exactKeys(event, [
+      "operation",
+      "requestId",
+      "approvalId",
+      "body",
+      "identity"
+    ]) ||
+    event.operation !== "decide" ||
+    !exactKeys(event.identity, ["subject", "issuer", "groups"]) ||
+    typeof event.requestId !== "string" ||
+    !/^[A-Za-z0-9=+/_-]{1,256}$/.test(event.requestId)
+  ) {
+    return { error: response(400, { error: "invalid_gateway_event" }) };
+  }
+  const approvalId = event.approvalId;
   if (
     typeof approvalId !== "string" ||
     !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)
@@ -49,13 +78,15 @@ function parseRequest(event) {
     return { error: response(400, { error: "invalid_approval_id" }) };
   }
 
-  let body;
-  try {
-    body = JSON.parse(event.body || "{}");
-  } catch {
-    return { error: response(400, { error: "invalid_json" }) };
+  let body = event.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body || "{}");
+    } catch {
+      return { error: response(400, { error: "invalid_json" }) };
+    }
   }
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
+  if (!record(body)) {
     return { error: response(400, { error: "invalid_body" }) };
   }
   if (Object.keys(body).some((key) => key !== "comment" && key !== "decision")) {
@@ -73,16 +104,33 @@ function parseRequest(event) {
     return { error: response(400, { error: "invalid_comment" }) };
   }
 
-  const claims = event.requestContext?.authorizer?.claims || {};
-  const subject = claims.sub;
-  const issuer = claims.iss;
-  if (typeof subject !== "string" || subject.length < 1) {
+  const identity = event.identity;
+  const subject = identity.subject;
+  const issuer = identity.issuer;
+  if (
+    typeof subject !== "string" ||
+    subject.length < 1 ||
+    subject.length > 512 ||
+    /[\u0000-\u001f\u007f]/u.test(subject)
+  ) {
     return { error: response(401, { error: "missing_identity" }) };
   }
-  if (typeof issuer !== "string" || !issuer.startsWith("https://")) {
+  if (
+    typeof issuer !== "string" ||
+    issuer.length > 2048 ||
+    !issuer.startsWith("https://") ||
+    /[\u0000-\u001f\u007f]/u.test(issuer)
+  ) {
     return { error: response(401, { error: "missing_issuer" }) };
   }
-  if (!groupsFrom(claims["cognito:groups"]).includes(approverGroup)) {
+  if (
+    typeof identity.groups !== "string" ||
+    identity.groups.length > 2048 ||
+    /[\u0000-\u001f\u007f]/u.test(identity.groups)
+  ) {
+    return { error: response(401, { error: "invalid_identity_projection" }) };
+  }
+  if (!groupsFrom(identity.groups).includes(approverGroup)) {
     return { error: response(403, { error: "approver_role_required" }) };
   }
   return {
@@ -90,8 +138,7 @@ function parseRequest(event) {
     decision: body.decision,
     comment: body.comment || "",
     subject,
-    issuer,
-    email: typeof claims.email === "string" ? claims.email : ""
+    issuer
   };
 }
 
@@ -169,7 +216,7 @@ exports.handler = async (event) => {
           ConditionExpression: "#status = :pending",
           UpdateExpression:
             "SET #status = :decided, #decision = :decision, #comment = :comment, " +
-            "approverSub = :sub, approverIssuer = :issuer, approverEmail = :email, decisionDigest = :digest, " +
+            "approverSub = :sub, approverIssuer = :issuer, decisionDigest = :digest, " +
             "decisionEvidenceSchema = :evidenceSchema, decisionEvidenceDigest = :evidenceDigest, " +
             "decisionEvidence = :evidence, decidedAt = :now, callbackDelivered = :false, " +
             "expiresAt = :retentionExpiresAt",
@@ -185,7 +232,6 @@ exports.handler = async (event) => {
             ":comment": { S: parsed.comment },
             ":sub": { S: parsed.subject },
             ":issuer": { S: parsed.issuer },
-            ":email": { S: parsed.email },
             ":digest": { S: decisionDigest },
             ":evidenceSchema": { S: "archon.approval-decision/v1" },
             ":evidenceDigest": { S: decisionEvidenceDigest },
@@ -241,7 +287,7 @@ exports.handler = async (event) => {
   }
   const callbackAttemptId = canonicalDigest({
     decisionDigest,
-    requestId: event.requestContext?.requestId || "unknown",
+    requestId: event.requestId || "unknown",
     attemptedAt: now
   });
   try {

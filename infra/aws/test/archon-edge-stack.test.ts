@@ -118,6 +118,15 @@ describe("Archon CloudFront edge stack", () => {
               FieldType: "SINGLE_HEADER",
               FieldKeys: ["cookie"]
             }
+          },
+          {
+            Action: "SUBSTITUTION",
+            ExcludeRateBasedDetails: false,
+            ExcludeRuleMatchDetails: false,
+            Field: {
+              FieldType: "SINGLE_HEADER",
+              FieldKeys: ["x-api-key"]
+            }
           }
         ]
       },
@@ -205,7 +214,8 @@ describe("Archon CloudFront edge stack", () => {
       },
       RedactedFields: [
         { SingleHeader: { Name: "authorization" } },
-        { SingleHeader: { Name: "cookie" } }
+        { SingleHeader: { Name: "cookie" } },
+        { SingleHeader: { Name: "x-api-key" } }
       ],
       ResourceArn: Match.anyValue()
     });

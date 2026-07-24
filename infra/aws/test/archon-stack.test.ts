@@ -464,7 +464,7 @@ describe("Archon AWS reference architecture", () => {
     );
   });
 
-  test("keeps audit public but makes the strict approval contract Cognito-only", () => {
+  test("binds judge routes to CloudFront and adds Cognito authorization to approval", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::Cognito::UserPool", 1);
     platform.hasResourceProperties("AWS::Cognito::UserPool", {
@@ -499,7 +499,100 @@ describe("Archon AWS reference architecture", () => {
     expect(requestModels).toHaveLength(2);
 
     const methods = platform.findResources("AWS::ApiGateway::Method");
-    const postMethods = Object.values(methods).filter(
+    const allMethods = Object.values(methods) as any[];
+    const publicMethods = allMethods.filter(
+      (resource: any) => resource.Properties?.AuthorizationType === "NONE"
+    );
+    expect(publicMethods).toHaveLength(3);
+    expect(
+      publicMethods.every(
+        (resource: any) => resource.Properties?.ApiKeyRequired === true
+      )
+    ).toBe(true);
+    const httpProxyMethods = allMethods.filter(
+      (resource: any) => resource.Properties?.Integration?.Type === "HTTP_PROXY"
+    );
+    expect(httpProxyMethods).toHaveLength(1);
+    expect(httpProxyMethods[0].Properties.Integration.RequestParameters).toEqual({
+      "integration.request.header.x-api-key": "'redacted'"
+    });
+    const lambdaMethods = allMethods.filter(
+      (resource: any) => resource.Properties?.Integration?.Type === "AWS"
+    );
+    expect(lambdaMethods).toHaveLength(3);
+    const baseIntegrationResponseParameters = {
+      "method.response.header.Cache-Control": "'no-store'",
+      "method.response.header.Content-Type":
+        "'application/json; charset=utf-8'",
+      "method.response.header.Cross-Origin-Resource-Policy": "'same-origin'",
+      "method.response.header.Referrer-Policy": "'no-referrer'",
+      "method.response.header.X-Content-Type-Options": "'nosniff'"
+    };
+    const integrationResponseParameters = {
+      ...baseIntegrationResponseParameters,
+      "method.response.header.Location":
+        "integration.response.body.headers.location",
+      "method.response.header.Retry-After":
+        "integration.response.body.headers.retryAfter"
+    };
+    const methodResponseParameters = {
+      "method.response.header.Cache-Control": true,
+      "method.response.header.Content-Type": true,
+      "method.response.header.Cross-Origin-Resource-Policy": true,
+      "method.response.header.Referrer-Policy": true,
+      "method.response.header.X-Content-Type-Options": true,
+      "method.response.header.Location": false,
+      "method.response.header.Retry-After": false
+    };
+    expect(
+      lambdaMethods.every(
+        (resource: any) =>
+          resource.Properties.Integration.PassthroughBehavior === "NEVER" &&
+          resource.Properties.Integration.RequestParameters === undefined &&
+          Object.keys(resource.Properties.Integration.RequestTemplates).length === 1 &&
+          typeof resource.Properties.Integration.RequestTemplates[
+            "application/json"
+          ] === "string"
+      )
+    ).toBe(true);
+    for (const method of lambdaMethods) {
+      const template =
+        method.Properties.Integration.RequestTemplates["application/json"];
+      expect(template).toContain('"requestId"');
+      expect(template).not.toMatch(
+        /x-api-key|authorization|cookie|\$input\.body|\$input\.params\(\)/iu
+      );
+      expect(method.Properties.Integration.IntegrationResponses).toEqual([
+        {
+          ResponseParameters: baseIntegrationResponseParameters,
+          ResponseTemplates: {
+            "application/json": '{"error":"lambda_integration_failed"}\n'
+          },
+          SelectionPattern: "(?s).+",
+          StatusCode: "502"
+        },
+        {
+          ResponseParameters: integrationResponseParameters,
+          ResponseTemplates: {
+            "application/json": [
+              "#set($statusCode = $input.path('$.statusCode'))",
+              "#set($context.responseOverride.status = $statusCode)",
+              "$input.json('$.payload')"
+            ].join("\n")
+          },
+          StatusCode: "200"
+        }
+      ]);
+      for (const response of method.Properties.MethodResponses) {
+        expect(response.ResponseParameters).toEqual(methodResponseParameters);
+      }
+      expect(
+        method.Properties.MethodResponses.map(
+          (response: any) => response.StatusCode
+        )
+      ).toContain("502");
+    }
+    const postMethods = allMethods.filter(
       (resource: any) =>
         resource.Properties?.HttpMethod === "POST"
     );
@@ -517,13 +610,135 @@ describe("Archon AWS reference architecture", () => {
         )
     ) as any;
     expect(approvalMethod).toBeDefined();
+    expect(approvalMethod.Properties.ApiKeyRequired).toBe(true);
     expect(approvalMethod.Properties.AuthorizationScopes).toEqual([
       "archon/approve"
     ]);
-    expect(approvalMethod.Properties.Integration.Type).toBe("AWS_PROXY");
+    expect(approvalMethod.Properties.Integration.Type).toBe("AWS");
+    const approvalTemplate =
+      approvalMethod.Properties.Integration.RequestTemplates["application/json"];
+    expect(approvalTemplate).toContain('"operation": "decide"');
+    expect(approvalTemplate).toContain('"identity"');
+    expect(approvalTemplate).toContain("$context.authorizer.claims.sub");
+    expect(approvalTemplate).toContain(
+      "$context.authorizer.claims['cognito:groups']"
+    );
+    expect(approvalTemplate).not.toContain("$context.authorizer.claims.email");
     expect(JSON.stringify(approvalMethod.Properties.Integration.Uri)).toContain(
       "ApprovalFunction"
     );
+    platform.hasResourceProperties("AWS::ApiGateway::RestApi", {
+      ApiKeySourceType: "HEADER"
+    });
+    platform.hasResourceProperties("AWS::SecretsManager::Secret", {
+      Name: "archon/staging/cloudfront-origin-api-key",
+      KmsKeyId: Match.anyValue(),
+      GenerateSecretString: {
+        ExcludePunctuation: true,
+        GenerateStringKey: "apiKey",
+        IncludeSpace: false,
+        PasswordLength: 64,
+        SecretStringTemplate: "{}"
+      }
+    });
+    platform.resourceCountIs("AWS::ApiGateway::ApiKey", 1);
+    platform.hasResourceProperties("AWS::ApiGateway::ApiKey", {
+      Description: Match.anyValue(),
+      Enabled: true,
+      Name: Match.absent(),
+      Value: Match.anyValue()
+    });
+    platform.resourceCountIs("AWS::ApiGateway::UsagePlan", 1);
+    platform.hasResourceProperties("AWS::ApiGateway::UsagePlan", {
+      ApiStages: Match.arrayWith([
+        Match.objectLike({
+          ApiId: Match.anyValue(),
+          Stage: Match.anyValue()
+        })
+      ]),
+      Quota: {
+        Limit: 25_000,
+        Period: "DAY"
+      },
+      Throttle: {
+        BurstLimit: 20,
+        RateLimit: 10
+      },
+      UsagePlanName: "archon-staging-cloudfront-origin"
+    });
+    platform.resourceCountIs("AWS::ApiGateway::UsagePlanKey", 1);
+    platform.hasResourceProperties("AWS::ApiGateway::UsagePlanKey", {
+      KeyId: Match.anyValue(),
+      KeyType: "API_KEY",
+      UsagePlanId: Match.anyValue()
+    });
+    const [apiKeyLogicalId, apiKeyResource] = Object.entries(
+      platform.findResources("AWS::ApiGateway::ApiKey")
+    )[0] as [string, any];
+    const [usagePlanLogicalId, usagePlanResource] = Object.entries(
+      platform.findResources("AWS::ApiGateway::UsagePlan")
+    )[0] as [string, any];
+    const usagePlanKeyResource = Object.values(
+      platform.findResources("AWS::ApiGateway::UsagePlanKey")
+    )[0] as any;
+    expect(usagePlanKeyResource.Properties.KeyId).toEqual({
+      Ref: apiKeyLogicalId
+    });
+    expect(usagePlanKeyResource.Properties.UsagePlanId).toEqual({
+      Ref: usagePlanLogicalId
+    });
+    const methodRestApiIds = new Set(
+      allMethods.map((resource) =>
+        JSON.stringify(resource.Properties.RestApiId)
+      )
+    );
+    expect(methodRestApiIds.size).toBe(1);
+    expect(
+      JSON.stringify(usagePlanResource.Properties.ApiStages[0].ApiId)
+    ).toBe([...methodRestApiIds][0]);
+    const distribution = Object.values(
+      platform.findResources("AWS::CloudFront::Distribution")
+    )[0] as any;
+    const apiOrigin = distribution.Properties.DistributionConfig.Origins.find(
+      (origin: any) => origin.CustomOriginConfig !== undefined
+    );
+    expect(apiOrigin.OriginCustomHeaders).toHaveLength(1);
+    expect(apiOrigin.OriginCustomHeaders[0]).toEqual({
+      HeaderName: "x-api-key",
+      HeaderValue: apiKeyResource.Properties.Value
+    });
+    expect(JSON.stringify(apiOrigin.OriginCustomHeaders[0].HeaderValue)).toContain(
+      "resolve:secretsmanager"
+    );
+    expect(JSON.stringify(apiOrigin.OriginCustomHeaders[0].HeaderValue)).toContain(
+      "apiKey"
+    );
+    platform.hasResourceProperties("AWS::CloudFront::OriginRequestPolicy", {
+      OriginRequestPolicyConfig: Match.objectLike({
+        Name: "archon-staging-api-origin",
+        CookiesConfig: {
+          CookieBehavior: "all"
+        },
+        HeadersConfig: {
+          HeaderBehavior: "allExcept",
+          Headers: ["host"]
+        },
+        QueryStringsConfig: {
+          QueryStringBehavior: "all"
+        }
+      })
+    });
+    const [originPolicyLogicalId] = Object.entries(
+      platform.findResources("AWS::CloudFront::OriginRequestPolicy")
+    )[0];
+    const apiBehavior =
+      distribution.Properties.DistributionConfig.CacheBehaviors.find(
+        (behavior: any) => behavior.PathPattern === "api/*"
+      );
+    expect(apiBehavior.OriginRequestPolicyId).toEqual({
+      Ref: originPolicyLogicalId
+    });
+    expect(apiBehavior.TargetOriginId).toBe(apiOrigin.Id);
 
     platform.hasResourceProperties("AWS::Lambda::Function", {
       FunctionName: "archon-staging-approval",
@@ -582,12 +797,28 @@ describe("Archon AWS reference architecture", () => {
     ).toEqual(["GET", "POST"]);
     expect(
       controlMethods.every(
-        (resource) => resource.Properties.AuthorizationType === "NONE"
+        (resource) =>
+          resource.Properties.AuthorizationType === "NONE" &&
+          resource.Properties.Integration.Type === "AWS" &&
+          resource.Properties.Integration.PassthroughBehavior === "NEVER"
       )
     ).toBe(true);
+    const startMethod = controlMethods.find(
+      (resource) => resource.Properties.HttpMethod === "POST"
+    );
     const statusMethod = controlMethods.find(
       (resource) => resource.Properties.HttpMethod === "GET"
     );
+    const startTemplate =
+      startMethod.Properties.Integration.RequestTemplates["application/json"];
+    const statusTemplate =
+      statusMethod.Properties.Integration.RequestTemplates["application/json"];
+    expect(startTemplate).toContain('"operation": "start"');
+    expect(startTemplate).toContain('"body": $input.json');
+    expect(startTemplate).not.toContain('"auditId"');
+    expect(statusTemplate).toContain('"operation": "status"');
+    expect(statusTemplate).toContain("$input.params('auditId')");
+    expect(statusTemplate).not.toContain('"body"');
     expect(statusMethod.Properties.RequestParameters).toEqual({
       "method.request.path.auditId": true
     });
@@ -1002,6 +1233,15 @@ describe("Archon AWS reference architecture", () => {
               FieldType: "SINGLE_HEADER",
               FieldKeys: ["cookie"]
             }
+          },
+          {
+            Action: "SUBSTITUTION",
+            ExcludeRateBasedDetails: false,
+            ExcludeRuleMatchDetails: false,
+            Field: {
+              FieldType: "SINGLE_HEADER",
+              FieldKeys: ["x-api-key"]
+            }
           }
         ]
       }
@@ -1052,7 +1292,8 @@ describe("Archon AWS reference architecture", () => {
       },
       RedactedFields: [
         { SingleHeader: { Name: "authorization" } },
-        { SingleHeader: { Name: "cookie" } }
+        { SingleHeader: { Name: "cookie" } },
+        { SingleHeader: { Name: "x-api-key" } }
       ],
       ResourceArn: Match.anyValue()
     });
@@ -1203,6 +1444,17 @@ describe("Archon AWS reference architecture", () => {
           ThrottlingRateLimit: 50
         })
       ])
+    });
+    production.hasResourceProperties("AWS::ApiGateway::UsagePlan", {
+      Quota: {
+        Limit: 250_000,
+        Period: "DAY"
+      },
+      Throttle: {
+        BurstLimit: 100,
+        RateLimit: 50
+      },
+      UsagePlanName: "archon-production-cloudfront-origin"
     });
 
     const webAcl = Object.values(

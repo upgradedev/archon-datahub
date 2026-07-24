@@ -116,6 +116,9 @@ export class ArchonPlatformStack extends Stack {
 
     const { stage, repository } = props;
     const isProduction = stage === "prod" || stage === "production";
+    const publicApiBurstLimit = isProduction ? 100 : 20;
+    const publicApiRateLimit = isProduction ? 50 : 10;
+    const publicApiDailyQuota = isProduction ? 250_000 : 25_000;
     const imageDigest = new CfnParameter(this, "ImageDigest", {
       type: "String",
       description: "Immutable ECR digest produced once by CI (sha256:...)",
@@ -550,6 +553,26 @@ export class ArchonPlatformStack extends Stack {
       secretsKey,
       "apiKey"
     );
+    const cloudFrontOriginApiKeySecret = new secretsmanager.Secret(
+      this,
+      "CloudFrontOriginApiKeySecret",
+      {
+        secretName: `archon/${stage}/cloudfront-origin-api-key`,
+        description:
+          "CloudFront-to-API-Gateway origin credential; never exposed to viewers or stack outputs",
+        encryptionKey: secretsKey,
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({}),
+          generateStringKey: "apiKey",
+          excludePunctuation: true,
+          includeSpace: false,
+          passwordLength: 64
+        }
+      }
+    );
+    cloudFrontOriginApiKeySecret.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    const cloudFrontOriginApiKeyValue =
+      cloudFrontOriginApiKeySecret.secretValueFromJson("apiKey").unsafeUnwrap();
 
     const auditDlq = encryptedQueue(this, "AuditDlq", `${stage}-audit-dlq`, queueKey, {
       retentionPeriod: Duration.days(14)
@@ -1311,6 +1334,7 @@ export class ArchonPlatformStack extends Stack {
       restApiName: `archon-${stage}`,
       description: "Public read-only audit plus authenticated Archon approval control plane",
       endpointTypes: [apigateway.EndpointType.REGIONAL],
+      apiKeySourceType: apigateway.ApiKeySourceType.HEADER,
       deployOptions: {
         stageName: stage,
         cacheClusterEnabled: true,
@@ -1323,8 +1347,8 @@ export class ArchonPlatformStack extends Stack {
             dataTraceEnabled: false,
             loggingLevel: apigateway.MethodLoggingLevel.ERROR,
             metricsEnabled: true,
-            throttlingBurstLimit: isProduction ? 100 : 20,
-            throttlingRateLimit: isProduction ? 50 : 10
+            throttlingBurstLimit: publicApiBurstLimit,
+            throttlingRateLimit: publicApiRateLimit
           }
         },
         accessLogDestination: new apigateway.LogGroupLogDestination(apiAccessLogGroup),
@@ -1346,6 +1370,35 @@ export class ArchonPlatformStack extends Stack {
       minCompressionSize: Size.bytes(1024),
       retainDeployments: true
     });
+    const cloudFrontOriginApiKey = new apigateway.ApiKey(
+      this,
+      "CloudFrontOriginApiKey",
+      {
+        description:
+          "High-entropy edge credential injected by CloudFront and never delivered to browsers",
+        enabled: true,
+        value: cloudFrontOriginApiKeyValue
+      }
+    );
+    const cloudFrontOriginUsagePlan = new apigateway.UsagePlan(
+      this,
+      "CloudFrontOriginUsagePlan",
+      {
+        name: `archon-${stage}-cloudfront-origin`,
+        description:
+          "Best-effort aggregate throttle and quota guardrail for CloudFront origin-gated requests",
+        apiStages: [{ api, stage: api.deploymentStage }],
+        throttle: {
+          burstLimit: publicApiBurstLimit,
+          rateLimit: publicApiRateLimit
+        },
+        quota: {
+          limit: publicApiDailyQuota,
+          period: apigateway.Period.DAY
+        }
+      }
+    );
+    cloudFrontOriginUsagePlan.addApiKey(cloudFrontOriginApiKey);
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, "Authorizer", {
       cognitoUserPools: [userPool],
       authorizerName: `archon-${stage}-cognito`,
@@ -1429,8 +1482,32 @@ export class ArchonPlatformStack extends Stack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
       authorizer,
       requestValidator,
-      apiKeyRequired: false
+      apiKeyRequired: true
     };
+    const scrubbedOriginCredential = {
+      "integration.request.header.x-api-key": "'redacted'"
+    };
+    const controlStartRequestTemplate = `{
+  "operation": "start",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "body": $input.json('$')
+}`;
+    const controlStatusRequestTemplate = `{
+  "operation": "status",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "auditId": "$util.escapeJavaScript($input.params('auditId')).replaceAll("\\\\'","'")"
+}`;
+    const approvalDecisionRequestTemplate = `{
+  "operation": "decide",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "approvalId": "$util.escapeJavaScript($input.params('approvalId')).replaceAll("\\\\'","'")",
+  "body": $input.json('$'),
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
     const apiResource = api.root.addResource("api");
     const auditsResource = apiResource.addResource("audits");
     auditsResource.addMethod(
@@ -1438,15 +1515,16 @@ export class ArchonPlatformStack extends Stack {
       privateHttpIntegration(
         vpcLink,
         "POST",
-        `http://${loadBalancer.loadBalancerDnsName}/api/audits`
+        `http://${loadBalancer.loadBalancerDnsName}/api/audits`,
+        scrubbedOriginCredential
       ),
       {
-        // Judges can exercise the sanitized, read-only audit without credentials.
-        // WAF, request validation, stage throttling, and the application's bounded
-        // query contract remain in force. No mutation route reaches this container.
+        // Judges use the public CloudFront URL without handling credentials. CloudFront
+        // overwrites x-api-key with a secret origin credential; direct API Gateway
+        // bypasses fail closed. No mutation route reaches this container.
         authorizationType: apigateway.AuthorizationType.NONE,
         requestValidator,
-        apiKeyRequired: false,
+        apiKeyRequired: true,
         requestModels: { "application/json": auditModel }
       }
     );
@@ -1454,37 +1532,46 @@ export class ArchonPlatformStack extends Stack {
     const controlLoopsResource = apiResource.addResource("control-loops");
     controlLoopsResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(controlFunction, {
-        proxy: true,
-        allowTestInvoke: false
-      }),
+      narrowLambdaIntegration(controlFunction, controlStartRequestTemplate),
       {
-        // Audit initiation is read-first and public for the judge journey. A random
-        // 256-bit audit id is the status capability; the Lambda never returns the
-        // execution ARN, workflow input/output, callback tokens, or provider errors.
+        // The judge journey remains public through CloudFront, while the edge credential
+        // prevents direct-origin bypass. A custom integration maps only the validated
+        // body and request id, so origin/browser credentials never enter the Lambda event.
         authorizationType: apigateway.AuthorizationType.NONE,
         requestValidator,
-        apiKeyRequired: false,
-        requestModels: { "application/json": controlLoopModel }
+        apiKeyRequired: true,
+        requestModels: { "application/json": controlLoopModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "200",
+          "202",
+          "400",
+          "404",
+          "413",
+          "502"
+        ])
       }
     );
     controlLoopsResource
       .addResource("{auditId}")
       .addMethod(
         "GET",
-        new apigateway.LambdaIntegration(controlFunction, {
-          proxy: true,
-          allowTestInvoke: false,
+        narrowLambdaIntegration(controlFunction, controlStatusRequestTemplate, {
           cacheKeyParameters: ["method.request.path.auditId"],
           cacheNamespace: "audit-status"
         }),
         {
           authorizationType: apigateway.AuthorizationType.NONE,
           requestValidator,
-          apiKeyRequired: false,
+          apiKeyRequired: true,
           requestParameters: {
             "method.request.path.auditId": true
-          }
+          },
+          methodResponses: narrowLambdaMethodResponses([
+            "200",
+            "400",
+            "404",
+            "502"
+          ])
         }
       );
 
@@ -1494,17 +1581,25 @@ export class ArchonPlatformStack extends Stack {
     const decisionsResource = approvalIdResource.addResource("decisions");
     decisionsResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(approvalFunction, {
-        proxy: true,
-        allowTestInvoke: false
-      }),
+      narrowLambdaIntegration(approvalFunction, approvalDecisionRequestTemplate),
       {
         ...authenticatedMethod,
         authorizationScopes: [approvalScopeName],
         requestParameters: {
           "method.request.path.approvalId": true
         },
-        requestModels: { "application/json": decisionModel }
+        requestModels: { "application/json": decisionModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "200",
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "502"
+        ])
       }
     );
 
@@ -1530,6 +1625,15 @@ export class ArchonPlatformStack extends Stack {
             field: {
               fieldType: "SINGLE_HEADER",
               fieldKeys: ["cookie"]
+            }
+          },
+          {
+            action: "SUBSTITUTION",
+            excludeRateBasedDetails: false,
+            excludeRuleMatchDetails: false,
+            field: {
+              fieldType: "SINGLE_HEADER",
+              fieldKeys: ["x-api-key"]
             }
           }
         ]
@@ -1605,7 +1709,8 @@ export class ArchonPlatformStack extends Stack {
         },
         redactedFields: [
           { singleHeader: { Name: "authorization" } },
-          { singleHeader: { Name: "cookie" } }
+          { singleHeader: { Name: "cookie" } },
+          { singleHeader: { Name: "x-api-key" } }
         ]
       }
     );
@@ -1655,11 +1760,26 @@ export class ArchonPlatformStack extends Stack {
         }
       }
     );
+    const apiOriginRequestPolicy = new cloudfront.OriginRequestPolicy(
+      this,
+      "ApiOriginRequestPolicy",
+      {
+        originRequestPolicyName: `archon-${stage}-api-origin`,
+        comment:
+          "Forward viewer context except Host; CloudFront overwrites the origin credential",
+        cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
+        headerBehavior: cloudfront.OriginRequestHeaderBehavior.denyList("host"),
+        queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all()
+      }
+    );
     const apiOrigin = new origins.HttpOrigin(
       `${api.restApiId}.execute-api.${Aws.REGION}.${Aws.URL_SUFFIX}`,
       {
         protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
         originPath: `/${api.deploymentStage.stageName}`,
+        customHeaders: {
+          "x-api-key": cloudFrontOriginApiKeyValue
+        },
         connectionAttempts: 3,
         connectionTimeout: Duration.seconds(10)
       }
@@ -1741,8 +1861,7 @@ export class ArchonPlatformStack extends Stack {
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           compress: true,
           functionAssociations: [canonicalHostAssociation],
-          originRequestPolicy:
-            cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          originRequestPolicy: apiOriginRequestPolicy,
           responseHeadersPolicy,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY
         }
@@ -2312,6 +2431,82 @@ function workloadSecurityGroup(
     allowAllIpv6Outbound: false,
     disableInlineRules: true
   });
+}
+
+const narrowLambdaBaseResponseParameters: Record<string, string> = {
+  "method.response.header.Cache-Control": "'no-store'",
+  "method.response.header.Content-Type":
+    "'application/json; charset=utf-8'",
+  "method.response.header.Cross-Origin-Resource-Policy": "'same-origin'",
+  "method.response.header.Referrer-Policy": "'no-referrer'",
+  "method.response.header.X-Content-Type-Options": "'nosniff'"
+};
+
+const narrowLambdaResponseParameters: Record<string, string> = {
+  ...narrowLambdaBaseResponseParameters,
+  "method.response.header.Location":
+    "integration.response.body.headers.location",
+  "method.response.header.Retry-After":
+    "integration.response.body.headers.retryAfter"
+};
+
+const narrowLambdaMethodResponseParameters: Record<string, boolean> =
+  Object.fromEntries(
+    Object.keys(narrowLambdaResponseParameters).map((parameter) => [
+      parameter,
+      parameter !== "method.response.header.Location" &&
+        parameter !== "method.response.header.Retry-After"
+    ])
+  );
+
+function narrowLambdaIntegration(
+  handler: lambda.IFunction,
+  requestTemplate: string,
+  cache: {
+    cacheKeyParameters?: string[];
+    cacheNamespace?: string;
+  } = {}
+): apigateway.LambdaIntegration {
+  return new apigateway.LambdaIntegration(handler, {
+    proxy: false,
+    allowTestInvoke: false,
+    passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
+    requestTemplates: {
+      "application/json": requestTemplate
+    },
+    cacheKeyParameters: cache.cacheKeyParameters,
+    cacheNamespace: cache.cacheNamespace,
+    integrationResponses: [
+      {
+        selectionPattern: "(?s).+",
+        statusCode: "502",
+        responseParameters: narrowLambdaBaseResponseParameters,
+        responseTemplates: {
+          "application/json": '{"error":"lambda_integration_failed"}\n'
+        }
+      },
+      {
+        statusCode: "200",
+        responseParameters: narrowLambdaResponseParameters,
+        responseTemplates: {
+          "application/json": [
+            "#set($statusCode = $input.path('$.statusCode'))",
+            "#set($context.responseOverride.status = $statusCode)",
+            "$input.json('$.payload')"
+          ].join("\n")
+        }
+      }
+    ]
+  });
+}
+
+function narrowLambdaMethodResponses(
+  statusCodes: string[]
+): apigateway.MethodResponse[] {
+  return [...new Set(statusCodes)].map((statusCode) => ({
+    statusCode,
+    responseParameters: narrowLambdaMethodResponseParameters
+  }));
 }
 
 function privateHttpIntegration(
