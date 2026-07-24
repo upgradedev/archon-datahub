@@ -219,9 +219,53 @@ let cloudfront_origin_request_policies = Resources.*[
 
 let cloudfront_origin_custom_headers = Resources.*[
   Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins.*.OriginCustomHeaders.*
+].Properties.DistributionConfig.Origins[
+  OriginCustomHeaders exists
+].OriginCustomHeaders.*
 
-let cloudfront_api_key_origin_headers = %cloudfront_origin_custom_headers[
+let cloudfront_api_origins = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+]
+
+let cloudfront_api_origin_domain_join_arguments = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+].DomainName.'Fn::Join'[*]
+
+let cloudfront_api_origin_domain_parts = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+].DomainName.'Fn::Join'[1][*]
+
+let cloudfront_api_origin_rest_api_refs = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+  DomainName.'Fn::Join'[1][0].Ref exists
+].DomainName.'Fn::Join'[1][0].Ref
+
+let referenced_cloudfront_origin_rest_apis =
+  Resources[
+    KEYS IN %cloudfront_api_origin_rest_api_refs
+  ][
+    Type == 'AWS::ApiGateway::RestApi'
+  ]
+
+let cloudfront_api_origin_custom_headers = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+].OriginCustomHeaders.*
+
+let cloudfront_api_key_origin_headers = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Origins[
+  CustomOriginConfig exists
+].OriginCustomHeaders[
   HeaderName == 'x-api-key'
 ]
 
@@ -231,13 +275,72 @@ let api_cache_behaviors = Resources.*[
   PathPattern == 'api/*'
 ]
 
+let api_origin_request_policy_refs = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.CacheBehaviors[
+  PathPattern == 'api/*'
+  OriginRequestPolicyId.Ref exists
+].OriginRequestPolicyId.Ref
+
+let referenced_cloudfront_origin_request_policies =
+  Resources[
+    KEYS IN %api_origin_request_policy_refs
+  ][
+    Type == 'AWS::CloudFront::OriginRequestPolicy'
+  ]
+
 let secrets = Resources.*[
   Type == 'AWS::SecretsManager::Secret'
 ]
 
 let origin_api_key_secrets = Resources.*[
   Type == 'AWS::SecretsManager::Secret'
+  Properties.Name == /^archon\/(staging|production)\/cloudfront-origin-api-key$/
   Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
+]
+
+let secrets_kms_keys = Resources.*[
+  Type == 'AWS::KMS::Key'
+  some Properties.Tags[*] {
+    Key == 'ArchonKeyPurpose'
+    Value == 'secrets'
+  }
+]
+
+let origin_api_key_secret_kms_key_refs =
+  %origin_api_key_secrets.Properties.KmsKeyId.'Fn::GetAtt'[0]
+
+let referenced_origin_api_key_secret_kms_keys =
+  Resources[
+    KEYS IN %origin_api_key_secret_kms_key_refs
+  ][
+    Type == 'AWS::KMS::Key'
+    some Properties.Tags[*] {
+      Key == 'ArchonKeyPurpose'
+      Value == 'secrets'
+    }
+  ]
+
+let staging_origin_api_key_secrets = Resources.*[
+  Type == 'AWS::SecretsManager::Secret'
+  Properties.Name == 'archon/staging/cloudfront-origin-api-key'
+  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
+]
+
+let production_origin_api_key_secrets = Resources.*[
+  Type == 'AWS::SecretsManager::Secret'
+  Properties.Name == 'archon/production/cloudfront-origin-api-key'
+  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
+]
+
+let staging_api_gateway_api_keys = Resources.*[
+  Type == 'AWS::ApiGateway::ApiKey'
+  Properties.Value == /^\{\{resolve:secretsmanager:archon\/staging\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
+]
+
+let production_api_gateway_api_keys = Resources.*[
+  Type == 'AWS::ApiGateway::ApiKey'
+  Properties.Value == /^\{\{resolve:secretsmanager:archon\/production\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
 ]
 
 let waf_associations = Resources.*[
@@ -457,9 +560,18 @@ rule public_api_methods_require_cloudfront_origin_gate
   let api_key_count = count(%api_gateway_api_keys)
   let usage_plan_count = count(%api_gateway_usage_plans)
   let usage_plan_key_count = count(%api_gateway_usage_plan_keys)
-  let origin_custom_header_count = count(%cloudfront_origin_custom_headers)
+  let cloudfront_distribution_count = count(%cloudfront_distributions)
+  let all_origin_custom_header_count =
+    count(%cloudfront_origin_custom_headers)
+  let api_origin_count = count(%cloudfront_api_origins)
+  let origin_custom_header_count =
+    count(%cloudfront_api_origin_custom_headers)
   let api_key_origin_header_count = count(%cloudfront_api_key_origin_headers)
   let origin_request_policy_count = count(%cloudfront_origin_request_policies)
+  let api_origin_request_policy_ref_count =
+    count(%api_origin_request_policy_refs)
+  let referenced_origin_request_policy_count =
+    count(%referenced_cloudfront_origin_request_policies)
   let origin_api_key_secret_count = count(%origin_api_key_secrets)
   let api_method_count = count(%api_gateway_methods)
   let public_api_method_count = count(%public_api_methods)
@@ -494,6 +606,8 @@ rule public_api_methods_require_cloudfront_origin_gate
   %api_gateway_api_keys.Properties {
     Enabled == true
     Value exists
+    Value is_string
+    Value == /^\{\{resolve:secretsmanager:archon\/(staging|production)\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
   }
   %api_gateway_usage_plans !empty
   %usage_plan_count == 1
@@ -514,7 +628,16 @@ rule public_api_methods_require_cloudfront_origin_gate
     KeyType == 'API_KEY'
     UsagePlanId exists
   }
-  %cloudfront_origin_custom_headers !empty
+  %cloudfront_distributions !empty
+  %cloudfront_distribution_count == 1
+  %all_origin_custom_header_count == 1
+  %cloudfront_api_origins !empty
+  %api_origin_count == 1
+  %cloudfront_api_origins {
+    Id exists
+    CustomOriginConfig.OriginProtocolPolicy == 'https-only'
+  }
+  %cloudfront_api_origin_custom_headers !empty
   %origin_custom_header_count == 1
   %cloudfront_api_key_origin_headers !empty
   %api_key_origin_header_count == 1
@@ -522,16 +645,25 @@ rule public_api_methods_require_cloudfront_origin_gate
   %api_gateway_api_keys.Properties.Value == %cloudfront_api_key_origin_headers.HeaderValue
   %origin_api_key_secrets !empty
   %origin_api_key_secret_count == 1
-  %origin_api_key_secrets.Properties {
-    KmsKeyId exists
-    GenerateSecretString.ExcludePunctuation == true
-    GenerateSecretString.GenerateStringKey == 'apiKey'
-    GenerateSecretString.IncludeSpace == false
-    GenerateSecretString.PasswordLength == 64
+  %origin_api_key_secrets {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      Name == /^archon\/(staging|production)\/cloudfront-origin-api-key$/
+      KmsKeyId.'Fn::GetAtt'[0] exists
+      KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
+      GenerateSecretString.ExcludePunctuation == true
+      GenerateSecretString.GenerateStringKey == 'apiKey'
+      GenerateSecretString.IncludeSpace == false
+      GenerateSecretString.PasswordLength == 64
+      GenerateSecretString.SecretStringTemplate == '{}'
+    }
   }
   %cloudfront_origin_request_policies !empty
   %origin_request_policy_count == 1
-  %cloudfront_origin_request_policies.Properties.OriginRequestPolicyConfig {
+  %api_origin_request_policy_ref_count == 1
+  %referenced_origin_request_policy_count == 1
+  %referenced_cloudfront_origin_request_policies.Properties.OriginRequestPolicyConfig {
     CookiesConfig.CookieBehavior == 'all'
     HeadersConfig.HeaderBehavior == 'allExcept'
     HeadersConfig.Headers == ['host']
@@ -540,8 +672,105 @@ rule public_api_methods_require_cloudfront_origin_gate
   %api_cache_behaviors !empty
   %api_cache_behavior_count == 1
   %api_cache_behaviors {
-    OriginRequestPolicyId exists
+    OriginRequestPolicyId.Ref exists
     TargetOriginId exists
+  }
+  %api_cache_behaviors.TargetOriginId == %cloudfront_api_origins.Id
+}
+
+rule cloudfront_api_origin_is_rest_api_bound
+  when %cloudfront_api_origins !empty {
+  let rest_api_count = count(%api_gateway_rest_apis)
+  let cloudfront_distribution_count = count(%cloudfront_distributions)
+  let api_origin_count = count(%cloudfront_api_origins)
+  let domain_join_argument_count =
+    count(%cloudfront_api_origin_domain_join_arguments)
+  let domain_part_count = count(%cloudfront_api_origin_domain_parts)
+  let rest_api_ref_count = count(%cloudfront_api_origin_rest_api_refs)
+  let referenced_rest_api_count =
+    count(%referenced_cloudfront_origin_rest_apis)
+
+  %rest_api_count == 1
+  %cloudfront_distribution_count == 1
+  %api_origin_count == 1
+  %domain_join_argument_count == 2
+  %domain_part_count == 5
+  %rest_api_ref_count == 1
+  %referenced_rest_api_count == 1
+  %cloudfront_api_origins {
+    DomainName.'Fn::Join'[0] == ''
+    DomainName.'Fn::Join'[1][0].Ref exists
+    DomainName.'Fn::Join'[1][1] == '.execute-api.'
+    DomainName.'Fn::Join'[1][2].Ref == 'AWS::Region'
+    DomainName.'Fn::Join'[1][3] == '.'
+    DomainName.'Fn::Join'[1][4].Ref == 'AWS::URLSuffix'
+  }
+}
+
+rule cloudfront_origin_custom_headers_are_api_key_only
+  when %cloudfront_origin_custom_headers !empty {
+  let cloudfront_distribution_count = count(%cloudfront_distributions)
+  let all_origin_custom_header_count =
+    count(%cloudfront_origin_custom_headers)
+  let api_origin_count = count(%cloudfront_api_origins)
+  let api_origin_custom_header_count =
+    count(%cloudfront_api_origin_custom_headers)
+  let api_key_origin_header_count = count(%cloudfront_api_key_origin_headers)
+
+  %cloudfront_distribution_count == 1
+  %all_origin_custom_header_count == 1
+  %api_origin_count == 1
+  %api_origin_custom_header_count == 1
+  %api_key_origin_header_count == 1
+}
+
+rule cloudfront_origin_key_is_stage_bound
+  when %api_gateway_api_keys !empty {
+  let api_key_count = count(%api_gateway_api_keys)
+  let origin_api_key_secret_count = count(%origin_api_key_secrets)
+  let staging_api_key_count = count(%staging_api_gateway_api_keys)
+  let staging_origin_api_key_secret_count =
+    count(%staging_origin_api_key_secrets)
+  let production_api_key_count = count(%production_api_gateway_api_keys)
+  let production_origin_api_key_secret_count =
+    count(%production_origin_api_key_secrets)
+
+  %api_key_count == 1
+  %origin_api_key_secret_count == 1
+  %staging_api_key_count == 1 OR
+  %production_api_key_count == 1
+  %staging_api_key_count == 0 OR
+  %staging_origin_api_key_secret_count == 1
+  %production_api_key_count == 0 OR
+  %production_origin_api_key_secret_count == 1
+}
+
+rule cloudfront_origin_key_uses_dedicated_cmk
+  when %origin_api_key_secrets !empty {
+  let origin_api_key_secret_count = count(%origin_api_key_secrets)
+  let secrets_kms_key_count = count(%secrets_kms_keys)
+  let origin_kms_key_ref_count =
+    count(%origin_api_key_secret_kms_key_refs)
+  let referenced_origin_kms_key_count =
+    count(%referenced_origin_api_key_secret_kms_keys)
+
+  %origin_api_key_secret_count == 1
+  %secrets_kms_key_count == 1
+  %origin_kms_key_ref_count == 1
+  %referenced_origin_kms_key_count == 1
+  %origin_api_key_secrets.Properties.KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
+  %referenced_origin_api_key_secret_kms_keys {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      EnableKeyRotation == true
+      PendingWindowInDays == 30
+      KeyPolicy exists
+      some Tags[*] {
+        Key == 'ArchonKeyPurpose'
+        Value == 'secrets'
+      }
+    }
   }
 }
 

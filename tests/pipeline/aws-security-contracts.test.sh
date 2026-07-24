@@ -429,23 +429,42 @@ JSON
         "Type":"AWS::ApiGateway::RestApi",
         "Properties":{"ApiKeySourceType":"HEADER"}
       },
+      "SecretsKeyLogical":{
+        "Type":"AWS::KMS::Key",
+        "DeletionPolicy":"Retain",
+        "UpdateReplacePolicy":"Retain",
+        "Properties":{
+          "EnableKeyRotation":true,
+          "PendingWindowInDays":30,
+          "KeyPolicy":{"Version":"2012-10-17","Statement":[]},
+          "Tags":[{
+            "Key":"ArchonKeyPurpose",
+            "Value":"secrets"
+          }]
+        }
+      },
       "OriginSecretLogical":{
-        "Type":"AWS::SecretsManager::Secret"
+        "Type":"AWS::SecretsManager::Secret",
+        "DeletionPolicy":"Retain",
+        "UpdateReplacePolicy":"Retain",
+        "Properties":{
+          "Name":"archon/staging/cloudfront-origin-api-key",
+          "KmsKeyId":{"Fn::GetAtt":["SecretsKeyLogical","Arn"]},
+          "GenerateSecretString":{
+            "ExcludePunctuation":true,
+            "GenerateStringKey":"apiKey",
+            "IncludeSpace":false,
+            "PasswordLength":64,
+            "SecretStringTemplate":"{}"
+          }
+        }
       },
       "ApiKeyLogical":{
         "Type":"AWS::ApiGateway::ApiKey",
+        "DependsOn":["OriginSecretLogical"],
         "Properties":{
           "Enabled":true,
-          "Value":{
-            "Fn::Join":[
-              "",
-              [
-                "{{resolve:secretsmanager:",
-                {"Ref":"OriginSecretLogical"},
-                ":SecretString:apiKey::}}"
-              ]
-            ]
-          }
+          "Value":"{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
         }
       },
       "OriginPolicyLogical":{
@@ -453,6 +472,7 @@ JSON
       },
       "DistributionLogical":{
         "Type":"AWS::CloudFront::Distribution",
+        "DependsOn":["OriginSecretLogical"],
         "Properties":{
           "DistributionConfig":{
             "Enabled":true,
@@ -475,16 +495,7 @@ JSON
               "ConnectionTimeout":10,
               "OriginCustomHeaders":[{
                 "HeaderName":"x-api-key",
-                "HeaderValue":{
-                  "Fn::Join":[
-                    "",
-                    [
-                      "{{resolve:secretsmanager:",
-                      {"Ref":"OriginSecretLogical"},
-                      ":SecretString:apiKey::}}"
-                    ]
-                  ]
-                }
+                "HeaderValue":"{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
               }],
               "CustomOriginConfig":{
                 "HTTPPort":80,
@@ -492,6 +503,10 @@ JSON
                 "OriginProtocolPolicy":"https-only",
                 "OriginSSLProtocols":["TLSv1.2"]
               }
+            },{
+              "Id":"spa-origin",
+              "DomainName":"spa.s3.amazonaws.com",
+              "S3OriginConfig":{"OriginAccessIdentity":""}
             }],
             "CacheBehaviors":[{
               "PathPattern":"api/*",
@@ -527,11 +542,97 @@ JSON
           <<<"${response}"
       )"
     fi
+    if [[ "${FAKE_CLOUDFRONT_DUPLICATE_HEADER_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.DistributionLogical.Properties
+            .DistributionConfig.Origins[1].OriginCustomHeaders = [{
+              "HeaderName": "x-api-key",
+              "HeaderValue":
+                "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+            }]' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_API_ORIGIN_DOMAIN_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.DistributionLogical.Properties
+            .DistributionConfig.Origins[0].DomainName["Fn::Join"][1][1] =
+              ".execute-api.attacker.example"' \
+          <<<"${response}"
+      )"
+    fi
     if [[ "${FAKE_DYNAMIC_REFERENCE_DRIFT:-0}" == "1" ]]; then
       response="$(
         jq \
           '.TemplateBody.Resources.ApiKeyLogical.Properties.Value =
             "plaintext-is-forbidden"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_NAME_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.OriginSecretLogical.Properties.Name =
+            "archon/production/cloudfront-origin-api-key"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_RETENTION_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          'del(
+            .TemplateBody.Resources.OriginSecretLogical.UpdateReplacePolicy
+          )' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_GENERATOR_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.OriginSecretLogical.Properties
+            .GenerateSecretString.PasswordLength = 32' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_KMS_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.OriginSecretLogical.Properties.KmsKeyId =
+            "alias/aws/secretsmanager"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_KMS_PURPOSE_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.SecretsKeyLogical.Properties
+            .Tags[0].Value = "data"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_KMS_ROTATION_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.SecretsKeyLogical.Properties
+            .EnableKeyRotation = false' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_SECRET_DEPENDENCY_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          'del(.TemplateBody.Resources.ApiKeyLogical.DependsOn)' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_ORIGIN_POLICY_BINDING_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.DistributionLogical.Properties
+            .DistributionConfig.CacheBehaviors[0].OriginRequestPolicyId.Ref =
+              "UnvalidatedPolicyLogical"' \
           <<<"${response}"
       )"
     fi
@@ -1065,7 +1166,17 @@ for drift_variable in \
   FAKE_USAGE_PLAN_DRIFT \
   FAKE_USAGE_PLAN_ASSOCIATION_DRIFT \
   FAKE_CLOUDFRONT_CUSTOM_HEADER_DRIFT \
+  FAKE_CLOUDFRONT_DUPLICATE_HEADER_DRIFT \
+  FAKE_API_ORIGIN_DOMAIN_DRIFT \
   FAKE_DYNAMIC_REFERENCE_DRIFT \
+  FAKE_ORIGIN_SECRET_NAME_DRIFT \
+  FAKE_ORIGIN_SECRET_RETENTION_DRIFT \
+  FAKE_ORIGIN_SECRET_GENERATOR_DRIFT \
+  FAKE_ORIGIN_SECRET_KMS_DRIFT \
+  FAKE_ORIGIN_SECRET_KMS_PURPOSE_DRIFT \
+  FAKE_ORIGIN_SECRET_KMS_ROTATION_DRIFT \
+  FAKE_ORIGIN_SECRET_DEPENDENCY_DRIFT \
+  FAKE_ORIGIN_POLICY_BINDING_DRIFT \
   FAKE_ORIGIN_POLICY_DRIFT \
   FAKE_DIRECT_NO_KEY_DRIFT \
   FAKE_DIRECT_BOGUS_KEY_DRIFT \

@@ -556,6 +556,9 @@ unset stack_template_json
 jq -e \
   --arg stage "${api_stage}" \
   '
+    def dependency_list:
+      if type == "array" then . else [.] end;
+
     .Resources as $resources |
     (
       $resources |
@@ -570,6 +573,37 @@ jq -e \
     (
       $resources |
       to_entries |
+      map(
+        select(
+          .value.Type == "AWS::SecretsManager::Secret" and
+          .value.Properties.Name ==
+            ("archon/" + $stage + "/cloudfront-origin-api-key")
+        )
+      )
+    ) as $originSecrets |
+    (
+      $originSecrets[0].value.Properties.KmsKeyId["Fn::GetAtt"][0]
+    ) as $originSecretKmsKeyRef |
+    (
+      $resources |
+      to_entries |
+      map(
+        select(
+          .value.Type == "AWS::KMS::Key" and
+          any(
+            .value.Properties.Tags[]?;
+            .Key == "ArchonKeyPurpose" and .Value == "secrets"
+          )
+        )
+      )
+    ) as $secretsKmsKeys |
+    (
+      $secretsKmsKeys |
+      map(select(.key == $originSecretKmsKeyRef))
+    ) as $originSecretKmsKeys |
+    (
+      $resources |
+      to_entries |
       map(select(.value.Type == "AWS::CloudFront::OriginRequestPolicy"))
     ) as $originPolicies |
     (
@@ -577,36 +611,75 @@ jq -e \
       to_entries |
       map(select(.value.Type == "AWS::CloudFront::Distribution"))
     ) as $distributions |
-    ($restApis | length) == 1 and
-    ($apiKeys | length) == 1 and
-    ($originPolicies | length) == 1 and
-    ($distributions | length) == 1 and
-    ($apiKeys[0].value.Properties.Value | type) == "object" and
     (
-      $apiKeys[0].value.Properties.Value |
-      tostring |
-      contains("resolve:secretsmanager")
-    ) and
-    (
-      $apiKeys[0].value.Properties.Value |
-      tostring |
-      contains("apiKey")
-    ) and
+      "{{resolve:secretsmanager:archon/" + $stage +
+      "/cloudfront-origin-api-key:SecretString:apiKey::}}"
+    ) as $expectedOriginReference |
     (
       $distributions[0].value.Properties.DistributionConfig
     ) as $distribution |
-    $distribution.Enabled == true and
+    (
+      [
+        $distribution.Origins[] |
+        (.OriginCustomHeaders // [])[]
+      ]
+    ) as $allOriginCustomHeaders |
     (
       [
         $distribution.Origins[] |
         select(.CustomOriginConfig != null)
       ]
     ) as $apiOrigins |
+    ($restApis | length) == 1 and
+    ($apiKeys | length) == 1 and
+    ($originSecrets | length) == 1 and
+    ($secretsKmsKeys | length) == 1 and
+    ($originSecretKmsKeys | length) == 1 and
+    ($originPolicies | length) == 1 and
+    ($distributions | length) == 1 and
+    $apiKeys[0].value.Properties.Value == $expectedOriginReference and
+    (
+      $apiKeys[0].value.DependsOn |
+      dependency_list |
+      index($originSecrets[0].key)
+    ) != null and
+    $originSecrets[0].value.DeletionPolicy == "Retain" and
+    $originSecrets[0].value.UpdateReplacePolicy == "Retain" and
+    $originSecrets[0].value.Properties.KmsKeyId == {
+      "Fn::GetAtt": [$originSecretKmsKeyRef, "Arn"]
+    } and
+    $originSecretKmsKeys[0].value.DeletionPolicy == "Retain" and
+    $originSecretKmsKeys[0].value.UpdateReplacePolicy == "Retain" and
+    $originSecretKmsKeys[0].value.Properties.EnableKeyRotation == true and
+    $originSecretKmsKeys[0].value.Properties.PendingWindowInDays == 30 and
+    ($originSecretKmsKeys[0].value.Properties.KeyPolicy != null) and
+    $originSecrets[0].value.Properties.GenerateSecretString == {
+      "ExcludePunctuation": true,
+      "GenerateStringKey": "apiKey",
+      "IncludeSpace": false,
+      "PasswordLength": 64,
+      "SecretStringTemplate": "{}"
+    } and
+    (
+      $distributions[0].value.DependsOn |
+      dependency_list |
+      index($originSecrets[0].key)
+    ) != null and
+    $distribution.Enabled == true and
+    ($allOriginCustomHeaders | length) == 1 and
     ($apiOrigins | length) == 1 and
-    ($apiOrigins[0].DomainName | tostring |
-      contains($restApis[0].key)) and
-    ($apiOrigins[0].DomainName | tostring |
-      contains("execute-api")) and
+    $apiOrigins[0].DomainName == {
+      "Fn::Join": [
+        "",
+        [
+          {"Ref": $restApis[0].key},
+          ".execute-api.",
+          {"Ref": "AWS::Region"},
+          ".",
+          {"Ref": "AWS::URLSuffix"}
+        ]
+      ]
+    } and
     $apiOrigins[0].OriginPath == ("/" + $stage) and
     $apiOrigins[0].ConnectionAttempts == 3 and
     $apiOrigins[0].ConnectionTimeout == 10 and
@@ -620,7 +693,7 @@ jq -e \
     $apiOrigins[0].OriginCustomHeaders[0].HeaderName ==
       "x-api-key" and
     $apiOrigins[0].OriginCustomHeaders[0].HeaderValue ==
-      $apiKeys[0].value.Properties.Value and
+      $expectedOriginReference and
     (
       [
         $distribution.CacheBehaviors[] |

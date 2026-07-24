@@ -491,6 +491,48 @@ jobs:
             echo "- Observed resolved lock SHA-256: \`${observed}\`"
             echo "- Contract resolved lock SHA-256: \`${expected}\`"
           } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Exercise the credentialless read-only MCP protocol
+        shell: bash
+        env:
+          MCP_PROJECT: ${{ steps.lock.outputs.project }}
+        run: |
+          set -euo pipefail
+          server="${MCP_PROJECT}/.venv/bin/mcp-server-datahub"
+          smoke="${MCP_PROJECT}/.archon-evidence/runtime-smoke.json"
+          test -x "${server}"
+          test "$("${server}" --version)" = \
+            "mcp-server-datahub, version 0.6.0"
+          test ! -e "${smoke}"
+          timeout 60 \
+            "${MCP_PROJECT}/.venv/bin/python" \
+            scripts/smoke-datahub-mcp-runtime.py \
+            --server "${server}" \
+            --output "${smoke}" \
+            --timeout-seconds 45
+          jq --exit-status '
+            .schemaVersion == "archon.datahub-mcp-runtime-smoke/v1" and
+            .protocol == "mcp-stdio" and
+            .packageVersion == "0.6.0" and
+            (.fastMcpVersion | test("^[0-9]+\\.[0-9]+\\.[0-9]+")) and
+            .serverInfoVersion == .fastMcpVersion and
+            .initialized == true and
+            .pinged == true and
+            .credentialsUsed == false and
+            .networkToolCalls == 0 and
+            .loopbackConfigRequests == 1 and
+            .unexpectedHttpRequests == 0 and
+            .readOnlyHints == true and
+            .tools == [
+              "get_dataset_queries",
+              "get_entities",
+              "get_lineage",
+              "get_lineage_paths_between",
+              "list_schema_fields",
+              "search"
+            ] and
+            (.stderrBytes | type == "number" and . >= 0) and
+            (.stderrSha256 | test("^[0-9a-f]{64}$"))
+          ' "${smoke}" >/dev/null
       - name: Audit the exact resolved MCP dependency closure
         id: audit
         shell: bash
@@ -498,7 +540,7 @@ jobs:
           MCP_PROJECT: ${{ steps.lock.outputs.project }}
         run: |
           set -euo pipefail
-          sarif="${RUNNER_TEMP}/datahub-mcp-audit.sarif"
+          sarif="${RUNNER_TEMP}/datahub-mcp-audit.raw.sarif"
           set +e
           uv audit \
             --project "${MCP_PROJECT}" \
@@ -534,16 +576,37 @@ jobs:
           jq --exit-status '
             .bomFormat == "CycloneDX" and
             .specVersion == "1.5" and
-            (.components | type == "array" and length > 10)
+            (.components | type == "array" and length > 10) and
+            any(.components[];
+              .name == "mcp-server-datahub" and
+              .version == "0.6.0"
+            ) and
+            any(.components[];
+              .name == "acryl-datahub" and
+              .version == "1.6.0.15"
+            ) and
+            any(.components[];
+              .name == "setuptools" and
+              .version == "81.0.0"
+            )
           ' "${RUNNER_TEMP}/datahub-mcp.cdx.json" >/dev/null
           jq --exit-status '
             (type == "array" and length > 10) and
             any(.[];
               .name == "mcp-server-datahub" and
               .version == "0.6.0"
+            ) and
+            any(.[];
+              .name == "acryl-datahub" and
+              .version == "1.6.0.15"
+            ) and
+            any(.[];
+              .name == "setuptools" and
+              .version == "81.0.0"
             )
           ' "${RUNNER_TEMP}/datahub-mcp-installed.json" >/dev/null
       - name: Bind MCP lock, audit, and SBOM evidence
+        id: bind
         shell: bash
         env:
           AUDIT_STATUS: ${{ steps.audit.outputs.status }}
@@ -552,13 +615,18 @@ jobs:
           OBSERVED_RESOLVED_LOCK_SHA: ${{ steps.lock.outputs.resolved_lock_sha }}
         run: |
           set -euo pipefail
-          audit="${RUNNER_TEMP}/datahub-mcp-audit.sarif"
+          raw_audit="${RUNNER_TEMP}/datahub-mcp-audit.raw.sarif"
+          actionable_audit="${RUNNER_TEMP}/datahub-mcp-audit.actionable.sarif"
           sbom="${RUNNER_TEMP}/datahub-mcp.cdx.json"
           installed="${RUNNER_TEMP}/datahub-mcp-installed.json"
+          runtime_smoke="${MCP_PROJECT}/.archon-evidence/runtime-smoke.json"
           contract=".github/locks/datahub-mcp-v0.6.0.json"
           evidence_dir="${RUNNER_TEMP}/datahub-mcp-security"
           mkdir -p "${evidence_dir}"
+          cp "${raw_audit}" "${actionable_audit}"
           cp "${contract}" "${evidence_dir}/lock-contract.json"
+          cp "${MCP_PROJECT}/.archon-evidence/openvex.json" \
+            "${evidence_dir}/openvex.json"
           cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
             "${evidence_dir}/pypi-provenance.json"
           cp "${MCP_PROJECT}/.archon-evidence/upstream-pyproject.toml" \
@@ -575,9 +643,55 @@ jobs:
             "${evidence_dir}/wheel-only-graph.json"
           cp "${MCP_PROJECT}/.archon-evidence/resolved-lock-binding.json" \
             "${evidence_dir}/resolved-lock-binding.json"
-          cp "${audit}" "${evidence_dir}/audit.sarif"
+          cp "${raw_audit}" "${evidence_dir}/audit.raw.sarif"
           cp "${installed}" "${evidence_dir}/installed-packages.json"
+          cp "${runtime_smoke}" "${evidence_dir}/runtime-smoke.json"
           cp "${sbom}" "${evidence_dir}/sbom.cdx.json"
+          python3 scripts/validate-datahub-mcp-audit.py --self-test
+          python3 scripts/validate-datahub-mcp-audit.py \
+            --contract "${contract}" \
+            --vex "${evidence_dir}/openvex.json" \
+            --sarif "${raw_audit}" \
+            --installed "${installed}" \
+            --wheel-graph \
+              "${MCP_PROJECT}/.archon-evidence/wheel-only-graph.json" \
+            --runtime-smoke "${runtime_smoke}" \
+            --audit-exit "${AUDIT_STATUS}" \
+            --actionable-sarif "${actionable_audit}" \
+            --disposition-receipt \
+              "${evidence_dir}/audit-disposition.json"
+          jq --exit-status '
+              .schemaVersion ==
+                "archon.datahub-mcp-audit-disposition/v1" and
+              .decision == "approved" and
+              .scanner == {
+                name: "uv",
+                version: "0.11.31",
+                exitCode: 1
+              } and
+              .policy.canonicalId == "CVE-2026-59890" and
+              .policy.scannerRuleIds == [
+                "GHSA-h35f-9h28-mq5c",
+                "PYSEC-2026-3447"
+              ] and
+              .policy.status == "not_affected" and
+              .findings == {
+                raw: 2,
+                approved: 2,
+                unapproved: 0,
+                actionable: 0
+              } and
+              .runtimeSmoke.protocol == "mcp-stdio" and
+              .runtimeSmoke.initialized == true and
+              .runtimeSmoke.pinged == true and
+              .runtimeSmoke.credentialsUsed == false and
+              .runtimeSmoke.readOnlyHints == true and
+              .runtimeSmoke.loopbackConfigRequests == 1 and
+              .runtimeSmoke.unexpectedHttpRequests == 0 and
+              .runtimeSmoke.toolCount == 6
+            ' "${evidence_dir}/audit-disposition.json" >/dev/null
+          cp "${actionable_audit}" \
+            "${evidence_dir}/audit.actionable.sarif"
           test "$(
             sha256sum "${evidence_dir}/upstream-uv.lock" |
               awk '{print $1}'
@@ -617,6 +731,15 @@ jobs:
             --arg expectedResolvedLockSha256 \
               "${EXPECTED_RESOLVED_LOCK_SHA}" \
             --arg wheelSha256 "$(jq -er '.package.wheel.sha256' "${contract}")" \
+            --arg virtualRootName "$(
+              jq -er '.resolution.virtualRootName' "${contract}"
+            )" \
+            --arg virtualRootVersion "$(
+              jq -er '.resolution.virtualRootVersion' "${contract}"
+            )" \
+            --arg mcpDependency "$(
+              jq -er '.resolution.mcpDependency' "${contract}"
+            )" \
             --arg registry "$(jq -er '.resolution.registry' "${contract}")" \
             --arg resolutionStrategy "$(
               jq -er '.resolution.strategy' "${contract}"
@@ -627,6 +750,9 @@ jobs:
             --arg excludeNewer "$(
               jq -er '.resolution.excludeNewer' "${contract}"
             )" \
+            --argjson resolutionConstraints "$(
+              jq -c '.resolution.constraints' "${contract}"
+            )" \
             --arg projectOverlaySha256 "$(
               sha256sum "${evidence_dir}/project-overlay.json" |
                 awk '{print $1}'
@@ -634,9 +760,31 @@ jobs:
             --arg wheelOnlyGraphSha256 "$(
               sha256sum "${evidence_dir}/wheel-only-graph.json" |
                 awk '{print $1}'
-            )" '
+            )" \
+            --arg rawAuditSha256 "$(
+              sha256sum "${evidence_dir}/audit.raw.sarif" |
+                awk '{print $1}'
+            )" \
+            --arg actionableAuditSha256 "$(
+              sha256sum "${evidence_dir}/audit.actionable.sarif" |
+                awk '{print $1}'
+            )" \
+            --arg auditDispositionSha256 "$(
+              sha256sum "${evidence_dir}/audit-disposition.json" |
+                awk '{print $1}'
+            )" \
+            --arg openVexSha256 "$(
+              sha256sum "${evidence_dir}/openvex.json" |
+                awk '{print $1}'
+            )" \
+            --arg runtimeSmokeSha256 "$(
+              sha256sum "${evidence_dir}/runtime-smoke.json" |
+                awk '{print $1}'
+            )" \
+            --slurpfile disposition \
+              "${evidence_dir}/audit-disposition.json" '
               {
-                schemaVersion: "archon.datahub-mcp-security-evidence/v2",
+                schemaVersion: "archon.datahub-mcp-security-evidence/v5",
                 sourceSha: $sourceSha,
                 generatedAt: $generatedAt,
                 scanner: {
@@ -655,13 +803,35 @@ jobs:
                     strategy: $resolutionStrategy,
                     upgrade: $resolutionUpgrade,
                     excludeNewer: $excludeNewer,
+                    constraints: $resolutionConstraints,
                     sourceBuilds: "deny",
                     projectMode: "virtual-static-metadata",
+                    virtualRootName: $virtualRootName,
+                    virtualRootVersion: $virtualRootVersion,
+                    mcpDependency: $mcpDependency,
                     projectOverlaySha256: $projectOverlaySha256
                   },
                   wheelOnlyGraphSha256: $wheelOnlyGraphSha256,
                   pypiTrustedPublisherProvenance:
-                    "matched-pinned-pypi-record"
+                    "matched-pinned-pypi-record",
+                  runtimeCompatibility: {
+                    mcpServerDatahub: "0.6.0",
+                    acrylDatahub: "1.6.0.15",
+                    setuptools: "81.0.0"
+                  }
+                },
+                advisoryDisposition: {
+                  openVexSha256: $openVexSha256,
+                  applicationReceiptSha256: $auditDispositionSha256,
+                  rawAuditSha256: $rawAuditSha256,
+                  actionableAuditSha256: $actionableAuditSha256,
+                  receipt: $disposition[0]
+                },
+                runtimeSmoke: {
+                  sha256: $runtimeSmokeSha256,
+                  protocol: "mcp-stdio",
+                  credentialPolicy: "no-datahub-token",
+                  toolProfile: "read-only-exact"
                 },
                 sbom: {
                   format: "CycloneDX",
@@ -672,15 +842,19 @@ jobs:
           (
             cd "${evidence_dir}"
             sha256sum \
-              audit.sarif \
+              audit-disposition.json \
+              audit.actionable.sarif \
+              audit.raw.sarif \
               installed-packages.json \
               lock-contract.json \
               metadata.json \
+              openvex.json \
               pypi-provenance.json \
               project-overlay.json \
               resolved-lock-binding.json \
               resolved-pyproject.toml \
               resolved-uv.lock \
+              runtime-smoke.json \
               sbom.cdx.json \
               upstream-pyproject.toml \
               upstream-uv.lock \
@@ -690,19 +864,27 @@ jobs:
           gate_status=0
           if ! jq --exit-status '
               .version == "2.1.0" and
-              (.runs | type == "array" and length > 0) and
+              (.runs | type == "array" and length == 1) and
               all(
                 .runs[];
                 (.tool.driver.name | ascii_downcase | contains("uv")) and
                 (.results | type == "array")
               ) and
               ([.runs[].results[]] | length) == 0
-            ' "${audit}" >/dev/null; then
-            echo "::error title=DataHub MCP SCA::Resolved graph contains audit findings"
+            ' "${actionable_audit}" >/dev/null; then
+            echo "::error title=DataHub MCP SCA::Actionable SARIF is not empty"
             gate_status=1
           fi
-          if [[ "${AUDIT_STATUS}" != "0" ]]; then
-            echo "::error title=DataHub MCP SCA::uv audit exited ${AUDIT_STATUS}"
+          if ! jq --exit-status '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length == 1) and
+              ([.runs[].results[]] | length) == 2
+            ' "${raw_audit}" >/dev/null; then
+            echo "::error title=DataHub MCP SCA::Raw SARIF lost expected evidence"
+            gate_status=1
+          fi
+          if [[ "${AUDIT_STATUS}" != "1" ]]; then
+            echo "::error title=DataHub MCP SCA::Expected approved-findings exit 1; got ${AUDIT_STATUS}"
             gate_status=1
           fi
           zero_sha256="$(printf '0%.0s' {1..64})"
@@ -722,17 +904,34 @@ jobs:
             gate_status=1
           fi
           exit "${gate_status}"
-      - name: Upload trusted MCP SCA SARIF
+      - name: Project fail-safe MCP SARIF
+        id: sarif_projection
+        if: always() && steps.audit.outcome == 'success'
+        shell: bash
+        env:
+          BIND_OUTCOME: ${{ steps.bind.outcome }}
+        run: |
+          set -euo pipefail
+          raw="${RUNNER_TEMP}/datahub-mcp-audit.raw.sarif"
+          actionable="${RUNNER_TEMP}/datahub-mcp-audit.actionable.sarif"
+          test -s "${raw}"
+          if [[ "${BIND_OUTCOME}" != "success" ]]; then
+            cp "${raw}" "${actionable}"
+            echo "::warning title=DataHub MCP SCA::Evidence binding failed; publishing raw findings"
+          fi
+          test -s "${actionable}"
+      - name: Upload fail-safe MCP SCA projection
         if: >-
           always() &&
           steps.audit.outcome == 'success' &&
+          steps.sarif_projection.outcome == 'success' &&
           (
             github.event_name == 'push' ||
             github.event.pull_request.head.repo.full_name == github.repository
           )
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          sarif_file: ${{ runner.temp }}/datahub-mcp-audit.sarif
+          sarif_file: ${{ runner.temp }}/datahub-mcp-audit.actionable.sarif
           category: uv-datahub-mcp
       - name: Retain locked MCP SCA and SBOM evidence
         id: evidence

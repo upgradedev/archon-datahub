@@ -9,6 +9,7 @@ import {
   Duration,
   Fn,
   RemovalPolicy,
+  SecretValue,
   Size,
   Stack,
   type StackProps,
@@ -337,6 +338,7 @@ export class ArchonPlatformStack extends Stack {
     ]);
     const queueKey = retainedKey(this, "QueueKey", `alias/archon/${stage}/queues`);
     const secretsKey = retainedKey(this, "SecretsKey", `alias/archon/${stage}/secrets`);
+    Tags.of(secretsKey).add("ArchonKeyPurpose", "secrets");
 
     const vpc = new ec2.Vpc(this, "Vpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.42.0.0/16"),
@@ -604,11 +606,13 @@ export class ArchonPlatformStack extends Stack {
       secretsKey,
       "apiKey"
     );
+    const cloudFrontOriginApiKeySecretName =
+      `archon/${stage}/cloudfront-origin-api-key`;
     const cloudFrontOriginApiKeySecret = new secretsmanager.Secret(
       this,
       "CloudFrontOriginApiKeySecret",
       {
-        secretName: `archon/${stage}/cloudfront-origin-api-key`,
+        secretName: cloudFrontOriginApiKeySecretName,
         description:
           "CloudFront-to-API-Gateway origin credential; never exposed to viewers or stack outputs",
         encryptionKey: secretsKey,
@@ -622,8 +626,10 @@ export class ArchonPlatformStack extends Stack {
       }
     );
     cloudFrontOriginApiKeySecret.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    const cloudFrontOriginApiKeyValue =
-      cloudFrontOriginApiKeySecret.secretValueFromJson("apiKey").unsafeUnwrap();
+    const cloudFrontOriginApiKeyValue = SecretValue.secretsManager(
+      cloudFrontOriginApiKeySecretName,
+      { jsonField: "apiKey" }
+    ).unsafeUnwrap();
 
     const auditDlq = encryptedQueue(this, "AuditDlq", `${stage}-audit-dlq`, queueKey, {
       retentionPeriod: Duration.days(14)
@@ -1431,6 +1437,7 @@ export class ArchonPlatformStack extends Stack {
         value: cloudFrontOriginApiKeyValue
       }
     );
+    cloudFrontOriginApiKey.node.addDependency(cloudFrontOriginApiKeySecret);
     const cloudFrontOriginUsagePlan = new apigateway.UsagePlan(
       this,
       "CloudFrontOriginUsagePlan",
@@ -1919,6 +1926,7 @@ export class ArchonPlatformStack extends Stack {
       },
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100
     });
+    distribution.node.addDependency(cloudFrontOriginApiKeySecret);
     const cloudFrontAliasTarget = {
       dnsName: distribution.distributionDomainName,
       // CloudFront's canonical hosted-zone ID is global for Route 53 aliases.

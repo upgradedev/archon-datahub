@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "archon.datahub-mcp-lock/v3",
+  "schemaVersion": "archon.datahub-mcp-lock/v5",
   "package": {
     "name": "mcp-server-datahub",
     "version": "0.6.0",
@@ -33,9 +33,16 @@
     "strategy": "highest",
     "upgrade": "all",
     "excludeNewer": "2026-07-23T03:00:00Z",
+    "constraints": [
+      "acryl-datahub==1.6.0.15",
+      "setuptools==81.0.0"
+    ],
     "sourceBuilds": "deny",
     "projectMode": "virtual-static-metadata",
-    "resolvedLockSha256": "8fa40a6f15951c03c98371bcbf91d23d6550a7bf2284ad0696a56b1ff74e0bba"
+    "virtualRootName": "archon-datahub-mcp-runtime",
+    "virtualRootVersion": "0.6.0",
+    "mcpDependency": "mcp-server-datahub==0.6.0",
+    "resolvedLockSha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
   "upstreamLockProvenance": {
     "wheelLessDependency": {
@@ -48,17 +55,78 @@
         "sha256": "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
         "size": 20961
       }
-    },
-    "historicalBuildBackend": {
-      "name": "setuptools",
-      "version": "83.0.0",
+    }
+  },
+  "runtimeCompatibility": {
+    "acrylDatahub": {
+      "name": "acryl-datahub",
+      "version": "1.6.0.15",
+      "metadataUrl": "https://pypi.org/pypi/acryl-datahub/1.6.0.15/json",
+      "setuptoolsRequirement": "setuptools<82.0.0",
       "wheel": {
-        "filename": "setuptools-83.0.0-py3-none-any.whl",
-        "url": "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl",
-        "sha256": "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3",
-        "size": 1008090
+        "filename": "acryl_datahub-1.6.0.15-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/c1/81/32a1e7a9b7bd75c4930ba27edad498cde2e4032464df8ad7577776038341/acryl_datahub-1.6.0.15-py3-none-any.whl",
+        "sha256": "18263b60c52c333dda3091578dead0a238e606c92c0561fe7b52c905e7b00cbf",
+        "size": 4725320
+      }
+    },
+    "setuptools": {
+      "name": "setuptools",
+      "version": "81.0.0",
+      "metadataUrl": "https://pypi.org/pypi/setuptools/81.0.0/json",
+      "wheel": {
+        "filename": "setuptools-81.0.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+        "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6",
+        "size": 1062021
       }
     }
+  },
+  "advisoryDisposition": {
+    "schemaVersion": "archon.openvex-policy/v1",
+    "vex": {
+      "path": ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json",
+      "sha256": "9432452a9fd4b602ec6509b059d7e45d5fd48cfa3ccb3fcbdfa561451d3b8dbc",
+      "issuedAt": "2026-07-23T11:30:00Z",
+      "expiresAt": "2026-08-22T11:30:00Z",
+      "maxValidityDays": 30
+    },
+    "canonicalId": "CVE-2026-59890",
+    "aliases": [
+      "BIT-setuptools-2026-59890",
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ],
+    "scannerRuleIds": [
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ],
+    "product": {
+      "name": "mcp-server-datahub",
+      "version": "0.6.0",
+      "purl": "pkg:pypi/mcp-server-datahub@0.6.0"
+    },
+    "package": {
+      "name": "setuptools",
+      "version": "81.0.0",
+      "purl": "pkg:pypi/setuptools@81.0.0"
+    },
+    "status": "not_affected",
+    "justification": "vulnerable_code_not_in_execute_path",
+    "impactStatement": "DataHub requires setuptools below 82 at runtime. This sealed Linux graph installs only hash-bound wheels with source builds and source-distribution creation forbidden. The affected macOS APFS/HFS+ MANIFEST.in source-distribution path cannot execute in this Linux wheel-only runtime, regardless of DataHub authentication. CI separately imports the MCP runtime and completes an uncredentialed stdio initialize/ping/tools-list smoke exposing only the exact read-only tool set.",
+    "conditions": {
+      "runnerOs": "Linux",
+      "pythonPlatform": "linux",
+      "sourceBuilds": "deny",
+      "sourceDistributionCreation": "forbidden",
+      "installation": "hash-bound-wheels-only"
+    },
+    "references": [
+      "https://github.com/advisories/GHSA-h35f-9h28-mq5c",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-59890",
+      "https://support.datahub.com/hc/en-us/articles/46448188563227--NEW-IMPORTANT-Ingestion-Disruption-on-Feb-8-2026-No-Data-Loss-Action-May-Be-Required-related-to-setuptools-82-0-0-update",
+      "https://pypi.org/pypi/acryl-datahub/1.6.0.15/json"
+    ]
   },
   "source": {
     "repository": "https://github.com/acryldata/mcp-server-datahub.git",

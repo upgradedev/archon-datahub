@@ -56,13 +56,17 @@ identities, or secrets. WAF, schema validation, and throttling protect both publ
 routes. Deploy them only against a sanitized demo DataHub tenant.
 
 Every API method also requires a generated 64-character origin key. Its value is held in
-KMS-encrypted Secrets Manager and referenced dynamically by both API Gateway and the
-CloudFront custom origin header; it is never present in a browser bundle, runtime config,
-stack output, or retained evidence. CloudFront overwrites a viewer-supplied `x-api-key`,
-while the custom origin request policy excludes `host` and forwards the remaining viewer
-context. API Gateway validates the overwritten edge key, then every HTTP/Lambda integration
-prevents it from propagating: the HTTP proxy overwrites it with the literal `redacted`,
-while custom Lambda mappings emit only the validated body, required path value, request
+the retained, KMS-encrypted `archon/<stage>/cloudfront-origin-api-key` secret and both API
+Gateway and the sole CloudFront custom origin header use the exact stage-scoped Secrets
+Manager dynamic reference for its `apiKey` field; it is never present in a browser bundle,
+runtime config, stack output, or retained evidence. The IaC policy and deployed-template
+pipeline gate reject any additional origin custom header, bind `api/*` to the sole custom
+origin, and resolve that behavior's exact `OriginRequestPolicy` logical ID before checking
+the policy. CloudFront overwrites a viewer-supplied `x-api-key`, while the bound custom
+origin request policy excludes `host` and forwards the remaining viewer context. API
+Gateway validates the overwritten edge key, then every HTTP/Lambda integration prevents
+it from propagating: the HTTP proxy overwrites it with the literal `redacted`, while
+custom Lambda mappings emit only the validated body, required path value, request
 identifier, and selected Cognito claims. The approval method additionally requires the
 Cognito access token, `archon/approve` scope, and approver group.
 API-key quotas are only a best-effort aggregate throttle; WAF, bounded workloads, reserved

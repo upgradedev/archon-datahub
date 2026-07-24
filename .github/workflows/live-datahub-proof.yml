@@ -503,7 +503,42 @@ jobs:
             jq -er '.runtime.pythonVersion' \
               .github/locks/datahub-mcp-v0.6.0.json
           )"
-          test -x "${project}/.venv/bin/mcp-server-datahub"
+          server="${project}/.venv/bin/mcp-server-datahub"
+          smoke="${project}/.archon-evidence/runtime-smoke.json"
+          test -x "${server}"
+          test "$("${server}" --version)" = \
+            "mcp-server-datahub, version 0.6.0"
+          test ! -e "${smoke}"
+          timeout 60 \
+            "${project}/.venv/bin/python" \
+            scripts/smoke-datahub-mcp-runtime.py \
+            --server "${server}" \
+            --output "${smoke}" \
+            --timeout-seconds 45
+          jq --exit-status '
+            .schemaVersion == "archon.datahub-mcp-runtime-smoke/v1" and
+            .protocol == "mcp-stdio" and
+            .packageVersion == "0.6.0" and
+            (.fastMcpVersion | test("^[0-9]+\\.[0-9]+\\.[0-9]+")) and
+            .serverInfoVersion == .fastMcpVersion and
+            .initialized == true and
+            .pinged == true and
+            .credentialsUsed == false and
+            .networkToolCalls == 0 and
+            .loopbackConfigRequests == 1 and
+            .unexpectedHttpRequests == 0 and
+            .readOnlyHints == true and
+            .tools == [
+              "get_dataset_queries",
+              "get_entities",
+              "get_lineage",
+              "get_lineage_paths_between",
+              "list_schema_fields",
+              "search"
+            ] and
+            (.stderrBytes | type == "number" and . >= 0) and
+            (.stderrSha256 | test("^[0-9a-f]{64}$"))
+          ' "${smoke}" >/dev/null
           {
             echo "project=${project}"
             echo "python_version=${python_version}"
@@ -658,16 +693,22 @@ jobs:
             "${evidence_dir}/mcp-resolved-lock-binding.json"
           cp "${MCP_PROJECT}/.archon-evidence/wheel-only-graph.json" \
             "${evidence_dir}/mcp-wheel-only-graph.json"
+          cp "${MCP_PROJECT}/.archon-evidence/openvex.json" \
+            "${evidence_dir}/mcp-openvex.json"
+          cp "${MCP_PROJECT}/.archon-evidence/runtime-smoke.json" \
+            "${evidence_dir}/mcp-runtime-smoke.json"
           for artifact in \
             control-plane-gates.json \
             control-plane-security-gates.json \
             deployment-binding.json \
             mcp-lock-contract.json \
+            mcp-openvex.json \
             mcp-pypi-provenance.json \
             mcp-project-overlay.json \
             mcp-resolved-lock-binding.json \
             mcp-resolved-pyproject.toml \
             mcp-resolved-uv.lock \
+            mcp-runtime-smoke.json \
             mcp-upstream-pyproject.toml \
             mcp-upstream-uv.lock \
             mcp-wheel-only-graph.json \
@@ -682,11 +723,13 @@ jobs:
               control-plane-security-gates.json \
               deployment-binding.json \
               mcp-lock-contract.json \
+              mcp-openvex.json \
               mcp-pypi-provenance.json \
               mcp-project-overlay.json \
               mcp-resolved-lock-binding.json \
               mcp-resolved-pyproject.toml \
               mcp-resolved-uv.lock \
+              mcp-runtime-smoke.json \
               mcp-upstream-pyproject.toml \
               mcp-upstream-uv.lock \
               mcp-wheel-only-graph.json \
@@ -742,6 +785,14 @@ jobs:
             sha256sum "${evidence_dir}/mcp-pypi-provenance.json" |
               awk '{print $1}'
           )"
+          openvex_sha="$(
+            sha256sum "${evidence_dir}/mcp-openvex.json" |
+              awk '{print $1}'
+          )"
+          runtime_smoke_sha="$(
+            sha256sum "${evidence_dir}/mcp-runtime-smoke.json" |
+              awk '{print $1}'
+          )"
           test "${upstream_lock_sha}" = "$(
             jq -er '.files["uv.lock"].sha256' \
               "${evidence_dir}/mcp-lock-contract.json"
@@ -757,6 +808,31 @@ jobs:
             jq -er '.resolution.resolvedLockSha256' \
               "${evidence_dir}/mcp-lock-contract.json"
           )"
+          test "${openvex_sha}" = "$(
+            jq -er '.advisoryDisposition.vex.sha256' \
+              "${evidence_dir}/mcp-lock-contract.json"
+          )"
+          vex_issued_epoch="$(
+            date -u --date="$(
+              jq -er '.advisoryDisposition.vex.issuedAt' \
+                "${evidence_dir}/mcp-lock-contract.json"
+            )" +%s
+          )"
+          vex_expires_epoch="$(
+            date -u --date="$(
+              jq -er '.advisoryDisposition.vex.expiresAt' \
+                "${evidence_dir}/mcp-lock-contract.json"
+            )" +%s
+          )"
+          now_epoch="$(date -u +%s)"
+          test "$(
+            jq -er '.advisoryDisposition.vex.maxValidityDays' \
+              "${evidence_dir}/mcp-lock-contract.json"
+          )" = "30"
+          test "${vex_issued_epoch}" -le "${now_epoch}"
+          test "${now_epoch}" -lt "${vex_expires_epoch}"
+          test "$((vex_expires_epoch - vex_issued_epoch))" -le \
+            "$((30 * 24 * 60 * 60))"
           jq --exit-status \
             --arg upstream "${upstream_lock_sha}" \
             --arg resolved "${resolved_lock_sha}" '
@@ -778,10 +854,18 @@ jobs:
                 awk '{print $1}'
             )" '
               .schemaVersion ==
-                "archon.datahub-mcp-project-overlay/v1" and
+                "archon.datahub-mcp-project-overlay/v3" and
               .upstreamPyprojectSha256 == $upstream and
               .resolvedPyprojectSha256 == $resolved and
+              .upstreamProjectName == "mcp-server-datahub" and
+              .resolvedProjectName == "archon-datahub-mcp-runtime" and
+              .version == "0.6.0" and
+              .mcpDependency == "mcp-server-datahub==0.6.0" and
               .package == false and
+              .constraintDependencies == [
+                "acryl-datahub==1.6.0.15",
+                "setuptools==81.0.0"
+              ] and
               .buildBackendExecution == "forbidden"
             ' "${evidence_dir}/mcp-project-overlay.json" >/dev/null
           jq --exit-status '
@@ -802,8 +886,43 @@ jobs:
                   (.url |
                     startswith("https://files.pythonhosted.org/"))
                 )
+              ) and
+              any(
+                .packages[];
+                .name == "mcp-server-datahub" and
+                .version == "0.6.0" and
+                .wheels == [{
+                  hash:
+                    "2679dcfafc0ae12724efbf0fc6a73014f9085a4e1303cba9b1e41776dab8f001",
+                  size: 119016,
+                  url:
+                    "https://files.pythonhosted.org/packages/fb/5a/5573927ea69ff2a93b1957d6f128b9aacbee50df0b35e6410678d3b62d0b/mcp_server_datahub-0.6.0-py3-none-any.whl"
+                }]
               )
             ' "${evidence_dir}/mcp-wheel-only-graph.json" >/dev/null
+          jq --exit-status '
+              .schemaVersion ==
+                "archon.datahub-mcp-runtime-smoke/v1" and
+              .protocol == "mcp-stdio" and
+              .packageVersion == "0.6.0" and
+              (.fastMcpVersion | test("^[0-9]+\\.[0-9]+\\.[0-9]+")) and
+              .serverInfoVersion == .fastMcpVersion and
+              .initialized == true and
+              .pinged == true and
+              .credentialsUsed == false and
+              .networkToolCalls == 0 and
+              .loopbackConfigRequests == 1 and
+              .unexpectedHttpRequests == 0 and
+              .readOnlyHints == true and
+              .tools == [
+                "get_dataset_queries",
+                "get_entities",
+                "get_lineage",
+                "get_lineage_paths_between",
+                "list_schema_fields",
+                "search"
+              ]
+            ' "${evidence_dir}/mcp-runtime-smoke.json" >/dev/null
           jq -cnS \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg workflowRunId "${GITHUB_RUN_ID}" \
@@ -823,9 +942,11 @@ jobs:
             --arg mcpWheelOnlyGraphSha256 "${wheel_graph_sha}" \
             --arg mcpProjectOverlaySha256 "${project_overlay_sha}" \
             --arg mcpPypiProvenanceSha256 "${pypi_provenance_sha}" \
+            --arg mcpOpenVexSha256 "${openvex_sha}" \
+            --arg mcpRuntimeSmokeSha256 "${runtime_smoke_sha}" \
             --slurpfile proof "${evidence_dir}/proof.json" '
               {
-                schemaVersion: "archon.live-datahub-proof-attestation/v2",
+                schemaVersion: "archon.live-datahub-proof-attestation/v3",
                 repository: $repository,
                 workflow: {
                   runId: $workflowRunId,
@@ -848,7 +969,9 @@ jobs:
                     $mcpResolvedLockBindingSha256,
                   mcpWheelOnlyGraphSha256: $mcpWheelOnlyGraphSha256,
                   mcpProjectOverlaySha256: $mcpProjectOverlaySha256,
-                  mcpPypiProvenanceSha256: $mcpPypiProvenanceSha256
+                  mcpPypiProvenanceSha256: $mcpPypiProvenanceSha256,
+                  mcpOpenVexSha256: $mcpOpenVexSha256,
+                  mcpRuntimeSmokeSha256: $mcpRuntimeSmokeSha256
                 },
                 result: $proof[0].result,
                 datasetUrnSha256: $proof[0].datasetUrnSha256
@@ -946,6 +1069,14 @@ jobs:
             sha256sum "${EVIDENCE_DIR}/mcp-pypi-provenance.json" |
               awk '{print $1}'
           )"
+          mcp_openvex_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-openvex.json" |
+              awk '{print $1}'
+          )"
+          mcp_runtime_smoke_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-runtime-smoke.json" |
+              awk '{print $1}'
+          )"
           test "${mcp_upstream_lock_sha}" = "$(
             jq -er '.files["uv.lock"].sha256' \
               "${EVIDENCE_DIR}/mcp-lock-contract.json"
@@ -954,6 +1085,17 @@ jobs:
             jq -er '.resolution.resolvedLockSha256' \
               "${EVIDENCE_DIR}/mcp-lock-contract.json"
           )"
+          test "${mcp_openvex_sha}" = "$(
+            jq -er '.advisoryDisposition.vex.sha256' \
+              "${EVIDENCE_DIR}/mcp-lock-contract.json"
+          )"
+          vex_expires_epoch="$(
+            date -u --date="$(
+              jq -er '.advisoryDisposition.vex.expiresAt' \
+                "${EVIDENCE_DIR}/mcp-lock-contract.json"
+            )" +%s
+          )"
+          test "$(date -u +%s)" -lt "${vex_expires_epoch}"
           jq --exit-status \
             --arg upstream "${mcp_upstream_lock_sha}" \
             --arg resolved "${mcp_resolved_lock_sha}" '
@@ -972,9 +1114,11 @@ jobs:
             --arg mcpBinding "${mcp_binding_sha}" \
             --arg mcpGraph "${mcp_graph_sha}" \
             --arg mcpOverlay "${mcp_overlay_sha}" \
-            --arg mcpProvenance "${mcp_provenance_sha}" '
+            --arg mcpProvenance "${mcp_provenance_sha}" \
+            --arg mcpOpenVex "${mcp_openvex_sha}" \
+            --arg mcpRuntimeSmoke "${mcp_runtime_smoke_sha}" '
               .schemaVersion ==
-                "archon.live-datahub-proof-attestation/v2" and
+                "archon.live-datahub-proof-attestation/v3" and
               .evidence.controlPlaneSecurityGatesSha256 == $exact and
               .evidence.controlPlaneGatesSha256 == $enriched and
               .evidence.mcpLockContractSha256 == $mcpContract and
@@ -983,7 +1127,9 @@ jobs:
               .evidence.mcpResolvedLockBindingSha256 == $mcpBinding and
               .evidence.mcpWheelOnlyGraphSha256 == $mcpGraph and
               .evidence.mcpProjectOverlaySha256 == $mcpOverlay and
-              .evidence.mcpPypiProvenanceSha256 == $mcpProvenance
+              .evidence.mcpPypiProvenanceSha256 == $mcpProvenance and
+              .evidence.mcpOpenVexSha256 == $mcpOpenVex and
+              .evidence.mcpRuntimeSmokeSha256 == $mcpRuntimeSmoke
             ' "${EVIDENCE_DIR}/attestation-predicate.json" >/dev/null || {
             echo "::error::The live-proof predicate lost an exact evidence binding"
             exit 1
@@ -993,7 +1139,7 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-checksums: ${{ steps.evidence.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v2
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v3
           predicate-path: ${{ steps.evidence.outputs.predicate }}
 
       - name: Retain sanitized live proof evidence

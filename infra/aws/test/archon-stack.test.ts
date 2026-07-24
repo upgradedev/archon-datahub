@@ -657,7 +657,9 @@ describe("Archon AWS reference architecture", () => {
     });
     platform.hasResourceProperties("AWS::SecretsManager::Secret", {
       Name: "archon/staging/cloudfront-origin-api-key",
-      KmsKeyId: Match.anyValue(),
+      KmsKeyId: {
+        "Fn::GetAtt": [Match.anyValue(), "Arn"]
+      },
       GenerateSecretString: {
         ExcludePunctuation: true,
         GenerateStringKey: "apiKey",
@@ -665,6 +667,44 @@ describe("Archon AWS reference architecture", () => {
         PasswordLength: 64,
         SecretStringTemplate: "{}"
       }
+    });
+    const originApiKeySecretEntries = Object.entries(
+      platform.findResources("AWS::SecretsManager::Secret")
+    ).filter(
+      ([, resource]: [string, any]) =>
+        resource.Properties?.Name ===
+        "archon/staging/cloudfront-origin-api-key"
+    ) as Array<[string, any]>;
+    expect(originApiKeySecretEntries).toHaveLength(1);
+    const [originApiKeySecretLogicalId, originApiKeySecretResource] =
+      originApiKeySecretEntries[0]!;
+    const secretsKmsKeyEntries = Object.entries(
+      platform.findResources("AWS::KMS::Key")
+    ).filter(([, resource]: [string, any]) =>
+      resource.Properties?.Tags?.some(
+        (tag: any) =>
+          tag.Key === "ArchonKeyPurpose" && tag.Value === "secrets"
+      )
+    ) as Array<[string, any]>;
+    expect(secretsKmsKeyEntries).toHaveLength(1);
+    const [secretsKmsKeyLogicalId, secretsKmsKeyResource] =
+      secretsKmsKeyEntries[0]!;
+    expect(originApiKeySecretResource.DeletionPolicy).toBe("Retain");
+    expect(originApiKeySecretResource.UpdateReplacePolicy).toBe("Retain");
+    expect(originApiKeySecretResource.Properties.KmsKeyId).toEqual({
+      "Fn::GetAtt": [secretsKmsKeyLogicalId, "Arn"]
+    });
+    expect(secretsKmsKeyResource.DeletionPolicy).toBe("Retain");
+    expect(secretsKmsKeyResource.UpdateReplacePolicy).toBe("Retain");
+    expect(secretsKmsKeyResource.Properties.EnableKeyRotation).toBe(true);
+    expect(secretsKmsKeyResource.Properties.PendingWindowInDays).toBe(30);
+    expect(secretsKmsKeyResource.Properties.KeyPolicy).toBeDefined();
+    expect(originApiKeySecretResource.Properties.GenerateSecretString).toEqual({
+      ExcludePunctuation: true,
+      GenerateStringKey: "apiKey",
+      IncludeSpace: false,
+      PasswordLength: 64,
+      SecretStringTemplate: "{}"
     });
     platform.resourceCountIs("AWS::ApiGateway::ApiKey", 1);
     platform.hasResourceProperties("AWS::ApiGateway::ApiKey", {
@@ -700,6 +740,14 @@ describe("Archon AWS reference architecture", () => {
     const [apiKeyLogicalId, apiKeyResource] = Object.entries(
       platform.findResources("AWS::ApiGateway::ApiKey")
     )[0] as [string, any];
+    const originCredentialReference =
+      "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}";
+    expect(apiKeyResource.Properties.Value).toBe(originCredentialReference);
+    expect(
+      Array.isArray(apiKeyResource.DependsOn)
+        ? apiKeyResource.DependsOn
+        : [apiKeyResource.DependsOn]
+    ).toContain(originApiKeySecretLogicalId);
     const [usagePlanLogicalId, usagePlanResource] = Object.entries(
       platform.findResources("AWS::ApiGateway::UsagePlan")
     )[0] as [string, any];
@@ -724,20 +772,37 @@ describe("Archon AWS reference architecture", () => {
     const distribution = Object.values(
       platform.findResources("AWS::CloudFront::Distribution")
     )[0] as any;
-    const apiOrigin = distribution.Properties.DistributionConfig.Origins.find(
+    expect(
+      Array.isArray(distribution.DependsOn)
+        ? distribution.DependsOn
+        : [distribution.DependsOn]
+    ).toContain(originApiKeySecretLogicalId);
+    const restApiLogicalIds = Object.keys(
+      platform.findResources("AWS::ApiGateway::RestApi")
+    );
+    expect(restApiLogicalIds).toHaveLength(1);
+    const apiOrigins = distribution.Properties.DistributionConfig.Origins.filter(
       (origin: any) => origin.CustomOriginConfig !== undefined
     );
+    expect(apiOrigins).toHaveLength(1);
+    const apiOrigin = apiOrigins[0]!;
+    expect(apiOrigin.DomainName).toEqual({
+      "Fn::Join": [
+        "",
+        [
+          { Ref: restApiLogicalIds[0]! },
+          ".execute-api.",
+          { Ref: "AWS::Region" },
+          ".",
+          { Ref: "AWS::URLSuffix" }
+        ]
+      ]
+    });
     expect(apiOrigin.OriginCustomHeaders).toHaveLength(1);
     expect(apiOrigin.OriginCustomHeaders[0]).toEqual({
       HeaderName: "x-api-key",
-      HeaderValue: apiKeyResource.Properties.Value
+      HeaderValue: originCredentialReference
     });
-    expect(JSON.stringify(apiOrigin.OriginCustomHeaders[0].HeaderValue)).toContain(
-      "resolve:secretsmanager"
-    );
-    expect(JSON.stringify(apiOrigin.OriginCustomHeaders[0].HeaderValue)).toContain(
-      "apiKey"
-    );
     platform.hasResourceProperties("AWS::CloudFront::OriginRequestPolicy", {
       OriginRequestPolicyConfig: Match.objectLike({
         Name: "archon-staging-api-origin",

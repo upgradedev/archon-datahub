@@ -246,7 +246,7 @@
         Type: AWS::ApiGateway::ApiKey
         Properties:
           Enabled: true
-          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
       CloudFrontOriginUsagePlan:
         Type: AWS::ApiGateway::UsagePlan
         Properties:
@@ -317,21 +317,48 @@
                 DomainName: spa.s3.amazonaws.com
                 OriginAccessControlId: oac-123
               - Id: ApiOrigin
-                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
                 CustomOriginConfig:
                   OriginProtocolPolicy: https-only
                 OriginCustomHeaders:
                   - HeaderName: x-api-key
-                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      SecretsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+          Tags:
+            - Key: ArchonKeyPurpose
+              Value: secrets
       CloudFrontOriginApiKeySecret:
         Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
         Properties:
-          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId:
+            Fn::GetAtt:
+              - SecretsKey
+              - Arn
           GenerateSecretString:
             ExcludePunctuation: true
             GenerateStringKey: apiKey
             IncludeSpace: false
             PasswordLength: 64
+            SecretStringTemplate: "{}"
       ReadSecret:
         Type: AWS::SecretsManager::Secret
         Properties:
@@ -414,6 +441,10 @@
       subnets_never_auto_assign_public_ips: PASS
       api_gateway_stages_are_observable: PASS
       public_api_methods_require_cloudfront_origin_gate: PASS
+      cloudfront_api_origin_is_rest_api_bound: PASS
+      cloudfront_origin_custom_headers_are_api_key_only: PASS
+      cloudfront_origin_key_is_stage_bound: PASS
+      cloudfront_origin_key_uses_dedicated_cmk: PASS
       cloudfront_distributions_enforce_tls_logging_and_oac: PASS
       secrets_use_customer_managed_kms: PASS
       waf_web_acls_protect_sensitive_sampled_data: PASS
@@ -1007,7 +1038,7 @@
         Type: AWS::ApiGateway::ApiKey
         Properties:
           Enabled: true
-          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
       OriginUsagePlan:
         Type: AWS::ApiGateway::UsagePlan
         Properties:
@@ -1028,13 +1059,17 @@
           UsagePlanId: plan-123
       OriginApiKeySecret:
         Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
         Properties:
+          Name: archon/staging/cloudfront-origin-api-key
           KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
           GenerateSecretString:
             ExcludePunctuation: true
             GenerateStringKey: apiKey
             IncludeSpace: false
             PasswordLength: 64
+            SecretStringTemplate: "{}"
       ApiOriginRequestPolicy:
         Type: AWS::CloudFront::OriginRequestPolicy
         Properties:
@@ -1077,17 +1112,24 @@
                 DomainName: spa.s3.amazonaws.com
                 OriginAccessControlId: oac-123
               - Id: ApiOrigin
-                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
                 CustomOriginConfig:
                   OriginProtocolPolicy: https-only
                 OriginCustomHeaders:
                   - HeaderName: x-api-key
-                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
   expectations:
     rules:
       public_api_methods_require_cloudfront_origin_gate: FAIL
 
-- name: a public API method without the secret CloudFront origin header is rejected
+- name: a CloudFront origin key on the SPA instead of the API origin is rejected
   input:
     Resources:
       RestApi:
@@ -1141,7 +1183,7 @@
         Type: AWS::ApiGateway::ApiKey
         Properties:
           Enabled: true
-          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey}}"
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
       OriginUsagePlan:
         Type: AWS::ApiGateway::UsagePlan
         Properties:
@@ -1162,13 +1204,17 @@
           UsagePlanId: plan-123
       OriginApiKeySecret:
         Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
         Properties:
+          Name: archon/staging/cloudfront-origin-api-key
           KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
           GenerateSecretString:
             ExcludePunctuation: true
             GenerateStringKey: apiKey
             IncludeSpace: false
             PasswordLength: 64
+            SecretStringTemplate: "{}"
       ApiOriginRequestPolicy:
         Type: AWS::CloudFront::OriginRequestPolicy
         Properties:
@@ -1210,13 +1256,156 @@
               - Id: SpaOrigin
                 DomainName: spa.s3.amazonaws.com
                 OriginAccessControlId: oac-123
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
               - Id: ApiOrigin
-                DomainName: api.execute-api.eu-west-1.amazonaws.com
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
                 CustomOriginConfig:
                   OriginProtocolPolicy: https-only
   expectations:
     rules:
       public_api_methods_require_cloudfront_origin_gate: FAIL
+
+- name: a duplicated CloudFront origin key on the SPA is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+                OriginCustomHeaders:
+                  - HeaderName: x-api-key
+                    HeaderValue: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+  expectations:
+    rules:
+      cloudfront_origin_custom_headers_are_api_key_only: FAIL
+
+- name: an attacker-suffix CloudFront API origin is rejected
+  input:
+    Resources:
+      RestApi:
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+          ApiKeySourceType: HEADER
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Origins:
+              - Id: ApiOrigin
+                DomainName:
+                  Fn::Join:
+                    - ""
+                    - - Ref: RestApi
+                      - .execute-api.attacker.example
+                      - Ref: AWS::Region
+                      - "."
+                      - Ref: AWS::URLSuffix
+                CustomOriginConfig:
+                  OriginProtocolPolicy: https-only
+  expectations:
+    rules:
+      cloudfront_api_origin_is_rest_api_bound: FAIL
+
+- name: the API key dynamic reference and generated secret are stage-bound
+  input:
+    Resources:
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_is_stage_bound: PASS
+
+- name: a cross-stage origin-key decoy secret is rejected
+  input:
+    Resources:
+      OriginApiKey:
+        Type: AWS::ApiGateway::ApiKey
+        Properties:
+          Enabled: true
+          Value: "{{resolve:secretsmanager:archon/staging/cloudfront-origin-api-key:SecretString:apiKey::}}"
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/production/cloudfront-origin-api-key
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/secrets
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_is_stage_bound: FAIL
+
+- name: an origin key encrypted by the AWS-managed Secrets Manager key is rejected
+  input:
+    Resources:
+      OriginApiKeySecret:
+        Type: AWS::SecretsManager::Secret
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          Name: archon/staging/cloudfront-origin-api-key
+          KmsKeyId: alias/aws/secretsmanager
+          GenerateSecretString:
+            ExcludePunctuation: true
+            GenerateStringKey: apiKey
+            IncludeSpace: false
+            PasswordLength: 64
+            SecretStringTemplate: "{}"
+  expectations:
+    rules:
+      cloudfront_origin_key_uses_dedicated_cmk: FAIL
 
 - name: CloudFront custom domain with legacy TLS no logging and no OAC is rejected
   input:

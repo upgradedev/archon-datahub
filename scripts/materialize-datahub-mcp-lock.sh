@@ -24,7 +24,7 @@ if [[ "${allow_unsealed}" != "true" && "${allow_unsealed}" != "false" ]]; then
 fi
 
 jq --exit-status '
-    .schemaVersion == "archon.datahub-mcp-lock/v3" and
+    .schemaVersion == "archon.datahub-mcp-lock/v5" and
     .package.name == "mcp-server-datahub" and
     .package.version == "0.6.0" and
     .package.wheel.filename ==
@@ -56,17 +56,28 @@ jq --exit-status '
       .strategy == "highest" and
       .upgrade == "all" and
       .excludeNewer == "2026-07-23T03:00:00Z" and
+      .constraints == [
+        "acryl-datahub==1.6.0.15",
+        "setuptools==81.0.0"
+      ] and
       .sourceBuilds == "deny" and
       .projectMode == "virtual-static-metadata" and
+      .virtualRootName == "archon-datahub-mcp-runtime" and
+      .virtualRootVersion == "0.6.0" and
+      .mcpDependency == "mcp-server-datahub==0.6.0" and
       (.resolvedLockSha256 | test("^[0-9a-f]{64}$")) and
       (keys | sort) == [
+        "constraints",
         "excludeNewer",
+        "mcpDependency",
         "projectMode",
         "registry",
         "resolvedLockSha256",
         "sourceBuilds",
         "strategy",
-        "upgrade"
+        "upgrade",
+        "virtualRootName",
+        "virtualRootVersion"
       ]
     ) and
     .upstreamLockProvenance.wheelLessDependency == {
@@ -82,17 +93,78 @@ jq --exit-status '
         size: 20961
       }
     } and
-    .upstreamLockProvenance.historicalBuildBackend == {
-      name: "setuptools",
-      version: "83.0.0",
+    (.upstreamLockProvenance | keys) == ["wheelLessDependency"] and
+    .runtimeCompatibility.acrylDatahub == {
+      name: "acryl-datahub",
+      version: "1.6.0.15",
+      metadataUrl: "https://pypi.org/pypi/acryl-datahub/1.6.0.15/json",
+      setuptoolsRequirement: "setuptools<82.0.0",
       wheel: {
-        filename: "setuptools-83.0.0-py3-none-any.whl",
+        filename: "acryl_datahub-1.6.0.15-py3-none-any.whl",
         url:
-          "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl",
+          "https://files.pythonhosted.org/packages/c1/81/32a1e7a9b7bd75c4930ba27edad498cde2e4032464df8ad7577776038341/acryl_datahub-1.6.0.15-py3-none-any.whl",
         sha256:
-          "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3",
-        size: 1008090
+          "18263b60c52c333dda3091578dead0a238e606c92c0561fe7b52c905e7b00cbf",
+        size: 4725320
       }
+    } and
+    .runtimeCompatibility.setuptools == {
+      name: "setuptools",
+      version: "81.0.0",
+      metadataUrl: "https://pypi.org/pypi/setuptools/81.0.0/json",
+      wheel: {
+        filename: "setuptools-81.0.0-py3-none-any.whl",
+        url:
+          "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+        sha256:
+          "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6",
+        size: 1062021
+      }
+    } and
+    (.runtimeCompatibility | keys | sort) == [
+      "acrylDatahub",
+      "setuptools"
+    ] and
+    .advisoryDisposition.schemaVersion ==
+      "archon.openvex-policy/v1" and
+    .advisoryDisposition.vex == {
+      path:
+        ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json",
+      sha256:
+        "9432452a9fd4b602ec6509b059d7e45d5fd48cfa3ccb3fcbdfa561451d3b8dbc",
+      issuedAt: "2026-07-23T11:30:00Z",
+      expiresAt: "2026-08-22T11:30:00Z",
+      maxValidityDays: 30
+    } and
+    .advisoryDisposition.canonicalId == "CVE-2026-59890" and
+    .advisoryDisposition.aliases == [
+      "BIT-setuptools-2026-59890",
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ] and
+    .advisoryDisposition.scannerRuleIds == [
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ] and
+    .advisoryDisposition.product == {
+      name: "mcp-server-datahub",
+      version: "0.6.0",
+      purl: "pkg:pypi/mcp-server-datahub@0.6.0"
+    } and
+    .advisoryDisposition.package == {
+      name: "setuptools",
+      version: "81.0.0",
+      purl: "pkg:pypi/setuptools@81.0.0"
+    } and
+    .advisoryDisposition.status == "not_affected" and
+    .advisoryDisposition.justification ==
+      "vulnerable_code_not_in_execute_path" and
+    .advisoryDisposition.conditions == {
+      runnerOs: "Linux",
+      pythonPlatform: "linux",
+      sourceBuilds: "deny",
+      sourceDistributionCreation: "forbidden",
+      installation: "hash-bound-wheels-only"
     } and
     .source.repository ==
       "https://github.com/acryldata/mcp-server-datahub.git" and
@@ -105,18 +177,87 @@ jq --exit-status '
     ([
       .package.wheel.sha256,
       .upstreamLockProvenance.wheelLessDependency.sdist.sha256,
-      .upstreamLockProvenance.historicalBuildBackend.wheel.sha256,
+      .runtimeCompatibility.acrylDatahub.wheel.sha256,
+      .runtimeCompatibility.setuptools.wheel.sha256,
+      .advisoryDisposition.vex.sha256,
       .files[].sha256
     ] |
       all(test("^[0-9a-f]{64}$"))) and
     ([
       .package.wheel.size,
       .upstreamLockProvenance.wheelLessDependency.sdist.size,
-      .upstreamLockProvenance.historicalBuildBackend.wheel.size,
+      .runtimeCompatibility.acrylDatahub.wheel.size,
+      .runtimeCompatibility.setuptools.wheel.size,
       .files[].size
     ] |
       all(type == "number" and . > 0))
   ' "${contract}" >/dev/null
+
+readonly vex_path="$(
+  jq -er '.advisoryDisposition.vex.path' "${contract}"
+)"
+readonly vex_sha="$(
+  jq -er '.advisoryDisposition.vex.sha256' "${contract}"
+)"
+readonly vex_issued_at="$(
+  jq -er '.advisoryDisposition.vex.issuedAt' "${contract}"
+)"
+readonly vex_expires_at="$(
+  jq -er '.advisoryDisposition.vex.expiresAt' "${contract}"
+)"
+readonly vex_max_validity_days="$(
+  jq -er '.advisoryDisposition.vex.maxValidityDays' "${contract}"
+)"
+test -f "${vex_path}"
+test ! -L "${vex_path}"
+test "$(sha256sum "${vex_path}" | awk '{print $1}')" = "${vex_sha}"
+jq --exit-status \
+  --arg productWheelSha "$(jq -er '.package.wheel.sha256' "${contract}")" \
+  --arg setuptoolsWheelSha "$(
+    jq -er '.runtimeCompatibility.setuptools.wheel.sha256' "${contract}"
+  )" \
+  --arg impactStatement "$(
+    jq -er '.advisoryDisposition.impactStatement' "${contract}"
+  )" '
+    ."@context" == "https://openvex.dev/ns/v0.2.0" and
+    ."@id" ==
+      "https://github.com/upgradedev/archon-datahub/security/vex/datahub-mcp-v0.6.0/setuptools-81.0.0/CVE-2026-59890" and
+    .author == "https://github.com/upgradedev/archon-datahub" and
+    .role == "Document Creator" and
+    .timestamp == "2026-07-23T11:30:00Z" and
+    .version == 1 and
+    (.statements | length) == 1 and
+    .statements[0].vulnerability == {
+      "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-59890",
+      name: "CVE-2026-59890",
+      aliases: [
+        "BIT-setuptools-2026-59890",
+        "GHSA-h35f-9h28-mq5c",
+        "PYSEC-2026-3447"
+      ]
+    } and
+    .statements[0].products == [{
+      "@id": "pkg:pypi/mcp-server-datahub@0.6.0",
+      hashes: {"sha-256": $productWheelSha},
+      subcomponents: [{
+        "@id": "pkg:pypi/setuptools@81.0.0",
+        hashes: {"sha-256": $setuptoolsWheelSha}
+      }]
+    }] and
+    .statements[0].status == "not_affected" and
+    .statements[0].justification ==
+      "vulnerable_code_not_in_execute_path" and
+    .statements[0].impact_statement == $impactStatement
+  ' "${vex_path}" >/dev/null
+readonly vex_issued_epoch="$(date -u --date="${vex_issued_at}" +%s)"
+readonly vex_expires_epoch="$(date -u --date="${vex_expires_at}" +%s)"
+readonly now_epoch="$(date -u +%s)"
+test "${vex_max_validity_days}" = "30"
+test "${vex_issued_epoch}" -le "${now_epoch}"
+test "${now_epoch}" -lt "${vex_expires_epoch}"
+test "${vex_expires_epoch}" -gt "${vex_issued_epoch}"
+test "$((vex_expires_epoch - vex_issued_epoch))" -le \
+  "$((vex_max_validity_days * 24 * 60 * 60))"
 
 readonly repository="$(jq -er '.source.repository' "${contract}")"
 readonly commit="$(jq -er '.source.commit' "${contract}")"
@@ -168,17 +309,22 @@ readonly project_overlay="${evidence_dir}/project-overlay.json"
 readonly resolved_lock="${evidence_dir}/resolved-uv.lock"
 readonly wheel_graph="${evidence_dir}/wheel-only-graph.json"
 readonly lock_binding="${evidence_dir}/resolved-lock-binding.json"
+readonly openvex="${evidence_dir}/openvex.json"
 mkdir -p "${evidence_dir}"
 cp -- "${destination}/pyproject.toml" "${upstream_pyproject}"
 cp -- "${destination}/uv.lock" "${upstream_lock}"
+cp -- "${vex_path}" "${openvex}"
 test -f "${upstream_pyproject}"
 test ! -L "${upstream_pyproject}"
 test -f "${upstream_lock}"
 test ! -L "${upstream_lock}"
+test -f "${openvex}"
+test ! -L "${openvex}"
 test "$(sha256sum "${upstream_pyproject}" | awk '{print $1}')" = \
   "$(jq -er '.files["pyproject.toml"].sha256' "${contract}")"
 test "$(sha256sum "${upstream_lock}" | awk '{print $1}')" = \
   "$(jq -er '.files["uv.lock"].sha256' "${contract}")"
+test "$(sha256sum "${openvex}" | awk '{print $1}')" = "${vex_sha}"
 
 # Validate the authenticated upstream TOML documents without asking uv to resolve
 # the dynamic editable project. The Git tree/blob/SHA/size checks above establish
@@ -225,31 +371,99 @@ require(
 )
 PY
 
-# Convert only the already hash-verified project metadata into a virtual project
-# with a static version. uv therefore resolves its declared runtime dependencies
-# without invoking the upstream setuptools/setuptools-scm build backend. The
-# official, provenance-bound wheel is installed separately after the sync.
+# Convert only the already hash-verified project metadata into a distinctly named
+# virtual project with a static version. The official MCP release is added as a
+# registry dependency, so uv audits the package that is actually executed instead
+# of excluding it as the local project root. No upstream build backend executes.
 python3 - \
   "${destination}/pyproject.toml" \
-  "$(jq -er '.package.version' "${contract}")" <<'PY'
+  "$(jq -er '.package.name' "${contract}")" \
+  "$(jq -er '.resolution.virtualRootName' "${contract}")" \
+  "$(jq -er '.resolution.virtualRootVersion' "${contract}")" \
+  "$(jq -er '.resolution.mcpDependency' "${contract}")" \
+  "$(jq -cer '.resolution.constraints | select(length == 2)' \
+    "${contract}")" <<'PY'
+import json
 import pathlib
 import sys
+import tomllib
 
 path = pathlib.Path(sys.argv[1])
-version = sys.argv[2]
+upstream_name = sys.argv[2]
+virtual_name = sys.argv[3]
+virtual_version = sys.argv[4]
+mcp_dependency = sys.argv[5]
+constraints = json.loads(sys.argv[6])
+if upstream_name != "mcp-server-datahub":
+    raise SystemExit("upstream MCP project identity changed")
+if virtual_name != "archon-datahub-mcp-runtime":
+    raise SystemExit("virtual runtime project identity changed")
+if virtual_version != "0.6.0":
+    raise SystemExit("virtual runtime project version changed")
+if mcp_dependency != "mcp-server-datahub==0.6.0":
+    raise SystemExit("audited MCP registry dependency changed")
+if constraints != [
+    "acryl-datahub==1.6.0.15",
+    "setuptools==81.0.0",
+]:
+    raise SystemExit("resolved dependency constraints changed")
 if not path.is_file() or path.is_symlink():
     raise SystemExit("upstream pyproject must be one regular file")
 text = path.read_text(encoding="utf-8")
+upstream = tomllib.loads(text)
+upstream_project = upstream.get("project", {})
+upstream_dependencies = upstream_project.get("dependencies")
+if upstream_project.get("name") != upstream_name:
+    raise SystemExit("upstream project name changed")
+if not isinstance(upstream_dependencies, list) or not upstream_dependencies:
+    raise SystemExit("upstream project dependencies changed")
+if mcp_dependency in upstream_dependencies:
+    raise SystemExit("upstream project already depends on its registry package")
+name_marker = f'name = "{upstream_name}"'
 dynamic = 'dynamic = ["version"]'
+dependencies_marker = "dependencies = [\n"
 tool_uv = "[tool.uv]\n"
+if text.count(name_marker) != 1:
+    raise SystemExit("upstream project name marker changed")
 if text.count(dynamic) != 1:
     raise SystemExit("upstream dynamic version marker changed")
+if text.count(dependencies_marker) != 1:
+    raise SystemExit("upstream dependency table changed")
 if text.count(tool_uv) != 1:
     raise SystemExit("upstream [tool.uv] table changed")
 if "\npackage =" in text:
     raise SystemExit("upstream project already declares tool.uv.package")
-text = text.replace(dynamic, f'version = "{version}"', 1)
-text = text.replace(tool_uv, tool_uv + "package = false\n", 1)
+if "\nconstraint-dependencies =" in text:
+    raise SystemExit("upstream project already declares dependency constraints")
+text = text.replace(name_marker, f'name = "{virtual_name}"', 1)
+text = text.replace(dynamic, f'version = "{virtual_version}"', 1)
+text = text.replace(
+    dependencies_marker,
+    dependencies_marker + f'    "{mcp_dependency}",\n',
+    1,
+)
+text = text.replace(
+    tool_uv,
+    tool_uv
+    + "package = false\n"
+    + "constraint-dependencies = "
+    + json.dumps(constraints, ensure_ascii=True, separators=(",", ":"))
+    + "\n",
+    1,
+)
+resolved = tomllib.loads(text)
+project = resolved.get("project", {})
+tool = resolved.get("tool", {}).get("uv", {})
+if project.get("name") != virtual_name:
+    raise SystemExit("resolved virtual project name changed")
+if project.get("version") != virtual_version or "dynamic" in project:
+    raise SystemExit("resolved virtual project version is not static")
+if project.get("dependencies") != [mcp_dependency, *upstream_dependencies]:
+    raise SystemExit("resolved audited dependency set changed")
+if tool.get("package") is not False:
+    raise SystemExit("resolved project must remain virtual")
+if tool.get("constraint-dependencies") != constraints:
+    raise SystemExit("resolved dependency constraint changed")
 path.write_text(text, encoding="utf-8")
 PY
 test -f "${destination}/pyproject.toml"
@@ -267,13 +481,26 @@ test "${resolved_pyproject_sha}" != "${upstream_pyproject_sha}"
 jq -cnS \
   --arg upstreamPyprojectSha256 "${upstream_pyproject_sha}" \
   --arg resolvedPyprojectSha256 "${resolved_pyproject_sha}" \
-  --arg version "$(jq -er '.package.version' "${contract}")" '
+  --arg upstreamProjectName "$(jq -er '.package.name' "${contract}")" \
+  --arg resolvedProjectName "$(
+    jq -er '.resolution.virtualRootName' "${contract}"
+  )" \
+  --arg version "$(jq -er '.resolution.virtualRootVersion' "${contract}")" \
+  --arg mcpDependency "$(jq -er '.resolution.mcpDependency' "${contract}")" \
+  --argjson constraints "$(
+    jq -cer '.resolution.constraints | select(length == 2)' \
+      "${contract}"
+  )" '
     {
-      schemaVersion: "archon.datahub-mcp-project-overlay/v1",
+      schemaVersion: "archon.datahub-mcp-project-overlay/v3",
       upstreamPyprojectSha256: $upstreamPyprojectSha256,
       resolvedPyprojectSha256: $resolvedPyprojectSha256,
+      upstreamProjectName: $upstreamProjectName,
+      resolvedProjectName: $resolvedProjectName,
       version: $version,
+      mcpDependency: $mcpDependency,
       package: false,
+      constraintDependencies: $constraints,
       buildBackendExecution: "forbidden"
     }
   ' >"${project_overlay}"
@@ -317,8 +544,9 @@ test ! -L "${resolved_lock}"
 python3 - \
   "${resolved_lock}" \
   "${wheel_graph}" \
-  "$(jq -er '.package.name' "${contract}")" \
-  "$(jq -er '.package.version' "${contract}")" \
+  "${contract}" \
+  "$(jq -er '.resolution.virtualRootName' "${contract}")" \
+  "$(jq -er '.resolution.virtualRootVersion' "${contract}")" \
   "${registry}" <<'PY'
 import json
 import pathlib
@@ -326,9 +554,13 @@ import re
 import sys
 import tomllib
 
-lock_path, output_path, project_name, project_version, registry = sys.argv[1:]
+lock_path, output_path, contract_path, project_name, project_version, registry = (
+    sys.argv[1:]
+)
 with open(lock_path, "rb") as handle:
     lock = tomllib.load(handle)
+with open(contract_path, encoding="utf-8") as handle:
+    contract = json.load(handle)
 
 
 def require(condition: bool, message: str) -> None:
@@ -339,14 +571,54 @@ def require(condition: bool, message: str) -> None:
 packages = lock.get("package")
 require(isinstance(packages, list) and len(packages) > 10, "invalid resolved package set")
 roots = [package for package in packages if package.get("name") == project_name]
-require(len(roots) == 1, "resolved lock must contain one MCP project root")
-require(roots[0].get("version") == project_version, "resolved MCP project version changed")
+require(len(roots) == 1, "resolved lock must contain one virtual runtime root")
+require(
+    roots[0].get("version") == project_version,
+    "resolved virtual runtime root version changed",
+)
 require(
     roots[0].get("source") == {"virtual": "."},
-    "resolved MCP project is not a non-buildable virtual root",
+    "resolved runtime project is not a non-buildable virtual root",
+)
+root_dependencies = roots[0].get("dependencies")
+require(
+    isinstance(root_dependencies, list),
+    "resolved virtual runtime dependencies are missing",
+)
+mcp_dependency_edges = [
+    dependency
+    for dependency in root_dependencies
+    if isinstance(dependency, dict)
+    and dependency.get("name") == contract["package"]["name"]
+]
+require(
+    len(mcp_dependency_edges) == 1,
+    "virtual runtime root must reach one audited MCP registry package",
 )
 
 sha256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+compatibility = contract["runtimeCompatibility"]
+expected_artifacts = {
+    contract["package"]["name"]: contract["package"],
+    **{
+        artifact["name"]: artifact
+        for artifact in compatibility.values()
+    },
+}
+require(
+    contract["resolution"]["constraints"]
+    == [
+        "acryl-datahub==1.6.0.15",
+        "setuptools==81.0.0",
+    ],
+    "runtime compatibility constraints changed",
+)
+require(
+    set(expected_artifacts)
+    == {"mcp-server-datahub", "acryl-datahub", "setuptools"},
+    "pinned runtime artifacts changed",
+)
+pinned_artifacts_seen = set()
 graph = []
 for package in packages:
     name = package.get("name")
@@ -383,6 +655,22 @@ for package in packages:
         )
         retained_wheels.append(
             {"hash": digest.removeprefix("sha256:"), "size": size, "url": url}
+    )
+    if name in expected_artifacts:
+        artifact = expected_artifacts[name]
+        pinned_artifacts_seen.add(name)
+        expected_wheel = {
+            "hash": artifact["wheel"]["sha256"],
+            "size": artifact["wheel"]["size"],
+            "url": artifact["wheel"]["url"],
+        }
+        require(
+            version == artifact["version"],
+            f"resolved {name} version violates the compatibility constraint",
+        )
+        require(
+            retained_wheels == [expected_wheel],
+            f"resolved {name} wheel set differs from the exact pinned artifact",
         )
     graph.append(
         {
@@ -392,6 +680,10 @@ for package in packages:
         }
     )
 
+require(
+    pinned_artifacts_seen == set(expected_artifacts),
+    "resolved graph omitted an exact pinned runtime artifact",
+)
 document = {
     "schemaVersion": "archon.datahub-mcp-wheel-only-graph/v1",
     "packageCount": len(graph),

@@ -38,14 +38,41 @@ lock is not the runtime lock: its historical wheel-less dependency and related h
 in the contract only to explain the upstream graph.
 
 CI derives the runtime lock with `uv==0.11.31`, the PyPI registry, highest-version
-resolution, a full upgrade, and the fixed `2026-07-23T03:00:00Z` upload cutoff. Before
-resolution, the already verified project metadata receives a canonical evidence-recorded
-overlay that makes the project version static and sets `tool.uv.package = false`. This
-prevents the upstream setuptools backend from executing; the official MCP wheel is
-installed separately. Resolution and sync use `--no-build` and `--no-cache`. Every
-non-project node must come from the exact PyPI registry and contain hash- and size-bound
+resolution, a full upgrade, and the fixed `2026-07-23T03:00:00Z` upload cutoff. The
+contract applies both `acryl-datahub==1.6.0.15` and `setuptools==81.0.0`. These pins
+prevent resolver backtracking while honoring DataHub's required `setuptools<82`
+compatibility boundary. Both resolved nodes must match the contract's exact official
+wheel URL, SHA-256, and byte size. Before resolution, the already verified project
+metadata receives a canonical evidence-recorded overlay that renames the virtual root to
+`archon-datahub-mcp-runtime`, makes its version static, adds
+`mcp-server-datahub==0.6.0` as an exact registry dependency, sets
+`tool.uv.package = false`, and records both constraints. This prevents the upstream
+setuptools backend from executing while ensuring `uv audit` includes the official MCP
+package instead of excluding it as the local project root. Resolution and sync use
+`--no-build` and `--no-cache`. Every registry node, including the MCP package, must come
+from the exact PyPI registry and contain hash- and size-bound
 `files.pythonhosted.org` wheels. A wheel-less, path, Git, URL, or alternate-registry node
 fails the gate.
+
+Setuptools 81 is reported for CVE-2026-59890 (GHSA-h35f-9h28-mq5c /
+PYSEC-2026-3447), whose affected path creates source distributions on macOS APFS/HFS+.
+Archon does not suppress or ignore that result. CI retains the raw `uv audit` SARIF and
+applies a committed, hash-bound OpenVEX v0.2 statement scoped to the Archon MCP runtime
+and its exact setuptools wheel. The exception is valid for at most 30 days and only for
+Linux, hash-bound wheel installation, denied source builds, forbidden source-distribution
+creation. These are the complete CVE-relevant applicability conditions: the affected
+macOS source-distribution path is independent of DataHub authentication and cannot execute
+in this Linux wheel-only runtime. The separate uncredentialed loopback smoke proves
+least-privilege startup and the exact read-only MCP tool surface. The gate
+requires the two expected scanner records and their precise aliases, package, version,
+fix version, fingerprint, and scanner version. An expired or unused VEX statement,
+malformed result, different version, or any additional finding fails closed. Only the
+derived actionable SARIF is uploaded to code scanning; the unmodified raw SARIF, VEX
+document, and application receipt remain in the retained evidence.
+If any downstream lock, SBOM, receipt, or evidence binding fails, an `always()` projection
+step replaces the upload candidate with the raw SARIF. Therefore only a completely sealed
+gate can publish the zero-result projection and close the corresponding code-scanning
+alerts.
 
 The contract binds the derived `uv.lock` by SHA-256. Default materialization is sealed and
 fails immediately on a placeholder or digest mismatch, before provenance downloads, sync,
@@ -57,17 +84,26 @@ contract and installs the official v0.6.0 PyPI wheel with the committed SHA-256,
 `--require-hashes`, `--no-deps`, and `--no-build`. The gate also matches PyPI's
 trusted-publisher DSSE statement, signature, Fulcio certificate, Rekor entry, GitHub
 publisher identity, and exact wheel subject before execution uses `uv run --frozen
---no-sync`.
+--no-sync`. Before any credentialed proof, CI starts the absolute installed executable
+against a loopback-only `/config` stub, with no token, telemetry and every
+mutation/user/document/data-quality/semantic capability disabled. A real MCP stdio
+client must initialize, ping, and enumerate exactly the six approved read-only tools;
+the stub rejects every other HTTP request and any authorization header.
 
 Ordinary CI audits the resolved Python/Linux runtime closure with `uv audit`, exports a
-CycloneDX SBOM and exact installed-package inventory, and retains the contract, byte-exact
-upstream project and lock, derived virtual project and lock, overlay receipt, sealed lock
-binding, wheel-only graph, trusted-publisher provenance, SARIF, and inventory for 90 days.
+CycloneDX SBOM that must contain exact `mcp-server-datahub`, `acryl-datahub`, and
+`setuptools` versions, plus an exact installed-package inventory. It retains the contract,
+byte-exact upstream project and lock, derived virtual project and lock, overlay receipt,
+sealed lock binding, wheel-only graph (including the exact MCP wheel), trusted-publisher
+provenance, raw and actionable SARIF, OpenVEX statement, VEX application receipt,
+sanitized runtime-smoke receipt, and inventory for 90 days.
 The signed CI release predicate includes both the gate result and exact evidence-artifact
 digest. The credentialed live proof defaults to sealed mode and includes those exact
-upstream and derived runtime subjects in its checksum manifest. Its v2 predicate binds the
+upstream and derived runtime subjects in its checksum manifest. Its v3 predicate binds the
 resolved lock SHA-256 plus the contract, lock-binding receipt, wheel graph, project overlay,
-and PyPI provenance digests.
+PyPI provenance, OpenVEX, and runtime-smoke digests. The live workflow rechecks the VEX
+expiry during materialization and again immediately before signing, so an old green CI run
+cannot authorize a proof after the exception expires.
 
 ## Proof and retention
 
@@ -82,7 +118,8 @@ The workflow emits a canonical JSON proof, both the exact enforced
 `control-plane-security-gates.json` receipt and its enriched MCP-evidence receipt, an exact
 deployment binding, the MCP lock contract, exact upstream and resolved locks, virtual
 project overlay, resolved-lock binding, wheel-only graph, trusted-publisher provenance,
-and a SHA-256 manifest. Both control-plane receipts and all MCP runtime evidence are
+OpenVEX statement, runtime-smoke receipt, and a SHA-256 manifest. Both control-plane
+receipts and all MCP runtime evidence are
 independent attestation subjects and their digests are recorded in the predicate. It signs
 the proof manifest with a GitHub artifact attestation and retains the sanitized bundle for
 90 days.
