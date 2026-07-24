@@ -53,7 +53,7 @@ let log_groups = Resources.*[
 
 let waf_data_protections = Resources.*[
   Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections[*]
+].Properties.DataProtectionConfig.DataProtections.*
 
 let waf_authorization_data_protections = Resources.*[
   Type == 'AWS::WAFv2::WebACL'
@@ -69,11 +69,11 @@ let waf_cookie_data_protections = Resources.*[
 
 let waf_logging_filters = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*]
+].Properties.LoggingFilter.Filters.*
 
 let waf_logging_conditions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*].Conditions[*]
+].Properties.LoggingFilter.Filters.*.Conditions.*
 
 let waf_block_logging_conditions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
@@ -89,7 +89,7 @@ let waf_count_logging_conditions = Resources.*[
 
 let waf_redacted_fields = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields[*]
+].Properties.RedactedFields.*
 
 let waf_authorization_redactions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
@@ -144,7 +144,7 @@ let api_gateway_stages = Resources.*[
 
 let cached_api_method_settings = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
-].Properties.MethodSettings[*][
+].Properties.MethodSettings.*[
   CachingEnabled == true
 ]
 
