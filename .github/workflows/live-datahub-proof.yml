@@ -642,31 +642,35 @@ jobs:
             "${evidence_dir}/deployment-binding.json"
           cp .github/locks/datahub-mcp-v0.6.0.json \
             "${evidence_dir}/mcp-lock-contract.json"
-          cp "${MCP_PROJECT}/.archon-evidence/pyperclip-1.9.0.tar.gz" \
-            "${evidence_dir}/mcp-allowed-source-build.tar.gz"
-          cp "${MCP_PROJECT}/.archon-evidence/build-constraints.txt" \
-            "${evidence_dir}/mcp-build-constraints.txt"
-          cp "${MCP_PROJECT}/.archon-evidence/no-build-packages.txt" \
-            "${evidence_dir}/mcp-no-build-packages.txt"
           cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
             "${evidence_dir}/mcp-pypi-provenance.json"
-          backend_filename="$(
-            jq -er \
-              '.sourceBuildPolicy.buildBackend.wheel.filename' \
-              .github/locks/datahub-mcp-v0.6.0.json
-          )"
-          cp "${MCP_PROJECT}/.archon-evidence/${backend_filename}" \
-            "${evidence_dir}/mcp-build-backend.whl"
+          cp "${MCP_PROJECT}/.archon-evidence/upstream-pyproject.toml" \
+            "${evidence_dir}/mcp-upstream-pyproject.toml"
+          cp "${MCP_PROJECT}/.archon-evidence/upstream-uv.lock" \
+            "${evidence_dir}/mcp-upstream-uv.lock"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-pyproject.toml" \
+            "${evidence_dir}/mcp-resolved-pyproject.toml"
+          cp "${MCP_PROJECT}/.archon-evidence/project-overlay.json" \
+            "${evidence_dir}/mcp-project-overlay.json"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-uv.lock" \
+            "${evidence_dir}/mcp-resolved-uv.lock"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-lock-binding.json" \
+            "${evidence_dir}/mcp-resolved-lock-binding.json"
+          cp "${MCP_PROJECT}/.archon-evidence/wheel-only-graph.json" \
+            "${evidence_dir}/mcp-wheel-only-graph.json"
           for artifact in \
             control-plane-gates.json \
             control-plane-security-gates.json \
             deployment-binding.json \
-            mcp-allowed-source-build.tar.gz \
-            mcp-build-backend.whl \
-            mcp-build-constraints.txt \
             mcp-lock-contract.json \
-            mcp-no-build-packages.txt \
             mcp-pypi-provenance.json \
+            mcp-project-overlay.json \
+            mcp-resolved-lock-binding.json \
+            mcp-resolved-pyproject.toml \
+            mcp-resolved-uv.lock \
+            mcp-upstream-pyproject.toml \
+            mcp-upstream-uv.lock \
+            mcp-wheel-only-graph.json \
             proof.json; do
             test -f "${evidence_dir}/${artifact}"
             test ! -L "${evidence_dir}/${artifact}"
@@ -677,12 +681,15 @@ jobs:
               control-plane-gates.json \
               control-plane-security-gates.json \
               deployment-binding.json \
-              mcp-allowed-source-build.tar.gz \
-              mcp-build-backend.whl \
-              mcp-build-constraints.txt \
               mcp-lock-contract.json \
-              mcp-no-build-packages.txt \
               mcp-pypi-provenance.json \
+              mcp-project-overlay.json \
+              mcp-resolved-lock-binding.json \
+              mcp-resolved-pyproject.toml \
+              mcp-resolved-uv.lock \
+              mcp-upstream-pyproject.toml \
+              mcp-upstream-uv.lock \
+              mcp-wheel-only-graph.json \
               proof.json >proof-subject.sha256
             sha256sum --check proof-subject.sha256
           )
@@ -711,6 +718,92 @@ jobs:
             sha256sum "${evidence_dir}/mcp-lock-contract.json" |
               awk '{print $1}'
           )"
+          upstream_lock_sha="$(
+            sha256sum "${evidence_dir}/mcp-upstream-uv.lock" |
+              awk '{print $1}'
+          )"
+          resolved_lock_sha="$(
+            sha256sum "${evidence_dir}/mcp-resolved-uv.lock" |
+              awk '{print $1}'
+          )"
+          resolved_binding_sha="$(
+            sha256sum "${evidence_dir}/mcp-resolved-lock-binding.json" |
+              awk '{print $1}'
+          )"
+          wheel_graph_sha="$(
+            sha256sum "${evidence_dir}/mcp-wheel-only-graph.json" |
+              awk '{print $1}'
+          )"
+          project_overlay_sha="$(
+            sha256sum "${evidence_dir}/mcp-project-overlay.json" |
+              awk '{print $1}'
+          )"
+          pypi_provenance_sha="$(
+            sha256sum "${evidence_dir}/mcp-pypi-provenance.json" |
+              awk '{print $1}'
+          )"
+          test "${upstream_lock_sha}" = "$(
+            jq -er '.files["uv.lock"].sha256' \
+              "${evidence_dir}/mcp-lock-contract.json"
+          )"
+          test "$(
+            sha256sum "${evidence_dir}/mcp-upstream-pyproject.toml" |
+              awk '{print $1}'
+          )" = "$(
+            jq -er '.files["pyproject.toml"].sha256' \
+              "${evidence_dir}/mcp-lock-contract.json"
+          )"
+          test "${resolved_lock_sha}" = "$(
+            jq -er '.resolution.resolvedLockSha256' \
+              "${evidence_dir}/mcp-lock-contract.json"
+          )"
+          jq --exit-status \
+            --arg upstream "${upstream_lock_sha}" \
+            --arg resolved "${resolved_lock_sha}" '
+              .schemaVersion ==
+                "archon.datahub-mcp-resolved-lock-binding/v1" and
+              .upstreamLockSha256 == $upstream and
+              .expectedResolvedLockSha256 == $resolved and
+              .observedResolvedLockSha256 == $resolved and
+              .matches == true and
+              .placeholder == false
+            ' "${evidence_dir}/mcp-resolved-lock-binding.json" >/dev/null
+          jq --exit-status \
+            --arg upstream "$(
+              jq -er '.files["pyproject.toml"].sha256' \
+                "${evidence_dir}/mcp-lock-contract.json"
+            )" \
+            --arg resolved "$(
+              sha256sum "${evidence_dir}/mcp-resolved-pyproject.toml" |
+                awk '{print $1}'
+            )" '
+              .schemaVersion ==
+                "archon.datahub-mcp-project-overlay/v1" and
+              .upstreamPyprojectSha256 == $upstream and
+              .resolvedPyprojectSha256 == $resolved and
+              .package == false and
+              .buildBackendExecution == "forbidden"
+            ' "${evidence_dir}/mcp-project-overlay.json" >/dev/null
+          jq --exit-status '
+              .schemaVersion ==
+                "archon.datahub-mcp-wheel-only-graph/v1" and
+              (.packageCount | type == "number" and . > 10) and
+              (.packages | type == "array") and
+              .packageCount == (.packages | length) and
+              all(
+                .packages[];
+                (.name | type == "string" and length > 0) and
+                (.version | type == "string" and length > 0) and
+                (.wheels | type == "array" and length > 0) and
+                all(
+                  .wheels[];
+                  (.hash | test("^[0-9a-f]{64}$")) and
+                  (.size | type == "number" and . > 0) and
+                  (.url |
+                    startswith("https://files.pythonhosted.org/"))
+                )
+              )
+            ' "${evidence_dir}/mcp-wheel-only-graph.json" >/dev/null
           jq -cnS \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg workflowRunId "${GITHUB_RUN_ID}" \
@@ -724,9 +817,15 @@ jobs:
             --arg controlPlaneGatesSha256 "${gates_sha}" \
             --arg controlPlaneSecurityGatesSha256 "${exact_gates_sha}" \
             --arg mcpLockContractSha256 "${lock_sha}" \
+            --arg mcpUpstreamLockSha256 "${upstream_lock_sha}" \
+            --arg mcpResolvedLockSha256 "${resolved_lock_sha}" \
+            --arg mcpResolvedLockBindingSha256 "${resolved_binding_sha}" \
+            --arg mcpWheelOnlyGraphSha256 "${wheel_graph_sha}" \
+            --arg mcpProjectOverlaySha256 "${project_overlay_sha}" \
+            --arg mcpPypiProvenanceSha256 "${pypi_provenance_sha}" \
             --slurpfile proof "${evidence_dir}/proof.json" '
               {
-                schemaVersion: "archon.live-datahub-proof-attestation/v1",
+                schemaVersion: "archon.live-datahub-proof-attestation/v2",
                 repository: $repository,
                 workflow: {
                   runId: $workflowRunId,
@@ -742,7 +841,14 @@ jobs:
                   controlPlaneGatesSha256: $controlPlaneGatesSha256,
                   controlPlaneSecurityGatesSha256:
                     $controlPlaneSecurityGatesSha256,
-                  mcpLockContractSha256: $mcpLockContractSha256
+                  mcpLockContractSha256: $mcpLockContractSha256,
+                  mcpUpstreamLockSha256: $mcpUpstreamLockSha256,
+                  mcpResolvedLockSha256: $mcpResolvedLockSha256,
+                  mcpResolvedLockBindingSha256:
+                    $mcpResolvedLockBindingSha256,
+                  mcpWheelOnlyGraphSha256: $mcpWheelOnlyGraphSha256,
+                  mcpProjectOverlaySha256: $mcpProjectOverlaySha256,
+                  mcpPypiProvenanceSha256: $mcpPypiProvenanceSha256
                 },
                 result: $proof[0].result,
                 datasetUrnSha256: $proof[0].datasetUrnSha256
@@ -807,15 +913,79 @@ jobs:
             sha256sum "${EVIDENCE_DIR}/control-plane-gates.json" |
               awk '{print $1}'
           )"
+          (
+            cd "${EVIDENCE_DIR}"
+            sha256sum --check proof-subject.sha256
+          )
+          mcp_contract_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-lock-contract.json" |
+              awk '{print $1}'
+          )"
+          mcp_upstream_lock_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-upstream-uv.lock" |
+              awk '{print $1}'
+          )"
+          mcp_resolved_lock_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-resolved-uv.lock" |
+              awk '{print $1}'
+          )"
+          mcp_binding_sha="$(
+            sha256sum \
+              "${EVIDENCE_DIR}/mcp-resolved-lock-binding.json" |
+              awk '{print $1}'
+          )"
+          mcp_graph_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-wheel-only-graph.json" |
+              awk '{print $1}'
+          )"
+          mcp_overlay_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-project-overlay.json" |
+              awk '{print $1}'
+          )"
+          mcp_provenance_sha="$(
+            sha256sum "${EVIDENCE_DIR}/mcp-pypi-provenance.json" |
+              awk '{print $1}'
+          )"
+          test "${mcp_upstream_lock_sha}" = "$(
+            jq -er '.files["uv.lock"].sha256' \
+              "${EVIDENCE_DIR}/mcp-lock-contract.json"
+          )"
+          test "${mcp_resolved_lock_sha}" = "$(
+            jq -er '.resolution.resolvedLockSha256' \
+              "${EVIDENCE_DIR}/mcp-lock-contract.json"
+          )"
+          jq --exit-status \
+            --arg upstream "${mcp_upstream_lock_sha}" \
+            --arg resolved "${mcp_resolved_lock_sha}" '
+              .upstreamLockSha256 == $upstream and
+              .expectedResolvedLockSha256 == $resolved and
+              .observedResolvedLockSha256 == $resolved and
+              .matches == true and
+              .placeholder == false
+            ' "${EVIDENCE_DIR}/mcp-resolved-lock-binding.json" >/dev/null
           jq -e \
             --arg exact "${EXPECTED_GATE_SHA256}" \
-            --arg enriched "${enriched_sha}" '
+            --arg enriched "${enriched_sha}" \
+            --arg mcpContract "${mcp_contract_sha}" \
+            --arg mcpUpstreamLock "${mcp_upstream_lock_sha}" \
+            --arg mcpResolvedLock "${mcp_resolved_lock_sha}" \
+            --arg mcpBinding "${mcp_binding_sha}" \
+            --arg mcpGraph "${mcp_graph_sha}" \
+            --arg mcpOverlay "${mcp_overlay_sha}" \
+            --arg mcpProvenance "${mcp_provenance_sha}" '
               .schemaVersion ==
-                "archon.live-datahub-proof-attestation/v1" and
+                "archon.live-datahub-proof-attestation/v2" and
               .evidence.controlPlaneSecurityGatesSha256 == $exact and
-              .evidence.controlPlaneGatesSha256 == $enriched
+              .evidence.controlPlaneGatesSha256 == $enriched and
+              .evidence.mcpLockContractSha256 == $mcpContract and
+              .evidence.mcpUpstreamLockSha256 == $mcpUpstreamLock and
+              .evidence.mcpResolvedLockSha256 == $mcpResolvedLock and
+              .evidence.mcpResolvedLockBindingSha256 == $mcpBinding and
+              .evidence.mcpWheelOnlyGraphSha256 == $mcpGraph and
+              .evidence.mcpProjectOverlaySha256 == $mcpOverlay and
+              .evidence.mcpPypiProvenanceSha256 == $mcpProvenance
             ' "${EVIDENCE_DIR}/attestation-predicate.json" >/dev/null || {
-            echo "::error::The live-proof predicate lost its exact control-plane bindings"
+            echo "::error::The live-proof predicate lost an exact evidence binding"
             exit 1
           }
 
@@ -823,7 +993,7 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-checksums: ${{ steps.evidence.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v1
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v2
           predicate-path: ${{ steps.evidence.outputs.predicate }}
 
       - name: Retain sanitized live proof evidence

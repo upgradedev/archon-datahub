@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "archon.datahub-mcp-lock/v2",
+  "schemaVersion": "archon.datahub-mcp-lock/v3",
   "package": {
     "name": "mcp-server-datahub",
     "version": "0.6.0",
@@ -28,21 +28,28 @@
     "pythonVersion": "3.11.15",
     "uvVersion": "0.11.31"
   },
-  "sourceBuildPolicy": {
-    "allowed": [
-      {
-        "name": "pyperclip",
-        "version": "1.9.0",
-        "registry": "https://pypi.org/simple",
-        "sdist": {
-          "filename": "pyperclip-1.9.0.tar.gz",
-          "url": "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz",
-          "sha256": "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
-          "size": 20961
-        }
+  "resolution": {
+    "registry": "https://pypi.org/simple",
+    "strategy": "highest",
+    "upgrade": "all",
+    "excludeNewer": "2026-07-23T03:00:00Z",
+    "sourceBuilds": "deny",
+    "projectMode": "virtual-static-metadata",
+    "resolvedLockSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "upstreamLockProvenance": {
+    "wheelLessDependency": {
+      "name": "pyperclip",
+      "version": "1.9.0",
+      "registry": "https://pypi.org/simple",
+      "sdist": {
+        "filename": "pyperclip-1.9.0.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz",
+        "sha256": "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
+        "size": 20961
       }
-    ],
-    "buildBackend": {
+    },
+    "historicalBuildBackend": {
       "name": "setuptools",
       "version": "83.0.0",
       "wheel": {

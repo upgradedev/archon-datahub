@@ -464,17 +464,34 @@ jobs:
           version: "0.11.31"
           enable-cache: true
           cache-dependency-glob: .github/locks/datahub-mcp-v0.6.0.json
-      - name: Materialize and verify the immutable upstream lock
+      - name: Verify upstream and derive the wheel-only runtime lock
         id: lock
         shell: bash
         run: |
           set -euo pipefail
           bash -n scripts/materialize-datahub-mcp-lock.sh
           project="${RUNNER_TEMP}/datahub-mcp-v0.6.0"
-          bash scripts/materialize-datahub-mcp-lock.sh "${project}"
+          ARCHON_ALLOW_UNSEALED_RESOLVED_LOCK=true \
+            bash scripts/materialize-datahub-mcp-lock.sh "${project}"
           test -x "${project}/.venv/bin/mcp-server-datahub"
-          echo "project=${project}" >>"${GITHUB_OUTPUT}"
-      - name: Audit the exact MCP dependency closure
+          binding="${project}/.archon-evidence/resolved-lock-binding.json"
+          observed="$(jq -er '.observedResolvedLockSha256' "${binding}")"
+          expected="$(jq -er '.expectedResolvedLockSha256' "${binding}")"
+          {
+            echo "project=${project}"
+            echo "resolved_lock_sha=${observed}"
+            echo "expected_resolved_lock_sha=${expected}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "::notice title=DataHub MCP resolved lock::Observed SHA-256 ${observed}"
+          {
+            echo "### DataHub MCP deterministic resolution"
+            echo
+            echo "- Upstream lock: retained and byte-verified"
+            echo "- Runtime graph: full upgrade, fixed cutoff, wheel-only"
+            echo "- Observed resolved lock SHA-256: \`${observed}\`"
+            echo "- Contract resolved lock SHA-256: \`${expected}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Audit the exact resolved MCP dependency closure
         id: audit
         shell: bash
         env:
@@ -487,6 +504,13 @@ jobs:
             --project "${MCP_PROJECT}" \
             --locked \
             --no-dev \
+            --no-build \
+            --no-cache \
+            --python-version "$(
+              jq -er '.runtime.pythonVersion' \
+                .github/locks/datahub-mcp-v0.6.0.json
+            )" \
+            --python-platform linux \
             --output-format sarif >"${sarif}"
           status=$?
           set -e
@@ -523,7 +547,9 @@ jobs:
         shell: bash
         env:
           AUDIT_STATUS: ${{ steps.audit.outputs.status }}
+          EXPECTED_RESOLVED_LOCK_SHA: ${{ steps.lock.outputs.expected_resolved_lock_sha }}
           MCP_PROJECT: ${{ steps.lock.outputs.project }}
+          OBSERVED_RESOLVED_LOCK_SHA: ${{ steps.lock.outputs.resolved_lock_sha }}
         run: |
           set -euo pipefail
           audit="${RUNNER_TEMP}/datahub-mcp-audit.sarif"
@@ -535,56 +561,82 @@ jobs:
           cp "${contract}" "${evidence_dir}/lock-contract.json"
           cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
             "${evidence_dir}/pypi-provenance.json"
-          cp "${MCP_PROJECT}/.archon-evidence/pyperclip-1.9.0.tar.gz" \
-            "${evidence_dir}/allowed-source-build.tar.gz"
-          cp "${MCP_PROJECT}/.archon-evidence/build-constraints.txt" \
-            "${evidence_dir}/build-constraints.txt"
-          cp "${MCP_PROJECT}/.archon-evidence/build-constraint-overlay.json" \
-            "${evidence_dir}/build-constraint-overlay.json"
-          cp "${MCP_PROJECT}/.archon-evidence/no-build-packages.txt" \
-            "${evidence_dir}/no-build-packages.txt"
-          backend_filename="$(
-            jq -er \
-              '.sourceBuildPolicy.buildBackend.wheel.filename' \
-              "${contract}"
-          )"
-          cp "${MCP_PROJECT}/.archon-evidence/${backend_filename}" \
-            "${evidence_dir}/build-backend.whl"
-          cp "${MCP_PROJECT}/uv.lock" "${evidence_dir}/uv.lock"
+          cp "${MCP_PROJECT}/.archon-evidence/upstream-pyproject.toml" \
+            "${evidence_dir}/upstream-pyproject.toml"
+          cp "${MCP_PROJECT}/.archon-evidence/upstream-uv.lock" \
+            "${evidence_dir}/upstream-uv.lock"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-uv.lock" \
+            "${evidence_dir}/resolved-uv.lock"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-pyproject.toml" \
+            "${evidence_dir}/resolved-pyproject.toml"
+          cp "${MCP_PROJECT}/.archon-evidence/project-overlay.json" \
+            "${evidence_dir}/project-overlay.json"
+          cp "${MCP_PROJECT}/.archon-evidence/wheel-only-graph.json" \
+            "${evidence_dir}/wheel-only-graph.json"
+          cp "${MCP_PROJECT}/.archon-evidence/resolved-lock-binding.json" \
+            "${evidence_dir}/resolved-lock-binding.json"
           cp "${audit}" "${evidence_dir}/audit.sarif"
           cp "${installed}" "${evidence_dir}/installed-packages.json"
           cp "${sbom}" "${evidence_dir}/sbom.cdx.json"
-          test "$(sha256sum "${evidence_dir}/uv.lock" | awk '{print $1}')" = \
+          test "$(
+            sha256sum "${evidence_dir}/upstream-uv.lock" |
+              awk '{print $1}'
+          )" = \
             "$(jq -er '.files["uv.lock"].sha256' "${contract}")"
           test "$(
-            sha256sum "${evidence_dir}/allowed-source-build.tar.gz" |
+            sha256sum "${evidence_dir}/upstream-pyproject.toml" |
               awk '{print $1}'
           )" = "$(
-            jq -er '.sourceBuildPolicy.allowed[0].sdist.sha256' "${contract}"
+            jq -er '.files["pyproject.toml"].sha256' "${contract}"
           )"
+          test "$(
+            sha256sum "${evidence_dir}/resolved-uv.lock" |
+              awk '{print $1}'
+          )" = "${OBSERVED_RESOLVED_LOCK_SHA}"
+          test "$(
+            sha256sum "${MCP_PROJECT}/uv.lock" |
+              awk '{print $1}'
+          )" = "${OBSERVED_RESOLVED_LOCK_SHA}"
+          test "$(
+            jq -er '.observedResolvedLockSha256' \
+              "${evidence_dir}/resolved-lock-binding.json"
+          )" = "${OBSERVED_RESOLVED_LOCK_SHA}"
+          test "$(
+            jq -er '.expectedResolvedLockSha256' \
+              "${evidence_dir}/resolved-lock-binding.json"
+          )" = "${EXPECTED_RESOLVED_LOCK_SHA}"
           jq -cnS \
             --arg sourceSha "${GITHUB_SHA}" \
             --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg uvVersion "$(uv --version | awk '{print $2}')" \
             --arg auditStatus "${AUDIT_STATUS}" \
-            --arg lockSha256 "$(jq -er '.files["uv.lock"].sha256' "${contract}")" \
+            --arg upstreamLockSha256 "$(
+              jq -er '.files["uv.lock"].sha256' "${contract}"
+            )" \
+            --arg resolvedLockSha256 "${OBSERVED_RESOLVED_LOCK_SHA}" \
+            --arg expectedResolvedLockSha256 \
+              "${EXPECTED_RESOLVED_LOCK_SHA}" \
             --arg wheelSha256 "$(jq -er '.package.wheel.sha256' "${contract}")" \
-            --arg allowedSdistSha256 "$(
-              jq -er \
-                '.sourceBuildPolicy.allowed[0].sdist.sha256' \
-                "${contract}"
+            --arg registry "$(jq -er '.resolution.registry' "${contract}")" \
+            --arg resolutionStrategy "$(
+              jq -er '.resolution.strategy' "${contract}"
             )" \
-            --arg buildBackendWheelSha256 "$(
-              jq -er \
-                '.sourceBuildPolicy.buildBackend.wheel.sha256' \
-                "${contract}"
+            --arg resolutionUpgrade "$(
+              jq -er '.resolution.upgrade' "${contract}"
             )" \
-            --arg buildConstraintOverlaySha256 "$(
-              sha256sum "${evidence_dir}/build-constraint-overlay.json" |
+            --arg excludeNewer "$(
+              jq -er '.resolution.excludeNewer' "${contract}"
+            )" \
+            --arg projectOverlaySha256 "$(
+              sha256sum "${evidence_dir}/project-overlay.json" |
+                awk '{print $1}'
+            )" \
+            --arg wheelOnlyGraphSha256 "$(
+              sha256sum "${evidence_dir}/wheel-only-graph.json" |
                 awk '{print $1}'
             )" '
               {
-                schemaVersion: "archon.datahub-mcp-security-evidence/v1",
+                schemaVersion: "archon.datahub-mcp-security-evidence/v2",
                 sourceSha: $sourceSha,
                 generatedAt: $generatedAt,
                 scanner: {
@@ -593,12 +645,21 @@ jobs:
                   exitCode: ($auditStatus | tonumber)
                 },
                 dependencyInputs: {
-                  uvLockSha256: $lockSha256,
+                  upstreamUvLockSha256: $upstreamLockSha256,
+                  resolvedUvLockSha256: $resolvedLockSha256,
+                  expectedResolvedUvLockSha256:
+                    $expectedResolvedLockSha256,
                   mcpWheelSha256: $wheelSha256,
-                  allowedSourceBuildSha256: $allowedSdistSha256,
-                  buildBackendWheelSha256: $buildBackendWheelSha256,
-                  buildConstraintOverlaySha256:
-                    $buildConstraintOverlaySha256,
+                  resolution: {
+                    registry: $registry,
+                    strategy: $resolutionStrategy,
+                    upgrade: $resolutionUpgrade,
+                    excludeNewer: $excludeNewer,
+                    sourceBuilds: "deny",
+                    projectMode: "virtual-static-metadata",
+                    projectOverlaySha256: $projectOverlaySha256
+                  },
+                  wheelOnlyGraphSha256: $wheelOnlyGraphSha256,
                   pypiTrustedPublisherProvenance:
                     "matched-pinned-pypi-record"
                 },
@@ -611,31 +672,56 @@ jobs:
           (
             cd "${evidence_dir}"
             sha256sum \
-              allowed-source-build.tar.gz \
               audit.sarif \
-              build-backend.whl \
-              build-constraint-overlay.json \
-              build-constraints.txt \
               installed-packages.json \
               lock-contract.json \
               metadata.json \
-              no-build-packages.txt \
               pypi-provenance.json \
+              project-overlay.json \
+              resolved-lock-binding.json \
+              resolved-pyproject.toml \
+              resolved-uv.lock \
               sbom.cdx.json \
-              uv.lock >evidence.manifest.sha256
+              upstream-pyproject.toml \
+              upstream-uv.lock \
+              wheel-only-graph.json >evidence.manifest.sha256
             sha256sum --check evidence.manifest.sha256
           )
-          jq --exit-status '
-            .version == "2.1.0" and
-            (.runs | type == "array" and length > 0) and
-            all(
-              .runs[];
-              (.tool.driver.name | ascii_downcase | contains("uv")) and
-              (.results | type == "array")
-            ) and
-            ([.runs[].results[]] | length) == 0
-          ' "${audit}" >/dev/null
-          test "${AUDIT_STATUS}" = "0"
+          gate_status=0
+          if ! jq --exit-status '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length > 0) and
+              all(
+                .runs[];
+                (.tool.driver.name | ascii_downcase | contains("uv")) and
+                (.results | type == "array")
+              ) and
+              ([.runs[].results[]] | length) == 0
+            ' "${audit}" >/dev/null; then
+            echo "::error title=DataHub MCP SCA::Resolved graph contains audit findings"
+            gate_status=1
+          fi
+          if [[ "${AUDIT_STATUS}" != "0" ]]; then
+            echo "::error title=DataHub MCP SCA::uv audit exited ${AUDIT_STATUS}"
+            gate_status=1
+          fi
+          zero_sha256="$(printf '0%.0s' {1..64})"
+          if [[ "${EXPECTED_RESOLVED_LOCK_SHA}" == "${zero_sha256}" ]]; then
+            echo "::error title=Resolved lock binding required::Replace the placeholder with ${OBSERVED_RESOLVED_LOCK_SHA}"
+            gate_status=1
+          elif [[ "${OBSERVED_RESOLVED_LOCK_SHA}" != \
+            "${EXPECTED_RESOLVED_LOCK_SHA}" ]]; then
+            echo "::error title=Resolved lock drift::Expected ${EXPECTED_RESOLVED_LOCK_SHA}; observed ${OBSERVED_RESOLVED_LOCK_SHA}"
+            gate_status=1
+          fi
+          if ! jq --exit-status '
+              .matches == true and
+              .placeholder == false
+            ' "${evidence_dir}/resolved-lock-binding.json" >/dev/null; then
+            echo "::error title=Resolved lock evidence::Contract binding is not sealed"
+            gate_status=1
+          fi
+          exit "${gate_status}"
       - name: Upload trusted MCP SCA SARIF
         if: >-
           always() &&
