@@ -57,13 +57,13 @@ let waf_data_protections = Resources.*[
 
 let waf_authorization_data_protections = Resources.*[
   Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections.*[
+].Properties.DataProtectionConfig.DataProtections[
   Field.FieldKeys == ['authorization']
 ]
 
 let waf_cookie_data_protections = Resources.*[
   Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections.*[
+].Properties.DataProtectionConfig.DataProtections[
   Field.FieldKeys == ['cookie']
 ]
 
@@ -77,13 +77,13 @@ let waf_logging_conditions = Resources.*[
 
 let waf_block_logging_conditions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*].Conditions.*[
+].Properties.LoggingFilter.Filters[*].Conditions[
   ActionCondition.Action == 'BLOCK'
 ]
 
 let waf_count_logging_conditions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*].Conditions.*[
+].Properties.LoggingFilter.Filters[*].Conditions[
   ActionCondition.Action == 'COUNT'
 ]
 
@@ -93,13 +93,13 @@ let waf_redacted_fields = Resources.*[
 
 let waf_authorization_redactions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields.*[
+].Properties.RedactedFields[
   SingleHeader.Name == 'authorization'
 ]
 
 let waf_cookie_redactions = Resources.*[
   Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields.*[
+].Properties.RedactedFields[
   SingleHeader.Name == 'cookie'
 ]
 
@@ -144,7 +144,7 @@ let api_gateway_stages = Resources.*[
 
 let cached_api_method_settings = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
-].Properties.MethodSettings.*[
+].Properties.MethodSettings[
   CachingEnabled == true
 ]
 
