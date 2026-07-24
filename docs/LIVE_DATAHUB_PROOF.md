@@ -56,7 +56,7 @@ After the digest is sealed, runtime installation uses the exact Python version f
 contract and installs the official v0.6.0 PyPI wheel with the committed SHA-256,
 `--require-hashes`, `--no-deps`, and `--no-build`. The gate also matches PyPI's
 trusted-publisher DSSE statement, signature, Fulcio certificate, Rekor entry, GitHub
-publisher identity, and exact wheel subject before execution uses `uv run --locked
+publisher identity, and exact wheel subject before execution uses `uv run --frozen
 --no-sync`.
 
 Ordinary CI audits the resolved Python/Linux runtime closure with `uv audit`, exports a

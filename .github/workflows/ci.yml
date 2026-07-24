@@ -524,7 +524,7 @@ jobs:
           set -euo pipefail
           uv export \
             --project "${MCP_PROJECT}" \
-            --locked \
+            --frozen \
             --no-dev \
             --format cyclonedx1.5 \
             --output-file "${RUNNER_TEMP}/datahub-mcp.cdx.json"

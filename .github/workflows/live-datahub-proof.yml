@@ -527,7 +527,7 @@ jobs:
           DATAHUB_MCP_COMMAND: uv
           DATAHUB_MCP_ARGS: >-
             run --project ${{ steps.mcp.outputs.project }}
-            --python ${{ steps.mcp.outputs.python_version }} --locked --no-sync
+            --python ${{ steps.mcp.outputs.python_version }} --frozen --no-sync
             --no-dev mcp-server-datahub
           ARCHON_DEMO_QUERY: ${{ inputs.query }}
           TOOLS_IS_MUTATION_ENABLED: "false"
