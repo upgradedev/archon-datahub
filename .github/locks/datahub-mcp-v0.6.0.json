@@ -42,7 +42,7 @@
     "virtualRootName": "archon-datahub-mcp-runtime",
     "virtualRootVersion": "0.6.0",
     "mcpDependency": "mcp-server-datahub==0.6.0",
-    "resolvedLockSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    "resolvedLockSha256": "8acb41db6f4afe3b6705ba3cb4863669231235f34bf8552026e4c47d9e068d6d"
   },
   "upstreamLockProvenance": {
     "wheelLessDependency": {

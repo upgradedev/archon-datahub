@@ -248,11 +248,11 @@ let cloudfront_api_origin_rest_api_refs = Resources.*[
   DomainName.'Fn::Join'[1][0].Ref exists
 ].DomainName.'Fn::Join'[1][0].Ref
 
+# Guard 3.2 map-key filters cannot be followed by a predicate filter without an
+# engine panic. Keep only KEYS here and assert resource predicates in the rules.
 let referenced_cloudfront_origin_rest_apis =
   Resources[
     KEYS IN %cloudfront_api_origin_rest_api_refs
-  ][
-    Type == 'AWS::ApiGateway::RestApi'
   ]
 
 let cloudfront_api_origin_custom_headers = Resources.*[
@@ -285,8 +285,6 @@ let api_origin_request_policy_refs = Resources.*[
 let referenced_cloudfront_origin_request_policies =
   Resources[
     KEYS IN %api_origin_request_policy_refs
-  ][
-    Type == 'AWS::CloudFront::OriginRequestPolicy'
   ]
 
 let secrets = Resources.*[
@@ -313,12 +311,6 @@ let origin_api_key_secret_kms_key_refs =
 let referenced_origin_api_key_secret_kms_keys =
   Resources[
     KEYS IN %origin_api_key_secret_kms_key_refs
-  ][
-    Type == 'AWS::KMS::Key'
-    some Properties.Tags[*] {
-      Key == 'ArchonKeyPurpose'
-      Value == 'secrets'
-    }
   ]
 
 let staging_origin_api_key_secrets = Resources.*[
@@ -663,6 +655,7 @@ rule public_api_methods_require_cloudfront_origin_gate
   %origin_request_policy_count == 1
   %api_origin_request_policy_ref_count == 1
   %referenced_origin_request_policy_count == 1
+  %referenced_cloudfront_origin_request_policies.Type == 'AWS::CloudFront::OriginRequestPolicy'
   %referenced_cloudfront_origin_request_policies.Properties.OriginRequestPolicyConfig {
     CookiesConfig.CookieBehavior == 'all'
     HeadersConfig.HeaderBehavior == 'allExcept'
@@ -697,6 +690,7 @@ rule cloudfront_api_origin_is_rest_api_bound
   %domain_part_count == 5
   %rest_api_ref_count == 1
   %referenced_rest_api_count == 1
+  %referenced_cloudfront_origin_rest_apis.Type == 'AWS::ApiGateway::RestApi'
   %cloudfront_api_origins {
     DomainName.'Fn::Join'[0] == ''
     DomainName.'Fn::Join'[1][0].Ref exists
@@ -760,6 +754,7 @@ rule cloudfront_origin_key_uses_dedicated_cmk
   %referenced_origin_kms_key_count == 1
   %origin_api_key_secrets.Properties.KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
   %referenced_origin_api_key_secret_kms_keys {
+    Type == 'AWS::KMS::Key'
     DeletionPolicy == 'Retain'
     UpdateReplacePolicy == 'Retain'
     Properties {
