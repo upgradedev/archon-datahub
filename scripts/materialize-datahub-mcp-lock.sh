@@ -187,12 +187,11 @@ test "$(sha256sum "${upstream_lock}" | awk '{print $1}')" = \
 python3 - \
   "${upstream_pyproject}" \
   "${upstream_lock}" \
-  "$(jq -er '.package.name' "${contract}")" \
-  "$(jq -er '.package.version' "${contract}")" <<'PY'
+  "$(jq -er '.package.name' "${contract}")" <<'PY'
 import sys
 import tomllib
 
-pyproject_path, lock_path, expected_name, expected_version = sys.argv[1:]
+pyproject_path, lock_path, expected_name = sys.argv[1:]
 with open(pyproject_path, "rb") as handle:
     pyproject = tomllib.load(handle)
 with open(lock_path, "rb") as handle:
@@ -216,7 +215,10 @@ packages = lock.get("package")
 require(isinstance(packages, list) and len(packages) > 10, "upstream lock graph missing")
 roots = [package for package in packages if package.get("name") == expected_name]
 require(len(roots) == 1, "upstream lock project root is ambiguous")
-require(roots[0].get("version") == expected_version, "upstream lock version changed")
+require(
+    "version" not in roots[0],
+    "upstream dynamic project unexpectedly has a locked version",
+)
 require(
     roots[0].get("source") == {"editable": "."},
     "upstream lock root is not the authenticated checkout",
