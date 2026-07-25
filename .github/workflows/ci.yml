@@ -202,16 +202,32 @@ jobs:
               npm install \
                 --package-lock-only \
                 --no-audit \
-                --no-fund
+              --no-fund
             )
           done
+          if ! cmp --silent \
+            "${generation_root}/root/package-lock.json" \
+            package-lock.json; then
+            echo "::error::Committed root lock differs from clean npm 10.9.8 resolution"
+            exit 1
+          fi
+          if ! cmp --silent \
+            "${generation_root}/infra/package-lock.json" \
+            infra/aws/package-lock.json; then
+            echo "::error::Committed infrastructure lock differs from clean npm 10.9.8 resolution"
+            exit 1
+          fi
           install -m 0644 \
             "${generation_root}/root/package-lock.json" \
             package-lock.json
           install -m 0644 \
             "${generation_root}/infra/package-lock.json" \
             infra/aws/package-lock.json
-          git diff --exit-code -- package.json infra/aws/package.json
+          git diff --exit-code -- \
+            package.json \
+            package-lock.json \
+            infra/aws/package.json \
+            infra/aws/package-lock.json
       - name: Seal candidate provenance before validation
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -357,7 +373,11 @@ jobs:
               .candidates.root.packageJsonSha256 == $rootManifestSha256 and
               .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256
             ' "${candidate_dir}/provenance.json" >/dev/null
-          git diff --exit-code -- package.json infra/aws/package.json
+          git diff --exit-code -- \
+            package.json \
+            package-lock.json \
+            infra/aws/package.json \
+            infra/aws/package-lock.json
           jq -nS \
             --arg headSha "${checkout_sha}" \
             --arg runId "${GITHUB_RUN_ID}" \

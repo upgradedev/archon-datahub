@@ -298,6 +298,15 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(ciWorkflow, /clean-lock-generation/u);
   assert.match(ciWorkflow, /NPM_CONFIG_USERCONFIG: \/dev\/null/u);
   assert.match(ciWorkflow, /NPM_CONFIG_REGISTRY: https:\/\/registry\.npmjs\.org\//u);
+  assert.equal(ciWorkflow.match(/cmp --silent/gu)?.length, 2);
+  assert.match(
+    ciWorkflow,
+    /Committed root lock differs from clean npm 10\.9\.8 resolution/u
+  );
+  assert.match(
+    ciWorkflow,
+    /Committed infrastructure lock differs from clean npm 10\.9\.8 resolution/u
+  );
   assert.match(ciWorkflow, /pullRequestHeadSha: \$headSha/u);
   assert.match(ciWorkflow, /headRepository: \$headRepository/u);
   assert.match(ciWorkflow, /pullRequestNumber: \$pullRequestNumber/u);

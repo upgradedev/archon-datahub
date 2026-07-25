@@ -104,6 +104,14 @@ synth, or deploy:
    dependency review has the same single-GHSA exception and no severity-wide
    suppression.
 
+The PR lock gate separately resolves root and infrastructure locks from only
+their reviewed manifests in clean temporary directories, with npm `10.9.8`,
+the HTTPS npm registry, strict engines, no lifecycle scripts, and no repository
+`.npmrc`. It requires byte-for-byte equality with both committed locks before
+running the full candidate validation, and seals the exact head repository,
+PR, workflow SHA, run/attempt, manifest hashes, lock hashes, Node, and npm
+versions in the short-lived review artifact.
+
 This control must be removed, rather than broadened, when an exact reviewed
 `aws-cdk-lib` release bundles `brace-expansion >=5.0.8`. Retirement deletes the
 two compensation scripts and the Dependency Review exception, updates the lock,
