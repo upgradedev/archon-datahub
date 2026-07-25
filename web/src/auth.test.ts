@@ -38,6 +38,7 @@ interface TestBrowser {
   navigate: ReturnType<typeof vi.fn>;
   replaceUrl: ReturnType<typeof vi.fn>;
   storage: Map<string, string>;
+  timers: Map<number, () => void>;
 }
 
 function testBrowser(
@@ -53,6 +54,7 @@ function testBrowser(
   });
   const navigate = vi.fn();
   const replaceUrl = vi.fn();
+  const timers = new Map<number, () => void>();
   let nextByte = 1;
   const environment: AuthEnvironment = {
     fetch: (input, init) => fetchMock(input, init) as Promise<Response>,
@@ -74,10 +76,22 @@ function testBrowser(
       },
     },
     now: () => 1_800_000_000_000,
-    setTimer: () => 17,
-    clearTimer: () => undefined,
+    setTimer: (callback) => {
+      timers.set(17, callback);
+      return 17;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle);
+    },
   };
-  return { environment, fetchMock, navigate, replaceUrl, storage };
+  return {
+    environment,
+    fetchMock,
+    navigate,
+    replaceUrl,
+    storage,
+    timers,
+  };
 }
 
 describe("runtime authentication config", () => {
@@ -253,5 +267,89 @@ describe("Cognito Authorization Code + PKCE", () => {
     expect(browser.fetchMock).toHaveBeenCalledTimes(1);
     expect(browser.storage.size).toBe(0);
     expect(browser.replaceUrl).toHaveBeenCalledWith("/");
+  });
+
+  it("sanitizes an OAuth denial and consumes the single-use transaction", async () => {
+    const state = "A".repeat(43);
+    const browser = testBrowser(
+      [json(runtimeConfig)],
+      `https://app.archon.example/?error=access_denied&error_description=${encodeURIComponent(
+        "  Steward denied\u0000the request  ",
+      )}&state=${state}`,
+      {
+        "archon.auth.pkce.v1": JSON.stringify({
+          version: 1,
+          state,
+          codeVerifier: "B".repeat(64),
+          redirectUri: runtimeConfig.auth.redirectUri,
+          createdAt: 1_800_000_000_000,
+        }),
+      },
+    );
+    const controller = new AuthController(browser.environment);
+
+    await controller.initialize();
+
+    expect(controller.getSnapshot()).toEqual({
+      status: "error",
+      message: "Steward denied the request",
+      recoverable: true,
+    });
+    expect(browser.fetchMock).toHaveBeenCalledTimes(1);
+    expect(browser.storage.size).toBe(0);
+  });
+
+  it("expires the in-memory token, supports unsubscribe, and builds an exact logout request", async () => {
+    const state = "A".repeat(43);
+    const accessToken = "TEST_ONLY_TOKEN_000000000000";
+    const browser = testBrowser(
+      [
+        json(runtimeConfig),
+        json({
+          access_token: accessToken,
+          token_type: "Bearer",
+          expires_in: 900,
+          scope: "openid archon/approve",
+        }),
+      ],
+      `https://app.archon.example/?code=authorization-code-123&state=${state}`,
+      {
+        "archon.auth.pkce.v1": JSON.stringify({
+          version: 1,
+          state,
+          codeVerifier: "B".repeat(64),
+          redirectUri: runtimeConfig.auth.redirectUri,
+          createdAt: 1_800_000_000_000,
+        }),
+      },
+    );
+    const controller = new AuthController(browser.environment);
+    const listener = vi.fn();
+    const unsubscribe = controller.subscribe(listener);
+
+    await controller.initialize();
+    expect(controller.getAccessToken()).toBe(accessToken);
+
+    const expiry = browser.timers.get(17);
+    expect(expiry).toBeDefined();
+    expiry!();
+    expect(controller.getSnapshot()).toEqual({ status: "anonymous" });
+    expect(() => controller.getAccessToken()).toThrow(/missing or expired/i);
+
+    const notificationsBeforeUnsubscribe = listener.mock.calls.length;
+    unsubscribe();
+    controller.signOut();
+    expect(listener).toHaveBeenCalledTimes(notificationsBeforeUnsubscribe);
+
+    const logout = new URL(String(browser.navigate.mock.calls[0]?.[0]));
+    expect(`${logout.origin}${logout.pathname}`).toBe(
+      runtimeConfig.auth.logoutEndpoint,
+    );
+    expect(logout.searchParams.get("client_id")).toBe(
+      runtimeConfig.auth.clientId,
+    );
+    expect(logout.searchParams.get("logout_uri")).toBe(
+      runtimeConfig.auth.logoutUri,
+    );
   });
 });
