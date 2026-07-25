@@ -146,8 +146,14 @@ jobs:
           [[ "${index_type,,}" == text/html* ]]
           grep -qi '^content-type:[[:space:]]*text/html' "${index_headers}"
           grep -qi '^cache-control:.*no-cache' "${index_headers}"
-          ! grep -qi '^set-cookie:' "${index_headers}"
-          ! grep -qi '^location:' "${index_headers}"
+          if grep -qi '^set-cookie:' "${index_headers}"; then
+            echo "::error::The public index response must not set cookies"
+            exit 1
+          fi
+          if grep -qi '^location:' "${index_headers}"; then
+            echo "::error::The public index response must not redirect"
+            exit 1
+          fi
           grep -qi '<!doctype html>' "${index_body}"
           grep -Fq '<div id="root"></div>' "${index_body}"
           grep -Fq '<title>Archon ' "${index_body}"
@@ -179,8 +185,14 @@ jobs:
           [[ "${runtime_type,,}" == application/json* ]]
           grep -qi '^content-type:[[:space:]]*application/json' "${runtime_headers}"
           grep -qi '^cache-control:.*no-store' "${runtime_headers}"
-          ! grep -qi '^set-cookie:' "${runtime_headers}"
-          ! grep -qi '^location:' "${runtime_headers}"
+          if grep -qi '^set-cookie:' "${runtime_headers}"; then
+            echo "::error::The public runtime config must not set cookies"
+            exit 1
+          fi
+          if grep -qi '^location:' "${runtime_headers}"; then
+            echo "::error::The public runtime config must not redirect"
+            exit 1
+          fi
           jq -e --arg root "${APPLICATION_URL}/" '
             def exact_keys($value; $wanted):
               ($value | type) == "object" and
@@ -319,8 +331,14 @@ jobs:
           [[ "${audit_type,,}" == application/json* ]]
           grep -qi '^content-type:[[:space:]]*application/json' "${audit_headers}"
           grep -qi '^cache-control:.*no-store' "${audit_headers}"
-          ! grep -qi '^set-cookie:' "${audit_headers}"
-          ! grep -qi '^location:' "${audit_headers}"
+          if grep -qi '^set-cookie:' "${audit_headers}"; then
+            echo "::error::The public audit response must not set cookies"
+            exit 1
+          fi
+          if grep -qi '^location:' "${audit_headers}"; then
+            echo "::error::The public audit response must not redirect"
+            exit 1
+          fi
           jq -e '
             def exact_keys($value; $wanted):
               ($value | type) == "object" and

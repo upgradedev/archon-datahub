@@ -297,7 +297,7 @@ function normalize(value: unknown, ancestors: Set<object>): unknown {
   ) {
     throw new Error("Evidence contains a value that cannot be canonicalized.");
   }
-  if (typeof value !== "object" || value === null) {
+  if (typeof value !== "object") {
     throw new Error("Evidence contains a value that cannot be canonicalized.");
   }
   if (ancestors.has(value)) {

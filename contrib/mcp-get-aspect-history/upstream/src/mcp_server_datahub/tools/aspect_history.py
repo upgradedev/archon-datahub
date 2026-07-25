@@ -302,7 +302,7 @@ def get_aspect_history(
             current, current_chars = _format_aspect_version(0, current_aspect)
             returned_chars += current_chars
 
-    history = []
+    history: list[dict[str, Any]] = []
     has_more = False
     next_start_version = None
     truncated_by_response_budget = False

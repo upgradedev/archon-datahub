@@ -153,6 +153,67 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  infra-lock-candidate:
+    name: Generate and validate infrastructure lock candidate
+    if: github.event_name == 'pull_request'
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.INFRA_NODE_VERSION }}
+      - name: Resolve the reviewed dependency policy into a candidate lock
+        working-directory: infra/aws
+        run: >-
+          npm install
+          --package-lock-only
+          --ignore-scripts
+          --no-audit
+          --no-fund
+      - name: Install and validate the candidate exactly
+        working-directory: infra/aws
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run build
+          npm test -- --ci --coverage
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
+            --audit-level=high
+          node <<'NODE'
+          const lock = require("./package-lock.json");
+          const versions = Object.entries(lock.packages)
+            .filter(([path]) => path.endsWith("node_modules/brace-expansion"))
+            .map(([, metadata]) => metadata.version);
+          if (versions.length === 0 || versions.some((version) => version !== "5.0.8")) {
+            throw new Error(`Unexpected brace-expansion resolutions: ${versions.join(",")}`);
+          }
+          NODE
+      - name: Seal the validated lock candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/infra-lock-candidate"
+          mkdir -p "${candidate_dir}"
+          install -m 0644 \
+            infra/aws/package-lock.json \
+            "${candidate_dir}/package-lock.json"
+          (
+            cd "${candidate_dir}"
+            sha256sum package-lock.json >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+      - name: Upload the short-lived reviewed lock candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: infra-lock-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/infra-lock-candidate/
+          if-no-files-found: error
+          retention-days: 1
+
   infra:
     name: AWS CDK build, test, synth, IaC gate
     needs: secret-scan

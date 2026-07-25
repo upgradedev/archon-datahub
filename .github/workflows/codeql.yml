@@ -57,9 +57,32 @@ jobs:
                   .runs[];
                   (.tool.driver.name | ascii_downcase | contains("codeql")) and
                   (.results | type == "array")
-                ) and
-                ([.runs[].results[]] | length) == 0
+                )
               ' "${sarif}" >/dev/null
+            finding_count="$(
+              jq --raw-output '[.runs[].results[]] | length' "${sarif}"
+            )"
+            [[ "${finding_count}" =~ ^[0-9]+$ ]]
+            if (( finding_count > 0 )); then
+              echo "CodeQL findings in $(basename "${sarif}"):"
+              jq --compact-output \
+                '
+                  .runs[].results[] |
+                  {
+                    ruleId,
+                    message: .message.text,
+                    location: (
+                      .locations[0].physicalLocation |
+                      {
+                        path: .artifactLocation.uri,
+                        line: .region.startLine
+                      }
+                    )
+                  }
+                ' "${sarif}"
+              echo "::error::CodeQL reported ${finding_count} blocking finding(s)"
+              exit 1
+            fi
           done
       - name: Retain CodeQL SARIF evidence
         if: always()

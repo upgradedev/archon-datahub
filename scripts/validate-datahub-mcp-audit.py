@@ -1460,6 +1460,8 @@ def run_real(arguments: argparse.Namespace) -> None:
                 canonical_json_bytes(rejected_receipt(str(exc), hashes)),
             )
         except OSError:
+            # Preserve the original validation failure when even the best-effort
+            # rejected receipt cannot be written to the runner's evidence path.
             pass
         raise ValidationError(str(exc)) from exc
 

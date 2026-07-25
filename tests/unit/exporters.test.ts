@@ -16,13 +16,17 @@ test("report exporters produce JSON, safe Markdown, and SARIF with stable finger
   const markdown = auditReportToMarkdown({
     ...report,
     scanId: "scan`](/unsafe)\u0000",
-    narrative: "<script>alert(1)</script> [link](javascript:alert(2)) `breakout`",
+    narrative:
+      "<script>alert(1)</script> [link](javascript:alert(2)) " +
+      "[payload](DATA:text/html,unsafe) vbscript:msgbox(1) `breakout`",
   });
   assert.match(markdown, /## Findings/);
   assert.doesNotMatch(markdown, /<script>/iu);
   assert.match(markdown, /&lt;script&gt;/);
   assert.doesNotMatch(markdown, /\u0000/u);
   assert.doesNotMatch(markdown, /\]\(javascript:/iu);
+  assert.doesNotMatch(markdown, /\b(?:javascript|vbscript|data):/iu);
+  assert.match(markdown, /\[blocked-active-scheme\]/u);
   assert.doesNotMatch(markdown, /`breakout`/u);
 
   const first = auditReportToSarif(report);

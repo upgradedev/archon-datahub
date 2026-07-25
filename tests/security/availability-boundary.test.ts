@@ -74,8 +74,16 @@ test("availability executes one bounded read-only request without credentials", 
   assert.match(workflow, /--connect-timeout 10 --max-time 50 --max-filesize 4194304/u);
   assert.match(workflow, /test "\$\{audit_redirects\}" = "0"/u);
   assert.match(workflow, /test "\$\{audit_tls\}" = "0"/u);
-  assert.match(workflow, /! grep -qi '\^set-cookie:' "\$\{audit_headers\}"/u);
-  assert.match(workflow, /! grep -qi '\^location:' "\$\{audit_headers\}"/u);
+  assert.match(
+    workflow,
+    /if grep -qi '\^set-cookie:' "\$\{audit_headers\}"; then/u
+  );
+  assert.match(
+    workflow,
+    /if grep -qi '\^location:' "\$\{audit_headers\}"; then/u
+  );
+  assert.match(workflow, /public audit response must not set cookies/u);
+  assert.match(workflow, /public audit response must not redirect/u);
 });
 
 test("public runtime, response, and header contracts are exact and sanitized", () => {
@@ -242,7 +250,7 @@ test("deployment ZIP metadata is bounded before streaming three required files",
     "max_compression_ratio",
     "set(required_entries) != set(required_limits)",
   ]) {
-    const checkIndex = workflow.indexOf(preExtractionCheck);
+    const checkIndex = workflow.indexOf(preExtractionCheck, metadataStart);
     assert.ok(checkIndex > metadataStart && checkIndex < extractionStart);
   }
 
@@ -336,7 +344,10 @@ test("evidence is minimal, checksum-sealed, retained, and honestly documented", 
   assert.match(documentation, /does not contain a release SHA/u);
   assert.match(documentation, /does not provide an SLA/u);
   assert.match(documentation, /does not use AWS credentials, OIDC, or long-lived secrets/u);
-  assert.match(documentation, /never calls an approval, remediation, or rollback route/u);
+  assert.match(
+    documentation,
+    /never calls an approval,\s+remediation, or rollback route/u
+  );
   assert.match(documentation, /newest successful/u);
   assert.match(documentation, /no older historical run/u);
   assert.match(documentation, /rollbackSelector\.ciRunId/u);
