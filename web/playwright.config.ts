@@ -29,7 +29,6 @@ export default defineConfig({
     actionTimeout: 10_000,
     navigationTimeout: 20_000,
     colorScheme: "dark",
-    reducedMotion: "reduce",
     trace: "on",
     screenshot: "only-on-failure",
     video: "off",

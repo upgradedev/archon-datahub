@@ -254,18 +254,33 @@ jobs:
             "${generation_root}/root/package-lock.json" \
             package-lock.json; then
             echo "::error::Committed root lock differs from clean npm 10.9.8 resolution"
+            diff -u \
+              --label committed/package-lock.json \
+              --label candidate/package-lock.json \
+              package-lock.json \
+              "${generation_root}/root/package-lock.json" || true
             exit 1
           fi
           if ! cmp --silent \
             "${generation_root}/infra/package-lock.json" \
             infra/aws/package-lock.json; then
             echo "::error::Committed infrastructure lock differs from clean npm 10.9.8 resolution"
+            diff -u \
+              --label committed/infra/aws/package-lock.json \
+              --label candidate/infra/aws/package-lock.json \
+              infra/aws/package-lock.json \
+              "${generation_root}/infra/package-lock.json" || true
             exit 1
           fi
           if ! cmp --silent \
             "${generation_root}/web/package-lock.json" \
             web/package-lock.json; then
             echo "::error::Committed web lock differs from clean npm 10.9.8 resolution"
+            diff -u \
+              --label committed/web/package-lock.json \
+              --label candidate/web/package-lock.json \
+              web/package-lock.json \
+              "${generation_root}/web/package-lock.json" || true
             exit 1
           fi
           install -m 0644 \

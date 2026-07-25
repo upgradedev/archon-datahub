@@ -59,6 +59,60 @@ while IFS= read -r candidate; do
     actual=true
   fi
   if [[ "${actual}" != "${expected}" ]]; then
+    diagnostic_validator="$(mktemp)"
+    trap 'rm -f "${diagnostic_validator:-}"' EXIT
+    sed '$d' "${validator}" >"${diagnostic_validator}"
+    cat >>"${diagnostic_validator}" <<'JQ'
+{
+  exactKeys: exact_keys([
+    "schemaVersion",
+    "scanId",
+    "classification",
+    "findings",
+    "narrative",
+    "modelProvenance",
+    "trace"
+  ]),
+  schemaVersion: (.schemaVersion == "archon.audit-report/v1"),
+  scanId: (.scanId | bounded_text(512)),
+  classification: (.classification | valid_classification),
+  findings: (
+    (.findings | type == "array") and
+    ((.findings | length) <= 10000) and
+    all(.findings[]; valid_finding)
+  ),
+  narrative: (.narrative | bounded_text(8000)),
+  modelProvenance: (.modelProvenance | valid_model_provenance),
+  trace: (
+    (.trace | type == "array") and
+    ((.trace | length) <= 32) and
+    all(.trace[]; valid_trace_step)
+  ),
+  publicSafe: public_safe,
+  publicSafeEntries: [
+    to_entries[] |
+    . as $entry |
+    {
+      key: $entry.key,
+      forbiddenKey: ($entry.key | forbidden_public_key),
+      credentialKey: ($entry.key | has_public_credential_value),
+      valueSafe: ($entry.value | public_safe)
+    }
+  ],
+  modelProvenancePublicSafeEntries: [
+    .modelProvenance |
+    to_entries[] |
+    . as $entry |
+    {
+      key: $entry.key,
+      forbiddenKey: ($entry.key | forbidden_public_key),
+      credentialKey: ($entry.key | has_public_credential_value),
+      valueSafe: ($entry.value | public_safe)
+    }
+  ]
+}
+JQ
+    jq -c -f "${diagnostic_validator}" <<<"${report}" >&2 || true
     echo "::error::jq model-provenance conformance mismatch for ${case_id}: expected=${expected} actual=${actual}"
     exit 1
   fi

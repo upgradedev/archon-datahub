@@ -22,6 +22,8 @@ export async function installFixtureAuthorityBoundary(
   }
   const allowedOrigin = new URL(configuredBaseUrl).origin;
 
+  await page.emulateMedia({ reducedMotion: "reduce" });
+
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (isApiPath(url.pathname)) {
