@@ -179,6 +179,12 @@ test("judge evidence identifier boundaries reject unknown URN extensions", () =>
       "known-field-fact-id"
     )
   );
+  assert.doesNotThrow(() =>
+    assertPublicJudgeEvidenceIdentifiers(
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)#email.",
+      "known-verification-evidence"
+    )
+  );
   assert.throws(
     () =>
       assertPublicJudgeEvidenceIdentifiers(

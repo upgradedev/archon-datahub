@@ -108,6 +108,7 @@ const PUBLIC_URNS = new Set([
 const PUBLIC_DATASET_DERIVED_SUFFIXES = [
   "#amount:schema",
   "#amount",
+  "#email",
   ":deprecation",
   ":domain",
   ":lineage",

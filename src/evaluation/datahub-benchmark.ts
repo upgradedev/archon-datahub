@@ -17,7 +17,7 @@ import { digest, type Sha256Digest } from "../remediation/integrity.js";
 export const DATAHUB_BENCHMARK_VERSION = "archon.datahub-benchmark/v1" as const;
 export const DATAHUB_BENCHMARK_DATASET_VERSION = "2026-07-25" as const;
 export const DATAHUB_BENCHMARK_DATASET_DIGEST =
-  "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42" as const;
+  "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42b" as const;
 
 export interface DataHubBenchmarkCase {
   id: string;

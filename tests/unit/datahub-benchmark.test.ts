@@ -14,7 +14,7 @@ test("benchmark measures retained-history recovery without manufacturing conflic
   assert.equal(DATAHUB_BENCHMARK_DATASET_VERSION, "2026-07-25");
   assert.equal(
     DATAHUB_BENCHMARK_DATASET_DIGEST,
-    "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42"
+    "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42b"
   );
   assert.equal(report.schemaVersion, "archon.datahub-benchmark/v1");
   assert.equal(report.dataset.version, DATAHUB_BENCHMARK_DATASET_VERSION);
