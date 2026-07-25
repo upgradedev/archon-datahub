@@ -234,11 +234,27 @@ test("hosted async path binds audit evidence, durable approval handoff, write, v
       requestedAt: "2026-07-23T10:00:00.000Z",
     },
   });
+  assert.equal(audit.schemaVersion, "archon.audit-result/v2");
   assert.equal(audit.requiresApproval, true);
   assert.ok(audit.approvalId);
   assert.ok(audit.planDigest);
   assert.equal(evidence.documents.length, 1);
   assert.equal(catalog.writes, 0);
+  const auditEvidence = evidence.documents[0] as AuditEvidenceV1;
+  assert.equal(verifyAuditEvidence(auditEvidence), true);
+  assert.equal(auditEvidence.report.modelProvenance.modelCall, false);
+  const unsafeEvidence = structuredClone(auditEvidence) as AuditEvidenceV1;
+  (
+    unsafeEvidence.report.modelProvenance as unknown as Record<string, unknown>
+  )["prompt"] = "unreviewed prompt bytes";
+  unsafeEvidence.reportDigest = digest(unsafeEvidence.report);
+  const { digest: _oldDigest, ...unsafeUnsigned } = unsafeEvidence;
+  unsafeEvidence.digest = digest(unsafeUnsigned);
+  assert.equal(
+    verifyAuditEvidence(unsafeEvidence),
+    false,
+    "a valid digest must not bless an unsafe provenance shape"
+  );
   const replayedAudit = await auditService.audit({
     type: "AUDIT_REQUESTED",
     taskToken: "different-redelivery-token-0001",
@@ -348,6 +364,7 @@ test("async audit remains read-only when the fresh field projection invalidates 
       requestedAt: "2026-07-23T10:59:00.000Z",
     },
   });
+  assert.equal(result.schemaVersion, "archon.audit-result/v2");
   assert.equal(result.requiresApproval, false);
   assert.equal(result.manualOnlyReason, "POLICY_REJECTED_PROPOSAL");
   assert.equal(mutation.writes, 0);
@@ -376,6 +393,7 @@ test("a human rejection produces immutable execution evidence without a mutation
       requestedAt: "2026-07-23T11:59:00.000Z",
     },
   });
+  assert.equal(audit.schemaVersion, "archon.audit-result/v2");
   assert.equal(audit.requiresApproval, true);
   const remediation = new RemediationWorkerService({
     tagReader: catalog,

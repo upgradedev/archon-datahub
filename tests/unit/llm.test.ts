@@ -7,8 +7,51 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveLlmProvider, hasLlmCreds } from "../../src/llm/client.js";
+import { readFileSync } from "node:fs";
+import {
+  resolveLlmProvider,
+  hasLlmCreds,
+  type LlmClient,
+} from "../../src/llm/client.js";
 import { FakeLlmClient } from "../../src/llm/fake.js";
+import { NarratorAgent } from "../../src/agents/narrator.js";
+import {
+  isModelRuntimeProvenance,
+  parseModelRuntimeProvenance,
+} from "../../src/llm/provenance.js";
+
+interface ModelProvenanceConformanceCase {
+  id: string;
+  valid: boolean;
+  value: unknown;
+}
+
+const modelProvenanceCorpus = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../contracts/model-provenance-v1.cases.json",
+      import.meta.url
+    ),
+    "utf8"
+  )
+) as {
+  schemaVersion: string;
+  credentialMacros: Record<string, string[]>;
+  cases: ModelProvenanceConformanceCase[];
+};
+
+function materializeCredentialMacros(value: unknown): unknown {
+  let encoded = JSON.stringify(value);
+  for (const [name, fragments] of Object.entries(
+    modelProvenanceCorpus.credentialMacros
+  )) {
+    encoded = encoded.replaceAll(
+      `{{credential:${name}}}`,
+      fragments.join("")
+    );
+  }
+  return JSON.parse(encoded) as unknown;
+}
 
 const KEYS = [
   "LLM_API_KEY",
@@ -19,6 +62,21 @@ const KEYS = [
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
 ];
+
+test("authoritative model-provenance corpus matches the backend validator", () => {
+  assert.equal(
+    modelProvenanceCorpus.schemaVersion,
+    "archon.model-provenance-conformance/v1"
+  );
+  assert.ok(modelProvenanceCorpus.cases.length >= 20);
+  for (const candidate of modelProvenanceCorpus.cases) {
+    assert.equal(
+      isModelRuntimeProvenance(materializeCredentialMacros(candidate.value)),
+      candidate.valid,
+      candidate.id
+    );
+  }
+});
 
 // Run `fn` with a clean slate for all LLM env vars, restoring the prior values after.
 function withEnv(overrides: Record<string, string>, fn: () => void): void {
@@ -126,4 +184,181 @@ test("Fake LLM returns a tool_call when the request carries tools (ReAct path)",
   });
   const call = res.choices[0]!.message.tool_calls![0]!;
   assert.equal(call.function.name, "harvest_catalog");
+  assert.equal(call.function.arguments, "{}");
+});
+
+test("a named credential routed through LLM_BASE_URL is provenance-classed as custom", () => {
+  withEnv(
+    {
+      DASHSCOPE_API_KEY: "q",
+      LLM_BASE_URL: "https://gateway.example/v1",
+    },
+    () => {
+      const provider = resolveLlmProvider()!;
+      assert.equal(provider.name, "custom");
+      assert.equal(provider.baseURL, "https://gateway.example/v1");
+    }
+  );
+});
+
+test("live narration emits only strict, bounded provider provenance", async () => {
+  const SENTINEL = "provider-secret-must-not-be-exported";
+  const client: LlmClient = {
+    runtime: { source: "live-provider", provider: "openai" },
+    chat: {
+      completions: {
+        create: async () => ({
+          id: "chatcmpl-safe-response-001",
+          model: "gpt-4o-mini-2026-07-01",
+          usage: {
+            prompt_tokens: 40,
+            completion_tokens: 12,
+            total_tokens: 52,
+            raw_provider_payload: SENTINEL,
+          },
+          choices: [
+            {
+              message: {
+                content: "A bounded provider-authored summary.",
+                tool_calls: undefined,
+              },
+            },
+          ],
+          raw_provider_payload: SENTINEL,
+        }),
+      },
+    },
+  };
+  const clock = [100, 137];
+  const result = await new NarratorAgent(
+    client,
+    "gpt-4o-mini",
+    () => clock.shift()!
+  ).summarize([], {
+    totalEntities: 1,
+    withLineage: 0,
+    sensitiveEntities: 0,
+    domains: {},
+    platforms: {},
+  });
+
+  assert.deepEqual(result.modelProvenance, {
+    schemaVersion: "archon.model-runtime-provenance/v1",
+    source: "live-provider",
+    modelCall: true,
+    provider: "openai",
+    requestedModel: "gpt-4o-mini",
+    returnedModel: "gpt-4o-mini-2026-07-01",
+    providerResponseId: "chatcmpl-safe-response-001",
+    tokenUsage: {
+      inputTokens: 40,
+      outputTokens: 12,
+      totalTokens: 52,
+    },
+    latencyMs: 37,
+  });
+  assert.doesNotMatch(JSON.stringify(result.modelProvenance), new RegExp(SENTINEL));
+});
+
+test("model provenance rejects mode confusion, unexpected fields, and malformed usage", () => {
+  const deterministic = {
+    schemaVersion: "archon.model-runtime-provenance/v1",
+    source: "deterministic-fixture",
+    modelCall: false,
+    provider: "fixture",
+    requestedModel: "archon-deterministic-fixture-narrator-v1",
+    returnedModel: null,
+    providerResponseId: null,
+    tokenUsage: null,
+    latencyMs: null,
+  };
+  assert.deepEqual(parseModelRuntimeProvenance(deterministic), deterministic);
+  assert.equal(
+    isModelRuntimeProvenance({ ...deterministic, prompt: "must not be accepted" }),
+    false
+  );
+  assert.equal(
+    isModelRuntimeProvenance({
+      ...deterministic,
+      source: "live-provider",
+      modelCall: true,
+      provider: "openai",
+    }),
+    false
+  );
+  assert.equal(
+    isModelRuntimeProvenance({
+      ...deterministic,
+      source: "live-provider",
+      modelCall: true,
+      provider: "openai",
+      returnedModel: "gpt-4o-mini",
+      providerResponseId: "chatcmpl-safe-001",
+      tokenUsage: { inputTokens: 5, outputTokens: 2, totalTokens: 99 },
+      latencyMs: 12,
+    }),
+    false
+  );
+  assert.equal(
+    isModelRuntimeProvenance({
+      ...deterministic,
+      source: "live-provider",
+      modelCall: true,
+      provider: "custom",
+      returnedModel: "custom-model",
+      providerResponseId: `sk-${"x".repeat(32)}`,
+      tokenUsage: null,
+      latencyMs: 12,
+    }),
+    false
+  );
+  assert.equal(
+    isModelRuntimeProvenance({
+      ...deterministic,
+      source: "live-provider",
+      modelCall: true,
+      provider: "custom",
+      returnedModel: `model_sk-${"x".repeat(32)}`,
+      providerResponseId: "response-safe-001",
+      tokenUsage: null,
+      latencyMs: 12,
+    }),
+    false
+  );
+  assert.equal(
+    isModelRuntimeProvenance({
+      ...deterministic,
+      source: "live-provider",
+      modelCall: true,
+      provider: "custom",
+      returnedModel: "custom-model",
+      providerResponseId: `resp_sk-${"x".repeat(32)}`,
+      tokenUsage: null,
+      latencyMs: 12,
+    }),
+    false
+  );
+});
+
+test("live narration fails closed when provider identity metadata is absent", async () => {
+  const client: LlmClient = {
+    runtime: { source: "live-provider", provider: "custom" },
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [{ message: { content: "No provider identity." } }],
+        }),
+      },
+    },
+  };
+  await assert.rejects(
+    new NarratorAgent(client, "custom-model", () => 1).summarize([], {
+      totalEntities: 0,
+      withLineage: 0,
+      sensitiveEntities: 0,
+      domains: {},
+      platforms: {},
+    }),
+    /provenance is absent or invalid/iu
+  );
 });

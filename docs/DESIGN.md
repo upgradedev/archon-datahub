@@ -66,6 +66,21 @@ profile admits at most 25 datasets and 12 retained versions per mutable aspect, 
 eight-way bounded lineage/history concurrency, and leaves 30 minutes of its two-hour
 callback window unused.
 
+Every public catalog start path must equal the environment's exact `DemoQuery` stack
+parameter; a missing scope, padded equivalents, wildcards, and any other otherwise-valid
+catalog query are rejected. Archon MCP resolves that exact query to one dataset before any
+catalog tool runs. `get_entity` can hydrate only that resolved URN and returns a fresh
+six-field identity projection (`schemaVersion`, URN, name, platform, fabric, deprecation);
+descriptions, ownership, schema, tags, glossary terms, domains, lineage, source metadata,
+and arbitrary aspects are never copied. Internal evidence remains complete and digest-bound,
+but HTTP, MCP audit tools, and the control Lambda rebuild every returned finding from a
+small UI allowlist. Contradiction provenance retains source/run/time/status while raw values
+and actors are omitted; arbitrary detail, prompts, endpoints, provider payloads, and
+secret-shaped keys or values cannot cross the projection. The final projection is
+recursively checked again before serialization. Backend, Lambda, browser API, browser
+evidence export, and the deployment `jq` validator all consume the same committed
+model-provenance conformance corpus in CI.
+
 ## 3. Audit pipeline
 
 | Agent | Deterministic responsibility | Main modules |
@@ -77,6 +92,34 @@ callback window unused.
 
 The bounded ReAct loop can call only the read-side audit tools. Its terminal action emits
 findings; it is not the write path.
+
+### Model/runtime provenance
+
+The audit report is `archon.audit-report/v1` and contains exactly one narration provenance
+record. `archon.model-runtime-provenance/v1` is a strict discriminated union:
+
+| Source | `modelCall` | Permitted model metadata |
+| --- | ---: | --- |
+| `deterministic-fixture` | `false` | fixture provider, requested fixture model; returned model, response ID, usage, and latency are all `null` |
+| `live-provider` | `true` | allowlisted provider kind, bounded requested/returned model IDs, bounded provider response ID, client-measured latency, and complete internally consistent token usage when the provider supplies it |
+
+Live responses without a safe returned model, response ID, or latency fail closed. Usage is
+`null` only when the provider omits it; a partial, negative, unsafe-integer, or inconsistent
+usage object is rejected. Exporters re-parse this exact schema before emitting JSON,
+Markdown, or SARIF, and immutable audit-evidence verification repeats the check even when
+the surrounding content digest is valid. The schema has no field for prompts, credentials,
+endpoints, raw provider errors, or arbitrary response payloads.
+
+Durable audit callbacks and checkpoints use `archon.audit-result/v2`. The control service
+recognizes `v1` only for the versioned cutover: a digest- and execution-bound historical
+five-key report receives HTTP 410 with a rerun instruction. A `v2` checkpoint always
+requires the strict provenance-bearing report and is never reclassified as legacy if that
+report is stripped or malformed.
+
+This provenance does not grant decision authority. Findings, G1–G6 evidence, blast radius,
+remediation eligibility, dossier contents, and mutation arguments are computed before or
+outside narration by deterministic code. A model can write the executive narrative; it
+cannot manufacture a governance fact or write target.
 
 ### G1–G6
 

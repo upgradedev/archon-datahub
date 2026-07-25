@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DataHubClient } from "../datahub/mcp-client.js";
 import type { DataHubMutationClient } from "../datahub/mutation-client.js";
-import { AuditPipeline } from "../pipeline/pipeline.js";
+import { AuditPipeline, isAuditReport } from "../pipeline/pipeline.js";
 import type {
   ApprovalRequestV1,
   ExecutionJournal,
@@ -29,7 +29,7 @@ import { verifyExecutionReceipt } from "../remediation/receipt.js";
 import type { Finding } from "../types.js";
 import type {
   ApprovalQueueMessageV1,
-  AuditCallbackOutputV1,
+  AuditCallbackOutputV2,
   AuditEvidenceV1,
   AuditQueueMessageV1,
   ExecutionEvidenceV1,
@@ -66,12 +66,12 @@ export interface AuditResultCheckpoint {
   get(
     executionId: string,
     requestDigest: Sha256Digest
-  ): Promise<AuditCallbackOutputV1 | null>;
+  ): Promise<AuditCallbackOutputV2 | null>;
   put(
     executionId: string,
     requestDigest: Sha256Digest,
-    output: AuditCallbackOutputV1
-  ): Promise<AuditCallbackOutputV1>;
+    output: AuditCallbackOutputV2
+  ): Promise<AuditCallbackOutputV2>;
 }
 
 export interface AuditWorkerServiceOptions {
@@ -188,10 +188,7 @@ export function verifyAuditEvidence(
       candidate.reportDigest !== digest(candidate.report) ||
       !candidate.request ||
       candidate.request.schemaVersion !== "archon.audit-request/v1" ||
-      !candidate.report ||
-      typeof candidate.report.scanId !== "string" ||
-      !Array.isArray(candidate.report.findings) ||
-      !Array.isArray(candidate.report.trace)
+      !isAuditReport(candidate.report)
     ) {
       return false;
     }
@@ -263,7 +260,7 @@ export class AuditWorkerService {
     this.#nonce = options.nonce ?? (() => randomBytes(24).toString("hex"));
   }
 
-  async audit(message: AuditQueueMessageV1): Promise<AuditCallbackOutputV1> {
+  async audit(message: AuditQueueMessageV1): Promise<AuditCallbackOutputV2> {
     const requestDigest = digest(message.request);
     const checkpoint = await this.options.auditCheckpoint?.get(
       message.executionId,
@@ -368,10 +365,10 @@ export class AuditWorkerService {
     const evidence = contentAddressedAuditEvidence(unsigned);
     await this.options.evidence.put(evidence);
 
-    const output: AuditCallbackOutputV1 =
+    const output: AuditCallbackOutputV2 =
       remediation.disposition === "ACTIONABLE"
         ? {
-            schemaVersion: "archon.audit-result/v1",
+            schemaVersion: "archon.audit-result/v2",
             requiresApproval: true,
             reportDigest: evidence.reportDigest,
             evidenceDigest: evidence.digest,
@@ -382,7 +379,7 @@ export class AuditWorkerService {
             approvalExpiresAt: remediation.approvalRequest.expiresAt,
           }
         : {
-            schemaVersion: "archon.audit-result/v1",
+            schemaVersion: "archon.audit-result/v2",
             requiresApproval: false,
             reportDigest: evidence.reportDigest,
             evidenceDigest: evidence.digest,

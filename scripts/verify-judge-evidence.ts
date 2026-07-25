@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AuditReport } from "../src/pipeline/pipeline.js";
+import {
+  isAuditReport,
+  type AuditReport,
+} from "../src/pipeline/pipeline.js";
+import { isModelRuntimeProvenance } from "../src/llm/provenance.js";
+import { DETERMINISTIC_FIXTURE_MODEL } from "../src/llm/fake.js";
 import type {
   ApprovalDecisionV1,
   ApprovalRequestV1,
@@ -515,16 +520,25 @@ function assertSha256Sums(files: ReadonlyMap<string, LoadedFile>): void {
   }
 }
 
-function assertReportProfile(report: AuditReport): void {
+function assertReportProfile(report: unknown): asserts report is AuditReport {
   if (
-    typeof report.scanId !== "string" ||
-    !isRecord(report.classification) ||
+    !isAuditReport(report) ||
     report.classification.totalEntities !== 3 ||
-    !Array.isArray(report.findings) ||
     report.findings.length !== 7 ||
-    !Array.isArray(report.trace)
+    canonicalize(report.modelProvenance) !==
+      canonicalize({
+        schemaVersion: "archon.model-runtime-provenance/v1",
+        source: "deterministic-fixture",
+        modelCall: false,
+        provider: "fixture",
+        requestedModel: DETERMINISTIC_FIXTURE_MODEL,
+        returnedModel: null,
+        providerResponseId: null,
+        tokenUsage: null,
+        latencyMs: null,
+      })
   ) {
-    fail("audit report structure or entity/finding totals changed.");
+    fail("audit report structure, fixture provenance, or entity/finding totals changed.");
   }
   const counts = {
     contradiction: 0,
@@ -541,7 +555,11 @@ function assertReportProfile(report: AuditReport): void {
   }
 }
 
-function assertSarif(content: string, findingCount: number): void {
+function assertSarif(
+  content: string,
+  findingCount: number,
+  modelProvenance: AuditReport["modelProvenance"]
+): void {
   const sarif = parseJson<Record<string, unknown>>(content, "audit/report.sarif");
   const runs = sarif["runs"];
   if (sarif["version"] !== "2.1.0" || !Array.isArray(runs)) {
@@ -552,6 +570,15 @@ function assertSarif(content: string, findingCount: number): void {
     fail("SARIF must contain exactly one run.");
   }
   const results = run["results"];
+  const properties = run["properties"];
+  if (
+    !isRecord(properties) ||
+    !isModelRuntimeProvenance(properties["modelProvenance"]) ||
+    canonicalize(properties["modelProvenance"]) !==
+      canonicalize(modelProvenance)
+  ) {
+    fail("SARIF model provenance is missing or differs from the JSON report.");
+  }
   if (!Array.isArray(results) || results.length !== findingCount) {
     fail("SARIF result count is not bound to the audit report.");
   }
@@ -607,7 +634,11 @@ function assertSemanticChain(
   );
 
   assertReportProfile(report);
-  assertSarif(files.get("audit/report.sarif")!.text, report.findings.length);
+  assertSarif(
+    files.get("audit/report.sarif")!.text,
+    report.findings.length,
+    report.modelProvenance
+  );
   if (!verifyEvidenceDossier(dossier)) fail("evidence dossier digest is invalid.");
   if (!verifyRemediationPlan(plan)) fail("remediation plan digest is invalid.");
   if (!verifyApprovalRequest(request)) fail("approval request digest is invalid.");

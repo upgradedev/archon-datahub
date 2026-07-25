@@ -115,8 +115,8 @@ export interface ExecutionEvidenceV1 {
   digest: Sha256Digest;
 }
 
-export interface AuditCallbackOutputV1 {
-  schemaVersion: "archon.audit-result/v1";
+export interface AuditCallbackOutputV2 {
+  schemaVersion: "archon.audit-result/v2";
   requiresApproval: boolean;
   reportDigest: Sha256Digest;
   evidenceDigest: Sha256Digest;

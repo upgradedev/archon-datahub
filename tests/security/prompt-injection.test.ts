@@ -101,6 +101,7 @@ test("prompt-injection: audit_catalog over MCP on a poisoned catalog returns rea
   const { server } = await buildMcpServer({
     datahub: new FakeDataHubMcpClient(poisonedReports, []),
     pipeline: new AuditPipeline(),
+    demoQuery: "injected_asset",
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });

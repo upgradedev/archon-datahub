@@ -14,6 +14,14 @@ const deploymentWorkflow = readFileSync(
   new URL("../../.github/workflows/deploy.yml", import.meta.url),
   "utf8"
 );
+const ciWorkflow = readFileSync(
+  new URL("../../.github/workflows/ci.yml", import.meta.url),
+  "utf8"
+);
+const reportValidator = readFileSync(
+  new URL("../../scripts/validate-audit-report.jq", import.meta.url),
+  "utf8"
+);
 
 test("availability is scheduled/manual on a protected, unprivileged observer", () => {
   assert.match(workflow, /^on:\n  schedule:/mu);
@@ -101,9 +109,79 @@ test("deploy and availability enforce the same non-wildcard demo scope", () => {
     deploymentWorkflow.match(
       /\(\$query \| test\("\[\*\?\]"\) \| not\) and\s+\$query != "\{\}"/gu
     )?.length,
-    5
+    7
   );
   assert.doesNotMatch(deploymentWorkflow, /\$query != "\*" and/u);
+});
+
+test("hosted observers share one strict report and model-provenance contract", () => {
+  assert.match(
+    workflow,
+    /contents\/scripts\/validate-audit-report\.jq/u
+  );
+  assert.match(
+    workflow,
+    /jq -e -f "\$\{report_validator\}" >\/dev\/null/u
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /jq -e -f scripts\/validate-audit-report\.jq >\/dev\/null/gu
+    )?.length,
+    3
+  );
+
+  assert.match(
+    reportValidator,
+    /\.schemaVersion == "archon\.audit-report\/v1"/u
+  );
+  assert.match(
+    reportValidator,
+    /\.schemaVersion != "archon\.model-runtime-provenance\/v1"/u
+  );
+  assert.match(reportValidator, /\.source == "deterministic-fixture"/u);
+  assert.match(reportValidator, /\.source == "live-provider"/u);
+  assert.match(reportValidator, /def has_credential_substring:/u);
+  assert.match(
+    reportValidator,
+    /\(has_credential_substring \| not\)/u
+  );
+  assert.match(
+    reportValidator,
+    /\.totalTokens == \(\.inputTokens \+ \.outputTokens\)/u
+  );
+  assert.match(reportValidator, /\.latencyMs <= 3600000/u);
+  assert.match(reportValidator, /def valid_public_detail:/u);
+  assert.match(reportValidator, /def public_safe:/u);
+  assert.match(reportValidator, /def forbidden_public_key:/u);
+  assert.match(
+    ciWorkflow,
+    /bash scripts\/validate-model-provenance-corpus\.sh/u
+  );
+
+  assert.match(
+    workflow,
+    /schemaVersion: "archon\.production-availability\/v2"/u
+  );
+  assert.match(workflow, /reportSchemaVersion: \$reportSchemaVersion/u);
+  assert.match(workflow, /modelProvenance: \$modelProvenance/u);
+  assert.equal(
+    deploymentWorkflow.match(
+      /schemaVersion: "archon\.audit-smoke-evidence\/v2"/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /reportSchemaVersion: \.report\.schemaVersion/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /modelProvenance: \.report\.modelProvenance/gu
+    )?.length,
+    2
+  );
 });
 
 test("public runtime, response, and header contracts are exact and sanitized", () => {
@@ -151,7 +229,7 @@ test("public runtime, response, and header contracts are exact and sanitized", (
     workflow,
     /exact_keys\(\.; \["requestId", "releaseSha", "report"\]\)/u
   );
-  assert.match(workflow, /\.report\.classification\.totalEntities \| natural and \. == 1/u);
+  assert.match(workflow, /\.report\.classification\.totalEntities == 1/u);
   assert.match(
     workflow,
     /map\(\.agent\) == \[\s+"classifier",\s+"lineage-analyzer",\s+"governance-auditor",\s+"narrator"/u
@@ -331,7 +409,7 @@ test("control-plane, newest deployment, CI, and artifact are rechecked before se
   assert.match(workflow, /finalArtifactMetadataRevalidated: true/u);
   assert.match(
     workflow,
-    /schemaVersion: "archon\.production-availability\/v1"/u
+    /schemaVersion: "archon\.production-availability\/v2"/u
   );
   assert.match(workflow, /masterAncestor: true/u);
 });

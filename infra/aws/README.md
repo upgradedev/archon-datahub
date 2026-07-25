@@ -182,7 +182,7 @@ Both WAFs use the moving AWS-managed default rule-group versions (no stale versi
 an explicit 300-second IP rate window, sampled-field substitution, filtered/redacted
 logging, and an exact enabled, rotating, single-Region customer KMS key binding.
 
-The environment stack has eight mandatory promotion parameters:
+The environment stack has nine mandatory promotion parameters:
 
 | Parameter | Contract |
 | --- | --- |
@@ -194,6 +194,7 @@ The environment stack has eight mandatory promotion parameters:
 | `DeploymentWorkflowRunAttempt` | Exact attempt number of that deployment run |
 | `CiRunId` | Numeric successful `master` CI run that produced all retained subjects |
 | `ReleaseSha` | Source commit represented by the container, SPA, and Lambda release candidates |
+| `DemoQuery` | Exact trimmed, non-wildcard dataset query shared by the hosted API, control Lambda, and SPA runtime configuration |
 
 The platform also requires `DataHubReadGmsUrl`, hosted `DataHubReadMcpUrl`,
 `DataHubWriteGmsUrl`, and hosted `DataHubWriteMcpUrl`. The Fargate image intentionally
@@ -421,6 +422,7 @@ Do not pipe an unpinned installer from the default branch into a shell.
         --parameters "${STACK_NAME}:DeploymentWorkflowRunAttempt=${DEPLOYMENT_WORKFLOW_RUN_ATTEMPT}" \
         --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
         --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+       --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
        --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
        --parameters "${STACK_NAME}:CloudFrontCertificateArn=${EDGE_CERTIFICATE_ARN}" \
        --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -456,7 +458,8 @@ Do not pipe an unpinned installer from the default branch into a shell.
 
 6. Configure a required, trimmed, non-wildcard `DATAHUB_DEMO_QUERY` GitHub environment
    variable that resolves to exactly one safe dataset. The deployment places that exact
-   value in runtime config and the SPA pre-fills it for a one-click bounded demo.
+   value in the `DemoQuery` stack parameter, the API container and control Lambda
+   environments, and runtime config; the SPA pre-fills it for a one-click bounded demo.
    Smoke-test `ArchonApplicationUrl`,
    exact runtime-config bytes and no-store
    headers, the synchronous read-only `POST /api/audits` preview, and fail-closed

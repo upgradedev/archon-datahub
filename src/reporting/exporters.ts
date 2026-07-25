@@ -1,6 +1,13 @@
-import type { AuditReport } from "../pipeline/pipeline.js";
+import {
+  assertAuditReport,
+  type AuditReport,
+} from "../pipeline/pipeline.js";
 import type { Finding } from "../types.js";
 import { digest } from "../remediation/integrity.js";
+import {
+  parseModelRuntimeProvenance,
+  type ModelRuntimeProvenance,
+} from "../llm/provenance.js";
 
 export interface SarifLog {
   version: "2.1.0";
@@ -17,6 +24,9 @@ export interface SarifLog {
           shortDescription: { text: string };
         }>;
       };
+    };
+    properties: {
+      modelProvenance: ModelRuntimeProvenance;
     };
     results: Array<{
       ruleId: string;
@@ -56,6 +66,10 @@ export function auditReportToSarif(
   report: AuditReport,
   version = "0.1.0"
 ): SarifLog {
+  assertAuditReport(report);
+  const modelProvenance = parseModelRuntimeProvenance(
+    report.modelProvenance
+  );
   const rules = new Map<string, Finding>();
   for (const finding of report.findings) rules.set(ruleId(finding), finding);
   return {
@@ -78,6 +92,7 @@ export function auditReportToSarif(
               })),
           },
         },
+        properties: { modelProvenance },
         results: report.findings.map((finding) => ({
           ruleId: ruleId(finding),
           level: sarifLevel(finding.severity),
@@ -122,12 +137,38 @@ function markdownText(value: unknown): string {
 }
 
 export function auditReportToMarkdown(report: AuditReport): string {
+  assertAuditReport(report);
+  const provenance = parseModelRuntimeProvenance(report.modelProvenance);
+  const returnedModel =
+    provenance.returnedModel === null ? "not applicable" : provenance.returnedModel;
+  const responseId =
+    provenance.providerResponseId === null
+      ? "not applicable"
+      : provenance.providerResponseId;
+  const usage =
+    provenance.tokenUsage === null
+      ? "not available"
+      : `${provenance.tokenUsage.inputTokens} input / ` +
+        `${provenance.tokenUsage.outputTokens} output / ` +
+        `${provenance.tokenUsage.totalTokens} total`;
+  const latency =
+    provenance.latencyMs === null
+      ? "not applicable"
+      : `${provenance.latencyMs} ms (client measured)`;
   const lines = [
     "# Archon DataHub audit",
     "",
     `- Scan: \`${markdownText(report.scanId)}\``,
     `- Findings: ${report.findings.length}`,
     `- Entities: ${report.classification.totalEntities}`,
+    `- Runtime: ${markdownText(provenance.source)}`,
+    `- Model call: ${provenance.modelCall ? "yes" : "no"}`,
+    `- Provider: ${markdownText(provenance.provider)}`,
+    `- Requested model: ${markdownText(provenance.requestedModel)}`,
+    `- Returned model: ${markdownText(returnedModel)}`,
+    `- Provider response ID: ${markdownText(responseId)}`,
+    `- Token usage: ${markdownText(usage)}`,
+    `- Latency: ${markdownText(latency)}`,
     "",
     "## Findings",
     "",
@@ -152,5 +193,9 @@ export function auditReportToMarkdown(report: AuditReport): string {
 }
 
 export function auditReportToJson(report: AuditReport): string {
-  return `${JSON.stringify(report, null, 2)}\n`;
+  assertAuditReport(report);
+  const modelProvenance = parseModelRuntimeProvenance(
+    report.modelProvenance
+  );
+  return `${JSON.stringify({ ...report, modelProvenance }, null, 2)}\n`;
 }

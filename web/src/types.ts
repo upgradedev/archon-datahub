@@ -19,8 +19,6 @@ export interface ProvenanceEvent {
   source: string;
   runId: string;
   observedAt: string;
-  actor?: string;
-  value?: string;
   status: "trusted" | "conflicting" | "observed";
 }
 
@@ -43,11 +41,10 @@ export interface ApprovalReview {
   risk: "low" | "medium" | "high";
 }
 
-export interface FindingDetail extends Record<string, unknown> {
+export interface FindingDetail {
   ruleId?: string;
   rule?: string;
   attribute?: string;
-  values?: Record<string, unknown>;
   unclassifiedFields?: string[];
   blastRadius?: BlastRadius;
   provenance?: ProvenanceEvent[];
@@ -72,11 +69,50 @@ export interface Classification {
   platforms: Record<string, number>;
 }
 
+export type LiveModelProvider =
+  | "custom"
+  | "qwen"
+  | "gemini"
+  | "openai"
+  | "anthropic";
+
+export interface ModelTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export type ModelRuntimeProvenance =
+  | {
+      schemaVersion: "archon.model-runtime-provenance/v1";
+      source: "deterministic-fixture";
+      modelCall: false;
+      provider: "fixture";
+      requestedModel: string;
+      returnedModel: null;
+      providerResponseId: null;
+      tokenUsage: null;
+      latencyMs: null;
+    }
+  | {
+      schemaVersion: "archon.model-runtime-provenance/v1";
+      source: "live-provider";
+      modelCall: true;
+      provider: LiveModelProvider;
+      requestedModel: string;
+      returnedModel: string;
+      providerResponseId: string;
+      tokenUsage: ModelTokenUsage | null;
+      latencyMs: number;
+    };
+
 export interface AuditReport {
+  schemaVersion: "archon.audit-report/v1";
   scanId: string;
   classification: Classification;
   findings: Finding[];
   narrative: string;
+  modelProvenance: ModelRuntimeProvenance;
   trace: Array<{ agent: string; produced: string }>;
 }
 

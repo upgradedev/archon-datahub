@@ -298,7 +298,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(ciWorkflow, /clean-lock-generation/u);
   assert.match(ciWorkflow, /NPM_CONFIG_USERCONFIG: \/dev\/null/u);
   assert.match(ciWorkflow, /NPM_CONFIG_REGISTRY: https:\/\/registry\.npmjs\.org\//u);
-  assert.equal(ciWorkflow.match(/cmp --silent/gu)?.length, 2);
+  assert.equal(ciWorkflow.match(/cmp --silent/gu)?.length, 3);
   assert.match(
     ciWorkflow,
     /Committed root lock differs from clean npm 10\.9\.8 resolution/u
@@ -307,6 +307,10 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
     ciWorkflow,
     /Committed infrastructure lock differs from clean npm 10\.9\.8 resolution/u
   );
+  assert.match(
+    ciWorkflow,
+    /Committed web lock differs from clean npm 10\.9\.8 resolution/u
+  );
   assert.match(ciWorkflow, /pullRequestHeadSha: \$headSha/u);
   assert.match(ciWorkflow, /headRepository: \$headRepository/u);
   assert.match(ciWorkflow, /pullRequestNumber: \$pullRequestNumber/u);
@@ -314,6 +318,8 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(ciWorkflow, /workflowSha: \$workflowSha/u);
   assert.match(ciWorkflow, /packageJsonSha256: \$infraManifestSha256/u);
   assert.match(ciWorkflow, /lockSha256: \$infraLockSha256/u);
+  assert.match(ciWorkflow, /packageJsonSha256: \$webManifestSha256/u);
+  assert.match(ciWorkflow, /lockSha256: \$webLockSha256/u);
 
   const infraStart = ciWorkflow.indexOf("\n  infra:");
   const publisherStart = ciWorkflow.indexOf(

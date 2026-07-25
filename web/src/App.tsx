@@ -28,6 +28,7 @@ import type {
   Finding,
   FindingType,
   LoadedAudit,
+  ModelRuntimeProvenance,
   ProvenanceEvent,
   Severity,
 } from "./types";
@@ -183,7 +184,7 @@ function EvidenceDigest({
   };
   return (
     <div className="rounded-lg border border-white/[0.06] bg-black/10 p-2.5">
-      <dt className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+      <dt className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-400">
         {label}
       </dt>
       <dd className="mt-1 flex items-center gap-1.5 font-mono text-[10px] text-slate-300">
@@ -240,7 +241,7 @@ function TerminalEvidence({ status }: { status: ControlLoopStatus }) {
       </dl>
       <dl className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-400 sm:grid-cols-4">
         <div>
-          <dt className="text-slate-600">Checks</dt>
+          <dt className="text-slate-400">Checks</dt>
           <dd className="mt-0.5 text-slate-300">
             {result.outcome === "REJECTED"
               ? "Not invoked"
@@ -248,19 +249,19 @@ function TerminalEvidence({ status }: { status: ControlLoopStatus }) {
           </dd>
         </div>
         <div>
-          <dt className="text-slate-600">Receipt events</dt>
+          <dt className="text-slate-400">Receipt events</dt>
           <dd className="mt-0.5 text-slate-300">
             {result.verification.eventCount}
           </dd>
         </div>
         <div>
-          <dt className="text-slate-600">Rollback</dt>
+          <dt className="text-slate-400">Rollback</dt>
           <dd className="mt-0.5 text-slate-300">
             {result.verification.rollbackAvailability}
           </dd>
         </div>
         <div>
-          <dt className="text-slate-600">Completed</dt>
+          <dt className="text-slate-400">Completed</dt>
           <dd className="mt-0.5 text-slate-300">{formatDate(result.completedAt)}</dd>
         </div>
       </dl>
@@ -314,6 +315,111 @@ function SourceBadge({ source }: { source: LoadedAudit["source"] }) {
   );
 }
 
+function ModelProvenancePanel({
+  provenance,
+}: {
+  provenance: ModelRuntimeProvenance;
+}) {
+  const titleId = "model-runtime-provenance-title";
+  if (provenance.source === "deterministic-fixture") {
+    return (
+      <section
+        aria-labelledby={titleId}
+        className="panel mt-6 overflow-hidden"
+        data-testid="model-provenance"
+      >
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Truthful runtime disclosure</p>
+            <h2 className="section-title" id={titleId}>
+              Model runtime provenance
+            </h2>
+          </div>
+          <span className="rounded-full border border-amber-300/20 bg-amber-300/[0.05] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-100">
+            No model call
+          </span>
+        </div>
+        <div className="border-t border-white/[0.06] p-5">
+          <p className="text-xs leading-5 text-slate-300">
+            This narrative is deterministic fixture output. No provider model API
+            call occurred, so there is no provider response ID, token usage, or
+            client latency to report.
+          </p>
+          <p className="mt-2 text-[10px] leading-4 text-slate-400">
+            Prompts, credentials, endpoints, raw responses, and provider errors are
+            outside the browser contract.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  const usage = provenance.tokenUsage;
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="panel mt-6 overflow-hidden"
+      data-testid="model-provenance"
+    >
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Truthful runtime disclosure</p>
+          <h2 className="section-title" id={titleId}>
+            Model runtime provenance
+          </h2>
+        </div>
+        <span className="rounded-full border border-cyan-300/20 bg-cyan-300/[0.05] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
+          Live model call
+        </span>
+      </div>
+      <dl className="grid gap-px border-t border-white/[0.06] bg-white/[0.06] sm:grid-cols-2 xl:grid-cols-3">
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Provider</dt>
+          <dd className="mt-2 text-xs font-semibold uppercase text-slate-100">
+            {provenance.provider}
+          </dd>
+        </div>
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Requested model</dt>
+          <dd className="mt-2 break-all font-mono text-[11px] text-slate-300">
+            {provenance.requestedModel}
+          </dd>
+        </div>
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Returned model</dt>
+          <dd className="mt-2 break-all font-mono text-[11px] text-slate-300">
+            {provenance.returnedModel}
+          </dd>
+        </div>
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Provider response ID</dt>
+          <dd className="mt-2 break-all font-mono text-[11px] text-slate-300">
+            {provenance.providerResponseId}
+          </dd>
+        </div>
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Token usage</dt>
+          <dd className="mt-2 text-[11px] leading-5 text-slate-300">
+            {usage
+              ? `${usage.inputTokens.toLocaleString("en-US")} in · ${usage.outputTokens.toLocaleString("en-US")} out · ${usage.totalTokens.toLocaleString("en-US")} total`
+              : "Not reported by provider"}
+          </dd>
+        </div>
+        <div className="bg-[#0a1513] p-4">
+          <dt className="detail-label">Client latency</dt>
+          <dd className="mt-2 text-[11px] text-slate-300">
+            {provenance.latencyMs.toLocaleString("en-US")} ms
+          </dd>
+        </div>
+      </dl>
+      <p className="border-t border-white/[0.06] px-5 py-3 text-[10px] leading-4 text-slate-400">
+        Privacy-bounded metadata only. Prompts, credentials, endpoints, raw
+        responses, and provider errors are not accepted by this schema.
+      </p>
+    </section>
+  );
+}
+
 function AuthControl({ auth }: { auth: AuthSnapshot }) {
   if (auth.status === "authenticated") {
     return (
@@ -337,7 +443,7 @@ function AuthControl({ auth }: { auth: AuthSnapshot }) {
     return (
       <span
         aria-live="polite"
-        className="hidden items-center gap-1.5 rounded-full border border-white/[0.07] px-2.5 py-1.5 text-[10px] text-slate-500 md:inline-flex"
+        className="hidden items-center gap-1.5 rounded-full border border-white/[0.07] px-2.5 py-1.5 text-[10px] text-slate-400 md:inline-flex"
       >
         <Icon className="size-3 animate-spin" name="refresh" />
         {auth.status === "loading" ? "Loading auth" : "Opening sign-in"}
@@ -348,7 +454,7 @@ function AuthControl({ auth }: { auth: AuthSnapshot }) {
   const unavailable = auth.status === "error" && !auth.recoverable;
   return (
     <button
-      className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.04] px-2.5 py-1.5 text-[10px] font-semibold text-cyan-100 transition enabled:hover:border-cyan-300/30 enabled:hover:bg-cyan-300/[0.07] disabled:cursor-not-allowed disabled:border-white/[0.05] disabled:bg-transparent disabled:text-slate-600"
+      className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.04] px-2.5 py-1.5 text-[10px] font-semibold text-cyan-100 transition enabled:hover:border-cyan-300/30 enabled:hover:bg-cyan-300/[0.07] disabled:cursor-not-allowed disabled:border-white/[0.05] disabled:bg-transparent disabled:text-slate-400"
       disabled={unavailable}
       onClick={() => void beginSignIn().catch(() => undefined)}
       title={auth.status === "error" ? auth.message : "Authenticate through Cognito"}
@@ -415,7 +521,7 @@ function PipelineTrace({ trace }: { trace: LoadedAudit["envelope"]["report"]["tr
                 <p className="truncate text-xs font-semibold capitalize text-slate-200">
                   {step.agent.replaceAll("-", " ")}
                 </p>
-                <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">
+                <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-400">
                   {step.produced}
                 </p>
               </div>
@@ -442,7 +548,7 @@ function FindingList({ findings, selectedId, onSelect }: FindingListProps) {
             <Icon name="check" />
           </span>
           <p className="mt-4 text-sm font-semibold text-slate-200">No matching findings</p>
-          <p className="mt-1 text-xs text-slate-500">Adjust the severity or control filter.</p>
+          <p className="mt-1 text-xs text-slate-400">Adjust the severity or control filter.</p>
         </div>
       </div>
     );
@@ -468,7 +574,7 @@ function FindingList({ findings, selectedId, onSelect }: FindingListProps) {
               />
               <span className="min-w-0 flex-1 text-left">
                 <span className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-[0.13em] text-slate-500">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.13em] text-slate-400">
                     {finding.detail.ruleId ?? typeLabels[finding.type]}
                   </span>
                   <SeverityBadge severity={finding.severity} />
@@ -476,7 +582,7 @@ function FindingList({ findings, selectedId, onSelect }: FindingListProps) {
                 <span className="mt-2 block text-sm font-medium leading-5 text-slate-100">
                   {finding.summary}
                 </span>
-                <span className="mt-2 flex items-center gap-2 text-[11px] text-slate-500">
+                <span className="mt-2 flex items-center gap-2 text-[11px] text-slate-400">
                   <span className="truncate font-mono">{shortUrn(finding.subject)}</span>
                   {blast && (
                     <>
@@ -488,7 +594,7 @@ function FindingList({ findings, selectedId, onSelect }: FindingListProps) {
               </span>
               <Icon
                 className={`mt-1 size-4 shrink-0 transition-transform ${
-                  selected ? "-rotate-90 text-emerald-200" : "text-slate-600"
+                  selected ? "-rotate-90 text-emerald-200" : "text-slate-400"
                 }`}
                 name="chevron"
               />
@@ -510,7 +616,7 @@ function BlastRadiusView({ blast }: { blast?: BlastRadius }) {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="detail-label">Bounded downstream walk</p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             {blast.downstream.length} impacted assets · up to {blast.maxHops} hops
             {blast.truncated ? " · result truncated" : ""}
           </p>
@@ -547,14 +653,14 @@ function BlastRadiusView({ blast }: { blast?: BlastRadius }) {
                 <span className="block truncate font-mono text-[11px] text-slate-300">
                   {shortUrn(asset.urn)}
                 </span>
-                <span className="mt-0.5 block text-[10px] text-slate-600">
+                <span className="mt-0.5 block text-[10px] text-slate-400">
                   hop {asset.minHops}
                 </span>
               </span>
             </div>
           ))}
           {blast.downstream.length > visible.length && (
-            <div className="grid min-h-12 place-items-center rounded-lg border border-dashed border-white/10 text-[11px] text-slate-500">
+            <div className="grid min-h-12 place-items-center rounded-lg border border-dashed border-white/10 text-[11px] text-slate-400">
               +{blast.downstream.length - visible.length} more assets
             </div>
           )}
@@ -581,7 +687,7 @@ function ProvenanceView({ events = [] }: { events?: ProvenanceEvent[] }) {
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
               <p className="font-mono text-xs text-slate-200">{event.source}</p>
-              <p className="mt-1 text-[11px] text-slate-500">
+              <p className="mt-1 text-[11px] text-slate-400">
                 {formatDate(event.observedAt)} · run {event.runId}
               </p>
             </div>
@@ -646,7 +752,7 @@ function EvidenceDossier({ finding }: { finding: Finding }) {
                 Content bound
               </span>
             </div>
-            <p className="mt-2 text-[11px] leading-5 text-slate-500">
+            <p className="mt-2 text-[11px] leading-5 text-slate-400">
               {dossier.evidenceCount} evidence records · generated {formatDate(dossier.generatedAt)}
             </p>
           </div>
@@ -675,7 +781,7 @@ function EvidenceDossier({ finding }: { finding: Finding }) {
           </div>
         </dl>
       </div>
-      <p className="mt-3 flex items-start gap-2 text-[10px] leading-4 text-slate-600">
+      <p className="mt-3 flex items-start gap-2 text-[10px] leading-4 text-slate-400">
         <Icon className="mt-px size-3 shrink-0" name="shield" />
         Evidence, policy, expected pre-state, and the proposed action are immutable inputs to approval.
       </p>
@@ -765,19 +871,19 @@ function ApprovalPanel({ approval, source, authStatus, controlLoop }: ApprovalPa
 
       <dl className="mt-3 grid gap-2 rounded-xl border border-white/[0.06] bg-black/10 p-3 text-[11px]">
         <div className="flex items-center justify-between gap-4">
-          <dt className="text-slate-500">Target</dt>
+          <dt className="text-slate-400">Target</dt>
           <dd className="truncate font-mono text-slate-300">{approval.targetField}</dd>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <dt className="text-slate-500">Action</dt>
+          <dt className="text-slate-400">Action</dt>
           <dd className="truncate font-mono text-slate-300">add {approval.proposedTag}</dd>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <dt className="text-slate-500">Plan</dt>
+          <dt className="text-slate-400">Plan</dt>
           <dd className="font-mono text-slate-400">{digestTail(approval.planDigest)}</dd>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <dt className="text-slate-500">Expires</dt>
+          <dt className="text-slate-400">Expires</dt>
           <dd className="text-slate-400">{formatDate(approval.expiresAt)}</dd>
         </div>
       </dl>
@@ -785,7 +891,7 @@ function ApprovalPanel({ approval, source, authStatus, controlLoop }: ApprovalPa
       <label className="mt-4 block">
         <span className="detail-label">Steward note · optional</span>
         <textarea
-          className="mt-2 min-h-20 w-full resize-y rounded-xl border border-white/10 bg-[#07100e] px-3 py-2 text-xs leading-5 text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-emerald-300/40 focus:ring-2 focus:ring-emerald-300/10"
+          className="mt-2 min-h-20 w-full resize-y rounded-xl border border-white/10 bg-[#07100e] px-3 py-2 text-xs leading-5 text-slate-200 outline-none transition placeholder:text-slate-400 focus:border-emerald-300/40 focus:ring-2 focus:ring-emerald-300/10"
           disabled={busy || liveLocked || terminal}
           maxLength={500}
           onChange={(event) => setComment(event.target.value)}
@@ -847,7 +953,7 @@ function ApprovalPanel({ approval, source, authStatus, controlLoop }: ApprovalPa
         )}
         {status.kind === "error" && <p className="text-rose-200">{status.message}</p>}
       </div>
-      <p className="mt-2 text-[10px] leading-4 text-slate-600">
+      <p className="mt-2 text-[10px] leading-4 text-slate-400">
         This client sends only approval ID, decision, and optional note. Mutation arguments remain server-owned.
       </p>
     </section>
@@ -869,8 +975,8 @@ function FindingDetail({
     return (
       <div className="grid min-h-[38rem] place-items-center px-8 text-center">
         <div>
-          <Icon className="mx-auto size-7 text-slate-700" name="file" />
-          <p className="mt-3 text-sm text-slate-500">Select a finding to inspect its evidence.</p>
+          <Icon className="mx-auto size-7 text-slate-400" name="file" />
+          <p className="mt-3 text-sm text-slate-400">Select a finding to inspect its evidence.</p>
         </div>
       </div>
     );
@@ -887,7 +993,7 @@ function FindingDetail({
         <h2 className="mt-3 max-w-3xl text-lg font-semibold leading-7 tracking-[-0.02em] text-white">
           {finding.summary}
         </h2>
-        <p className="mt-2 break-all font-mono text-[10px] leading-4 text-slate-600">{finding.subject}</p>
+        <p className="mt-2 break-all font-mono text-[10px] leading-4 text-slate-400">{finding.subject}</p>
       </header>
 
       <div className="space-y-7 px-5 py-6 sm:px-6">
@@ -908,7 +1014,7 @@ function FindingDetail({
             <Icon name="fingerprint" />
             Source provenance
           </h3>
-          <p className="mt-2 text-[11px] leading-5 text-slate-500">
+          <p className="mt-2 text-[11px] leading-5 text-slate-400">
             Stable pipeline identity establishes source independence; run IDs remain execution evidence.
           </p>
           <div className="mt-4">
@@ -1103,7 +1209,7 @@ export function App() {
           </span>
           <span className="hidden sm:block">
             <span className="block text-sm font-semibold tracking-[-0.02em] text-white">Archon</span>
-            <span className="mt-0.5 block text-[9px] uppercase tracking-[0.15em] text-slate-600">
+            <span className="mt-0.5 block text-[9px] uppercase tracking-[0.15em] text-slate-400">
               Control plane
             </span>
           </span>
@@ -1123,11 +1229,11 @@ export function App() {
           </a>
         </nav>
         <div className="hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 sm:block">
-          <div className="flex items-center gap-2 text-[10px] text-slate-500">
+          <div className="flex items-center gap-2 text-[10px] text-slate-400">
             <Icon className="size-3.5 text-emerald-300" name="shield" />
             Zero-trust writes
           </div>
-          <p className="mt-2 text-[9px] leading-4 text-slate-700">
+          <p className="mt-2 text-[9px] leading-4 text-slate-400">
             Read and mutation credentials are isolated.
           </p>
         </div>
@@ -1140,11 +1246,11 @@ export function App() {
               Scope audit by asset, domain, or platform
             </label>
             <Icon
-              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-600"
+              className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
               name="search"
             />
             <input
-              className="w-full rounded-xl border border-white/[0.07] bg-white/[0.025] py-2.5 pl-10 pr-3 text-xs text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-emerald-300/30 focus:bg-white/[0.04] focus:ring-2 focus:ring-emerald-300/[0.07]"
+              className="w-full rounded-xl border border-white/[0.07] bg-white/[0.025] py-2.5 pl-10 pr-3 text-xs text-slate-200 outline-none transition placeholder:text-slate-400 focus:border-emerald-300/30 focus:bg-white/[0.04] focus:ring-2 focus:ring-emerald-300/[0.07]"
               id="catalog-scope"
               maxLength={256}
               onChange={(event) => setQuery(event.target.value)}
@@ -1243,7 +1349,7 @@ export function App() {
                 </div>
                 <div>
                   <p className="text-xs font-semibold text-slate-100">Integrity posture</p>
-                  <p className="mt-1 text-[11px] text-slate-500">
+                  <p className="mt-1 text-[11px] text-slate-400">
                     {high > 0 ? `${high} high-priority controls need review` : "No high-priority controls"}
                   </p>
                 </div>
@@ -1330,6 +1436,8 @@ export function App() {
             <PipelineTrace trace={report.trace} />
           </div>
 
+          <ModelProvenancePanel provenance={report.modelProvenance} />
+
           <EvidencePack audit={audit} controlLoop={controlLoop} />
 
           <section aria-labelledby="findings-title" className="mt-6" id="findings">
@@ -1373,7 +1481,7 @@ export function App() {
             </div>
             <div className="grid overflow-hidden rounded-b-2xl border border-white/[0.07] bg-[#0a1513]/95 xl:grid-cols-[22rem_minmax(0,1fr)]">
               <div className="max-h-[64rem] overflow-y-auto border-b border-white/[0.06] xl:border-b-0 xl:border-r">
-                <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3 text-[10px] uppercase tracking-[0.13em] text-slate-600">
+                <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-3 text-[10px] uppercase tracking-[0.13em] text-slate-400">
                   <span>{filtered.length} results</span>
                   <span>severity ↓</span>
                 </div>
@@ -1396,7 +1504,7 @@ export function App() {
             </div>
           </section>
 
-          <footer className="mt-8 flex flex-col gap-2 border-t border-white/[0.05] pt-5 text-[10px] text-slate-700 sm:flex-row sm:items-center sm:justify-between">
+          <footer className="mt-8 flex flex-col gap-2 border-t border-white/[0.05] pt-5 text-[10px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
             <p>Archon Metadata Integrity Control Plane · read-first, human-gated</p>
             <p className="font-mono">
               scan {report.scanId} · release {audit.envelope.releaseSha.slice(0, 12)}

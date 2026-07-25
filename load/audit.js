@@ -84,7 +84,10 @@ async function runVu(vu, planned, pipeline, mcpDeps, latencies, errors) {
 
 async function main() {
   const pipeline = new AuditPipeline();
-  const { deps: mcpDeps } = await buildMcpServer({ datahub: new FakeDataHubMcpClient() });
+  const { deps: mcpDeps } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    demoQuery: "sales",
+  });
 
   const perVu = Math.ceil(ITERATIONS / VUS);
   const planned = perVu * VUS;

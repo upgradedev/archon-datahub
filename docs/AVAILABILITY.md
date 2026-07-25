@@ -94,10 +94,12 @@ Successful runs upload
 `production-availability-<release-sha>-<run-attempt>` for 90 days. The artifact contains
 exactly:
 
-- `availability.json` — a sanitized projection with source/run identifiers, hashes of the
-  application origin and response bodies, classification counts, agent names, release
-  SHA, live-runtime-manifest digest, the exact rollback-selector CI ID, newest-deployment
-  identifiers, and explicit public-byte/final-recheck results;
+- `availability.json` — an `archon.production-availability/v2` sanitized projection with
+  source/run identifiers, hashes of the application origin and response bodies, the
+  validated audit-report schema and full privacy-safe model provenance, classification
+  counts, agent names, release SHA, live-runtime-manifest digest, the exact
+  rollback-selector CI ID, newest-deployment identifiers, and explicit
+  public-byte/final-recheck results;
 - `manifest.json` — `archon.production-availability-manifest/v1`, binding the exact
   `availability.json` SHA-256 and byte count; and
 - `SHA256SUMS` — checksums for both JSON files, verified before upload.

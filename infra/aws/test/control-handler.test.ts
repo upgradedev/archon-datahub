@@ -4,6 +4,41 @@ const mockDdbSend = jest.fn();
 const mockS3Send = jest.fn();
 const mockSfnSend = jest.fn();
 const { createHash } = require("node:crypto") as typeof import("node:crypto");
+const { readFileSync } = require("node:fs") as typeof import("node:fs");
+const { resolve } = require("node:path") as typeof import("node:path");
+
+const modelProvenanceCorpus = JSON.parse(
+  readFileSync(
+    resolve(
+      __dirname,
+      "../../../contracts/model-provenance-v1.cases.json"
+    ),
+    "utf8"
+  )
+) as {
+  schemaVersion: string;
+  credentialMacros: Record<string, string[]>;
+  cases: Array<{
+    id: string;
+    valid: boolean;
+    value: Record<string, unknown>;
+  }>;
+};
+
+function materializeCredentialMacros(
+  value: Record<string, unknown>
+): Record<string, unknown> {
+  let encoded = JSON.stringify(value);
+  for (const [name, fragments] of Object.entries(
+    modelProvenanceCorpus.credentialMacros
+  )) {
+    encoded = encoded.replaceAll(
+      `{{credential:${name}}}`,
+      fragments.join("")
+    );
+  }
+  return JSON.parse(encoded) as Record<string, unknown>;
+}
 
 jest.mock(
   "@aws-sdk/client-dynamodb",
@@ -54,6 +89,7 @@ process.env.STATE_MACHINE_ARN =
 process.env.CHECKPOINT_TABLE = "checkpoint-table";
 process.env.APPROVAL_TABLE = "approval-table";
 process.env.EVIDENCE_BUCKET = "evidence-bucket";
+process.env.ARCHON_DEMO_QUERY = "domain:Commerce";
 
 const { handler } = require("../lambda/control/index.js") as {
   handler: (event: Record<string, any>) => Promise<{
@@ -115,9 +151,122 @@ function signed<T extends Record<string, unknown>>(value: T): T & { digest: stri
   return { ...value, digest: digest(value) };
 }
 
+function fixtureModelProvenance() {
+  return {
+    schemaVersion: "archon.model-runtime-provenance/v1",
+    source: "deterministic-fixture",
+    modelCall: false,
+    provider: "fixture",
+    requestedModel: "archon-deterministic-fixture-narrator-v1",
+    returnedModel: null,
+    providerResponseId: null,
+    tokenUsage: null,
+    latencyMs: null
+  };
+}
+
+function liveModelProvenance() {
+  return {
+    schemaVersion: "archon.model-runtime-provenance/v1",
+    source: "live-provider",
+    modelCall: true,
+    provider: "qwen",
+    requestedModel: "qwen-plus",
+    returnedModel: "qwen-plus-2026-07-01",
+    providerResponseId: "chatcmpl-safe-live-001",
+    tokenUsage: {
+      inputTokens: 40,
+      outputTokens: 12,
+      totalTokens: 52
+    },
+    latencyMs: 137
+  };
+}
+
+function readOnlyFixture(
+  auditId: string,
+  modelProvenance: Record<string, unknown>,
+  includeCurrentSchema = true,
+  scanId = "scan-read-only-contract"
+) {
+  const executionArn =
+    `arn:aws:states:eu-west-1:111111111111:execution:` +
+    `archon-staging-control-loop:${auditId}`;
+  const report = {
+    ...(includeCurrentSchema
+      ? { schemaVersion: "archon.audit-report/v1" }
+      : {}),
+    scanId,
+    classification: {
+      totalEntities: 1,
+      withLineage: 0,
+      sensitiveEntities: 0,
+      domains: {},
+      platforms: { snowflake: 1 }
+    },
+    findings: [],
+    narrative: "No findings.",
+    ...(includeCurrentSchema ? { modelProvenance } : {}),
+    trace: []
+  };
+  const reportDigest = digest(report);
+  const auditEvidence = signed({
+    schemaVersion: "archon.audit-evidence/v1",
+    executionId: executionArn,
+    request: {
+      schemaVersion: "archon.audit-request/v1",
+      requestId: auditId,
+      requestedAt: "2026-07-23T12:00:00.000Z",
+      mode: "READ_ONLY"
+    },
+    releaseSha: "release-read-only-contract",
+    report,
+    reportDigest,
+    remediation: {
+      disposition: "MANUAL_ONLY",
+      reason: "READ_ONLY_REQUEST"
+    },
+    createdAt: "2026-07-23T12:00:01.000Z"
+  });
+  return { auditEvidence, executionArn, report, reportDigest };
+}
+
+function mockReadOnlyStatus(
+  fixture: ReturnType<typeof readOnlyFixture>,
+  checkpointSchema:
+    | "archon.audit-result/v1"
+    | "archon.audit-result/v2" = "archon.audit-result/v2"
+): void {
+  mockSfnSend.mockResolvedValue({
+    status: "SUCCEEDED",
+    startDate: new Date("2026-07-23T12:00:00.000Z"),
+    stopDate: new Date("2026-07-23T12:00:02.000Z")
+  });
+  mockDdbSend.mockResolvedValue({
+    Item: {
+      output: {
+        S: JSON.stringify({
+          schemaVersion: checkpointSchema,
+          requiresApproval: false,
+          reportDigest: fixture.reportDigest,
+          evidenceDigest: fixture.auditEvidence.digest,
+          manualOnlyReason: "READ_ONLY_REQUEST"
+        })
+      }
+    }
+  });
+  mockS3Send.mockResolvedValue({
+    Body: {
+      transformToByteArray: async () =>
+        Buffer.from(JSON.stringify(fixture.auditEvidence), "utf8")
+    }
+  });
+}
+
 function terminalFixture(
   auditId: string,
-  decisionValue: "APPROVE" | "REJECT" = "APPROVE"
+  decisionValue: "APPROVE" | "REJECT" = "APPROVE",
+  modelProvenance: Record<string, unknown> = fixtureModelProvenance()
 ) {
   const executionArn =
     `arn:aws:states:eu-west-1:111111111111:execution:` +
@@ -168,7 +317,15 @@ function terminalFixture(
       entityUrn: "urn:li:dataset:private-customer",
       columnPath: "email"
     },
-    provenance: [],
+    provenance: [
+      {
+        sourceKind: "current_view",
+        entityUrn: "urn:li:dataset:private-customer",
+        aspect: "schemaMetadata",
+        observedAt: "2026-07-23T12:00:05.000Z",
+        valueDigest: `sha256:${"8".repeat(64)}`
+      }
+    ],
     blastRadius: {
       downstreamUrns: [],
       maxHops: 3,
@@ -219,6 +376,7 @@ function terminalFixture(
     digest: approvalRequestDigest
   };
   const report = {
+    schemaVersion: "archon.audit-report/v1",
     scanId: "scan-live-terminal",
     classification: {
       totalEntities: 1,
@@ -233,10 +391,34 @@ function terminalFixture(
         severity: "high",
         subject: "urn:li:dataset:private-customer",
         summary: "Missing PII classification",
-        detail: { ruleId: "G6", unclassifiedFields: ["email"] }
+        detail: {
+          ruleId: "G6",
+          unclassifiedFields: ["email"],
+          blastRadius: {
+            rootUrn: "urn:li:dataset:private-customer",
+            downstream: [],
+            maxHops: 3,
+            truncated: false,
+            impact: "none"
+          },
+          provenance: [
+            {
+              source: "pipeline:snowflake",
+              runId: "run-20260725",
+              observedAt: "2026-07-25T10:00:00.000Z",
+              actor: "private-provenance-actor",
+              value: "private-provenance-value",
+              status: "trusted"
+            }
+          ],
+          rawResponse: {
+            providerDebug: "private-detail-must-not-enter-public-report"
+          }
+        }
       }
     ],
     narrative: "One exact G6 finding.",
+    modelProvenance,
     trace: [{ agent: "governance-auditor", produced: "one finding" }]
   };
   const reportDigest = digest(report);
@@ -430,6 +612,8 @@ function terminalFixture(
   const decisionEvidenceText = JSON.stringify(decisionEvidence);
   return {
     approvalId,
+    approvalRequestDigest: approvalRequest.digest,
+    approvalRequestedAt: approvalRequest.requestedAt,
     approvalExpiresAt: approvalRequest.expiresAt,
     auditEvidence,
     decisionEvidenceText,
@@ -442,6 +626,22 @@ function terminalFixture(
     remediationResult,
     reportDigest,
     receipt
+  };
+}
+
+function currentActionableCheckpoint(
+  fixture: ReturnType<typeof terminalFixture>
+): Record<string, unknown> {
+  return {
+    schemaVersion: "archon.audit-result/v2",
+    requiresApproval: true,
+    reportDigest: fixture.reportDigest,
+    evidenceDigest: fixture.auditEvidence.digest,
+    approvalId: fixture.approvalId,
+    planDigest: fixture.planDigest,
+    approvalRequestDigest: fixture.approvalRequestDigest,
+    approvalRequestedAt: fixture.approvalRequestedAt,
+    approvalExpiresAt: fixture.approvalExpiresAt
   };
 }
 
@@ -498,6 +698,19 @@ describe("async audit control Lambda", () => {
     const tooLong = await handler(startEvent({ query: "x".repeat(257) }));
     const missing = await handler(startEvent({}));
     const wildcard = await handler(startEvent({ query: "*" }));
+    const embeddedWildcard = await handler(
+      startEvent({ query: "domain:Commerce*" })
+    );
+    const singleCharacterWildcard = await handler(
+      startEvent({ query: "domain:Commerc?" })
+    );
+    const emptyObject = await handler(startEvent({ query: "{}" }));
+    const padded = await handler(
+      startEvent({ query: " domain:Commerce " })
+    );
+    const outsideDemo = await handler(
+      startEvent({ query: "domain:AnotherDataset" })
+    );
 
     expect(unexpected.statusCode).toBe(400);
     expect(unexpected.payload).toEqual({ error: "unexpected_field" });
@@ -505,6 +718,21 @@ describe("async audit control Lambda", () => {
     expect(missing.payload).toEqual({ error: "query_required" });
     expect(wildcard.payload).toEqual({
       error: "query_must_be_narrow"
+    });
+    expect(embeddedWildcard.payload).toEqual({
+      error: "query_must_be_narrow"
+    });
+    expect(singleCharacterWildcard.payload).toEqual({
+      error: "query_must_be_narrow"
+    });
+    expect(emptyObject.payload).toEqual({
+      error: "query_must_be_narrow"
+    });
+    expect(padded.payload).toEqual({
+      error: "query_must_be_trimmed"
+    });
+    expect(outsideDemo.payload).toEqual({
+      error: "query_outside_demo_scope"
     });
     expect(mockSfnSend).not.toHaveBeenCalled();
   });
@@ -552,75 +780,11 @@ describe("async audit control Lambda", () => {
 
   test("verifies immutable evidence and projects a pending approval without its task token", async () => {
     const auditId = "d".repeat(64);
-    const executionArn =
-      `arn:aws:states:eu-west-1:111111111111:execution:` +
-      `archon-staging-control-loop:${auditId}`;
-    const report = {
-      scanId: "scan-live-1234",
-      classification: {
-        totalEntities: 1,
-        withLineage: 1,
-        sensitiveEntities: 1,
-        domains: { Customer: 1 },
-        platforms: { snowflake: 1 }
-      },
-      findings: [
-        {
-          type: "governance_violation",
-          severity: "high",
-          subject: "urn:li:dataset:customer",
-          summary: "Missing PII classification",
-          detail: { ruleId: "G6", unclassifiedFields: ["email"] }
-        }
-      ],
-      narrative: "One exact G6 finding.",
-      trace: [{ agent: "governance-auditor", produced: "one finding" }]
-    };
-    const reportDigest = digest(report);
-    const planDigest = `sha256:${"5".repeat(64)}`;
-    const unsignedEvidence = {
-      schemaVersion: "archon.audit-evidence/v1",
-      executionId: executionArn,
-      request: {
-        schemaVersion: "archon.audit-request/v1",
-        requestId: auditId,
-        requestedAt: "2026-07-23T12:00:00.000Z"
-      },
-      releaseSha: "release-live-123",
-      report,
-      reportDigest,
-      remediation: {
-        disposition: "ACTIONABLE",
-        dossier: {
-          dossierId: "dossier-live-1234",
-          digest: `sha256:${"6".repeat(64)}`,
-          policyDigest: `sha256:${"7".repeat(64)}`,
-          createdAt: "2026-07-23T12:00:05.000Z",
-          finding: {
-            subject: "urn:li:dataset:customer"
-          },
-          target: { columnPath: "email" },
-          provenance: [],
-          blastRadius: { downstreamUrns: [] }
-        },
-        plan: {
-          digest: planDigest,
-          risk: "low",
-          action: {
-            arguments: { tag_urns: ["urn:li:tag:PII"] }
-          },
-          expectedBefore: { tags: [] },
-          expectedAfter: { tags: ["urn:li:tag:PII"] }
-        },
-        approvalRequest: {
-          approvalId: "approval-live-1234",
-          expiresAt: "2026-07-30T12:00:00.000Z"
-        }
-      },
-      createdAt: "2026-07-23T12:00:05.000Z"
-    };
-    const evidenceDigest = digest(unsignedEvidence);
-    const evidence = { ...unsignedEvidence, digest: evidenceDigest };
+    const fixture = terminalFixture(
+      auditId,
+      "APPROVE",
+      liveModelProvenance()
+    );
     mockSfnSend.mockResolvedValue({
       status: "RUNNING",
       startDate: new Date("2026-07-23T12:00:00.000Z")
@@ -631,14 +795,7 @@ describe("async audit control Lambda", () => {
         return {
           Item: {
             output: {
-              S: JSON.stringify({
-                schemaVersion: "archon.audit-result/v1",
-                requiresApproval: true,
-                reportDigest,
-                evidenceDigest,
-                approvalId: "approval-live-1234",
-                planDigest
-              })
+              S: JSON.stringify(currentActionableCheckpoint(fixture))
             }
           }
         };
@@ -646,13 +803,180 @@ describe("async audit control Lambda", () => {
       return {
         Item: {
           status: { S: "PENDING" },
-          evidenceDigest: { S: evidenceDigest },
-          planDigest: { S: planDigest },
+          evidenceDigest: { S: fixture.auditEvidence.digest },
+          planDigest: { S: fixture.planDigest },
           taskToken: { S: "opaque-task-token-must-never-leak" },
-          approvalExpiresAt: { S: "2026-07-30T12:00:00.000Z" },
-          expiresAt: { N: "1785412800" }
+          approvalExpiresAt: { S: fixture.approvalExpiresAt },
+          expiresAt: {
+            N: String(Math.floor(Date.parse(fixture.approvalExpiresAt) / 1000))
+          }
         }
       };
+    });
+    mockS3Send.mockResolvedValue({
+      Body: {
+        transformToByteArray: async () =>
+          Buffer.from(JSON.stringify(fixture.auditEvidence), "utf8")
+      }
+    });
+
+    const result = await handler(statusEvent(auditId));
+    const body = result.payload;
+
+    expect(result.statusCode).toBe(200);
+    expect(body.status).toBe("AWAITING_APPROVAL");
+    expect(body.releaseSha).toBe("release-live-terminal");
+    expect(body.report.modelProvenance).toEqual(liveModelProvenance());
+    expect(body.report.findings[0].detail.dossier).toEqual({
+      dossierId: fixture.auditEvidence.remediation.dossier.dossierId,
+      digest: fixture.auditEvidence.remediation.dossier.digest,
+      policyDigest: fixture.auditEvidence.remediation.dossier.policyDigest,
+      generatedAt: fixture.auditEvidence.remediation.dossier.createdAt,
+      evidenceCount: 3
+    });
+    expect(body.report.findings[0].detail.approval).toEqual({
+      approvalId: fixture.approvalId,
+      expiresAt: fixture.approvalExpiresAt,
+      targetField: "email",
+      proposedTag: "urn:li:tag:PII",
+      before: [],
+      after: ["urn:li:tag:PII"],
+      planDigest: fixture.planDigest,
+      risk: "low"
+    });
+    expect(body.report.findings[0].detail.provenance).toEqual([
+      {
+        source: "current_view:schemaMetadata",
+        runId: `sha256:${"8".repeat(64)}`,
+        observedAt: "2026-07-23T12:00:05.000Z",
+        status: "trusted"
+      }
+    ]);
+    expect(JSON.stringify(body)).not.toContain("opaque-task-token");
+    expect(JSON.stringify(body)).not.toContain(fixture.executionArn);
+    expect(JSON.stringify(body)).not.toContain(
+      "private-detail-must-not-enter-public-report"
+    );
+    expect(JSON.stringify(body)).not.toContain("rawResponse");
+    expect(JSON.stringify(body)).not.toContain("private-provenance-actor");
+    expect(JSON.stringify(body)).not.toContain("private-provenance-value");
+  });
+
+  test("rejects a v2 actionable checkpoint stripped of immutable approval-request bindings", async () => {
+    const auditId = "8".repeat(64);
+    const fixture = terminalFixture(auditId);
+    const checkpoint = without(currentActionableCheckpoint(fixture), [
+      "approvalRequestDigest",
+      "approvalRequestedAt",
+      "approvalExpiresAt"
+    ]);
+    mockSfnSend.mockResolvedValue({
+      status: "RUNNING",
+      startDate: new Date("2026-07-23T12:00:00.000Z")
+    });
+    mockDdbSend.mockResolvedValue({
+      Item: { output: { S: JSON.stringify(checkpoint) } }
+    });
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(502);
+    expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  const partialApprovalBindingCases: Array<
+    [label: string, retainedKeys: string[]]
+  > = [
+    ["digest only", ["approvalRequestDigest"]],
+    ["timestamps only", ["approvalRequestedAt", "approvalExpiresAt"]]
+  ];
+
+  test.each(partialApprovalBindingCases)(
+    "rejects a v2 actionable checkpoint with partial approval-request bindings: %s",
+    async (_label, retainedKeys) => {
+      const auditId = "9".repeat(64);
+      const fixture = terminalFixture(auditId);
+      const complete = currentActionableCheckpoint(fixture);
+      const checkpoint = {
+        ...without(complete, [
+          "approvalRequestDigest",
+          "approvalRequestedAt",
+          "approvalExpiresAt"
+        ]),
+        ...Object.fromEntries(
+          retainedKeys.map((key) => [key, complete[key]])
+        )
+      };
+      mockSfnSend.mockResolvedValue({
+        status: "RUNNING",
+        startDate: new Date("2026-07-23T12:00:00.000Z")
+      });
+      mockDdbSend.mockResolvedValue({
+        Item: { output: { S: JSON.stringify(checkpoint) } }
+      });
+
+      const result = await handler(statusEvent(auditId));
+
+      expect(result.statusCode).toBe(502);
+      expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+      expect(mockS3Send).not.toHaveBeenCalled();
+    }
+  );
+
+  test.each(["2026-07-23", "2026-07-23T12:00:05"])(
+    "rejects a v2 actionable checkpoint with a non-RFC3339 request instant: %s",
+    async (approvalRequestedAt) => {
+      const auditId = "0".repeat(64);
+      const fixture = terminalFixture(auditId);
+      const checkpoint = {
+        ...currentActionableCheckpoint(fixture),
+        approvalRequestedAt
+      };
+      mockSfnSend.mockResolvedValue({
+        status: "RUNNING",
+        startDate: new Date("2026-07-23T12:00:00.000Z")
+      });
+      mockDdbSend.mockResolvedValue({
+        Item: { output: { S: JSON.stringify(checkpoint) } }
+      });
+
+      const result = await handler(statusEvent(auditId));
+
+      expect(result.statusCode).toBe(502);
+      expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+      expect(mockS3Send).not.toHaveBeenCalled();
+    }
+  );
+
+  test("retains v1 actionable cutover support when historical request bindings are absent", async () => {
+    const auditId = "a".repeat(64);
+    const fixture = terminalFixture(auditId);
+    const evidence: any = JSON.parse(JSON.stringify(fixture.auditEvidence));
+    delete evidence.report.schemaVersion;
+    delete evidence.report.modelProvenance;
+    evidence.reportDigest = digest(evidence.report);
+    delete evidence.digest;
+    evidence.digest = digest(evidence);
+    const checkpoint = without(
+      {
+        ...currentActionableCheckpoint(fixture),
+        schemaVersion: "archon.audit-result/v1",
+        reportDigest: evidence.reportDigest,
+        evidenceDigest: evidence.digest
+      },
+      [
+        "approvalRequestDigest",
+        "approvalRequestedAt",
+        "approvalExpiresAt"
+      ]
+    );
+    mockSfnSend.mockResolvedValue({
+      status: "RUNNING",
+      startDate: new Date("2026-07-23T12:00:00.000Z")
+    });
+    mockDdbSend.mockResolvedValue({
+      Item: { output: { S: JSON.stringify(checkpoint) } }
     });
     mockS3Send.mockResolvedValue({
       Body: {
@@ -662,21 +986,48 @@ describe("async audit control Lambda", () => {
     });
 
     const result = await handler(statusEvent(auditId));
-    const body = result.payload;
 
-    expect(result.statusCode).toBe(200);
-    expect(body.status).toBe("AWAITING_APPROVAL");
-    expect(body.releaseSha).toBe("release-live-123");
-    expect(body.report.findings[0].detail.approval).toEqual(
-      expect.objectContaining({
-        approvalId: "approval-live-1234",
-        targetField: "email",
-        proposedTag: "urn:li:tag:PII",
-        planDigest
-      })
+    expect(result.statusCode).toBe(410);
+    expect(result.payload).toEqual({
+      error: "audit_schema_retired",
+      rerunRequired: true
+    });
+  });
+
+  test("rejects outer-digest-valid evidence with a tampered nested remediation plan", async () => {
+    const auditId = "b".repeat(64);
+    const fixture = terminalFixture(auditId);
+    const evidence: any = JSON.parse(JSON.stringify(fixture.auditEvidence));
+    evidence.remediation.plan.action.arguments.tag_urns.push(
+      "urn:li:tag:UNTRUSTED_SECOND_TAG"
     );
-    expect(JSON.stringify(body)).not.toContain("opaque-task-token");
-    expect(JSON.stringify(body)).not.toContain(executionArn);
+    delete evidence.digest;
+    evidence.digest = digest(evidence);
+    const checkpoint = {
+      ...currentActionableCheckpoint(fixture),
+      evidenceDigest: evidence.digest
+    };
+    mockSfnSend.mockResolvedValue({
+      status: "RUNNING",
+      startDate: new Date("2026-07-23T12:00:00.000Z")
+    });
+    mockDdbSend.mockResolvedValue({
+      Item: { output: { S: JSON.stringify(checkpoint) } }
+    });
+    mockS3Send.mockResolvedValue({
+      Body: {
+        transformToByteArray: async () =>
+          Buffer.from(JSON.stringify(evidence), "utf8")
+      }
+    });
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(502);
+    expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+    expect(JSON.stringify(result.payload)).not.toContain(
+      "UNTRUSTED_SECOND_TAG"
+    );
   });
 
   test("verifies and sanitizes terminal governed execution evidence", async () => {
@@ -698,14 +1049,7 @@ describe("async audit control Lambda", () => {
         return {
           Item: {
             output: {
-              S: JSON.stringify({
-                schemaVersion: "archon.audit-result/v1",
-                requiresApproval: true,
-                reportDigest: fixture.reportDigest,
-                evidenceDigest: fixture.auditEvidence.digest,
-                approvalId: fixture.approvalId,
-                planDigest: fixture.planDigest
-              })
+              S: JSON.stringify(currentActionableCheckpoint(fixture))
             }
           }
         };
@@ -765,6 +1109,7 @@ describe("async audit control Lambda", () => {
       executionEvidenceDigest: fixture.executionEvidence.digest
     });
     expect(body.approval.expiresAt).toBe(fixture.approvalExpiresAt);
+    expect(body.report.modelProvenance).toEqual(fixtureModelProvenance());
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain("private-steward-subject");
     expect(serialized).not.toContain("server-held-token");
@@ -809,14 +1154,7 @@ describe("async audit control Lambda", () => {
         return {
           Item: {
             output: {
-              S: JSON.stringify({
-                schemaVersion: "archon.audit-result/v1",
-                requiresApproval: true,
-                reportDigest: fixture.reportDigest,
-                evidenceDigest: fixture.auditEvidence.digest,
-                approvalId: fixture.approvalId,
-                planDigest: fixture.planDigest
-              })
+              S: JSON.stringify(currentActionableCheckpoint(fixture))
             }
           }
         };
@@ -880,14 +1218,7 @@ describe("async audit control Lambda", () => {
         return {
           Item: {
             output: {
-              S: JSON.stringify({
-                schemaVersion: "archon.audit-result/v1",
-                requiresApproval: true,
-                reportDigest: fixture.reportDigest,
-                evidenceDigest: fixture.auditEvidence.digest,
-                approvalId: fixture.approvalId,
-                planDigest: fixture.planDigest
-              })
+              S: JSON.stringify(currentActionableCheckpoint(fixture))
             }
           }
         };
@@ -950,6 +1281,7 @@ describe("async audit control Lambda", () => {
       `arn:aws:states:eu-west-1:111111111111:execution:` +
       `archon-staging-control-loop:${auditId}`;
     const report = {
+      schemaVersion: "archon.audit-report/v1",
       scanId: "scan-read-only-terminal",
       classification: {
         totalEntities: 0,
@@ -960,6 +1292,7 @@ describe("async audit control Lambda", () => {
       },
       findings: [],
       narrative: "No findings.",
+      modelProvenance: fixtureModelProvenance(),
       trace: []
     };
     const reportDigest = digest(report);
@@ -995,10 +1328,11 @@ describe("async audit control Lambda", () => {
       Item: {
         output: {
           S: JSON.stringify({
-            schemaVersion: "archon.audit-result/v1",
+            schemaVersion: "archon.audit-result/v2",
             requiresApproval: false,
             reportDigest,
-            evidenceDigest: auditEvidence.digest
+            evidenceDigest: auditEvidence.digest,
+            manualOnlyReason: "READ_ONLY_REQUEST"
           })
         }
       }
@@ -1015,12 +1349,196 @@ describe("async audit control Lambda", () => {
 
     expect(result.statusCode).toBe(200);
     expect(body.result).toEqual({ outcome: "READ_ONLY_COMPLETE" });
+    expect(body.report.modelProvenance).toEqual(fixtureModelProvenance());
     expect(JSON.stringify(body)).not.toContain("read-only-output-must-not-leak");
     expect(mockDdbSend).toHaveBeenCalledTimes(1);
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     expect(mockS3Send.mock.calls[0]![0].input.Key).toBe(
       `v1/audit/sha256/${auditEvidence.digest.slice(7)}.json`
     );
+  });
+
+  test("accepts live provenance with explicitly unavailable token usage", async () => {
+    const auditId = "2".repeat(64);
+    const fixture = readOnlyFixture(auditId, {
+      ...liveModelProvenance(),
+      tokenUsage: null
+    });
+    mockReadOnlyStatus(fixture);
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(200);
+    expect(result.payload.report.modelProvenance).toEqual({
+      ...liveModelProvenance(),
+      tokenUsage: null
+    });
+  });
+
+  test("keeps the control projection conformant with the shared provenance corpus", async () => {
+    expect(modelProvenanceCorpus.schemaVersion).toBe(
+      "archon.model-provenance-conformance/v1"
+    );
+    for (const [index, candidate] of modelProvenanceCorpus.cases.entries()) {
+      const auditId = index.toString(16).padStart(64, "0");
+      const provenance = materializeCredentialMacros(candidate.value);
+      const fixture = readOnlyFixture(auditId, provenance);
+      mockReadOnlyStatus(fixture);
+
+      const result = await handler(statusEvent(auditId));
+
+      expect(result.statusCode).toBe(candidate.valid ? 200 : 502);
+      if (candidate.valid) {
+        expect(result.payload.report.modelProvenance).toEqual(provenance);
+      } else {
+        expect(result.payload).toEqual({
+          error: "control_plane_unavailable"
+        });
+      }
+    }
+  });
+
+  const invalidModelProvenanceCases: Array<
+    [label: string, provenance: Record<string, unknown>]
+  > = [
+    [
+      "missing required field",
+      without(fixtureModelProvenance(), ["latencyMs"])
+    ],
+    [
+      "unexpected private field",
+      { ...fixtureModelProvenance(), prompt: "must-not-be-retained" }
+    ],
+    [
+      "fixture/live discriminant confusion",
+      {
+        ...fixtureModelProvenance(),
+        source: "live-provider",
+        modelCall: true,
+        provider: "qwen"
+      }
+    ],
+    [
+      "credential embedded in returned model",
+      {
+        ...liveModelProvenance(),
+        returnedModel: `model_sk-${"x".repeat(32)}`
+      }
+    ],
+    [
+      "credential embedded in provider response id",
+      {
+        ...liveModelProvenance(),
+        providerResponseId: `resp_sk-${"x".repeat(32)}`
+      }
+    ],
+    [
+      "inconsistent token usage",
+      {
+        ...liveModelProvenance(),
+        tokenUsage: {
+          inputTokens: 40,
+          outputTokens: 12,
+          totalTokens: 999
+        }
+      }
+    ],
+    [
+      "excessive latency",
+      { ...liveModelProvenance(), latencyMs: 3_600_001 }
+    ]
+  ];
+
+  test.each(invalidModelProvenanceCases)(
+    "fails closed on %s in model provenance",
+    async (_label, provenance) => {
+      const auditId = "3".repeat(64);
+      const fixture = readOnlyFixture(auditId, provenance);
+      mockReadOnlyStatus(fixture);
+
+      const result = await handler(statusEvent(auditId));
+
+      expect(result.statusCode).toBe(502);
+      expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+      expect(JSON.stringify(result.payload)).not.toContain("must-not-be-retained");
+      expect(JSON.stringify(result.payload)).not.toContain("sk-");
+    }
+  );
+
+  test("returns an explicit rerun-required cutover for a digest-valid v1 five-key report", async () => {
+    const auditId = "4".repeat(64);
+    const fixture = readOnlyFixture(
+      auditId,
+      fixtureModelProvenance(),
+      false
+    );
+    mockReadOnlyStatus(fixture, "archon.audit-result/v1");
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(410);
+    expect(result.payload).toEqual({
+      error: "audit_schema_retired",
+      rerunRequired: true
+    });
+    expect(JSON.stringify(result.payload)).not.toContain("scan-read-only-contract");
+  });
+
+  test("recognizes a historically valid v1 five-key report with an empty scan id", async () => {
+    const auditId = "5".repeat(64);
+    const fixture = readOnlyFixture(
+      auditId,
+      fixtureModelProvenance(),
+      false,
+      ""
+    );
+    mockReadOnlyStatus(fixture, "archon.audit-result/v1");
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(410);
+    expect(result.payload).toEqual({
+      error: "audit_schema_retired",
+      rerunRequired: true
+    });
+  });
+
+  test("fails closed when v1 legacy evidence is tampered after signing", async () => {
+    const auditId = "6".repeat(64);
+    const fixture = readOnlyFixture(
+      auditId,
+      fixtureModelProvenance(),
+      false
+    );
+    mockReadOnlyStatus(fixture, "archon.audit-result/v1");
+    fixture.auditEvidence.executionId =
+      "arn:aws:states:eu-west-1:111111111111:execution:" +
+      "archon-staging-control-loop:tampered-legacy-binding";
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(502);
+    expect(result.payload).toEqual({ error: "control_plane_unavailable" });
+  });
+
+  test("does not misclassify a re-signed stripped v2 report as retired evidence", async () => {
+    const auditId = "7".repeat(64);
+    const fixture = readOnlyFixture(
+      auditId,
+      fixtureModelProvenance()
+    );
+    delete fixture.report.schemaVersion;
+    delete fixture.report.modelProvenance;
+    fixture.reportDigest = digest(fixture.report);
+    fixture.auditEvidence.reportDigest = fixture.reportDigest;
+    const { digest: _oldDigest, ...unsignedEvidence } = fixture.auditEvidence;
+    fixture.auditEvidence.digest = digest(unsignedEvidence);
+    mockReadOnlyStatus(fixture);
+
+    const result = await handler(statusEvent(auditId));
+
+    expect(result.statusCode).toBe(502);
+    expect(result.payload).toEqual({ error: "control_plane_unavailable" });
   });
 
   test("fails closed on malformed capability ids before AWS", async () => {

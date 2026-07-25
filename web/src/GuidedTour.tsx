@@ -173,7 +173,7 @@ export function GuidedTour({ targetIds }: GuidedTourProps = {}) {
             >
               Show this area
             </button>
-            <span className="text-[10px] leading-4 text-slate-500">
+            <span className="text-[10px] leading-4 text-slate-400">
               Scrolls only after this explicit action.
             </span>
           </div>

@@ -9,6 +9,7 @@ import {
   type EvidencePackFile,
 } from "./evidence-pack";
 import { previewAudit } from "./fixtures";
+import modelProvenanceCorpus from "../../contracts/model-provenance-v1.cases.json";
 import type {
   ControlLoopStatus,
   LoadedAudit,
@@ -44,6 +45,19 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function materializeCredentialMacros(value: unknown): unknown {
+  let encoded = JSON.stringify(value);
+  for (const [name, fragments] of Object.entries(
+    modelProvenanceCorpus.credentialMacros,
+  )) {
+    encoded = encoded.replaceAll(
+      `{{credential:${name}}}`,
+      fragments.join(""),
+    );
+  }
+  return JSON.parse(encoded) as unknown;
 }
 
 beforeEach(() => {
@@ -113,6 +127,37 @@ async function reseal(
 }
 
 describe("browser judge evidence pack", () => {
+  it("keeps evidence export conformant with the shared provenance corpus", async () => {
+    expect(modelProvenanceCorpus.schemaVersion).toBe(
+      "archon.model-provenance-conformance/v1",
+    );
+    for (const candidate of modelProvenanceCorpus.cases) {
+      const provenance = materializeCredentialMacros(candidate.value);
+      const loaded = structuredClone(fixtureAudit);
+      loaded.source =
+        (
+          provenance as {
+            source?: unknown;
+          }
+        ).source === "live-provider"
+          ? "live"
+          : "fixture";
+      (
+        loaded.envelope.report as unknown as Record<string, unknown>
+      ).modelProvenance = provenance;
+
+      if (candidate.valid) {
+        await expect(buildBrowserEvidencePack(loaded)).resolves.toMatchObject({
+          schemaVersion: "archon.browser-evidence-pack/v1",
+        });
+      } else {
+        await expect(buildBrowserEvidencePack(loaded)).rejects.toThrow(
+          /model runtime provenance|public allowlist/iu,
+        );
+      }
+    }
+  });
+
   it("builds a deterministic exact public projection with honest integrity claims", async () => {
     const first = await buildBrowserEvidencePack(fixtureAudit);
     const second = await buildBrowserEvidencePack(fixtureAudit);
@@ -157,6 +202,94 @@ describe("browser judge evidence pack", () => {
     expect(reportText).not.toContain('"trace"');
     expect(JSON.stringify(first)).not.toContain("taskToken");
     expect(JSON.stringify(first)).not.toContain("DATAHUB_GMS_TOKEN");
+
+    const report = JSON.parse(reportText) as {
+      modelProvenance?: unknown;
+    };
+    expect(report.modelProvenance).toEqual(
+      fixtureAudit.envelope.report.modelProvenance,
+    );
+    const markdown = first.files.find(
+      (entry) => entry.path === "audit/report.md",
+    );
+    expect(markdown?.content).toContain("## Model runtime provenance");
+    expect(markdown?.content).toContain("- Model call: `no`");
+    expect(markdown?.content).toContain(
+      "No provider model API call occurred",
+    );
+    const sarifFile = first.files.find(
+      (entry) => entry.path === "audit/report.sarif",
+    );
+    const sarif = JSON.parse(sarifFile?.content ?? "{}") as {
+      runs?: Array<{
+        properties?: { modelProvenance?: unknown };
+      }>;
+    };
+    expect(sarif.runs?.[0]?.properties?.modelProvenance).toEqual(
+      report.modelProvenance,
+    );
+  });
+
+  it("renders live privacy-safe model provenance consistently across all public artifacts", async () => {
+    const liveModelProvenance = {
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "live-provider",
+      modelCall: true,
+      provider: "qwen",
+      requestedModel: "qwen/qwen3-235b-a22b",
+      returnedModel: "qwen/qwen3-235b-a22b",
+      providerResponseId: "resp_qwen_20260725_0001",
+      tokenUsage: {
+        inputTokens: 384,
+        outputTokens: 96,
+        totalTokens: 480,
+      },
+      latencyMs: 842,
+    } as const;
+    const liveAudit: LoadedAudit = {
+      source: "live",
+      envelope: {
+        ...fixtureAudit.envelope,
+        report: {
+          ...fixtureAudit.envelope.report,
+          modelProvenance: liveModelProvenance,
+        },
+      },
+    };
+
+    const pack = await buildBrowserEvidencePack(liveAudit);
+    expect(pack.verification.valid).toBe(true);
+    const reportFile = pack.files.find(
+      (entry) => entry.path === "audit/report.json",
+    );
+    const report = JSON.parse(reportFile?.content ?? "{}") as {
+      modelProvenance?: unknown;
+    };
+    expect(report.modelProvenance).toEqual(liveModelProvenance);
+
+    const markdown = pack.files.find(
+      (entry) => entry.path === "audit/report.md",
+    );
+    expect(markdown?.content).toContain("- Model call: `yes`");
+    expect(markdown?.content).toContain("- Provider: `qwen`");
+    expect(markdown?.content).toContain(
+      "- Token usage: 384 input / 96 output / 480 total",
+    );
+    expect(markdown?.content).toContain(
+      "- Client-observed latency: 842 ms",
+    );
+
+    const sarifFile = pack.files.find(
+      (entry) => entry.path === "audit/report.sarif",
+    );
+    const sarif = JSON.parse(sarifFile?.content ?? "{}") as {
+      runs?: Array<{
+        properties?: { modelProvenance?: unknown };
+      }>;
+    };
+    expect(sarif.runs?.[0]?.properties?.modelProvenance).toEqual(
+      liveModelProvenance,
+    );
   });
 
   it("fails verification when one public artifact is modified", async () => {
@@ -180,29 +313,13 @@ describe("browser judge evidence pack", () => {
   });
 
   it("drops arbitrary raw detail and rejects credential-shaped public text", async () => {
-    const extraPrivateDetail: LoadedAudit = {
-      ...fixtureAudit,
-      envelope: {
-        ...fixtureAudit.envelope,
-        report: {
-          ...fixtureAudit.envelope.report,
-          findings: fixtureAudit.envelope.report.findings.map(
-            (finding, index) =>
-              index === 0
-                ? {
-                    ...finding,
-                    detail: {
-                      ...finding.detail,
-                      secret: "ordinary-private-provider-value",
-                      raw_provider_debug: {
-                        opaque: "must-not-enter-the-pack",
-                      },
-                    },
-                  }
-                : finding,
-          ),
-        },
-      },
+    const extraPrivateDetail = structuredClone(fixtureAudit);
+    const rawDetail =
+      extraPrivateDetail.envelope.report.findings[0]!
+        .detail as unknown as Record<string, unknown>;
+    rawDetail["secret"] = "ordinary-private-provider-value";
+    rawDetail["raw_provider_debug"] = {
+      opaque: "must-not-enter-the-pack",
     };
     const pack = await buildBrowserEvidencePack(extraPrivateDetail);
     const serialized = JSON.stringify(pack);
@@ -244,6 +361,69 @@ describe("browser judge evidence pack", () => {
     await expect(
       buildBrowserEvidencePack(credentialInDynamicKey),
     ).rejects.toThrow(/credential-shaped key/u);
+  });
+
+  it("rejects credential-shaped substrings embedded in model provenance", async () => {
+    const loaded = structuredClone(fixtureAudit);
+    loaded.source = "live";
+    loaded.envelope.report.modelProvenance = {
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "live-provider",
+      modelCall: true,
+      provider: "custom",
+      requestedModel: "custom-model",
+      returnedModel: "custom-model",
+      providerResponseId: "response-safe-001",
+      tokenUsage: null,
+      latencyMs: 12,
+    };
+    loaded.envelope.report.modelProvenance.returnedModel =
+      `model_sk-${"x".repeat(32)}`;
+    await expect(buildBrowserEvidencePack(loaded)).rejects.toThrow(
+      /invalid|outside the exact public allowlist/u,
+    );
+
+    loaded.envelope.report.modelProvenance.returnedModel = "qwen-plus";
+    loaded.envelope.report.modelProvenance.providerResponseId =
+      `resp_sk-${"x".repeat(32)}`;
+    await expect(buildBrowserEvidencePack(loaded)).rejects.toThrow(
+      /invalid|outside the exact public allowlist/u,
+    );
+  });
+
+  it("rejects aligned short secret and JWT shapes anywhere in public evidence", async () => {
+    const unsafeValues = [
+      `sk-${"x".repeat(12)}`,
+      `eyJ${"a".repeat(8)}.${"b".repeat(8)}.${"c".repeat(8)}`,
+    ];
+    for (const unsafeValue of unsafeValues) {
+      const loaded = structuredClone(fixtureAudit);
+      loaded.envelope.report.narrative = `Provider diagnostic ${unsafeValue}`;
+      await expect(buildBrowserEvidencePack(loaded)).rejects.toThrow(
+        /credential-shaped value/u,
+      );
+    }
+  });
+
+  it("rejects extra private model provenance fields before export", async () => {
+    const privateProvenance: LoadedAudit = {
+      ...fixtureAudit,
+      envelope: {
+        ...fixtureAudit.envelope,
+        report: {
+          ...fixtureAudit.envelope.report,
+          modelProvenance: {
+            ...fixtureAudit.envelope.report.modelProvenance,
+            endpoint: "https://provider.example.invalid/v1",
+            prompt: "must-never-enter-the-pack",
+          } as unknown as LoadedAudit["envelope"]["report"]["modelProvenance"],
+        },
+      },
+    };
+
+    await expect(
+      buildBrowserEvidencePack(privateProvenance),
+    ).rejects.toThrow(/exact public allowlist/u);
   });
 
   it("checks cancellation after the asynchronous digest and before download", async () => {
@@ -351,6 +531,80 @@ describe("browser judge evidence pack", () => {
       pack.files[reportIndex]?.content ?? "{}",
     ) as Record<string, unknown>;
     report["unexpected"] = "not in the public contract";
+    const changed = await file(
+      "audit/report.json",
+      "application/json",
+      `${JSON.stringify(report, null, 2)}\n`,
+    );
+    const files = pack.files.map((entry, index) =>
+      index === reportIndex ? changed : entry,
+    );
+    const resealed = await reseal(pack, files);
+
+    const verification = await verifyBrowserEvidencePack(resealed);
+    expect(
+      verification.checks.find(
+        (check) => check.checkId === "FILE_DIGESTS_VALID",
+      )?.passed,
+    ).toBe(true);
+    expect(
+      verification.checks.find(
+        (check) => check.checkId === "PUBLIC_PROJECTION_VALID",
+      )?.passed,
+    ).toBe(false);
+    expect(verification.valid).toBe(false);
+  });
+
+  it("fails closed on legacy report projections without model provenance", async () => {
+    const pack = await buildBrowserEvidencePack(fixtureAudit);
+    const reportIndex = pack.files.findIndex(
+      (entry) => entry.path === "audit/report.json",
+    );
+    expect(reportIndex).toBeGreaterThanOrEqual(0);
+    const report = JSON.parse(
+      pack.files[reportIndex]?.content ?? "{}",
+    ) as Record<string, unknown>;
+    delete report["modelProvenance"];
+    const changed = await file(
+      "audit/report.json",
+      "application/json",
+      `${JSON.stringify(report, null, 2)}\n`,
+    );
+    const files = pack.files.map((entry, index) =>
+      index === reportIndex ? changed : entry,
+    );
+    const resealed = await reseal(pack, files);
+
+    const verification = await verifyBrowserEvidencePack(resealed);
+    expect(
+      verification.checks.find(
+        (check) => check.checkId === "FILE_DIGESTS_VALID",
+      )?.passed,
+    ).toBe(true);
+    expect(
+      verification.checks.find(
+        (check) => check.checkId === "PUBLIC_PROJECTION_VALID",
+      )?.passed,
+    ).toBe(false);
+    expect(verification.valid).toBe(false);
+  });
+
+  it("rejects a valid JSON provenance change when Markdown and SARIF replay do not match", async () => {
+    const pack = await buildBrowserEvidencePack(fixtureAudit);
+    const reportIndex = pack.files.findIndex(
+      (entry) => entry.path === "audit/report.json",
+    );
+    expect(reportIndex).toBeGreaterThanOrEqual(0);
+    const report = JSON.parse(
+      pack.files[reportIndex]?.content ?? "{}",
+    ) as {
+      modelProvenance?: Record<string, unknown>;
+    };
+    expect(report.modelProvenance).toBeDefined();
+    if (report.modelProvenance) {
+      report.modelProvenance["requestedModel"] =
+        "archon-deterministic-fixture-narrator-v2";
+    }
     const changed = await file(
       "audit/report.json",
       "application/json",

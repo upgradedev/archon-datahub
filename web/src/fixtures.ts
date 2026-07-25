@@ -41,16 +41,12 @@ const findings: Finding[] = [
           source: "pipeline:snowflake-prod",
           runId: "snowflake-20260723-0918",
           observedAt: "2026-07-23T09:18:05.000Z",
-          actor: "urn:li:corpuser:archon-ingestion",
-          value: "SchemaField(email), tags=[]",
           status: "trusted",
         },
         {
           source: "pipeline:dbt-cloud-prod",
           runId: "dbt-20260723-0927",
           observedAt: "2026-07-23T09:27:41.000Z",
-          actor: "urn:li:corpuser:dbt-cloud",
-          value: "SchemaField(email), tags=[]",
           status: "observed",
         },
       ],
@@ -81,10 +77,6 @@ const findings: Finding[] = [
     recommendation: "Ask the Commerce steward to select the authoritative ownership source.",
     detail: {
       attribute: "owner",
-      values: {
-        "pipeline:snowflake-prod": "urn:li:corpGroup:commerce-platform",
-        "pipeline:dbt-cloud-prod": "urn:li:corpGroup:analytics-engineering",
-      },
       blastRadius: blast(
         "urn:li:dataset:(urn:li:dataPlatform:snowflake,prod.orders,PROD)",
         [
@@ -102,16 +94,12 @@ const findings: Finding[] = [
           source: "pipeline:snowflake-prod",
           runId: "snowflake-20260723-0918",
           observedAt: "2026-07-23T09:18:05.000Z",
-          actor: "urn:li:corpuser:platform-ingestion",
-          value: "commerce-platform",
           status: "trusted",
         },
         {
           source: "pipeline:dbt-cloud-prod",
           runId: "dbt-20260723-0927",
           observedAt: "2026-07-23T09:27:41.000Z",
-          actor: "urn:li:corpuser:dbt-cloud",
-          value: "analytics-engineering",
           status: "conflicting",
         },
       ],
@@ -131,7 +119,6 @@ const findings: Finding[] = [
     summary: "An upstream payment_events edge resolves to no catalogued entity.",
     recommendation: "Restore the missing ingestion source or remove the stale lineage edge.",
     detail: {
-      missingRef: "urn:li:dataset:(urn:li:dataPlatform:kafka,payment_events,PROD)",
       blastRadius: blast(
         "urn:li:dataset:(urn:li:dataPlatform:kafka,payment_events,PROD)",
         [
@@ -146,8 +133,6 @@ const findings: Finding[] = [
           source: "pipeline:dbt-cloud-prod",
           runId: "dbt-20260723-0927",
           observedAt: "2026-07-23T09:27:41.000Z",
-          actor: "urn:li:corpuser:dbt-cloud",
-          value: "upstream=payment_events",
           status: "observed",
         },
       ],
@@ -179,8 +164,6 @@ const findings: Finding[] = [
           source: "pipeline:s3-prod",
           runId: "s3-20260723-0901",
           observedAt: "2026-07-23T09:01:12.000Z",
-          actor: "urn:li:corpuser:s3-ingestion",
-          value: "owners=[]",
           status: "trusted",
         },
       ],
@@ -212,8 +195,6 @@ const findings: Finding[] = [
           source: "pipeline:postgres-ops",
           runId: "postgres-20260723-0830",
           observedAt: "2026-07-23T08:30:00.000Z",
-          actor: "urn:li:corpuser:postgres-ingestion",
-          value: "domain=null",
           status: "trusted",
         },
       ],
@@ -232,6 +213,7 @@ export const previewAudit: AuditEnvelope = {
   requestId: "preview-request-0001",
   releaseSha: "showcase-fixture",
   report: {
+    schemaVersion: "archon.audit-report/v1",
     scanId: "archon-showcase-20260723T094218Z",
     classification: {
       totalEntities: 1049,
@@ -255,6 +237,17 @@ export const previewAudit: AuditEnvelope = {
     findings,
     narrative:
       "Archon inspected the DataHub Context Graph and surfaced five integrity risks. Two high-severity findings affect governed ownership and PII classification; downstream impact reaches analytics, dashboards, and an ML deployment. All proposed actions remain human-gated.",
+    modelProvenance: {
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "deterministic-fixture",
+      modelCall: false,
+      provider: "fixture",
+      requestedModel: "archon-deterministic-fixture-narrator-v1",
+      returnedModel: null,
+      providerResponseId: null,
+      tokenUsage: null,
+      latencyMs: null,
+    },
     trace: [
       { agent: "classifier", produced: "1,049 entities classified" },
       {

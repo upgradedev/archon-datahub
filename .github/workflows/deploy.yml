@@ -1798,6 +1798,7 @@ jobs:
               --parameters "${stack_name}:DeploymentWorkflowRunAttempt=${GITHUB_RUN_ATTEMPT}" \
               --parameters "${stack_name}:CiRunId=${CI_RUN_ID}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
               --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -2205,6 +2206,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
           DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -2235,6 +2237,7 @@ jobs:
           )
           : "${DATAHUB_READ_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?staging DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
           : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?staging LLM_BASE_URL is required}"
@@ -2248,6 +2251,17 @@ jobs:
           : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
           : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?staging ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
           : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?staging ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
 
           # Reconcile desired count through CloudFormation so activation creates
           # no drift, then force all services to consume the refreshed secret versions.
@@ -2266,6 +2280,7 @@ jobs:
               --parameters "${STACK_NAME}:DeploymentWorkflowRunAttempt=${GITHUB_RUN_ATTEMPT}" \
               --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
               --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -2556,9 +2571,17 @@ jobs:
             --data "${audit_payload}" \
             --output "${audit_response}" \
             "${APPLICATION_URL}/api/audits"
+          jq -ce '.report' "${audit_response}" |
+            jq -e -f scripts/validate-audit-report.jq >/dev/null
           jq -e --arg release "${RELEASE_SHA}" \
-            '.releaseSha == $release
-             and (.report | type == "object")
+            'def exact_keys($wanted):
+               type == "object" and
+               ((keys | sort) == ($wanted | sort));
+             exact_keys(["requestId", "releaseSha", "report"])
+             and (.requestId |
+               type == "string" and
+               test("^[A-Za-z0-9._-]{1,128}$"))
+             and .releaseSha == $release
              and .report.classification.totalEntities == 1' \
             "${audit_response}" >/dev/null
           audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
@@ -2568,13 +2591,15 @@ jobs:
             --arg querySha256 "${demo_query_sha}" \
             --arg responseSha256 "${audit_response_sha}" \
             '{
-              schemaVersion: "archon.audit-smoke-evidence/v1",
+              schemaVersion: "archon.audit-smoke-evidence/v2",
               environment: $environment,
               querySha256: $querySha256,
               responseSha256: $responseSha256,
               releaseSha: .releaseSha,
               requestId: .requestId,
               scanId: .report.scanId,
+              reportSchemaVersion: .report.schemaVersion,
+              modelProvenance: .report.modelProvenance,
               classification: {
                 totalEntities: .report.classification.totalEntities,
                 withLineage: .report.classification.withLineage,
@@ -2642,6 +2667,8 @@ jobs:
                   .report.classification.totalEntities == 1 and
                   (has("approval") | not)
                 ' "${control_response}" >/dev/null
+                jq -ce '.report' "${control_response}" |
+                  jq -e -f scripts/validate-audit-report.jq >/dev/null
                 control_terminal="true"
                 break
                 ;;
@@ -5019,6 +5046,7 @@ jobs:
               --parameters "${stack_name}:DeploymentWorkflowRunAttempt=${GITHUB_RUN_ATTEMPT}" \
               --parameters "${stack_name}:CiRunId=${CI_RUN_ID}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${stack_name}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
               --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -5423,6 +5451,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           DATAHUB_READ_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
           DATAHUB_READ_MCP_URL: ${{ vars.DATAHUB_READ_MCP_URL }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
@@ -5453,6 +5482,7 @@ jobs:
           )
           : "${DATAHUB_READ_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
           : "${DATAHUB_READ_MCP_URL:?production DATAHUB_READ_MCP_URL is required}"
+          : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
           : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
           : "${LLM_BASE_URL:?production LLM_BASE_URL is required}"
@@ -5466,6 +5496,17 @@ jobs:
           : "${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID is required}"
           : "${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID:?production ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID is required}"
           : "${ARCHON_LLM_EGRESS_PREFIX_LIST_ID:?production ARCHON_LLM_EGRESS_PREFIX_LIST_ID is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
 
           # Reconcile desired count through CloudFormation so activation creates
           # no drift, then force all services to consume the refreshed secret versions.
@@ -5484,6 +5525,7 @@ jobs:
               --parameters "${STACK_NAME}:DeploymentWorkflowRunAttempt=${GITHUB_RUN_ATTEMPT}" \
               --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
+              --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
               --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
               --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
               --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
@@ -5766,9 +5808,17 @@ jobs:
             --data "${audit_payload}" \
             --output "${audit_response}" \
             "${APPLICATION_URL}/api/audits"
+          jq -ce '.report' "${audit_response}" |
+            jq -e -f scripts/validate-audit-report.jq >/dev/null
           jq -e --arg release "${RELEASE_SHA}" \
-            '.releaseSha == $release
-             and (.report | type == "object")
+            'def exact_keys($wanted):
+               type == "object" and
+               ((keys | sort) == ($wanted | sort));
+             exact_keys(["requestId", "releaseSha", "report"])
+             and (.requestId |
+               type == "string" and
+               test("^[A-Za-z0-9._-]{1,128}$"))
+             and .releaseSha == $release
              and .report.classification.totalEntities == 1' \
             "${audit_response}" >/dev/null
           audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
@@ -5778,13 +5828,15 @@ jobs:
             --arg querySha256 "${demo_query_sha}" \
             --arg responseSha256 "${audit_response_sha}" \
             '{
-              schemaVersion: "archon.audit-smoke-evidence/v1",
+              schemaVersion: "archon.audit-smoke-evidence/v2",
               environment: $environment,
               querySha256: $querySha256,
               responseSha256: $responseSha256,
               releaseSha: .releaseSha,
               requestId: .requestId,
               scanId: .report.scanId,
+              reportSchemaVersion: .report.schemaVersion,
+              modelProvenance: .report.modelProvenance,
               classification: {
                 totalEntities: .report.classification.totalEntities,
                 withLineage: .report.classification.withLineage,

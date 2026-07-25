@@ -14,6 +14,7 @@ import {
 } from "../datahub/mcp-client.js";
 import { AuditPipeline } from "../pipeline/pipeline.js";
 import { DataHubHarvestError } from "../datahub/harvest-policy.js";
+import { projectPublicAuditReport } from "../reporting/public-audit-report.js";
 
 const MAX_BODY_BYTES = 8 * 1024;
 const MAX_QUERY_CHARS = 256;
@@ -22,6 +23,7 @@ export interface HttpServerDeps {
   datahub: DataHubClient;
   pipeline: AuditPipeline;
   releaseSha?: string;
+  demoQuery?: string;
 }
 
 function applySecurityHeaders(response: ServerResponse): void {
@@ -70,20 +72,47 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   }
 }
 
-function queryFrom(body: Record<string, unknown>): string | undefined {
+function isNarrowQuery(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_QUERY_CHARS &&
+    !/[\u0000-\u001f\u007f]/u.test(value) &&
+    !/[*?]/u.test(value) &&
+    value !== "{}"
+  );
+}
+
+function configuredDemoQuery(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value !== value.trim() || !isNarrowQuery(value)) {
+    throw new Error("ARCHON_DEMO_QUERY must be an exact narrow query.");
+  }
+  return value;
+}
+
+function queryFrom(
+  body: Record<string, unknown>,
+  allowedDemoQuery: string | undefined
+): string {
   if (body.query === undefined || body.query === null || body.query === "") {
     throw new HttpInputError(400, "a narrow dataset query is required");
   }
   if (typeof body.query !== "string") throw new HttpInputError(400, "query must be a string");
   const query = body.query.trim();
+  if (query !== body.query) {
+    throw new HttpInputError(400, "query must be trimmed");
+  }
   if (query.length > MAX_QUERY_CHARS) {
     throw new HttpInputError(400, `query must be at most ${MAX_QUERY_CHARS} characters`);
   }
   if (/[\u0000-\u001f\u007f]/u.test(query)) {
     throw new HttpInputError(400, "query contains control characters");
   }
-  if (!query || /[*?]/u.test(query) || query === "{}") {
+  if (!isNarrowQuery(query)) {
     throw new HttpInputError(400, "query must be narrow and cannot be a wildcard");
+  }
+  if (allowedDemoQuery !== undefined && query !== allowedDemoQuery) {
+    throw new HttpInputError(400, "query is outside the configured public demo scope");
   }
   return query;
 }
@@ -104,6 +133,9 @@ function requestIdOf(request: IncomingMessage): string {
 
 export function createArchonHttpServer(deps: HttpServerDeps): Server {
   const releaseSha = deps.releaseSha || process.env.ARCHON_RELEASE_SHA || "dev";
+  const allowedDemoQuery = configuredDemoQuery(
+    deps.demoQuery ?? process.env.ARCHON_DEMO_QUERY
+  );
   return createServer(async (request, response) => {
     const requestId = requestIdOf(request);
     const method = request.method ?? "GET";
@@ -124,10 +156,19 @@ export function createArchonHttpServer(deps: HttpServerDeps): Server {
         const body = await readJsonBody(request);
         const report = await deps.pipeline.run(
           deps.datahub,
-          queryFrom(body),
+          queryFrom(body, allowedDemoQuery),
           { executionProfile: "synchronous-preview" }
         );
-        return sendJson(response, 200, { requestId, releaseSha, report }, requestId);
+        return sendJson(
+          response,
+          200,
+          {
+            requestId,
+            releaseSha,
+            report: projectPublicAuditReport(report),
+          },
+          requestId
+        );
       }
       if (pathname === "/api/audits") {
         response.setHeader("Allow", "POST");

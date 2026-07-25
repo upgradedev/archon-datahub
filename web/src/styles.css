@@ -117,7 +117,7 @@ textarea:focus-visible {
   border: 1px solid transparent;
   border-radius: 0.7rem;
   padding: 0.65rem 0.75rem;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.72rem;
   font-weight: 500;
   transition: 150ms ease;
@@ -281,7 +281,7 @@ textarea:focus-visible {
   font-weight: 650;
   letter-spacing: 0.11em;
   text-transform: uppercase;
-  color: #64748b;
+  color: #94a3b8;
 }
 
 .metric-icon {
@@ -342,7 +342,7 @@ textarea:focus-visible {
   right: 0.6rem;
   width: 0.75rem;
   pointer-events: none;
-  color: #475569;
+  color: #94a3b8;
 }
 
 .finding-row {
@@ -520,7 +520,7 @@ textarea:focus-visible {
   gap: 1rem;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   padding-top: 0.55rem;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.62rem;
 }
 
@@ -543,7 +543,7 @@ textarea:focus-visible {
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 0.4rem;
-  color: #64748b;
+  color: #94a3b8;
   transition: 150ms ease;
 }
 
@@ -555,7 +555,7 @@ textarea:focus-visible {
   border: 1px dashed rgba(255, 255, 255, 0.08);
   border-radius: 0.75rem;
   padding: 1rem;
-  color: #475569;
+  color: #94a3b8;
   font-size: 0.7rem;
   text-align: center;
 }

@@ -65,6 +65,16 @@ describe("Archon AWS reference architecture", () => {
         AllowedPattern: "^[a-f0-9]{64}$"
       })
     );
+    expect(json.Parameters.DemoQuery).toEqual(
+      expect.objectContaining({
+        Type: "String",
+        MinLength: 1,
+        MaxLength: 256,
+        AllowedPattern:
+          "^(?!\\s)(?!.*\\s$)(?!\\{\\}$)(?!.*[*?])[^\\u0000-\\u001F\\u007F]{1,256}$"
+      })
+    );
+    expect(json.Parameters.DemoQuery.Default).toBeUndefined();
     for (const parameter of [
       "ContainerArchiveSha256",
       "LambdaArchiveSha256"
@@ -872,7 +882,8 @@ describe("Archon AWS reference architecture", () => {
           STATE_MACHINE_ARN: Match.anyValue(),
           CHECKPOINT_TABLE: Match.anyValue(),
           APPROVAL_TABLE: Match.anyValue(),
-          EVIDENCE_BUCKET: Match.anyValue()
+          EVIDENCE_BUCKET: Match.anyValue(),
+          ARCHON_DEMO_QUERY: { Ref: "DemoQuery" }
         }
       }
     });
@@ -1067,6 +1078,10 @@ describe("Archon AWS reference architecture", () => {
     const apiEnvironment = api.Properties.ContainerDefinitions[0].Environment.map(
       (entry: any) => entry.Name
     );
+    expect(api.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+      Name: "ARCHON_DEMO_QUERY",
+      Value: { Ref: "DemoQuery" }
+    });
     expect(apiEnvironment).not.toEqual(
       expect.arrayContaining([
         "ARCHON_APPROVAL_TABLE",

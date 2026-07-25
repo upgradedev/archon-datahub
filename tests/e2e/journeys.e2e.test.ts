@@ -108,7 +108,11 @@ test("J4: raw_orders' same-pipeline edit does NOT surface as a contradiction", a
 
 // ── J5 — dual-face MCP round-trip over the real protocol ────────────────────────
 test("J5: dual-face MCP round-trip — audit_catalog + run_audit_loop over a real Client↔Server", async () => {
-  const { server } = await buildMcpServer({ datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() });
+  const { server } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    pipeline: new AuditPipeline(),
+    demoQuery: "sales",
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "journey", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);

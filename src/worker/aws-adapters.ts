@@ -40,10 +40,11 @@ import {
 import { verifyExecutionReceipt } from "../remediation/receipt.js";
 import type {
   AsyncMessageKind,
-  AuditCallbackOutputV1,
+  AuditCallbackOutputV2,
   AuditEvidenceV1,
   ExecutionEvidenceV1,
   AuditQueueMessageV1,
+  ManualOnlyReason,
   RemediationQueueMessageV1,
   WorkerQueueMessage,
 } from "./contracts.js";
@@ -282,7 +283,51 @@ export class S3ImmutableEvidenceStore implements ImmutableEvidenceStore {
   }
 }
 
-function auditOutput(value: string | undefined): AuditCallbackOutputV1 | null {
+const REPLAY_APPROVAL_ID_PATTERN = /^[A-Za-z0-9._:-]{8,160}$/u;
+const REPLAY_INSTANT_PATTERN =
+  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/u;
+const REPLAY_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+const REPLAY_MANUAL_REASONS = new Set<ManualOnlyReason>([
+  "READ_ONLY_REQUEST",
+  "NO_ACTIONABLE_G6_FINDING",
+  "REMEDIATION_PRESTATE_UNAVAILABLE",
+  "POLICY_REJECTED_PROPOSAL",
+]);
+
+function isReplayDigest(value: unknown): value is Sha256Digest {
+  return typeof value === "string" && REPLAY_DIGEST_PATTERN.test(value);
+}
+
+function isReplayApprovalId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    REPLAY_APPROVAL_ID_PATTERN.test(value)
+  );
+}
+
+function isCanonicalReplayInstant(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length !== 24 ||
+    !REPLAY_INSTANT_PATTERN.test(value)
+  ) {
+    return false;
+  }
+  const epoch = Date.parse(value);
+  return (
+    Number.isFinite(epoch) &&
+    new Date(epoch).toISOString() === value
+  );
+}
+
+function isReplayManualReason(value: unknown): value is ManualOnlyReason {
+  return (
+    typeof value === "string" &&
+    REPLAY_MANUAL_REASONS.has(value as ManualOnlyReason)
+  );
+}
+
+function auditOutput(value: string | undefined): AuditCallbackOutputV2 | null {
   if (!value) return null;
   let parsed: unknown;
   try {
@@ -291,38 +336,73 @@ function auditOutput(value: string | undefined): AuditCallbackOutputV1 | null {
     return null;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const candidate = parsed as Partial<AuditCallbackOutputV1>;
-  const digestPattern = /^sha256:[a-f0-9]{64}$/u;
+  const candidate = parsed as Partial<AuditCallbackOutputV2>;
+  const baseKeys = [
+    "schemaVersion",
+    "requiresApproval",
+    "reportDigest",
+    "evidenceDigest",
+  ];
+  const exactKeys = (expected: readonly string[]): boolean => {
+    const actual = Object.keys(parsed);
+    return (
+      actual.length === expected.length &&
+      actual.every((key) => expected.includes(key))
+    );
+  };
   if (
-    candidate.schemaVersion !== "archon.audit-result/v1" ||
+    candidate.schemaVersion !== "archon.audit-result/v2" ||
     typeof candidate.requiresApproval !== "boolean" ||
-    typeof candidate.reportDigest !== "string" ||
-    !digestPattern.test(candidate.reportDigest) ||
-    typeof candidate.evidenceDigest !== "string" ||
-    !digestPattern.test(candidate.evidenceDigest)
+    !isReplayDigest(candidate.reportDigest) ||
+    !isReplayDigest(candidate.evidenceDigest)
   ) {
     return null;
+  }
+  if (candidate.requiresApproval) {
+    if (
+      !exactKeys([
+        ...baseKeys,
+        "approvalId",
+        "planDigest",
+        "approvalRequestDigest",
+        "approvalRequestedAt",
+        "approvalExpiresAt",
+      ]) ||
+      !isReplayApprovalId(candidate.approvalId) ||
+      !isReplayDigest(candidate.planDigest) ||
+      !isReplayDigest(candidate.approvalRequestDigest) ||
+      !isCanonicalReplayInstant(candidate.approvalRequestedAt) ||
+      !isCanonicalReplayInstant(candidate.approvalExpiresAt) ||
+      Date.parse(candidate.approvalExpiresAt) <=
+        Date.parse(candidate.approvalRequestedAt)
+    ) {
+      return null;
+    }
+    return {
+      schemaVersion: "archon.audit-result/v2",
+      requiresApproval: true,
+      reportDigest: candidate.reportDigest,
+      evidenceDigest: candidate.evidenceDigest,
+      approvalId: candidate.approvalId,
+      planDigest: candidate.planDigest,
+      approvalRequestDigest: candidate.approvalRequestDigest,
+      approvalRequestedAt: candidate.approvalRequestedAt,
+      approvalExpiresAt: candidate.approvalExpiresAt,
+    };
   }
   if (
-    candidate.requiresApproval &&
-    (typeof candidate.approvalId !== "string" ||
-      typeof candidate.planDigest !== "string" ||
-      !digestPattern.test(candidate.planDigest) ||
-      typeof candidate.approvalRequestDigest !== "string" ||
-      !digestPattern.test(candidate.approvalRequestDigest) ||
-      typeof candidate.approvalRequestedAt !== "string" ||
-      !Number.isFinite(Date.parse(candidate.approvalRequestedAt)) ||
-      typeof candidate.approvalExpiresAt !== "string" ||
-      !Number.isFinite(Date.parse(candidate.approvalExpiresAt)) ||
-      Date.parse(candidate.approvalExpiresAt) <=
-        Date.parse(candidate.approvalRequestedAt))
+    !exactKeys([...baseKeys, "manualOnlyReason"]) ||
+    !isReplayManualReason(candidate.manualOnlyReason)
   ) {
     return null;
   }
-  if (!candidate.requiresApproval && typeof candidate.manualOnlyReason !== "string") {
-    return null;
-  }
-  return candidate as AuditCallbackOutputV1;
+  return {
+    schemaVersion: "archon.audit-result/v2",
+    requiresApproval: false,
+    reportDigest: candidate.reportDigest,
+    evidenceDigest: candidate.evidenceDigest,
+    manualOnlyReason: candidate.manualOnlyReason,
+  };
 }
 
 export class DynamoAuditResultCheckpoint implements AuditResultCheckpoint {
@@ -335,7 +415,7 @@ export class DynamoAuditResultCheckpoint implements AuditResultCheckpoint {
   async get(
     executionId: string,
     requestDigest: Sha256Digest
-  ): Promise<AuditCallbackOutputV1 | null> {
+  ): Promise<AuditCallbackOutputV2 | null> {
     const response = await this.client.send(
       new GetItemCommand({
         TableName: this.tableName,
@@ -366,8 +446,8 @@ export class DynamoAuditResultCheckpoint implements AuditResultCheckpoint {
   async put(
     executionId: string,
     requestDigest: Sha256Digest,
-    output: AuditCallbackOutputV1
-  ): Promise<AuditCallbackOutputV1> {
+    output: AuditCallbackOutputV2
+  ): Promise<AuditCallbackOutputV2> {
     const now = this.clock();
     try {
       await this.client.send(

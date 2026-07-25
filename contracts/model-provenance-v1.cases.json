@@ -1,0 +1,437 @@
+{
+  "schemaVersion": "archon.model-provenance-conformance/v1",
+  "credentialMacros": {
+    "openai": ["s", "k-", "12345678", "90abcdef"],
+    "aws": ["AK", "IA", "12345678", "90ABCDEF"],
+    "slack": ["xo", "xb-", "12345678", "90ABCDEF"],
+    "github": ["gh", "p_", "12345678", "90ABCDEFGHIJ"],
+    "google": ["AI", "za", "12345678901234567", "890123456789012345"],
+    "jwt": ["ey", "Jabcdefghijk", ".", "abcdefghijkl", ".", "abcdefghijk"]
+  },
+  "cases": [
+    {
+      "id": "fixture-valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "deterministic-fixture",
+        "modelCall": false,
+        "provider": "fixture",
+        "requestedModel": "archon-deterministic-fixture-narrator-v1",
+        "returnedModel": null,
+        "providerResponseId": null,
+        "tokenUsage": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "id": "live-usage-valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "qwen",
+        "requestedModel": "qwen-plus",
+        "returnedModel": "qwen-plus-2026-07",
+        "providerResponseId": "chatcmpl_123456",
+        "tokenUsage": {
+          "inputTokens": 21,
+          "outputTokens": 13,
+          "totalTokens": 34
+        },
+        "latencyMs": 42
+      }
+    },
+    {
+      "id": "live-null-usage-valid",
+      "valid": true,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "gpt-5-mini",
+        "returnedModel": "gpt-5-mini-2026-06-01",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 0
+      }
+    },
+    {
+      "id": "missing-latency",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "qwen",
+        "requestedModel": "qwen-plus",
+        "returnedModel": "qwen-plus",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null
+      }
+    },
+    {
+      "id": "extra-prompt-field",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "qwen",
+        "requestedModel": "qwen-plus",
+        "returnedModel": "qwen-plus",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10,
+        "prompt": "private"
+      }
+    },
+    {
+      "id": "fixture-live-discriminant-confusion",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "deterministic-fixture",
+        "modelCall": true,
+        "provider": "fixture",
+        "requestedModel": "fixture-model",
+        "returnedModel": null,
+        "providerResponseId": null,
+        "tokenUsage": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "id": "live-fixture-discriminant-confusion",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": false,
+        "provider": "qwen",
+        "requestedModel": "qwen-plus",
+        "returnedModel": "qwen-plus",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "unknown-provider",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "unknown",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "requested-model-url",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "https://gateway.example/model",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "requested-model-empty",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "response-id-too-short",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "short",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "token-usage-missing-field",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": {
+          "inputTokens": 1,
+          "outputTokens": 2
+        },
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "token-usage-total-mismatch",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": {
+          "inputTokens": 1,
+          "outputTokens": 2,
+          "totalTokens": 4
+        },
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "token-usage-negative",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": {
+          "inputTokens": -1,
+          "outputTokens": 2,
+          "totalTokens": 1
+        },
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "token-usage-fractional",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": {
+          "inputTokens": 1.5,
+          "outputTokens": 2,
+          "totalTokens": 3.5
+        },
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "latency-negative",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": -1
+      }
+    },
+    {
+      "id": "latency-over-bound",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 3600001
+      }
+    },
+    {
+      "id": "latency-fractional",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10.5
+      }
+    },
+    {
+      "id": "requested-model-embedded-openai-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model_{{credential:openai}}",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "requested-model-embedded-aws-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model_{{credential:aws}}",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "requested-model-embedded-slack-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model_{{credential:slack}}",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "returned-model-embedded-github-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model-v1",
+        "returnedModel": "model_{{credential:github}}",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "returned-model-embedded-google-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model-v1",
+        "returnedModel": "model_{{credential:google}}",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "returned-model-embedded-jwt",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model-v1",
+        "returnedModel": "model_{{credential:jwt}}",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "response-id-embedded-openai-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "openai",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_{{credential:openai}}",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "response-id-embedded-slack-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_{{credential:slack}}",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "response-id-embedded-google-key",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "custom",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_{{credential:google}}",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    }
+  ]
+}

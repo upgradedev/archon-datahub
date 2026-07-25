@@ -50,6 +50,19 @@ describe("Archon control plane", () => {
     expect(screen.getByRole("heading", { name: "Blast radius" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Source provenance" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Evidence dossier" })).toBeInTheDocument();
+    const modelProvenance = screen.getByTestId("model-provenance");
+    expect(
+      within(modelProvenance).getByRole("heading", {
+        name: "Model runtime provenance",
+      }),
+    ).toBeInTheDocument();
+    expect(within(modelProvenance).getByText("No model call")).toBeInTheDocument();
+    expect(modelProvenance).toHaveTextContent(
+      /No provider model API call occurred/i,
+    );
+    expect(modelProvenance).toHaveTextContent(
+      /there is no provider response ID, token usage, or client latency/i,
+    );
     expect(document.getElementById("judge-tour-run-audit")).toBeInstanceOf(
       HTMLButtonElement,
     );
@@ -139,6 +152,74 @@ describe("Archon control plane", () => {
       `/api/control-loops/${auditId}`,
       expect.objectContaining({ method: "GET" }),
     );
+  });
+
+  it("renders only the bounded live model provenance projection", async () => {
+    const auditId = "e".repeat(64);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({
+          schemaVersion: "archon.control-loop-start/v1",
+          auditId,
+          status: "RUNNING",
+          pollUrl: `/api/control-loops/${auditId}`,
+          submittedAt: "2026-07-23T12:00:00.000Z",
+        }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          schemaVersion: "archon.control-loop-status/v1",
+          auditId,
+          status: "AWAITING_APPROVAL",
+          submittedAt: "2026-07-23T12:00:00.000Z",
+          updatedAt: "2026-07-23T12:00:02.000Z",
+          releaseSha: "live-model-release",
+          report: {
+            ...previewAudit.report,
+            modelProvenance: {
+              schemaVersion: "archon.model-runtime-provenance/v1",
+              source: "live-provider",
+              modelCall: true,
+              provider: "qwen",
+              requestedModel: "qwen-plus",
+              returnedModel: "qwen-plus-2026-07",
+              providerResponseId: "chatcmpl_archon_123",
+              tokenUsage: {
+                inputTokens: 120,
+                outputTokens: 30,
+                totalTokens: 150,
+              },
+              latencyMs: 842,
+            },
+          },
+          approval: {
+            approvalId: "approval-g6-customer-email-001",
+            status: "PENDING",
+            expiresAt: "2026-08-10T20:59:00.000Z",
+            planDigest: `sha256:${"1".repeat(64)}`,
+            evidenceDigest: `sha256:${"2".repeat(64)}`,
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+
+    expect(await screen.findByDisplayValue("customer_pii")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
+
+    await screen.findByText("Live model call");
+    const panel = screen.getByTestId("model-provenance");
+    expect(within(panel).getByText("Live model call")).toBeInTheDocument();
+    expect(within(panel).getByText("qwen", { exact: true })).toBeInTheDocument();
+    expect(within(panel).getByText("qwen-plus")).toBeInTheDocument();
+    expect(within(panel).getByText("qwen-plus-2026-07")).toBeInTheDocument();
+    expect(within(panel).getByText("chatcmpl_archon_123")).toBeInTheDocument();
+    expect(panel).toHaveTextContent("120 in · 30 out · 150 total");
+    expect(panel).toHaveTextContent("842 ms");
+    expect(panel).not.toHaveTextContent("https://provider.example.test");
+    expect(panel).not.toHaveTextContent("private prompt body");
+    expect(panel).not.toHaveTextContent("provider raw response");
   });
 
   it("renders only the sanitized, verified terminal evidence projection", async () => {

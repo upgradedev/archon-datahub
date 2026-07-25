@@ -3,6 +3,7 @@ import type {
   ControlLoopStatus,
   Finding,
   LoadedAudit,
+  ModelRuntimeProvenance,
 } from "./types";
 
 export type BrowserDigest = `sha256:${string}`;
@@ -34,6 +35,7 @@ export interface PublicAuditProjection {
   };
   findings: PublicFindingProjection[];
   narrative: string;
+  modelProvenance: ModelRuntimeProvenance;
 }
 
 export interface PublicFindingProjection {
@@ -151,6 +153,34 @@ export interface BrowserEvidencePack {
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const RULE_ID_PATTERN = /^ARCHON-[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
+const RESPONSE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u;
+const CREDENTIAL_SHAPED_IDENTIFIER =
+  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+const LIVE_MODEL_PROVIDERS = new Set([
+  "custom",
+  "qwen",
+  "gemini",
+  "openai",
+  "anthropic",
+]);
+const MODEL_PROVENANCE_KEYS = [
+  "schemaVersion",
+  "source",
+  "modelCall",
+  "provider",
+  "requestedModel",
+  "returnedModel",
+  "providerResponseId",
+  "tokenUsage",
+  "latencyMs",
+] as const;
+const MODEL_TOKEN_USAGE_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+] as const;
+const MAX_MODEL_LATENCY_MS = 3_600_000;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_PACK_BYTES = 8 * 1024 * 1024;
 const BASE_FILE_CONTRACT = [
@@ -197,14 +227,14 @@ const FORBIDDEN_EXPORT_KEYS = new Set([
   "tokens",
 ]);
 const CREDENTIAL_PATTERNS = [
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
-  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/u,
-  /\bAIza[0-9A-Za-z_-]{35}\b/u,
-  /\b(?:Bearer\s+|sk-(?:ant-)?)[A-Za-z0-9._~+/=-]{12,}\b/iu,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
-  /\b(?:api[_ -]?key|password|passwd|pwd|secret|token)\s*[:=]\s*["']?[^\s"',;]{8,}/iu,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
+  /gh[pousr]_[A-Za-z0-9_]{20,}/u,
+  /github_pat_[A-Za-z0-9_]{20,}/u,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/u,
+  /AIza[0-9A-Za-z_-]{35}/u,
+  /(?:Bearer\s+|sk-(?:ant-)?)[A-Za-z0-9._~+/=-]{12,}/iu,
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /(?:api[_ -]?key|password|passwd|pwd|secret|token)\s*[:=]\s*["']?[^\s"',;]{8,}/iu,
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u,
 ] as const;
 
@@ -240,6 +270,70 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
   return (
     isRecord(value) &&
     Object.values(value).every((entry) => isCount(entry))
+  );
+}
+
+function isSafeModelId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    MODEL_ID_PATTERN.test(value) &&
+    !value.includes("://") &&
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
+  );
+}
+
+function isSafeResponseId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    RESPONSE_ID_PATTERN.test(value) &&
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
+  );
+}
+
+function isModelTokenUsage(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, MODEL_TOKEN_USAGE_KEYS) &&
+    isCount(value.inputTokens) &&
+    isCount(value.outputTokens) &&
+    isCount(value.totalTokens) &&
+    value.totalTokens === value.inputTokens + value.outputTokens
+  );
+}
+
+function isPublicModelProvenance(
+  value: unknown,
+): value is ModelRuntimeProvenance {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, MODEL_PROVENANCE_KEYS) ||
+    value.schemaVersion !== "archon.model-runtime-provenance/v1" ||
+    !isSafeModelId(value.requestedModel)
+  ) {
+    return false;
+  }
+
+  if (value.source === "deterministic-fixture") {
+    return (
+      value.modelCall === false &&
+      value.provider === "fixture" &&
+      value.returnedModel === null &&
+      value.providerResponseId === null &&
+      value.tokenUsage === null &&
+      value.latencyMs === null
+    );
+  }
+
+  return (
+    value.source === "live-provider" &&
+    value.modelCall === true &&
+    typeof value.provider === "string" &&
+    LIVE_MODEL_PROVIDERS.has(value.provider) &&
+    isSafeModelId(value.returnedModel) &&
+    isSafeResponseId(value.providerResponseId) &&
+    (value.tokenUsage === null || isModelTokenUsage(value.tokenUsage)) &&
+    isCount(value.latencyMs) &&
+    value.latencyMs <= MAX_MODEL_LATENCY_MS
   );
 }
 
@@ -435,6 +529,41 @@ function projectFinding(finding: Finding): PublicFindingProjection {
   };
 }
 
+function projectModelProvenance(
+  value: unknown,
+): ModelRuntimeProvenance {
+  if (!isPublicModelProvenance(value)) {
+    throw new Error(
+      "Model runtime provenance is absent, invalid, or outside the exact public allowlist.",
+    );
+  }
+  if (value.source === "deterministic-fixture") {
+    return {
+      schemaVersion: value.schemaVersion,
+      source: value.source,
+      modelCall: value.modelCall,
+      provider: value.provider,
+      requestedModel: value.requestedModel,
+      returnedModel: value.returnedModel,
+      providerResponseId: value.providerResponseId,
+      tokenUsage: value.tokenUsage,
+      latencyMs: value.latencyMs,
+    };
+  }
+  return {
+    schemaVersion: value.schemaVersion,
+    source: value.source,
+    modelCall: value.modelCall,
+    provider: value.provider,
+    requestedModel: value.requestedModel,
+    returnedModel: value.returnedModel,
+    providerResponseId: value.providerResponseId,
+    tokenUsage:
+      value.tokenUsage === null ? null : { ...value.tokenUsage },
+    latencyMs: value.latencyMs,
+  };
+}
+
 function projectAudit(audit: LoadedAudit): PublicAuditProjection {
   const report = audit.envelope.report;
   const findings = report.findings
@@ -462,6 +591,7 @@ function projectAudit(audit: LoadedAudit): PublicAuditProjection {
     },
     findings,
     narrative: report.narrative,
+    modelProvenance: projectModelProvenance(report.modelProvenance),
   };
 }
 
@@ -540,6 +670,49 @@ function markdownText(value: unknown): string {
     .replaceAll("\n", " ");
 }
 
+function modelProvenanceMarkdown(
+  provenance: ModelRuntimeProvenance,
+): string[] {
+  const returnedModel =
+    provenance.returnedModel === null
+      ? "not applicable"
+      : `\`${markdownText(provenance.returnedModel)}\``;
+  const providerResponseId =
+    provenance.providerResponseId === null
+      ? "not applicable"
+      : `\`${markdownText(provenance.providerResponseId)}\``;
+  const tokenUsage =
+    provenance.tokenUsage === null
+      ? provenance.source === "deterministic-fixture"
+        ? "not applicable"
+        : "not reported"
+      : `${provenance.tokenUsage.inputTokens} input / ${provenance.tokenUsage.outputTokens} output / ${provenance.tokenUsage.totalTokens} total`;
+  const latency =
+    provenance.latencyMs === null
+      ? "not applicable"
+      : `${provenance.latencyMs} ms`;
+
+  return [
+    "## Model runtime provenance",
+    "",
+    `- Contract: \`${provenance.schemaVersion}\``,
+    `- Source: \`${provenance.source}\``,
+    `- Model call: \`${provenance.modelCall ? "yes" : "no"}\``,
+    `- Provider: \`${markdownText(provenance.provider)}\``,
+    `- Requested model: \`${markdownText(provenance.requestedModel)}\``,
+    `- Returned model: ${returnedModel}`,
+    `- Provider response ID: ${providerResponseId}`,
+    `- Token usage: ${tokenUsage}`,
+    `- Client-observed latency: ${latency}`,
+    "",
+    provenance.source === "deterministic-fixture"
+      ? "No provider model API call occurred; the requested model identifies the deterministic narrator contract."
+      : "A provider model API call occurred; only its bounded runtime metadata is represented.",
+    "",
+    "Prompts, credentials, endpoints, raw responses, and provider errors are excluded.",
+  ];
+}
+
 function reportMarkdown(report: PublicAuditProjection): string {
   const lines = [
     "# Archon DataHub audit",
@@ -549,6 +722,8 @@ function reportMarkdown(report: PublicAuditProjection): string {
     `- Scan: \`${markdownText(report.source.scanId)}\``,
     `- Findings: ${report.findings.length}`,
     `- Entities: ${report.classification.totalEntities}`,
+    "",
+    ...modelProvenanceMarkdown(report.modelProvenance),
     "",
     "## Findings",
     "",
@@ -619,6 +794,9 @@ async function reportSarif(report: PublicAuditProjection): Promise<string> {
                   shortDescription: { text: finding.summary },
                 })),
             },
+          },
+          properties: {
+            modelProvenance: report.modelProvenance,
           },
           results,
         },
@@ -806,6 +984,7 @@ function isPublicAuditProjection(
       "classification",
       "findings",
       "narrative",
+      "modelProvenance",
     ]) &&
     value.schemaVersion === "archon.browser-audit-projection/v1" &&
     isEvidenceSource(value.source) &&
@@ -824,7 +1003,8 @@ function isPublicAuditProjection(
     isNumberRecord(value.classification.platforms) &&
     Array.isArray(value.findings) &&
     value.findings.every(isPublicFinding) &&
-    typeof value.narrative === "string"
+    typeof value.narrative === "string" &&
+    isPublicModelProvenance(value.modelProvenance)
   );
 }
 

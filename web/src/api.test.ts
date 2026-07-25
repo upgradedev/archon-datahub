@@ -7,6 +7,7 @@ import {
   submitApprovalDecision,
 } from "./api";
 import { previewAudit } from "./fixtures";
+import modelProvenanceCorpus from "../../contracts/model-provenance-v1.cases.json";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -24,6 +25,19 @@ function json(value: unknown, status = 200): Response {
     },
     json: async () => value,
   } as unknown as Response;
+}
+
+function materializeCredentialMacros(value: unknown): unknown {
+  let encoded = JSON.stringify(value);
+  for (const [name, fragments] of Object.entries(
+    modelProvenanceCorpus.credentialMacros,
+  )) {
+    encoded = encoded.replaceAll(
+      `{{credential:${name}}}`,
+      fragments.join(""),
+    );
+  }
+  return JSON.parse(encoded) as unknown;
 }
 
 function verifiedResult() {
@@ -47,6 +61,37 @@ function verifiedResult() {
 }
 
 describe("audit API", () => {
+  it("keeps the API provenance validator conformant with the shared runtime corpus", async () => {
+    expect(modelProvenanceCorpus.schemaVersion).toBe(
+      "archon.model-provenance-conformance/v1",
+    );
+    for (const candidate of modelProvenanceCorpus.cases) {
+      const provenance = materializeCredentialMacros(candidate.value);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          json({
+            ...previewAudit,
+            report: {
+              ...previewAudit.report,
+              modelProvenance: provenance,
+            },
+          }),
+        ),
+      );
+
+      if (candidate.valid) {
+        await expect(requestAudit("domain:Commerce")).resolves.toMatchObject({
+          report: { modelProvenance: provenance },
+        });
+      } else {
+        await expect(requestAudit("domain:Commerce")).rejects.toMatchObject({
+          status: 502,
+        });
+      }
+    }
+  });
+
   it("posts a bounded catalog scope and validates the envelope", async () => {
     const fetchMock = vi.fn().mockResolvedValue(json(previewAudit));
     vi.stubGlobal("fetch", fetchMock);
@@ -54,6 +99,18 @@ describe("audit API", () => {
     const result = await requestAudit("  domain:Commerce  ");
 
     expect(result.report.scanId).toBe(previewAudit.report.scanId);
+    expect(result.report.schemaVersion).toBe("archon.audit-report/v1");
+    expect(result.report.modelProvenance).toEqual({
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "deterministic-fixture",
+      modelCall: false,
+      provider: "fixture",
+      requestedModel: "archon-deterministic-fixture-narrator-v1",
+      returnedModel: null,
+      providerResponseId: null,
+      tokenUsage: null,
+      latencyMs: null,
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/audits",
       expect.objectContaining({
@@ -62,6 +119,200 @@ describe("audit API", () => {
         body: JSON.stringify({ query: "domain:Commerce" }),
       }),
     );
+  });
+
+  it("rejects credential-shaped substrings embedded in model identifiers", async () => {
+    const base = structuredClone(previewAudit);
+    base.report.modelProvenance = {
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "live-provider",
+      modelCall: true,
+      provider: "custom",
+      requestedModel: "custom-model",
+      returnedModel: `model_sk-${"x".repeat(32)}`,
+      providerResponseId: "response-safe-001",
+      tokenUsage: null,
+      latencyMs: 12,
+    };
+    const fetcher = vi.fn(async () => json(base));
+    vi.stubGlobal("fetch", fetcher);
+
+    await expect(requestAudit("sales")).rejects.toMatchObject({ status: 502 });
+
+    base.report.modelProvenance.returnedModel = "custom-model";
+    base.report.modelProvenance.providerResponseId =
+      `resp_sk-${"x".repeat(32)}`;
+    await expect(requestAudit("sales")).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("accepts only bounded live model runtime provenance", async () => {
+    const liveEnvelope = {
+      ...previewAudit,
+      report: {
+        ...previewAudit.report,
+        modelProvenance: {
+          schemaVersion: "archon.model-runtime-provenance/v1",
+          source: "live-provider",
+          modelCall: true,
+          provider: "openai",
+          requestedModel: "gpt-5.6",
+          returnedModel: "gpt-5.6-2026-07-01",
+          providerResponseId: "resp_archon_123456",
+          tokenUsage: {
+            inputTokens: 200,
+            outputTokens: 50,
+            totalTokens: 250,
+          },
+          latencyMs: 731,
+        },
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json(liveEnvelope)));
+
+    const result = await requestAudit("customer_pii");
+
+    expect(result.report.modelProvenance).toEqual(
+      liveEnvelope.report.modelProvenance,
+    );
+  });
+
+  it("rejects private, extra, or internally inconsistent model provenance", async () => {
+    const fixtureProvenance = previewAudit.report.modelProvenance;
+    const liveProvenance = {
+      schemaVersion: "archon.model-runtime-provenance/v1",
+      source: "live-provider",
+      modelCall: true,
+      provider: "qwen",
+      requestedModel: "qwen-plus",
+      returnedModel: "qwen-plus-2026-07",
+      providerResponseId: "chatcmpl_archon_123",
+      tokenUsage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+      },
+      latencyMs: 640,
+    };
+    const invalidReports = [
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...fixtureProvenance,
+          prompt: "private prompt body",
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...fixtureProvenance,
+          endpoint: "https://provider.example.test/v1",
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...fixtureProvenance,
+          error: "private provider error",
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...fixtureProvenance,
+          rawResponse: { private: true },
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...fixtureProvenance,
+          modelCall: true,
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...liveProvenance,
+          tokenUsage: {
+            inputTokens: 100,
+            outputTokens: 20,
+            totalTokens: 121,
+          },
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...liveProvenance,
+          latencyMs: 3_600_001,
+        },
+      },
+      {
+        ...previewAudit.report,
+        modelProvenance: {
+          ...liveProvenance,
+          requestedModel: "https://provider.example.test/model",
+        },
+      },
+      {
+        ...previewAudit.report,
+        debug: "not part of archon.audit-report/v1",
+      },
+    ];
+    const fetchMock = vi.fn();
+    for (const report of invalidReports) {
+      fetchMock.mockResolvedValueOnce(json({ ...previewAudit, report }));
+    }
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const _report of invalidReports) {
+      await expect(requestAudit("customer_pii")).rejects.toMatchObject({
+        status: 502,
+      });
+    }
+  });
+
+  it("rejects non-allowlisted detail, private provenance, and credential-shaped output", async () => {
+    const rawDetail = structuredClone(previewAudit);
+    (
+      rawDetail.report.findings[0]!.detail as unknown as Record<
+        string,
+        unknown
+      >
+    )["rawResponse"] = { providerDebug: "private" };
+
+    const actorBearing = structuredClone(previewAudit);
+    (
+      actorBearing.report.findings[0]!.detail.provenance![
+        0
+      ]! as unknown as Record<string, unknown>
+    )["actor"] = "urn:li:corpuser:private-ingestion";
+
+    const shortSecret = structuredClone(previewAudit);
+    shortSecret.report.narrative = `Provider diagnostic sk-${"x".repeat(12)}`;
+
+    const shortJwt = structuredClone(previewAudit);
+    shortJwt.report.findings[0]!.summary =
+      `Provider diagnostic eyJ${"a".repeat(8)}.${"b".repeat(8)}.${"c".repeat(8)}`;
+
+    const invalidEnvelopes: unknown[] = [
+      rawDetail,
+      actorBearing,
+      shortSecret,
+      shortJwt,
+      { ...previewAudit, unexpectedEnvelopeField: true },
+    ];
+    const fetchMock = vi.fn();
+    for (const envelope of invalidEnvelopes) {
+      fetchMock.mockResolvedValueOnce(json(envelope));
+    }
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const _envelope of invalidEnvelopes) {
+      await expect(requestAudit("customer_pii")).rejects.toMatchObject({
+        status: 502,
+      });
+    }
   });
 
   it("falls back deterministically only when the hosted API is unavailable", async () => {
@@ -126,6 +377,52 @@ describe("audit API", () => {
       `/api/control-loops/${auditId}`,
       expect.objectContaining({ method: "GET", credentials: "same-origin" }),
     );
+  });
+
+  it("surfaces a friendly rerun instruction for retired audit evidence", async () => {
+    const auditId = "9".repeat(64);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        json(
+          {
+            error: "audit_schema_retired",
+            rerunRequired: true,
+          },
+          410,
+        ),
+      ),
+    );
+
+    await expect(
+      getControlLoopStatus({
+        auditId,
+        pollUrl: `/api/control-loops/${auditId}`,
+      }),
+    ).rejects.toMatchObject({
+      status: 410,
+      message: expect.stringMatching(/rerun.*current provenance-bound report/iu),
+    });
+  });
+
+  it("never surfaces an untrusted control-plane error body", async () => {
+    const sentinel = `sk-${"browser-provider-secret".repeat(2)}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        json(
+          {
+            message: `Provider rejected ${sentinel} at https://gateway.example/v1`,
+          },
+          502,
+        ),
+      ),
+    );
+
+    await expect(requestAudit("customer_pii")).rejects.toMatchObject({
+      status: 502,
+      message: "Control-plane request failed (502).",
+    });
   });
 
   it("keeps polling through human approval and returns the terminal verified report", async () => {

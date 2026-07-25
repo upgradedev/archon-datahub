@@ -11,12 +11,14 @@ import { DataHubHarvestError } from "../../src/datahub/harvest-policy.js";
 
 async function withServer(
   run: (baseUrl: string) => Promise<void>,
-  datahub: DataHubClient = new FakeDataHubMcpClient()
+  datahub: DataHubClient = new FakeDataHubMcpClient(),
+  demoQuery?: string
 ): Promise<void> {
   const server = createArchonHttpServer({
     datahub,
     pipeline: new AuditPipeline(),
     releaseSha: "test-sha",
+    ...(demoQuery === undefined ? {} : { demoQuery }),
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
@@ -79,7 +81,57 @@ test("POST /api/audits drives the real pipeline through the HTTP boundary", asyn
     assert.equal(body.releaseSha, "test-sha");
     assert.ok(body.report.findings.length > 0);
     assert.equal(body.report.trace.length, 4);
+    assert.ok(
+      (
+        body.report.findings as Array<{
+          detail: Record<string, unknown>;
+        }>
+      ).every(
+        (finding) =>
+          !Object.hasOwn(finding.detail, "values") &&
+          !Object.hasOwn(finding.detail, "resolution") &&
+          !Object.hasOwn(finding.detail, "sensitiveFields")
+      )
+    );
   });
+});
+
+test("hosted HTTP audit permits only the exact configured public demo query", async () => {
+  await withServer(
+    async (baseUrl) => {
+      const rejected = await fetch(`${baseUrl}/api/audits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "customer_pii" }),
+      });
+      assert.equal(rejected.status, 400);
+      const rejectedBody = (await rejected.json()) as {
+        error: string;
+        message: string;
+      };
+      assert.equal(rejectedBody.error, "invalid_request");
+      assert.equal(
+        rejectedBody.message,
+        "query is outside the configured public demo scope"
+      );
+
+      const accepted = await fetch(`${baseUrl}/api/audits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "sales" }),
+      });
+      assert.equal(accepted.status, 200);
+
+      const padded = await fetch(`${baseUrl}/api/audits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: " sales " }),
+      });
+      assert.equal(padded.status, 400);
+    },
+    new FakeDataHubMcpClient(),
+    "sales"
+  );
 });
 
 test("HTTP boundary rejects wrong methods, media types, and oversized/control input", async () => {

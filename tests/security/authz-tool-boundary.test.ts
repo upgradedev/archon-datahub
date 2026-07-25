@@ -83,7 +83,8 @@ test("authz: a mutation-named tool call is refused over the dispatch layer (no w
     const res = await callAuditTool(deps, m, { urn: "urn:li:dataset:(x)", tag: "PII" });
     assert.equal(res.isError, true, `mutation tool '${m}' must be rejected`);
     const text = (res.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
-    assert.match(text, /unknown tool/i);
+    assert.equal(text, "error: unknown_tool");
+    assert.doesNotMatch(text, new RegExp(m, "iu"));
   }
 });
 

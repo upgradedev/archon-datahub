@@ -149,7 +149,10 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
-  const { deps } = await buildMcpServer({ datahub: new FakeDataHubMcpClient() });
+  const { deps } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    demoQuery: "sales",
+  });
   const toolResult = await callAuditTool(deps, "audit_catalog", {
     query: "sales",
   });

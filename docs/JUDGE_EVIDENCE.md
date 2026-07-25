@@ -61,6 +61,8 @@ The committed fixture profile is deliberately exact:
 - 2 cross-source contradictions;
 - 1 lineage gap;
 - 4 governance violations;
+- one strict deterministic-fixture model-runtime record stating `modelCall: false`, with
+  no returned model, provider response ID, usage, or latency claim;
 - one policy-derived G6 classification-tag action;
 - one authenticated synthetic steward approval;
 - one verified transition with all five postconditions passing;
@@ -82,7 +84,8 @@ file. `SHA256SUMS` independently covers every file except itself.
   form one exact chain;
 - the receipt is `VERIFIED`, all five checks pass, and rollback is `ELIGIBLE`;
 - recreating the rollback proposal from the receipt yields identical canonical content;
-- the report retains its exact 2/1/4 finding profile and SARIF has one result per finding;
+- the report retains its exact 2/1/4 finding profile, exact no-live-call fixture
+  provenance, and SARIF has one result per finding with identical provenance;
 - no task-token field or common credential-shaped value is present;
 - every DataHub URN, URL, and email identity belongs to the fixed public-fixture allowlist;
 - forbidden keys are compared case- and separator-insensitively, and common AWS, GitHub,

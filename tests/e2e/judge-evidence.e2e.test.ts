@@ -87,6 +87,17 @@ test("judge evidence is reproducible and binds the real audit/remediation functi
   for (const finding of report.findings) counts[finding.type] += 1;
   assert.equal(report.classification.totalEntities, 3);
   assert.equal(report.findings.length, 7);
+  assert.deepEqual(report.modelProvenance, {
+    schemaVersion: "archon.model-runtime-provenance/v1",
+    source: "deterministic-fixture",
+    modelCall: false,
+    provider: "fixture",
+    requestedModel: "archon-deterministic-fixture-narrator-v1",
+    returnedModel: null,
+    providerResponseId: null,
+    tokenUsage: null,
+    latencyMs: null,
+  });
   assert.deepEqual(counts, {
     contradiction: 2,
     lineage_gap: 1,

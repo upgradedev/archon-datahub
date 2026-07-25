@@ -1,9 +1,10 @@
 // LLM client seam — one OpenAI-compatible entry point, provider-agnostic.
 //
 // The narrator (executive summary) and the optional ReAct loop talk to an LLM through
-// this single OpenAI-compatible surface, so ANY provider works unchanged: Qwen via
-// Alibaba Model Studio (DashScope), OpenAI, or Gemini behind an OpenAI-compatible
-// gateway. Auth + endpoint come from the environment (LLM_API_KEY / LLM_BASE_URL /
+// this single OpenAI-compatible surface. Supported live providers must return the
+// bounded response identity required by archon.model-runtime-provenance/v1; Qwen,
+// OpenAI, Gemini, Anthropic, and explicitly configured compatible gateways are
+// supported. Auth + endpoint come from the environment (LLM_API_KEY / LLM_BASE_URL /
 // LLM_MODEL). With NO key configured the agent auto-falls back to the deterministic
 // FakeLlmClient (src/llm/fake.ts), so every code path — including the function-calling
 // tool-call parse — runs offline in CI with zero secrets and zero spend.
@@ -12,12 +13,16 @@
 // `openai` client satisfies them, and the Fake satisfies them in tests.
 
 import OpenAI from "openai";
+import type {
+  LiveLlmProvider,
+  LlmRuntimeIdentity,
+} from "./provenance.js";
 
 // ── Provider auto-detection (OpenAI-compatible, provider-agnostic) ────────────
 //
-// The narrator + optional ReAct loop talk to an LLM through ONE OpenAI-compatible surface,
-// so any provider works unchanged. We detect which real model to use from the environment,
-// in a DETERMINISTIC precedence order, and route the base URL + default model accordingly.
+// The narrator + optional ReAct loop talk to an LLM through ONE OpenAI-compatible surface.
+// We detect which supported provider to use from the environment, in a DETERMINISTIC
+// precedence order, and route the base URL + default model accordingly.
 // Each provider below exposes an OpenAI-compatible `/chat/completions` endpoint:
 //   • LLM_API_KEY      — generic override (honors LLM_BASE_URL / LLM_MODEL); wins outright.
 //   • DASHSCOPE_API_KEY — Qwen via Alibaba Model Studio (this project's default provider).
@@ -32,7 +37,7 @@ import OpenAI from "openai";
 // offline run to a live (billable) call by accident.
 
 export interface LlmProvider {
-  name: string;
+  name: LiveLlmProvider;
   apiKey: string;
   baseURL: string;
   model: string;
@@ -40,7 +45,7 @@ export interface LlmProvider {
 
 interface ProviderSpec {
   env: string;
-  name: string;
+  name: LiveLlmProvider;
   baseURL: string;
   model: string;
 }
@@ -84,7 +89,10 @@ export function resolveLlmProvider(): LlmProvider | null {
     const key = process.env[p.env];
     if (key) {
       return {
-        name: p.name,
+        // A named credential routed through an explicit gateway is provenance-classed
+        // as custom. Claiming the named provider would be misleading because the
+        // configured endpoint, rather than the credential name, determines the runtime.
+        name: process.env.LLM_BASE_URL ? "custom" : p.name,
         apiKey: key,
         // LLM_BASE_URL / LLM_MODEL still override a named provider's defaults if set.
         baseURL: process.env.LLM_BASE_URL || p.baseURL,
@@ -147,13 +155,28 @@ export interface ChatCreateArgs {
 }
 
 export interface ChatResponse {
+  id?: unknown;
+  model?: unknown;
+  usage?: unknown;
   choices: Array<{ message: { content: string | null; tool_calls?: ToolCall[] } }>;
 }
 
 export interface LlmClient {
+  readonly runtime: LlmRuntimeIdentity;
   chat: { completions: { create(args: ChatCreateArgs): Promise<ChatResponse> } };
 }
 
 export function chatClient(): LlmClient {
-  return createLlmClient() as unknown as LlmClient;
+  const provider = resolveLlmProvider();
+  if (!provider) {
+    throw new Error("A live LLM client requires an explicitly configured provider.");
+  }
+  const sdk = createLlmClient(provider.apiKey, provider.baseURL);
+  return {
+    runtime: {
+      source: "live-provider",
+      provider: provider.name,
+    },
+    chat: sdk.chat as unknown as LlmClient["chat"],
+  };
 }

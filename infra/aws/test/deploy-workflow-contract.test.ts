@@ -181,6 +181,9 @@ describe("deployment workflow release-subject binding", () => {
         ":SpaArtifactSha256=${SPA_ARTIFACT_SHA}"
       );
       expect(deployment).toContain(":ReleaseSha=${RELEASE_SHA}");
+      expect(deployment).toContain(
+        ":DemoQuery=${DATAHUB_DEMO_QUERY}"
+      );
     }
   });
 });

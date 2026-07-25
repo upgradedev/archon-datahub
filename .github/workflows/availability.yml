@@ -115,6 +115,33 @@ jobs:
           work_dir="${RUNNER_TEMP}/availability-work"
           evidence_dir="${RUNNER_TEMP}/availability-evidence"
           mkdir -p "${work_dir}" "${evidence_dir}"
+          report_validator="${work_dir}/validate-audit-report.jq"
+          validator_metadata="$(
+            gh api \
+              --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/contents/scripts/validate-audit-report.jq" \
+              -f "ref=${default_sha}"
+          )"
+          validator_size="$(
+            jq -er '
+              select(
+                .type == "file" and
+                .name == "validate-audit-report.jq" and
+                .path == "scripts/validate-audit-report.jq" and
+                .encoding == "base64" and
+                (.sha | test("^[0-9a-f]{40}$")) and
+                (.size | type == "number" and . >= 1 and . <= 65536)
+              ) |
+              .size
+            ' <<<"${validator_metadata}"
+          )"
+          jq -er '.content' <<<"${validator_metadata}" |
+            base64 --decode >"${report_validator}"
+          test -f "${report_validator}"
+          test ! -L "${report_validator}"
+          test "$(stat -c '%s' "${report_validator}")" = "${validator_size}"
           payload="${work_dir}/audit-request.json"
           jq -cnS --arg query "${AUDIT_QUERY}" '{query: $query}' >"${payload}"
           test "$(stat -c '%s' "${payload}")" -le 1024
@@ -342,89 +369,26 @@ jobs:
             echo "::error::The public audit response must not redirect"
             exit 1
           fi
+          jq -ce '.report' "${audit_body}" |
+            jq -e -f "${report_validator}" >/dev/null
           jq -e '
             def exact_keys($value; $wanted):
               ($value | type) == "object" and
               (($value | keys | sort) == ($wanted | sort));
-            def natural:
-              type == "number" and
-              floor == . and
-              . >= 0;
             exact_keys(.; ["requestId", "releaseSha", "report"]) and
             (.requestId | type == "string" and test("^[A-Za-z0-9._-]{1,128}$")) and
             (.releaseSha | type == "string" and test("^[0-9a-f]{40}$")) and
-            exact_keys(
-              .report;
-              ["scanId", "classification", "findings", "narrative", "trace"]
-            ) and
-            (
-              .report.scanId |
-              type == "string" and
-              length >= 1 and
-              length <= 256 and
-              (test("[\\u0000-\\u001f\\u007f]") | not)
-            ) and
-            exact_keys(
-              .report.classification;
-              [
-                "totalEntities",
-                "withLineage",
-                "sensitiveEntities",
-                "domains",
-                "platforms"
-              ]
-            ) and
-            (.report.classification.totalEntities | natural and . == 1) and
-            (.report.classification.withLineage | natural) and
-            (.report.classification.sensitiveEntities | natural) and
-            .report.classification.withLineage <=
-              .report.classification.totalEntities and
-            .report.classification.sensitiveEntities <=
-              .report.classification.totalEntities and
-            (
-              [.report.classification.domains[], .report.classification.platforms[]] |
-              all(natural)
-            ) and
-            (.report.findings | type == "array" and length <= 100) and
-            all(
-              .report.findings[];
-              type == "object" and
-              has("type") and
-              has("severity") and
-              has("subject") and
-              has("summary") and
-              has("detail") and
-              (
-                keys -
-                ["type", "severity", "subject", "summary", "detail", "recommendation"] |
-                length == 0
-              ) and
-              (.type | IN("contradiction", "lineage_gap", "governance_violation")) and
-              (.severity | IN("high", "medium", "low")) and
-              (.subject | type == "string" and length >= 1 and length <= 2048) and
-              (.summary | type == "string" and length >= 1 and length <= 4096) and
-              (.detail | type == "object") and
-              (
-                .recommendation == null or
-                (.recommendation | type == "string" and length <= 4096)
-              )
-            ) and
-            (.report.narrative | type == "string" and length <= 16384) and
+            .report.classification.totalEntities == 1 and
+            (.report.findings | length <= 100) and
             (
               .report.trace |
-              type == "array" and
               length == 4 and
               map(.agent) == [
                 "classifier",
                 "lineage-analyzer",
                 "governance-auditor",
                 "narrator"
-              ] and
-              all(
-                .[];
-                exact_keys(.; ["agent", "produced"]) and
-                (.produced | type == "string" and length >= 1 and length <= 1024)
-              )
+              ]
             ) and
             (
               [.. | objects | keys[]] |
@@ -1063,6 +1027,12 @@ jobs:
             --arg releaseSha "${release_sha}" \
             --arg requestIdSha256 "${request_id_sha256}" \
             --arg scanIdSha256 "${scan_id_sha256}" \
+            --arg reportSchemaVersion "$(
+              jq -er '.report.schemaVersion' "${audit_body}"
+            )" \
+            --argjson modelProvenance "$(
+              jq -c '.report.modelProvenance' "${audit_body}"
+            )" \
             --argjson classification "$(
               jq -c '
                 .report.classification |
@@ -1090,7 +1060,7 @@ jobs:
             --arg deploymentArtifactDigest "${deployment_artifact_digest}" \
             --arg deploymentEvidenceSha256 "${deployment_evidence_sha256}" '
               {
-                schemaVersion: "archon.production-availability/v1",
+                schemaVersion: "archon.production-availability/v2",
                 observedAt: $observedAt,
                 source: {
                   repository: $repository,
@@ -1125,6 +1095,8 @@ jobs:
                   releaseSha: $releaseSha,
                   requestIdSha256: $requestIdSha256,
                   scanIdSha256: $scanIdSha256,
+                  reportSchemaVersion: $reportSchemaVersion,
+                  modelProvenance: $modelProvenance,
                   requestIdHeaderMatchesBody: true,
                   classification: $classification,
                   findingCount: $findingCount,

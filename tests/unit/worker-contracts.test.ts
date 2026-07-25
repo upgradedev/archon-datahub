@@ -11,6 +11,7 @@ import {
 } from "../../src/datahub/tag-projection-reader-live.js";
 import { RemediationError } from "../../src/remediation/control-loop.js";
 import {
+  DynamoAuditResultCheckpoint,
   DynamoExecutionJournal,
   retryVisibilitySeconds,
   shouldFinalizePoisonDelivery,
@@ -20,6 +21,65 @@ const EXECUTION =
   "arn:aws:states:eu-west-1:111111111111:execution:archon-staging-control-loop:execution-0001";
 const TOKEN = "opaque-step-functions-task-token-0001";
 const DIGEST = `sha256:${"a".repeat(64)}` as `sha256:${string}`;
+const ACTIONABLE_REPLAY = {
+  schemaVersion: "archon.audit-result/v2",
+  requiresApproval: true,
+  reportDigest: DIGEST,
+  evidenceDigest: DIGEST,
+  approvalId: "approval-0001",
+  planDigest: DIGEST,
+  approvalRequestDigest: DIGEST,
+  approvalRequestedAt: "2026-07-23T10:00:00.000Z",
+  approvalExpiresAt: "2026-07-23T10:10:00.000Z",
+} as const;
+const MANUAL_REPLAY = {
+  schemaVersion: "archon.audit-result/v2",
+  requiresApproval: false,
+  reportDigest: DIGEST,
+  evidenceDigest: DIGEST,
+  manualOnlyReason: "NO_ACTIONABLE_G6_FINDING",
+} as const;
+
+function auditCheckpoint(output: unknown): DynamoAuditResultCheckpoint {
+  const client = {
+    async send(command: any): Promise<any> {
+      assert.equal(command.input.TableName, "archon-idempotency");
+      assert.deepEqual(command.input.Key, {
+        pk: { S: "AUDIT#execution-replay-0001" },
+        sk: { S: "RESULT" },
+      });
+      assert.equal(command.input.ConsistentRead, true);
+      return {
+        Item: {
+          requestDigest: { S: DIGEST },
+          output: { S: JSON.stringify(output) },
+        },
+      };
+    },
+  } as unknown as DynamoDBClient;
+  return new DynamoAuditResultCheckpoint(
+    client,
+    "archon-idempotency"
+  );
+}
+
+async function rejectsAuditReplay(output: unknown): Promise<void> {
+  await assert.rejects(
+    auditCheckpoint(output).get("execution-replay-0001", DIGEST),
+    (error: unknown) =>
+      error instanceof WorkerContractError &&
+      error.code === "INVALID_EVIDENCE"
+  );
+}
+
+function withoutKey(
+  value: object,
+  omitted: string
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => key !== omitted)
+  );
+}
 
 test("worker contracts accept the exact audit, approval, and remediation envelopes", () => {
   const audit = parseQueueMessage(
@@ -138,6 +198,109 @@ test("worker contracts reject unknown fields, queue confusion, and forged roles"
       })
     )
   );
+});
+
+test("Dynamo audit checkpoint replays exact actionable and manual v2 results", async () => {
+  assert.deepEqual(
+    await auditCheckpoint(ACTIONABLE_REPLAY).get(
+      "execution-replay-0001",
+      DIGEST
+    ),
+    ACTIONABLE_REPLAY
+  );
+  assert.deepEqual(
+    await auditCheckpoint(MANUAL_REPLAY).get(
+      "execution-replay-0001",
+      DIGEST
+    ),
+    MANUAL_REPLAY
+  );
+});
+
+test("Dynamo audit checkpoint rejects invalid IDs and incomplete v2 bindings", async () => {
+  await rejectsAuditReplay({
+    ...ACTIONABLE_REPLAY,
+    approvalId: "",
+  });
+  await rejectsAuditReplay({
+    ...ACTIONABLE_REPLAY,
+    approvalId: "short",
+  });
+  await rejectsAuditReplay({
+    ...ACTIONABLE_REPLAY,
+    approvalId: "approval/invalid",
+  });
+  await rejectsAuditReplay({
+    ...ACTIONABLE_REPLAY,
+    approvalId: "a".repeat(161),
+  });
+
+  for (const key of [
+    "approvalId",
+    "planDigest",
+    "approvalRequestDigest",
+    "approvalRequestedAt",
+    "approvalExpiresAt",
+  ]) {
+    await rejectsAuditReplay(withoutKey(ACTIONABLE_REPLAY, key));
+  }
+  await rejectsAuditReplay(
+    withoutKey(ACTIONABLE_REPLAY, "reportDigest")
+  );
+  await rejectsAuditReplay({
+    schemaVersion: "archon.audit-result/v2",
+    requiresApproval: true,
+    reportDigest: DIGEST,
+    evidenceDigest: DIGEST,
+    approvalId: "approval-0001",
+  });
+  await rejectsAuditReplay({
+    ...ACTIONABLE_REPLAY,
+    unexpectedBinding: DIGEST,
+  });
+  await rejectsAuditReplay({
+    ...MANUAL_REPLAY,
+    approvalId: "approval-0001",
+  });
+  await rejectsAuditReplay(
+    withoutKey(MANUAL_REPLAY, "manualOnlyReason")
+  );
+});
+
+test("Dynamo audit checkpoint rejects malformed, noncanonical, and unordered instants", async () => {
+  const cases = [
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalRequestedAt: "not-a-date",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalRequestedAt: "2026-07-23T10:00:00Z",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalRequestedAt: "2026-07-23T12:00:00.000+02:00",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalRequestedAt: "2026-02-30T10:00:00.000Z",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalExpiresAt: "not-a-date",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalExpiresAt: "2026-07-23T09:59:59.999Z",
+    },
+    {
+      ...ACTIONABLE_REPLAY,
+      approvalExpiresAt: ACTIONABLE_REPLAY.approvalRequestedAt,
+    },
+  ];
+  for (const output of cases) {
+    await rejectsAuditReplay(output);
+  }
 });
 
 test("direct GMS projection unions base and editable field tag URNs", () => {

@@ -61,6 +61,7 @@ jobs:
             scripts/observe-aws-live-runtime.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
+            scripts/validate-model-provenance-corpus.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
             scripts/validate-aws-waf-contract.sh \
@@ -68,6 +69,7 @@ jobs:
             bash -n "${script}"
           done
           bash tests/pipeline/aws-security-contracts.test.sh
+          bash scripts/validate-model-provenance-corpus.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -94,10 +96,12 @@ jobs:
           retention-days: 90
 
   web:
-    name: Web typecheck, test, build
+    name: Web typecheck, coverage, browser journey, build
     needs: secret-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,12 +114,27 @@ jobs:
       - name: Install locked web dependencies
         working-directory: web
         run: npm ci --ignore-scripts
-      - name: Typecheck
+      - name: Application and browser test typecheck
         working-directory: web
-        run: npm run typecheck
+        run: |
+          npm run typecheck
+          npm run typecheck:e2e
       - name: Component and API contract tests
         working-directory: web
         run: npm test
+      - name: Web coverage and decision-critical ratchets
+        working-directory: web
+        run: |
+          npm run test:coverage
+          npm run coverage:critical
+      - name: Upload web coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-coverage-${{ github.sha }}
+          path: web/coverage/
+          if-no-files-found: error
+          retention-days: 90
       - name: Web SCA gate
         working-directory: web
         run: >-
@@ -126,6 +145,22 @@ jobs:
         env:
           VITE_ARCHON_RELEASE_SHA: ${{ github.sha }}
         run: npm run build
+      - name: Install pinned Chromium runtime
+        working-directory: web
+        run: npm run browser:install
+      - name: Fixture judge journey, responsive, keyboard, and Axe gates
+        working-directory: web
+        run: npm run test:e2e
+      - name: Upload browser verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-browser-${{ github.sha }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: error
+          retention-days: 90
       - name: Package deterministic SPA candidate
         shell: bash
         run: |
@@ -182,7 +217,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "${PR_HEAD_SHA}"
           test "$(node --version)" = "v${INFRA_NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
-      - name: Resolve both reviewed dependency policies into candidate locks
+      - name: Resolve all reviewed dependency policies into candidate locks
         env:
           NPM_CONFIG_AUDIT: "false"
           NPM_CONFIG_ENGINE_STRICT: "true"
@@ -194,17 +229,22 @@ jobs:
         run: |
           set -euo pipefail
           generation_root="${RUNNER_TEMP}/clean-lock-generation"
-          mkdir -p "${generation_root}/root" "${generation_root}/infra"
+          mkdir -p \
+            "${generation_root}/root" \
+            "${generation_root}/infra" \
+            "${generation_root}/web"
           install -m 0644 package.json "${generation_root}/root/package.json"
           install -m 0644 infra/aws/package.json \
             "${generation_root}/infra/package.json"
-          for directory in root infra; do
+          install -m 0644 web/package.json \
+            "${generation_root}/web/package.json"
+          for directory in root infra web; do
             (
               cd "${generation_root}/${directory}"
               npm install \
                 --package-lock-only \
                 --no-audit \
-              --no-fund
+                --no-fund
             )
           done
           if ! cmp --silent \
@@ -219,17 +259,28 @@ jobs:
             echo "::error::Committed infrastructure lock differs from clean npm 10.9.8 resolution"
             exit 1
           fi
+          if ! cmp --silent \
+            "${generation_root}/web/package-lock.json" \
+            web/package-lock.json; then
+            echo "::error::Committed web lock differs from clean npm 10.9.8 resolution"
+            exit 1
+          fi
           install -m 0644 \
             "${generation_root}/root/package-lock.json" \
             package-lock.json
           install -m 0644 \
             "${generation_root}/infra/package-lock.json" \
             infra/aws/package-lock.json
+          install -m 0644 \
+            "${generation_root}/web/package-lock.json" \
+            web/package-lock.json
           git diff --exit-code -- \
             package.json \
             package-lock.json \
             infra/aws/package.json \
-            infra/aws/package-lock.json
+            infra/aws/package-lock.json \
+            web/package.json \
+            web/package-lock.json
       - name: Seal candidate provenance before validation
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -247,6 +298,8 @@ jobs:
             "${candidate_dir}/root-package-lock.json"
           install -m 0644 infra/aws/package-lock.json \
             "${candidate_dir}/infra-package-lock.json"
+          install -m 0644 web/package-lock.json \
+            "${candidate_dir}/web-package-lock.json"
 
           checkout_sha="$(git rev-parse HEAD)"
           test "${checkout_sha}" = "${PR_HEAD_SHA}"
@@ -254,6 +307,8 @@ jobs:
           root_lock_sha="$(sha256sum package-lock.json | cut -d' ' -f1)"
           infra_manifest_sha="$(sha256sum infra/aws/package.json | cut -d' ' -f1)"
           infra_lock_sha="$(sha256sum infra/aws/package-lock.json | cut -d' ' -f1)"
+          web_manifest_sha="$(sha256sum web/package.json | cut -d' ' -f1)"
+          web_lock_sha="$(sha256sum web/package-lock.json | cut -d' ' -f1)"
           jq -nS \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg checkoutSha "${checkout_sha}" \
@@ -272,6 +327,8 @@ jobs:
             --arg rootLockSha256 "${root_lock_sha}" \
             --arg infraManifestSha256 "${infra_manifest_sha}" \
             --arg infraLockSha256 "${infra_lock_sha}" \
+            --arg webManifestSha256 "${web_manifest_sha}" \
+            --arg webLockSha256 "${web_lock_sha}" \
             '{
               schemaVersion: 1,
               repository: $repository,
@@ -301,6 +358,11 @@ jobs:
                   packageJsonSha256: $infraManifestSha256,
                   lockFile: "infra-package-lock.json",
                   lockSha256: $infraLockSha256
+                },
+                web: {
+                  packageJsonSha256: $webManifestSha256,
+                  lockFile: "web-package-lock.json",
+                  lockSha256: $webLockSha256
                 }
               }
             }' >"${candidate_dir}/provenance.json"
@@ -309,7 +371,8 @@ jobs:
             sha256sum \
               infra-package-lock.json \
               provenance.json \
-              root-package-lock.json >SHA256SUMS
+              root-package-lock.json \
+              web-package-lock.json >SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
       - name: Validate the root candidate exactly
@@ -332,6 +395,21 @@ jobs:
           npm --prefix infra/aws run build
           npm --prefix infra/aws test -- --ci --coverage
           bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
+      - name: Validate the web candidate exactly
+        working-directory: web
+        env:
+          VITE_ARCHON_RELEASE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run typecheck
+          npm run typecheck:e2e
+          npm test
+          npm run test:coverage
+          npm run coverage:critical
+          npm run build
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
+            --audit-level=high
       - name: Mark the exact candidates as remotely validated
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
@@ -359,6 +437,7 @@ jobs:
             --arg workflowSha "${WORKFLOW_SHA}" \
             --arg rootManifestSha256 "$(sha256sum package.json | cut -d' ' -f1)" \
             --arg infraManifestSha256 "$(sha256sum infra/aws/package.json | cut -d' ' -f1)" \
+            --arg webManifestSha256 "$(sha256sum web/package.json | cut -d' ' -f1)" \
             '
               .schemaVersion == 1 and
               .repository == $repository and
@@ -373,26 +452,30 @@ jobs:
               .generator.nodeVersion == "v22.23.1" and
               .generator.npmVersion == "10.9.8" and
               .candidates.root.packageJsonSha256 == $rootManifestSha256 and
-              .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256
+              .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256 and
+              .candidates.web.packageJsonSha256 == $webManifestSha256
             ' "${candidate_dir}/provenance.json" >/dev/null
           git diff --exit-code -- \
             package.json \
             package-lock.json \
             infra/aws/package.json \
-            infra/aws/package-lock.json
+            infra/aws/package-lock.json \
+            web/package.json \
+            web/package-lock.json
           jq -nS \
             --arg headSha "${checkout_sha}" \
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
             '{
               schemaVersion: 1,
-              result: "root-and-infrastructure-candidates-validated",
+              result: "root-infrastructure-and-web-candidates-validated",
               headSha: $headSha,
               runId: $runId,
               runAttempt: $runAttempt,
               gates: [
                 "root-typecheck-build-test-coverage-sca",
-                "infra-typecheck-test-coverage-exact-compensated-sca"
+                "infra-typecheck-test-coverage-exact-compensated-sca",
+                "web-typecheck-test-coverage-build-sca"
               ]
             }' >"${candidate_dir}/validation.json"
           (

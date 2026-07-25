@@ -31,6 +31,10 @@ process.env.DATAHUB_GMS_TOKEN = SENTINEL;
 // A stub LLM that never returns a usable tool call — forces the loop's no-progress fallback,
 // which logs via console.warn. This exercises the realistic offline leak surface (logging).
 class NoOpLlm implements LlmClient {
+  readonly runtime = {
+    source: "deterministic-fixture",
+    provider: "fixture",
+  } as const;
   chat = { completions: { create: async () => ({ choices: [{ message: { content: null, tool_calls: undefined } }] }) } };
 }
 
@@ -51,7 +55,11 @@ test("data-exposure: the token never appears in the pipeline report (findings + 
 });
 
 test("data-exposure: the token never appears in the MCP tool output", async () => {
-  const { server } = await buildMcpServer({ datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() });
+  const { server } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    pipeline: new AuditPipeline(),
+    demoQuery: "sales",
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);

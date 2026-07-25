@@ -40,7 +40,10 @@ import {
   auditReportToMarkdown,
   auditReportToSarif,
 } from "../src/reporting/exporters.js";
-import { FakeLlmClient } from "../src/llm/fake.js";
+import {
+  DETERMINISTIC_FIXTURE_MODEL,
+  FakeLlmClient,
+} from "../src/llm/fake.js";
 import { AuditPipeline, type AuditReport } from "../src/pipeline/pipeline.js";
 
 const REPOSITORY = "upgradedev/archon-datahub";
@@ -444,7 +447,7 @@ export async function buildJudgeEvidencePack(input: {
   const pipeline = new AuditPipeline({
     narrator: new NarratorAgent(
       new FakeLlmClient(),
-      "archon-deterministic-fixture-narrator-v1"
+      DETERMINISTIC_FIXTURE_MODEL
     ),
   });
   const report = await pipeline.run(new FakeDataHubMcpClient());

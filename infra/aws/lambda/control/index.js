@@ -22,14 +22,59 @@ const stateMachineArn = process.env.STATE_MACHINE_ARN;
 const checkpointTable = process.env.CHECKPOINT_TABLE;
 const approvalTable = process.env.APPROVAL_TABLE;
 const evidenceBucket = process.env.EVIDENCE_BUCKET;
+const demoQuery = process.env.ARCHON_DEMO_QUERY;
 
 const AUDIT_ID = /^[a-f0-9]{64}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const RFC3339_INSTANT =
+  /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
 const MAX_BODY_BYTES = 4096;
 const MAX_EVIDENCE_BYTES = 6 * 1024 * 1024;
 const MAX_EXECUTION_OUTPUT_BYTES = 256 * 1024;
 const DECIDED_RETENTION_SECONDS = 90 * 24 * 60 * 60;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const CREDENTIAL_SHAPED_IDENTIFIER =
+  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+const MANUAL_ONLY_REASONS = [
+  "READ_ONLY_REQUEST",
+  "NO_ACTIONABLE_G6_FINDING",
+  "REMEDIATION_PRESTATE_UNAVAILABLE",
+  "POLICY_REJECTED_PROPOSAL"
+];
+const FORBIDDEN_PUBLIC_KEYS = new Set([
+  "accesstoken",
+  "accesstokens",
+  "apikey",
+  "authorization",
+  "clientsecret",
+  "cookie",
+  "credential",
+  "credentials",
+  "idtoken",
+  "jwt",
+  "password",
+  "privatekey",
+  "rawresponse",
+  "refreshtoken",
+  "secret",
+  "secretaccesskey",
+  "sessiontoken",
+  "tasktoken",
+  "token",
+  "tokens"
+]);
+const PUBLIC_CREDENTIAL_PATTERNS = [
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
+  /gh[pousr]_[A-Za-z0-9_]{20,}/u,
+  /github_pat_[A-Za-z0-9_]{20,}/u,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/u,
+  /AIza[0-9A-Za-z_-]{35}/u,
+  /Bearer\s+[A-Za-z0-9._~+/=-]{12,}/iu,
+  /sk-(?:ant-)?[A-Za-z0-9._~+/=-]{12,}/iu,
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /(?:api[_ -]?key|password|passwd|pwd|secret|token)\s*[:=]\s*["']?[^\s"',;]{8,}/iu,
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u
+];
 const VERIFICATION_CHECK_IDS = [
   "TARGET_UNCHANGED",
   "PREEXISTING_TAGS_PRESERVED",
@@ -46,6 +91,13 @@ const RECEIPT_EVENT_KINDS = [
   "POSTCONDITION_CHECKED",
   "ROLLBACK_ANCHORED"
 ];
+
+class RetiredAuditSchemaError extends Error {
+  constructor() {
+    super("retired audit evidence schema");
+    this.name = "RetiredAuditSchemaError";
+  }
+}
 
 function response(statusCode, body, extraHeaders = {}) {
   return {
@@ -81,6 +133,7 @@ function instant(value) {
   return (
     typeof value === "string" &&
     value.length <= 64 &&
+    RFC3339_INSTANT.test(value) &&
     Number.isFinite(Date.parse(value))
   );
 }
@@ -92,6 +145,21 @@ function boundedString(value, maximum = 2048) {
     value.length <= maximum &&
     !/[\u0000-\u001f\u007f]/u.test(value)
   );
+}
+
+function configuredDemoQuery() {
+  if (
+    typeof demoQuery !== "string" ||
+    demoQuery !== demoQuery.trim() ||
+    demoQuery.length < 1 ||
+    demoQuery.length > 256 ||
+    /[\u0000-\u001f\u007f]/u.test(demoQuery) ||
+    /[*?]/u.test(demoQuery) ||
+    demoQuery === "{}"
+  ) {
+    throw new Error("invalid demo query configuration");
+  }
+  return demoQuery;
 }
 
 function without(value, keys) {
@@ -151,8 +219,14 @@ function parseStartBody(input) {
     return { error: response(400, { error: "invalid_query" }) };
   }
   const query = body.query.trim();
-  if (!query || query === "*") {
+  if (query !== body.query) {
+    return { error: response(400, { error: "query_must_be_trimmed" }) };
+  }
+  if (!query || /[*?]/u.test(query) || query === "{}") {
     return { error: response(400, { error: "query_must_be_narrow" }) };
+  }
+  if (query !== configuredDemoQuery()) {
+    return { error: response(400, { error: "query_outside_demo_scope" }) };
   }
   return { query, mode };
 }
@@ -859,29 +933,234 @@ function parseAuditCheckpoint(item) {
   } catch {
     throw new Error("malformed audit checkpoint");
   }
+  const baseKeys = [
+    "schemaVersion",
+    "requiresApproval",
+    "reportDigest",
+    "evidenceDigest"
+  ];
   if (
     !record(output) ||
-    output.schemaVersion !== "archon.audit-result/v1" ||
+    !["archon.audit-result/v1", "archon.audit-result/v2"].includes(
+      output.schemaVersion
+    ) ||
     typeof output.requiresApproval !== "boolean" ||
     !DIGEST.test(output.reportDigest) ||
     !DIGEST.test(output.evidenceDigest)
   ) {
     throw new Error("invalid audit checkpoint");
   }
-  if (
-    output.requiresApproval &&
-    (typeof output.approvalId !== "string" ||
+  if (output.requiresApproval) {
+    const approvalBindingKeys = [
+      "approvalRequestDigest",
+      "approvalRequestedAt",
+      "approvalExpiresAt"
+    ];
+    const isCurrentCheckpoint =
+      output.schemaVersion === "archon.audit-result/v2";
+    if (
+      !exactKeys(
+        output,
+        [
+          ...baseKeys,
+          "approvalId",
+          "planDigest",
+          ...(isCurrentCheckpoint ? approvalBindingKeys : [])
+        ],
+        isCurrentCheckpoint ? [] : approvalBindingKeys
+      ) ||
+      typeof output.approvalId !== "string" ||
       !/^[A-Za-z0-9._:-]{8,160}$/.test(output.approvalId) ||
-      !DIGEST.test(output.planDigest))
+      !DIGEST.test(output.planDigest)
+    ) {
+      throw new Error("invalid approval checkpoint");
+    }
+    const presentApprovalKeys = approvalBindingKeys.filter((key) =>
+      Object.prototype.hasOwnProperty.call(output, key)
+    );
+    if (
+      (isCurrentCheckpoint || presentApprovalKeys.length !== 0) &&
+      (presentApprovalKeys.length !== approvalBindingKeys.length ||
+        !DIGEST.test(output.approvalRequestDigest) ||
+        !instant(output.approvalRequestedAt) ||
+        !instant(output.approvalExpiresAt) ||
+        Date.parse(output.approvalExpiresAt) <=
+          Date.parse(output.approvalRequestedAt))
+    ) {
+      throw new Error("invalid approval checkpoint");
+    }
+  } else if (
+    !exactKeys(output, [...baseKeys, "manualOnlyReason"]) ||
+    !MANUAL_ONLY_REASONS.includes(output.manualOnlyReason)
   ) {
-    throw new Error("invalid approval checkpoint");
+    throw new Error("invalid manual-only checkpoint");
   }
   return output;
 }
 
+function safeReportCount(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function boundedReportText(value, maximum) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximum &&
+    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+  );
+}
+
+function validCountMap(value) {
+  return (
+    record(value) &&
+    Object.keys(value).length <= 1000 &&
+    Object.entries(value).every(
+      ([key, count]) => boundedReportText(key, 256) && safeReportCount(count)
+    )
+  );
+}
+
+function validModelId(value) {
+  return (
+    typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u.test(value) &&
+    !value.includes("://") &&
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
+  );
+}
+
+function validTokenUsage(value) {
+  return (
+    exactKeys(value, ["inputTokens", "outputTokens", "totalTokens"]) &&
+    safeReportCount(value.inputTokens) &&
+    safeReportCount(value.outputTokens) &&
+    safeReportCount(value.totalTokens) &&
+    value.totalTokens === value.inputTokens + value.outputTokens
+  );
+}
+
+function validModelProvenance(value) {
+  if (
+    !exactKeys(value, [
+      "schemaVersion",
+      "source",
+      "modelCall",
+      "provider",
+      "requestedModel",
+      "returnedModel",
+      "providerResponseId",
+      "tokenUsage",
+      "latencyMs"
+    ]) ||
+    value.schemaVersion !== "archon.model-runtime-provenance/v1" ||
+    !validModelId(value.requestedModel)
+  ) {
+    return false;
+  }
+  if (value.source === "deterministic-fixture") {
+    return (
+      value.modelCall === false &&
+      value.provider === "fixture" &&
+      value.returnedModel === null &&
+      value.providerResponseId === null &&
+      value.tokenUsage === null &&
+      value.latencyMs === null
+    );
+  }
+  return (
+    value.source === "live-provider" &&
+    value.modelCall === true &&
+    ["custom", "qwen", "gemini", "openai", "anthropic"].includes(
+      value.provider
+    ) &&
+    validModelId(value.returnedModel) &&
+    typeof value.providerResponseId === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u.test(value.providerResponseId) &&
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value.providerResponseId) &&
+    (value.tokenUsage === null || validTokenUsage(value.tokenUsage)) &&
+    Number.isSafeInteger(value.latencyMs) &&
+    value.latencyMs >= 0 &&
+    value.latencyMs <= 3600000
+  );
+}
+
+function validAuditFinding(value) {
+  return (
+    exactKeys(
+      value,
+      ["type", "severity", "subject", "summary", "detail"],
+      ["recommendation"]
+    ) &&
+    ["contradiction", "lineage_gap", "governance_violation"].includes(
+      value.type
+    ) &&
+    ["low", "medium", "high"].includes(value.severity) &&
+    boundedReportText(value.subject, 2048) &&
+    boundedReportText(value.summary, 4000) &&
+    record(value.detail) &&
+    (value.recommendation === undefined ||
+      boundedReportText(value.recommendation, 4000))
+  );
+}
+
 function validAuditReport(report) {
   return (
-    record(report) &&
+    exactKeys(report, [
+      "schemaVersion",
+      "scanId",
+      "classification",
+      "findings",
+      "narrative",
+      "modelProvenance",
+      "trace"
+    ]) &&
+    report.schemaVersion === "archon.audit-report/v1" &&
+    boundedReportText(report.scanId, 512) &&
+    exactKeys(report.classification, [
+      "totalEntities",
+      "withLineage",
+      "sensitiveEntities",
+      "domains",
+      "platforms"
+    ]) &&
+    safeReportCount(report.classification.totalEntities) &&
+    safeReportCount(report.classification.withLineage) &&
+    safeReportCount(report.classification.sensitiveEntities) &&
+    report.classification.withLineage <=
+      report.classification.totalEntities &&
+    report.classification.sensitiveEntities <=
+      report.classification.totalEntities &&
+    validCountMap(report.classification.domains) &&
+    validCountMap(report.classification.platforms) &&
+    Array.isArray(report.findings) &&
+    report.findings.length <= 10000 &&
+    report.findings.every(validAuditFinding) &&
+    boundedReportText(report.narrative, 8000) &&
+    validModelProvenance(report.modelProvenance) &&
+    Array.isArray(report.trace) &&
+    report.trace.length <= 32 &&
+    report.trace.every(
+      (step) =>
+        exactKeys(step, ["agent", "produced"]) &&
+        boundedReportText(step.agent, 128) &&
+        boundedReportText(step.produced, 2000)
+    )
+  );
+}
+
+function validRetiredAuditReport(report) {
+  return (
+    exactKeys(report, [
+      "scanId",
+      "classification",
+      "findings",
+      "narrative",
+      "trace"
+    ]) &&
+    // This mirrors the historical five-key report acceptance contract, including
+    // an empty scan id. The report is digest-verified and never returned; it only
+    // identifies evidence that must be rerun under the current provenance schema.
     typeof report.scanId === "string" &&
     record(report.classification) &&
     Array.isArray(report.findings) &&
@@ -906,39 +1185,398 @@ function verifyAuditEvidence(value, expectedDigest, expectedExecutionArn, report
   return digest(unsigned) === expectedDigest && digest(value.report) === reportDigest;
 }
 
+function verifyRetiredAuditEvidence(
+  value,
+  expectedDigest,
+  expectedExecutionArn,
+  reportDigest
+) {
+  if (
+    !record(value) ||
+    value.schemaVersion !== "archon.audit-evidence/v1" ||
+    value.executionId !== expectedExecutionArn ||
+    value.digest !== expectedDigest ||
+    value.reportDigest !== reportDigest ||
+    !validRetiredAuditReport(value.report) ||
+    !record(value.remediation)
+  ) {
+    return false;
+  }
+  const { digest: _storedDigest, ...unsigned } = value;
+  return digest(unsigned) === expectedDigest && digest(value.report) === reportDigest;
+}
+
+function auditCheckpointBindsEvidence(checkpoint, evidence) {
+  const remediation = evidence?.remediation;
+  if (!record(remediation)) return false;
+  if (!checkpoint.requiresApproval) {
+    return (
+      remediation.disposition === "MANUAL_ONLY" &&
+      remediation.reason === checkpoint.manualOnlyReason
+    );
+  }
+  if (
+    remediation.disposition !== "ACTIONABLE" ||
+    !record(remediation.plan) ||
+    !record(remediation.approvalRequest) ||
+    remediation.plan.digest !== checkpoint.planDigest ||
+    remediation.approvalRequest.approvalId !== checkpoint.approvalId
+  ) {
+    return false;
+  }
+  if (
+    checkpoint.schemaVersion === "archon.audit-result/v1" &&
+    checkpoint.approvalRequestDigest === undefined
+  ) {
+    return true;
+  }
+  return (
+    remediation.approvalRequest.digest === checkpoint.approvalRequestDigest &&
+    remediation.approvalRequest.requestedAt ===
+      checkpoint.approvalRequestedAt &&
+    remediation.approvalRequest.expiresAt === checkpoint.approvalExpiresAt
+  );
+}
+
+function assertPublicOutputSafe(value) {
+  if (typeof value === "string") {
+    if (PUBLIC_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(value))) {
+      throw new Error("unsafe public audit value");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach(assertPublicOutputSafe);
+    return;
+  }
+  if (!record(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = key.replace(/[^A-Za-z0-9]/gu, "").toLowerCase();
+    if (
+      FORBIDDEN_PUBLIC_KEYS.has(normalized) ||
+      PUBLIC_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(key))
+    ) {
+      throw new Error("unsafe public audit field");
+    }
+    assertPublicOutputSafe(entry);
+  }
+}
+
+function projectPublicBlastRadius(value) {
+  if (
+    !exactKeys(value, [
+      "rootUrn",
+      "downstream",
+      "maxHops",
+      "truncated",
+      "impact"
+    ]) ||
+    !boundedReportText(value.rootUrn, 2048) ||
+    !Array.isArray(value.downstream) ||
+    value.downstream.length > 10000 ||
+    !Number.isSafeInteger(value.maxHops) ||
+    value.maxHops < 0 ||
+    value.maxHops > 10 ||
+    typeof value.truncated !== "boolean" ||
+    !["none", "low", "medium", "high", "critical"].includes(value.impact)
+  ) {
+    throw new Error("invalid public blast radius");
+  }
+  return {
+    rootUrn: value.rootUrn,
+    downstream: value.downstream.map((asset) => {
+      if (
+        !exactKeys(asset, ["urn", "minHops"]) ||
+        !boundedReportText(asset.urn, 2048) ||
+        !Number.isSafeInteger(asset.minHops) ||
+        asset.minHops < 0 ||
+        asset.minHops > 10
+      ) {
+        throw new Error("invalid public impacted asset");
+      }
+      return { urn: asset.urn, minHops: asset.minHops };
+    }),
+    maxHops: value.maxHops,
+    truncated: value.truncated,
+    impact: value.impact
+  };
+}
+
+function projectExplicitPublicProvenance(value) {
+  if (!Array.isArray(value) || value.length > 1000) {
+    throw new Error("invalid public provenance");
+  }
+  return value.map((event) => {
+    if (
+      !exactKeys(
+        event,
+        ["source", "runId", "observedAt", "status"],
+        ["actor", "value"]
+      ) ||
+      !boundedReportText(event.source, 512) ||
+      !boundedReportText(event.runId, 512) ||
+      !instant(event.observedAt) ||
+      !["trusted", "conflicting", "observed"].includes(event.status)
+    ) {
+      throw new Error("invalid public provenance event");
+    }
+    return {
+      source: event.source,
+      runId: event.runId,
+      observedAt: event.observedAt,
+      status: event.status
+    };
+  });
+}
+
+function contradictionProvenance(detail) {
+  if (!Array.isArray(detail.values) || detail.values.length > 1000) {
+    return undefined;
+  }
+  const recommendedFactId =
+    record(detail.resolution) &&
+    boundedReportText(detail.resolution.recommendedFactId, 512)
+      ? detail.resolution.recommendedFactId
+      : undefined;
+  const events = detail.values.map((entry) => {
+    if (
+      !record(entry) ||
+      !boundedReportText(entry.factId, 512) ||
+      (entry.source !== null && !boundedReportText(entry.source, 512)) ||
+      !instant(entry.createdAt)
+    ) {
+      throw new Error("invalid contradiction provenance");
+    }
+    return {
+      source: entry.source ?? "unattributed-source",
+      runId: entry.factId,
+      observedAt: entry.createdAt,
+      status:
+        entry.factId === recommendedFactId ? "trusted" : "conflicting"
+    };
+  });
+  return events;
+}
+
+function projectPublicFinding(finding) {
+  const detail = {};
+  if (finding.detail.ruleId !== undefined) {
+    if (!boundedReportText(finding.detail.ruleId, 128)) {
+      throw new Error("invalid public rule id");
+    }
+    detail.ruleId = finding.detail.ruleId;
+  }
+  if (finding.detail.rule !== undefined) {
+    if (!boundedReportText(finding.detail.rule, 2048)) {
+      throw new Error("invalid public rule");
+    }
+    detail.rule = finding.detail.rule;
+  }
+  if (finding.detail.attribute !== undefined) {
+    if (!boundedReportText(finding.detail.attribute, 512)) {
+      throw new Error("invalid public attribute");
+    }
+    detail.attribute = finding.detail.attribute;
+  }
+  if (finding.detail.unclassifiedFields !== undefined) {
+    if (
+      !Array.isArray(finding.detail.unclassifiedFields) ||
+      finding.detail.unclassifiedFields.length > 1000 ||
+      !finding.detail.unclassifiedFields.every((field) =>
+        boundedReportText(field, 1024)
+      )
+    ) {
+      throw new Error("invalid public field list");
+    }
+    detail.unclassifiedFields = [...finding.detail.unclassifiedFields];
+  }
+  if (finding.detail.blastRadius !== undefined) {
+    detail.blastRadius = projectPublicBlastRadius(
+      finding.detail.blastRadius
+    );
+  }
+  if (finding.detail.provenance !== undefined) {
+    detail.provenance = projectExplicitPublicProvenance(
+      finding.detail.provenance
+    );
+  } else {
+    const derived = contradictionProvenance(finding.detail);
+    if (derived !== undefined) detail.provenance = derived;
+  }
+  const projected = {
+    type: finding.type,
+    severity: finding.severity,
+    subject: finding.subject,
+    summary: finding.summary,
+    detail,
+    ...(finding.recommendation === undefined
+      ? {}
+      : { recommendation: finding.recommendation })
+  };
+  assertPublicOutputSafe(projected);
+  return projected;
+}
+
+function actionableDossierProvenance(dossier) {
+  if (!Array.isArray(dossier.provenance) || dossier.provenance.length > 1000) {
+    throw new Error("actionable dossier provenance is malformed");
+  }
+  return dossier.provenance.map((event) => {
+    if (
+      !record(event) ||
+      !boundedReportText(event.sourceKind, 128) ||
+      !boundedReportText(event.aspect, 256) ||
+      !instant(event.observedAt) ||
+      !DIGEST.test(event.valueDigest)
+    ) {
+      throw new Error("actionable dossier provenance is malformed");
+    }
+    return {
+      source: `${event.sourceKind}:${event.aspect}`,
+      runId: event.valueDigest,
+      observedAt: event.observedAt,
+      status: "trusted"
+    };
+  });
+}
+
+function projectActionableDossier(dossier) {
+  const evidenceCount =
+    dossier.provenance.length + dossier.blastRadius.downstreamUrns.length + 2;
+  const projected = {
+    dossierId: dossier.dossierId,
+    digest: dossier.digest,
+    policyDigest: dossier.policyDigest,
+    generatedAt: dossier.createdAt,
+    evidenceCount
+  };
+  if (
+    !exactKeys(projected, [
+      "dossierId",
+      "digest",
+      "policyDigest",
+      "generatedAt",
+      "evidenceCount"
+    ]) ||
+    !/^dossier-[a-f0-9]{24}$/u.test(projected.dossierId) ||
+    !DIGEST.test(projected.digest) ||
+    !DIGEST.test(projected.policyDigest) ||
+    !instant(projected.generatedAt) ||
+    !Number.isSafeInteger(projected.evidenceCount) ||
+    projected.evidenceCount < 2 ||
+    projected.evidenceCount > 100000
+  ) {
+    throw new Error("actionable dossier projection is malformed");
+  }
+  return projected;
+}
+
+function projectActionableApproval(dossier, plan, approvalRequest) {
+  const projected = {
+    approvalId: approvalRequest.approvalId,
+    expiresAt: approvalRequest.expiresAt,
+    targetField: dossier.target.columnPath,
+    proposedTag: plan.action.arguments.tag_urns[0],
+    before: [...plan.expectedBefore.tags],
+    after: [...plan.expectedAfter.tags],
+    planDigest: plan.digest,
+    risk: plan.risk
+  };
+  if (
+    !exactKeys(projected, [
+      "approvalId",
+      "expiresAt",
+      "targetField",
+      "proposedTag",
+      "before",
+      "after",
+      "planDigest",
+      "risk"
+    ]) ||
+    !/^approval-[a-f0-9]{24}$/u.test(projected.approvalId) ||
+    !instant(projected.expiresAt) ||
+    !boundedReportText(projected.targetField, 1024) ||
+    !boundedReportText(projected.proposedTag, 2048) ||
+    !Array.isArray(projected.before) ||
+    projected.before.length > 256 ||
+    !projected.before.every((tag) => boundedReportText(tag, 2048)) ||
+    !Array.isArray(projected.after) ||
+    projected.after.length > 256 ||
+    !projected.after.every((tag) => boundedReportText(tag, 2048)) ||
+    !DIGEST.test(projected.planDigest) ||
+    projected.risk !== "low"
+  ) {
+    throw new Error("actionable approval projection is malformed");
+  }
+  return projected;
+}
+
 async function readAuditEvidence(checkpoint, expectedExecutionArn) {
   const evidence = await readEvidenceObject("audit", checkpoint.evidenceDigest);
+  if (checkpoint.schemaVersion === "archon.audit-result/v2") {
+    if (
+      verifyAuditEvidence(
+        evidence,
+        checkpoint.evidenceDigest,
+        expectedExecutionArn,
+        checkpoint.reportDigest
+      ) &&
+      auditCheckpointBindsEvidence(checkpoint, evidence)
+    ) {
+      if (checkpoint.requiresApproval) {
+        actionableArtifacts(evidence, checkpoint);
+      }
+      return evidence;
+    }
+    throw new Error("evidence integrity verification failed");
+  }
   if (
-    !verifyAuditEvidence(
+    checkpoint.schemaVersion === "archon.audit-result/v1" &&
+    verifyRetiredAuditEvidence(
       evidence,
       checkpoint.evidenceDigest,
       expectedExecutionArn,
       checkpoint.reportDigest
-    )
+    ) &&
+    auditCheckpointBindsEvidence(checkpoint, evidence)
   ) {
-    throw new Error("evidence integrity verification failed");
+    // Historical evidence remains immutable and digest-verified, but it predates
+    // model-runtime provenance. Returning or inventing a provenance claim would be
+    // misleading, so callers receive an explicit rerun-required cutover response.
+    throw new RetiredAuditSchemaError();
   }
-  return evidence;
+  throw new Error("evidence integrity verification failed");
 }
 
-function projectReport(evidence) {
-  const report = JSON.parse(JSON.stringify(evidence.report));
-  if (evidence.remediation.disposition !== "ACTIONABLE") return report;
+function projectReport(evidence, checkpoint) {
+  const artifacts =
+    evidence.remediation.disposition === "ACTIONABLE"
+      ? actionableArtifacts(evidence, checkpoint)
+      : undefined;
+  const report = {
+    schemaVersion: "archon.audit-report/v1",
+    scanId: evidence.report.scanId,
+    classification: {
+      totalEntities: evidence.report.classification.totalEntities,
+      withLineage: evidence.report.classification.withLineage,
+      sensitiveEntities: evidence.report.classification.sensitiveEntities,
+      domains: { ...evidence.report.classification.domains },
+      platforms: { ...evidence.report.classification.platforms }
+    },
+    findings: evidence.report.findings.map(projectPublicFinding),
+    narrative: evidence.report.narrative,
+    modelProvenance: JSON.parse(
+      JSON.stringify(evidence.report.modelProvenance)
+    ),
+    trace: evidence.report.trace.map((step) => ({
+      agent: step.agent,
+      produced: step.produced
+    }))
+  };
+  assertPublicOutputSafe(report);
+  if (!artifacts) return report;
 
-  const { dossier, plan, approvalRequest } = evidence.remediation;
-  if (
-    !record(dossier) ||
-    !record(dossier.finding) ||
-    !record(dossier.target) ||
-    !record(plan) ||
-    !record(plan.action) ||
-    !record(plan.action.arguments) ||
-    !record(plan.expectedBefore) ||
-    !record(plan.expectedAfter) ||
-    !record(approvalRequest)
-  ) {
-    throw new Error("actionable evidence projection is malformed");
-  }
+  const { dossier, plan, approvalRequest } = artifacts;
   const finding = report.findings.find(
     (candidate) =>
       record(candidate) &&
@@ -947,50 +1585,13 @@ function projectReport(evidence) {
       candidate.detail.ruleId === "G6"
   );
   if (!finding) throw new Error("actionable finding is absent from report");
-  const before = Array.isArray(plan.expectedBefore.tags)
-    ? plan.expectedBefore.tags.filter((tag) => typeof tag === "string")
-    : [];
-  const after = Array.isArray(plan.expectedAfter.tags)
-    ? plan.expectedAfter.tags.filter((tag) => typeof tag === "string")
-    : [];
-  const tagUrns = Array.isArray(plan.action.arguments.tag_urns)
-    ? plan.action.arguments.tag_urns
-    : [];
-  if (
-    typeof approvalRequest.approvalId !== "string" ||
-    typeof approvalRequest.expiresAt !== "string" ||
-    typeof dossier.target.columnPath !== "string" ||
-    typeof plan.digest !== "string" ||
-    plan.risk !== "low" ||
-    typeof tagUrns[0] !== "string"
-  ) {
-    throw new Error("actionable evidence has no safe approval projection");
-  }
   finding.detail = {
     ...finding.detail,
-    dossier: {
-      dossierId: dossier.dossierId,
-      digest: dossier.digest,
-      policyDigest: dossier.policyDigest,
-      generatedAt: dossier.createdAt,
-      evidenceCount:
-        (Array.isArray(dossier.provenance) ? dossier.provenance.length : 0) +
-        (Array.isArray(dossier.blastRadius?.downstreamUrns)
-          ? dossier.blastRadius.downstreamUrns.length
-          : 0) +
-        2
-    },
-    approval: {
-      approvalId: approvalRequest.approvalId,
-      expiresAt: approvalRequest.expiresAt,
-      targetField: dossier.target.columnPath,
-      proposedTag: tagUrns[0],
-      before,
-      after,
-      planDigest: plan.digest,
-      risk: plan.risk
-    }
+    provenance: actionableDossierProvenance(dossier),
+    dossier: projectActionableDossier(dossier),
+    approval: projectActionableApproval(dossier, plan, approvalRequest)
   };
+  assertPublicOutputSafe(report);
   return report;
 }
 
@@ -1137,6 +1738,8 @@ function actionableArtifacts(evidence, checkpoint) {
       )
     : undefined;
   if (
+    checkpoint?.schemaVersion !== "archon.audit-result/v2" ||
+    checkpoint.requiresApproval !== true ||
     remediation?.disposition !== "ACTIONABLE" ||
     !record(dossier) ||
     !record(plan) ||
@@ -1156,7 +1759,10 @@ function actionableArtifacts(evidence, checkpoint) {
     approvalRequest.requestedAt !== evidence.createdAt ||
     plan.digest !== checkpoint.planDigest ||
     approvalRequest.approvalId !== checkpoint.approvalId ||
-    approvalRequest.planDigest !== checkpoint.planDigest
+    approvalRequest.planDigest !== checkpoint.planDigest ||
+    approvalRequest.digest !== checkpoint.approvalRequestDigest ||
+    approvalRequest.requestedAt !== checkpoint.approvalRequestedAt ||
+    approvalRequest.expiresAt !== checkpoint.approvalExpiresAt
   ) {
     throw new Error("terminal audit evidence binding is invalid");
   }
@@ -1400,7 +2006,7 @@ async function status(auditId) {
     ...(evidence
       ? {
           releaseSha: evidence.releaseSha,
-          report: projectReport(evidence)
+          report: projectReport(evidence, checkpoint)
         }
       : {}),
     ...(approval ? { approval: approval.projection } : {}),
@@ -1426,7 +2032,13 @@ exports.handler = async (event) => {
       return await status(event.auditId);
     }
     return response(404, { error: "not_found" });
-  } catch {
+  } catch (error) {
+    if (error instanceof RetiredAuditSchemaError) {
+      return response(410, {
+        error: "audit_schema_retired",
+        rerunRequired: true
+      });
+    }
     const requestId =
       typeof event?.requestId === "string" &&
       /^[A-Za-z0-9=+/_-]{1,256}$/.test(event.requestId)

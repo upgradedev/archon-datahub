@@ -23,7 +23,11 @@ consistent:
   descriptions, typing, and sensitive-field classification. G6 accepts only exact
   policy identifiers; an unrelated tag or glossary term never passes the control.
 - **Evidence, not opaque advice** — every result can be exported as JSON, Markdown, or
-  SARIF and carries provenance, policy, and content digests.
+  SARIF and carries provenance, policy, and content digests. Model-runtime provenance is
+  a strict union: deterministic fixture runs state that no provider model call occurred;
+  live runs retain only bounded provider/model/response-ID, token-usage, and client-latency
+  metadata. Prompts, credentials, endpoints, raw errors, and provider payloads are never
+  admitted to that contract.
 - **Governed G6 remediation** — only a missing classification tag can become an action.
   Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
   optional comment; it never sends a tool name, entity URN, or mutation arguments.
@@ -41,6 +45,18 @@ diagnostic preview with a 25-second pipeline deadline. A separately deployed wor
 the only component that may
 receive a distinct write credential. Its action catalog is limited to the official
 `add_tags` / `remove_tags` tools, one entity, one column, and one policy tag.
+
+The environment supplies one exact `DemoQuery` to the SPA, HTTP service, control Lambda,
+and public Archon MCP server; a missing scope, padded equivalents, wildcards, alternate
+catalog queries, and a query resolving to anything other than one dataset fail closed. MCP
+`get_entity` accepts only the URN resolved from that scope and rebuilds a six-field public
+identity projection; descriptions, owners, schema fields, tags, glossary terms, domains,
+lineage, source metadata, and arbitrary aspects never cross that boundary. Public audit
+responses are likewise newly constructed allowlisted projections rather than the immutable
+internal evidence object: arbitrary rich detail and raw contradiction values are excluded,
+provenance drops actor/value fields, and the complete response is recursively rejected if
+it contains forbidden or credential-shaped fields. A shared conformance corpus keeps the
+backend, Lambda, browser, evidence exporter, and deployment validator aligned in CI.
 
 ## Why DataHub
 
@@ -91,6 +107,10 @@ Important trust boundaries:
   bounded direct GMS version-history recovery path and distinct stable pipeline identities.
 - Unknown or unstable provenance fails closed. It may produce a drift candidate, never a
   confirmed cross-source contradiction.
+- The model is not an authority for governance state or mutations. Classifier, lineage,
+  G1–G6, blast-radius, dossier, and exact mutation arguments remain deterministic. The
+  optional narrator receives those completed results and returns bounded prose plus
+  fail-closed `archon.model-runtime-provenance/v1` metadata.
 - The approval service has no DataHub or LLM secrets. It rehydrates server-owned state by
   `approvalId` and releases only a server-held callback token.
 - The control service has no DataHub, write, or LLM secret. It may start/describe only this
@@ -145,24 +165,37 @@ The React application is an independent locked package:
 npm ci --prefix web --ignore-scripts
 npm --prefix web run typecheck
 npm --prefix web test
+npm --prefix web run test:coverage
+npm --prefix web run coverage:critical
 npm --prefix web run build
 ```
 
 Generated `dist/`, `coverage/`, `cdk.out/`, `readiness.json`, dependency directories, and
 test reports are ignored and must not be committed.
 
+The ordinary CI web job additionally installs the exact Playwright Chromium revision in
+the ephemeral runner, serves the already-built SPA through Vite preview, and exercises the
+fixture judge journey on desktop Chrome, Pixel 7, and a 320×568 viewport. The journey keeps
+production authentication fail-closed, proves that passive orientation and fixture approval
+emit no API or external request, checks keyboard/overflow behavior, and rejects critical or
+serious WCAG A/AA Axe findings. Coverage HTML/LCOV/JSON, Playwright HTML, screenshots, traces,
+and structured authority/accessibility receipts are retained only as CI artifacts.
+
 ## Judge-ready evidence without hand-authored outputs
 
-CI generates two complementary, explicitly labeled evidence products:
+CI generates three complementary, explicitly labeled evidence products:
 
 - a frozen seven-case DataHub capability benchmark that measures a latest-write-wins
   current-view boundary against Archon's retained-history path, including negative cases
-  for same-pipeline drift, unknown provenance, source agreement, and a single write; and
+  for same-pipeline drift, unknown provenance, source agreement, and a single write;
 - a deterministic synthetic judge pack produced by the real audit, G6 planning, approval,
-  execution-verification, receipt, rollback, JSON, Markdown, and SARIF functions.
+  execution-verification, receipt, rollback, JSON, Markdown, and SARIF functions; and
+- a browser-rendered fixture journey with desktop/mobile screenshots, responsive and
+  keyboard checks, Axe evidence, and a zero-mutation-authority request receipt.
 
-Both are replayed or contract-checked in CI, checksum-sealed, retained for 90 days, and
-their GitHub artifact digests are bound into the default-branch release attestation.
+These are replayed or contract-checked in CI and retained for 90 days; the benchmark and
+synthetic judge-pack artifact digests are checksum-sealed and bound into the default-branch
+release attestation.
 The browser also offers an on-demand, exactly allowlisted application projection with
 WebCrypto self-consistency checks and an optional, passive three-step judge tour. It does
 not claim origin authenticity; the attested CI artifact is the external provenance path.
@@ -182,7 +215,11 @@ Use a sanitized demo tenant and a least-privilege read token.
 DATAHUB_GMS_URL=https://datahub.example.test
 DATAHUB_GMS_TOKEN=...
 DATAHUB_MCP_URL=https://datahub.example.test/integrations/ai/mcp/
+ARCHON_DEMO_QUERY=domain:Commerce
 ```
+
+`ARCHON_DEMO_QUERY` must already be trimmed, contain no wildcard, and resolve to exactly
+one dataset. It is the only query admitted by the public HTTP and Archon MCP catalog tools.
 
 Archon supports two MCP transports:
 
@@ -310,6 +347,7 @@ output is not accepted as release evidence:
 | Secret detection | Checksum-pinned Gitleaks |
 | SAST | CodeQL security-and-quality queries |
 | Application abuse cases | AuthZ/tool-boundary, prompt-injection, provenance injection, data-exposure, and remediation-boundary tests |
+| Browser quality | Exact-pinned Chromium fixture journey on desktop, Pixel 7, and 320×568; keyboard and zero-overflow contracts; serious/critical WCAG A/AA Axe gate; global and decision-critical web coverage ratchets |
 | Dependency security | Root, web, approval-Lambda, and control-Lambda fail-closed `npm audit` with bounded registry-transport retries; exact override verification; infra-only checksum-pinned repair and receipt-bound exact-path audit compensation for the immutable `aws-cdk-lib` GHSA; PR dependency review; Dependabot |
 | IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
 | IaC scanner | Trivy config scan with an all-severity, zero-finding fail gate plus structurally validated SARIF |
@@ -322,9 +360,10 @@ output is not accepted as release evidence:
 
 Workflows:
 
-- [CI](.github/workflows/ci.yml) — root, web, AWS CDK, policy, security, load, benchmark,
-  reproducible judge evidence, exact-upstream DataHub MCP contribution tests, and immutable
-  artifact gates.
+- [CI](.github/workflows/ci.yml) — root, coverage-ratcheted web, Playwright/Axe
+  desktop/mobile browser journey, AWS CDK, policy, security, load, benchmark, reproducible
+  judge evidence, exact-upstream DataHub MCP contribution tests, and immutable artifact
+  gates.
 - [CodeQL](.github/workflows/codeql.yml) — JavaScript/TypeScript and Python SAST on pull
   requests, `master`, and schedule.
 - [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor

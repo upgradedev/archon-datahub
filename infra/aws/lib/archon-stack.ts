@@ -188,6 +188,17 @@ export class ArchonPlatformStack extends Stack {
         "Source commit represented by the immutable image and promoted archives",
       allowedPattern: "^[a-f0-9]{7,64}$"
     });
+    const demoQuery = new CfnParameter(this, "DemoQuery", {
+      type: "String",
+      description:
+        "Exact non-wildcard dataset query exposed by the public judge application",
+      minLength: 1,
+      maxLength: 256,
+      allowedPattern:
+        "^(?!\\s)(?!.*\\s$)(?!\\{\\}$)(?!.*[*?])[^\\u0000-\\u001F\\u007F]{1,256}$",
+      constraintDescription:
+        "must be a trimmed, non-wildcard, control-free query"
+    });
     const cloudFrontDomainName = new CfnParameter(
       this,
       "CloudFrontDomainName",
@@ -727,6 +738,7 @@ export class ArchonPlatformStack extends Stack {
         NODE_ENV: "production",
         PORT: "8080",
         ARCHON_RELEASE_SHA: releaseSha.valueAsString,
+        ARCHON_DEMO_QUERY: demoQuery.valueAsString,
         DATAHUB_GMS_URL: dataHubReadUrl.valueAsString,
         DATAHUB_MCP_URL: dataHubReadMcpUrl.valueAsString,
         LLM_BASE_URL: llmBaseUrl.valueAsString,
@@ -1322,7 +1334,8 @@ export class ArchonPlatformStack extends Stack {
         STATE_MACHINE_ARN: stateMachine.stateMachineArn,
         CHECKPOINT_TABLE: idempotencyTable.tableName,
         APPROVAL_TABLE: approvalTable.tableName,
-        EVIDENCE_BUCKET: evidenceBucket.bucketName
+        EVIDENCE_BUCKET: evidenceBucket.bucketName,
+        ARCHON_DEMO_QUERY: demoQuery.valueAsString
       }
     });
     stateMachine.grantStartExecution(controlFunction);
@@ -1628,6 +1641,7 @@ export class ArchonPlatformStack extends Stack {
             "200",
             "400",
             "404",
+            "410",
             "502"
           ])
         }
