@@ -171,6 +171,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.INFRA_NODE_VERSION }}
+          package-manager-cache: false
       - name: Bind the generator to the exact PR head and package manager
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -178,7 +179,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${PR_HEAD_SHA}"
           test "$(node --version)" = "v${INFRA_NODE_VERSION}"
-          test "$(npm --version)" = "10.9.2"
+          test "$(npm --version)" = "10.9.8"
       - name: Resolve both reviewed dependency policies into candidate locks
         env:
           NPM_CONFIG_AUDIT: "false"
@@ -352,7 +353,7 @@ jobs:
               .generator.runId == $runId and
               .generator.runAttempt == $runAttempt and
               .generator.nodeVersion == "v22.23.1" and
-              .generator.npmVersion == "10.9.2" and
+              .generator.npmVersion == "10.9.8" and
               .candidates.root.packageJsonSha256 == $rootManifestSha256 and
               .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256
             ' "${candidate_dir}/provenance.json" >/dev/null

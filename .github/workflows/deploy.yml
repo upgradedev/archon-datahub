@@ -805,7 +805,7 @@ jobs:
       - name: Validate CDK source without rebuilding release artifacts
         run: |
           set -euo pipefail
-          test "$(npm --version)" = "10.9.2"
+          test "$(npm --version)" = "10.9.8"
           npm ci --prefix infra/aws --ignore-scripts
           node scripts/verify-exact-npm-overrides.mjs infra/aws
           bash scripts/patch-cdk-brace-expansion.sh infra/aws
@@ -4005,7 +4005,7 @@ jobs:
       - name: Install locked CDK dependencies
         run: |
           set -euo pipefail
-          test "$(npm --version)" = "10.9.2"
+          test "$(npm --version)" = "10.9.8"
           npm ci --prefix infra/aws --ignore-scripts
           node scripts/verify-exact-npm-overrides.mjs infra/aws
           bash scripts/patch-cdk-brace-expansion.sh infra/aws

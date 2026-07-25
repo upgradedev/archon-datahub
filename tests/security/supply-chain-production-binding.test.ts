@@ -443,7 +443,7 @@ test("staging and production synth only with the same repaired CDK tree", () => 
     assert.ok(patch > overrides);
     assert.ok(audit > patch);
     assert.ok(synth > audit);
-    assert.match(segment, /test "\$\(npm --version\)" = "10\.9\.2"/u);
+    assert.match(segment, /test "\$\(npm --version\)" = "10\.9\.8"/u);
     assert.match(
       segment,
       /\$\{\{ runner\.temp \}\}\/cdk-brace-expansion-compensation\//u
