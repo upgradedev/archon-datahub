@@ -87,11 +87,13 @@ findings; it is not the write path.
 | G3 | every dataset has a non-empty description |
 | G4 | a deprecated dataset has no active downstream |
 | G5 | every schema field has a resolved type |
-| G6 | every sensitive field has a classification |
+| G6 | every sensitive field has an exact policy-accepted classification |
 
 Only G6 can enter the governed remediation planner. G1–G5 and every contradiction remain
 manual-only because their correct resolution requires organizational judgement or a broader
-action surface.
+action surface. The default strict G6 policy recognizes only explicit PII tag/term
+identifiers; its sensitive-name hints and accepted identifiers are injectable. Arbitrary
+metadata and substring lookalikes fail closed.
 
 ## 4. Temporal provenance
 
@@ -116,12 +118,15 @@ Each audit consumes one fresh bundle. Snapshot and fact projections are derived 
 same live report list, and history uses the same complete search URN set; there is no
 cross-run metadata cache. Search declares its total up front and fails if it exceeds the
 profile ceiling or changes while paging. `get_entities` must return every requested URN
-exactly once, without errors, malformed entries, duplicates, or extras. MCP `isError` is
-terminal, and lineage requires an offset-zero envelope whose count, total, result list,
-degrees, and unique URNs agree. Hosted live audits also require the direct GMS
-version-history capability; MCP-only connectivity may serve standalone reads but cannot
-produce an audit or governed plan. Consequently no
-partial harvest can reach the G6 planner as `ACTIONABLE`.
+exactly once, without errors, malformed entries, duplicates, or extras. A truncation marker
+forces complete `list_schema_fields` paging with stable totals, returned-count offsets,
+duplicate/zero-progress rejection, and field/page ceilings. MCP `isError` is terminal.
+Direct-upstream and unlimited downstream reads use separate exact envelopes; resolved MCP
+nodes provide topology, while the direct current `upstreamLineage` aspect proves declared
+edges and therefore distinguishes a real dangling reference from a merely out-of-query
+entity. Hosted live audits also require direct GMS current-aspect and version-history
+capabilities; MCP-only connectivity may serve standalone reads but cannot produce an audit
+or governed plan. Consequently no partial harvest can reach the G6 planner as `ACTIONABLE`.
 The version-history recovery is therefore a separate bounded GMS read capability, not an
 inferred feature of the MCP latest-state surface.
 
@@ -228,8 +233,10 @@ plus distinct token for the isolated worker. No read-to-write credential fallbac
 
 CloudFront never rewrites API authorization/errors into SPA success responses. Security
 headers apply to static and API behaviors. `/runtime-config.json` is generated only after
-the stack exists, contains public OAuth coordinates, is served by a caching-disabled
-behavior with `no-store`, and is smoke-verified byte for byte.
+the stack exists, contains public OAuth coordinates plus the exact narrow demo query,
+is served by a caching-disabled behavior with `no-store`, and is smoke-verified byte for
+byte. The SPA pre-fills that scope; both the runtime-config proof and the live audit smoke
+bind it to the same protected-environment value.
 
 The distribution has no default-certificate fallback: AWS fixes the generated
 `*.cloudfront.net` certificate to the legacy `TLSv1` policy. Each environment therefore

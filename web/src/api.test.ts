@@ -67,7 +67,7 @@ describe("audit API", () => {
   it("falls back deterministically only when the hosted API is unavailable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("network unavailable")));
 
-    const result = await loadAudit();
+    const result = await loadAudit("customer_pii");
 
     expect(result.source).toBe("fixture");
     expect(result.envelope).toBe(previewAudit);
@@ -176,7 +176,7 @@ describe("audit API", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const resultPromise = loadAudit("", undefined, progress);
+    const resultPromise = loadAudit("customer_pii", undefined, progress);
     await vi.advanceTimersByTimeAsync(3000);
     const result = await resultPromise;
 
@@ -187,6 +187,17 @@ describe("audit API", () => {
       "SUCCEEDED",
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects empty and wildcard scopes before the network boundary", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    for (const query of ["", "   ", "*", " * "]) {
+      await expect(startControlLoop(query)).rejects.toMatchObject({ status: 400 });
+      await expect(requestAudit(query)).rejects.toMatchObject({ status: 400 });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects legacy, malformed, or raw terminal result projections", async () => {

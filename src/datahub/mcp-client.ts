@@ -15,7 +15,13 @@
 // recommends, a human disposes.
 
 import type { AuditFact } from "../types.js";
-import type { CatalogEntity, CatalogSnapshot, LineageEdge, Urn } from "./models.js";
+import type {
+  CatalogEntity,
+  CatalogSnapshot,
+  LineageEdge,
+  LineageTopologyNode,
+  Urn,
+} from "./models.js";
 import { reportsToFacts, type SourceReport } from "../audit/harvest.js";
 import { FIXTURE_REPORTS, FIXTURE_VERSION_HISTORY } from "./fixtures.js";
 import type { AspectVersionHistory } from "./version-history.js";
@@ -30,6 +36,15 @@ export interface AuditHarvest {
 export interface AuditHarvestOptions {
   profile: AuditExecutionProfile;
   signal?: AbortSignal;
+}
+
+// A live adapter proves topology independently from the audited search roots. The Fake
+// instead supplies its full current graph through `topologyEntities`, allowing a filtered
+// one-root audit to retain complete downstream context without auditing neighboring assets.
+export interface SnapshotTopologyContext {
+  topologyEntities?: readonly CatalogEntity[];
+  downstreamByRoot?: ReadonlyMap<Urn, readonly LineageTopologyNode[]>;
+  knownLineageUrns?: ReadonlySet<Urn>;
 }
 
 // The read surface the agent needs. Mirrors the DataHub MCP server's read tools, but
@@ -66,7 +81,7 @@ export interface DataHubClient {
 // Reduce a provenance-aware report stream to the CURRENT view — the latest report per
 // URN (newest `createdAt` wins; ties broken deterministically by scanId). This is what
 // `get_entities` conceptually returns: one current entity per URN.
-export function mergeLatest(reports: SourceReport[]): CatalogEntity[] {
+export function mergeLatest(reports: readonly SourceReport[]): CatalogEntity[] {
   const latest = new Map<Urn, SourceReport>();
   for (const r of reports) {
     const cur = latest.get(r.entity.urn);
@@ -83,13 +98,149 @@ export function mergeLatest(reports: SourceReport[]): CatalogEntity[] {
     .map((r) => r.entity);
 }
 
-// Assemble a CatalogSnapshot (current view + the set of URNs DataHub knows about) from
-// a report stream. Shared by the Fake and the live adapter.
-export function snapshotFromReports(reports: SourceReport[]): CatalogSnapshot {
+function deriveDownstreamByRoot(
+  roots: readonly CatalogEntity[],
+  topologyEntities: readonly CatalogEntity[]
+): Map<Urn, LineageTopologyNode[]> {
+  // Audited entities win for their own URNs so every projection is bound to the exact
+  // report stream. The remaining entities provide topology context only.
+  const byUrn = new Map<Urn, CatalogEntity>();
+  for (const entity of topologyEntities) byUrn.set(entity.urn, entity);
+  for (const root of roots) byUrn.set(root.urn, root);
+
+  const directConsumers = new Map<Urn, Set<Urn>>();
+  for (const entity of byUrn.values()) {
+    for (const edge of entity.upstreams ?? []) {
+      if (!edge.upstreamResolved || !byUrn.has(edge.upstream)) continue;
+      let consumers = directConsumers.get(edge.upstream);
+      if (!consumers) {
+        consumers = new Set<Urn>();
+        directConsumers.set(edge.upstream, consumers);
+      }
+      consumers.add(entity.urn);
+    }
+  }
+
+  const downstreamByRoot = new Map<Urn, LineageTopologyNode[]>();
+  for (const root of roots) {
+    const distances = new Map<Urn, number>();
+    const queue: Array<{ urn: Urn; hops: number }> = [
+      { urn: root.urn, hops: 0 },
+    ];
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const current = queue[cursor]!;
+      const consumers = [...(directConsumers.get(current.urn) ?? [])].sort();
+      for (const downstream of consumers) {
+        if (downstream === root.urn || distances.has(downstream)) continue;
+        const minHops = current.hops + 1;
+        distances.set(downstream, minHops);
+        queue.push({ urn: downstream, hops: minHops });
+      }
+    }
+    const nodes = [...distances]
+      .map(([urn, minHops]): LineageTopologyNode => {
+        const entity = byUrn.get(urn)!;
+        return {
+          urn,
+          minHops,
+          entityType: "DATASET",
+          deprecated: entity.deprecated === true,
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.minHops - b.minHops ||
+          (a.urn < b.urn ? -1 : a.urn > b.urn ? 1 : 0)
+      );
+    downstreamByRoot.set(root.urn, nodes);
+  }
+  return downstreamByRoot;
+}
+
+function copyProvenDownstream(
+  roots: readonly CatalogEntity[],
+  proven: ReadonlyMap<Urn, readonly LineageTopologyNode[]>
+): Map<Urn, LineageTopologyNode[]> {
+  const downstreamByRoot = new Map<Urn, LineageTopologyNode[]>();
+  for (const root of roots) {
+    const raw = proven.get(root.urn);
+    if (raw === undefined) {
+      throw new TypeError(
+        `Complete downstream topology is missing for audited root ${root.urn}.`
+      );
+    }
+    const seen = new Set<Urn>();
+    const nodes = raw.map((node): LineageTopologyNode => {
+      if (
+        !node ||
+        typeof node.urn !== "string" ||
+        node.urn.length === 0 ||
+        node.urn === root.urn ||
+        !Number.isInteger(node.minHops) ||
+        node.minHops < 1 ||
+        typeof node.entityType !== "string" ||
+        node.entityType.trim().length === 0 ||
+        typeof node.deprecated !== "boolean" ||
+        seen.has(node.urn)
+      ) {
+        throw new TypeError(
+          `Downstream topology for ${root.urn} contains an invalid or duplicate node.`
+        );
+      }
+      seen.add(node.urn);
+      return {
+        urn: node.urn,
+        minHops: node.minHops,
+        entityType: node.entityType,
+        deprecated: node.deprecated,
+      };
+    });
+    nodes.sort(
+      (a, b) =>
+        a.minHops - b.minHops ||
+        (a.urn < b.urn ? -1 : a.urn > b.urn ? 1 : 0)
+    );
+    downstreamByRoot.set(root.urn, nodes);
+  }
+  return downstreamByRoot;
+}
+
+// Assemble a CatalogSnapshot from the exact audited report stream plus independently
+// proven topology context. `entities` never expands beyond the reports; downstream nodes
+// and known lineage URNs are context, not additional governance/history audit targets.
+export function snapshotFromReports(
+  reports: readonly SourceReport[],
+  context: SnapshotTopologyContext = {}
+): CatalogSnapshot {
   const entities = mergeLatest(reports);
+  if (context.topologyEntities && context.downstreamByRoot) {
+    throw new TypeError(
+      "Provide either topologyEntities or downstreamByRoot, not both."
+    );
+  }
+  const downstreamByRoot = context.downstreamByRoot
+    ? copyProvenDownstream(entities, context.downstreamByRoot)
+    : deriveDownstreamByRoot(
+        entities,
+        context.topologyEntities ?? entities
+      );
   const knownUrns = new Set<Urn>(entities.map((e) => e.urn));
+  for (const entity of entities) {
+    for (const edge of entity.upstreams ?? []) {
+      if (edge.upstreamResolved) knownUrns.add(edge.upstream);
+    }
+  }
+  for (const nodes of downstreamByRoot.values()) {
+    for (const node of nodes) knownUrns.add(node.urn);
+  }
+  for (const urn of context.knownLineageUrns ?? []) {
+    if (typeof urn !== "string" || urn.length === 0) {
+      throw new TypeError("Known lineage context contains an invalid URN.");
+    }
+    knownUrns.add(urn);
+  }
   const scanId = reports.reduce((acc, r) => (r.scanId > acc ? r.scanId : acc), "");
-  return { scanId, entities, knownUrns };
+  return { scanId, entities, knownUrns, downstreamByRoot };
 }
 
 // The offline DataHub client: serves a fixed report stream through the same interface
@@ -128,7 +279,9 @@ export class FakeDataHubMcpClient implements DataHubClient {
   }
 
   async harvestSnapshot(query?: string): Promise<CatalogSnapshot> {
-    return snapshotFromReports(this.filter(query));
+    return snapshotFromReports(this.filter(query), {
+      topologyEntities: mergeLatest(this.reports),
+    });
   }
 
   async harvestFacts(query?: string): Promise<AuditFact[]> {
@@ -144,7 +297,9 @@ export class FakeDataHubMcpClient implements DataHubClient {
     // derived from that exact in-memory report bundle.
     const reports = this.filter(query);
     return {
-      snapshot: snapshotFromReports(reports),
+      snapshot: snapshotFromReports(reports, {
+        topologyEntities: mergeLatest(this.reports),
+      }),
       facts: reportsToFacts(reports),
       versionHistories: this.filterHistories(query),
     };

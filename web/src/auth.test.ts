@@ -7,6 +7,7 @@ import {
 
 const runtimeConfig = {
   schemaVersion: 1,
+  demoQuery: "customer_pii",
   auth: {
     clientId: "5k6exampleclientid9h2",
     authorizationEndpoint: "https://auth.archon.example/oauth2/authorize",
@@ -103,6 +104,14 @@ describe("runtime authentication config", () => {
         "https://app.archon.example",
       ),
     ).toThrow(/schema/i);
+    for (const demoQuery of ["", " customer_pii", "customer_pii ", "*", "customer\npii"]) {
+      expect(() =>
+        parseRuntimeConfig(
+          { ...runtimeConfig, demoQuery },
+          "https://app.archon.example",
+        ),
+      ).toThrow(/demo query/i);
+    }
   });
 
   it("fails closed when runtime config cannot be validated", async () => {
@@ -116,6 +125,7 @@ describe("runtime authentication config", () => {
 
     await controller.initialize();
 
+    expect(controller.getDemoQuery()).toBeUndefined();
     expect(controller.getSnapshot()).toMatchObject({
       status: "error",
       recoverable: false,
@@ -131,6 +141,7 @@ describe("Cognito Authorization Code + PKCE", () => {
     const controller = new AuthController(browser.environment);
 
     await controller.initialize();
+    expect(controller.getDemoQuery()).toBe(runtimeConfig.demoQuery);
     await controller.signIn();
 
     const destination = new URL(String(browser.navigate.mock.calls[0]?.[0]));

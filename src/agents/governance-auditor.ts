@@ -3,13 +3,22 @@
 // Finding. The rule logic lives in src/governance/validator.ts; this agent only maps
 // its results into the Finding vocabulary and drops the passing (skipped) rules.
 
-import { validateSnapshot } from "../governance/validator.js";
+import {
+  GovernanceValidator,
+  type GovernancePolicy,
+} from "../governance/validator.js";
 import type { CatalogSnapshot } from "../datahub/models.js";
 import type { Finding } from "../types.js";
 
 export class GovernanceAuditorAgent {
+  private readonly validator: GovernanceValidator;
+
+  constructor(policy?: GovernancePolicy) {
+    this.validator = new GovernanceValidator(policy);
+  }
+
   audit(snapshot: CatalogSnapshot): Finding[] {
-    return validateSnapshot(snapshot)
+    return this.validator.validate(snapshot)
       .filter((r) => !r.passed)
       .map((r) => ({
         type: "governance_violation" as const,

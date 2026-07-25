@@ -56,8 +56,9 @@ One run performs exactly three public requests:
    mount point, cache behavior, and the exact deployed browser-security headers.
 2. `GET /runtime-config.json` verifies zero redirects, a bounded no-store JSON response,
    exact keys, PKCE/Cognito HTTPS endpoints on one auth origin, the application redirect
-   and logout URIs, and the exact `openid`, `email`, `archon/approve` scope set. Its public
-   bytes must be identical to `production-runtime-config.json` in deployment evidence.
+   and logout URIs, the exact `openid`, `email`, `archon/approve` scope set, and a demo
+   query exactly equal to the protected query submitted in step 3. Its public bytes must
+   be identical to `production-runtime-config.json` in deployment evidence.
 3. `POST /api/audits` submits one canonical `{"query":"..."}` body. This endpoint is the
    synchronous read-only audit path. The probe enforces a 50-second request deadline, a
    4 MiB response limit, zero redirects, security headers, exact response/report shapes,

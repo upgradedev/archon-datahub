@@ -181,9 +181,17 @@ test("judge evidence identifier boundaries reject unknown URN extensions", () =>
   );
   assert.doesNotThrow(() =>
     assertPublicJudgeEvidenceIdentifiers(
-      "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)#email.",
+      '"urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)#email"',
       "known-verification-evidence"
     )
+  );
+  assert.throws(
+    () =>
+      assertPublicJudgeEvidenceIdentifiers(
+        "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)#email.shadow",
+        "ambiguous-field-extension"
+      ),
+    /unapproved DataHub URN/u
   );
   assert.throws(
     () =>

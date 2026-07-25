@@ -144,7 +144,9 @@ export function createArchonHttpServer(deps: HttpServerDeps): Server {
         );
       }
       if (error instanceof DataHubHarvestError) {
-        const scopeError = error.code === "SEARCH_LIMIT_EXCEEDED";
+        const scopeError =
+          error.code === "SEARCH_LIMIT_EXCEEDED" ||
+          error.code === "SCHEMA_LIMIT_EXCEEDED";
         const historyError =
           error.code === "HISTORY_CAPABILITY_REQUIRED";
         const deadlineError =

@@ -29,11 +29,8 @@ function fail(
   throw new TagProjectionReadError(code, message);
 }
 
-function endpoint(gmsUrl: string, entityUrn: string): string {
-  return (
-    `${gmsUrl.replace(/\/+$/u, "")}/openapi/v3/entity/dataset/` +
-    `${encodeURIComponent(entityUrn)}/schemaMetadata?systemMetadata=true&version=0`
-  );
+function endpoint(gmsUrl: string): string {
+  return `${gmsUrl.replace(/\/+$/u, "")}/openapi/v3/entity/dataset/batchGet`;
 }
 
 function tagUrns(value: unknown): string[] {
@@ -60,42 +57,107 @@ function tagUrns(value: unknown): string[] {
   return [...new Set(urns)].sort((a, b) => a.localeCompare(b));
 }
 
+function record(value: unknown, message: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    fail("INVALID_RESPONSE", message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function aspectValue(
+  entity: Record<string, unknown>,
+  aspectName: "schemaMetadata" | "editableSchemaMetadata",
+  required: boolean
+): Record<string, unknown> | undefined {
+  const wrapper = entity[aspectName];
+  if (wrapper === undefined && !required) return undefined;
+  const envelope = record(
+    wrapper,
+    `DataHub response is missing a valid ${aspectName} wrapper.`
+  );
+  if (!Object.prototype.hasOwnProperty.call(envelope, "value")) {
+    fail("INVALID_RESPONSE", `DataHub ${aspectName} wrapper is missing value.`);
+  }
+  return record(
+    envelope["value"],
+    `DataHub ${aspectName} value must be an object.`
+  );
+}
+
+function fieldsByPath(
+  value: unknown,
+  collectionName: "schemaMetadata.fields" | "editableSchemaMetadata.editableSchemaFieldInfo"
+): Map<string, Record<string, unknown>> {
+  if (!Array.isArray(value)) {
+    fail("INVALID_RESPONSE", `DataHub ${collectionName} must be an array.`);
+  }
+  const fields = new Map<string, Record<string, unknown>>();
+  for (const candidate of value) {
+    const field = record(candidate, `Every ${collectionName} entry must be an object.`);
+    const fieldPath = field["fieldPath"];
+    if (typeof fieldPath !== "string" || !fieldPath.trim()) {
+      fail("INVALID_RESPONSE", `Every ${collectionName} entry must have a fieldPath.`);
+    }
+    if (fields.has(fieldPath)) {
+      fail("INVALID_RESPONSE", `DataHub ${collectionName} contains a duplicate fieldPath.`);
+    }
+    fields.set(fieldPath, field);
+  }
+  return fields;
+}
+
 export function parseTagProjectionResponse(
   value: unknown,
   target: { entityUrn: string; columnPath: string }
 ): TagProjection {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    fail("INVALID_RESPONSE", "DataHub schemaMetadata response must be an object.");
+  if (!Array.isArray(value) || value.length !== 1) {
+    fail(
+      "INVALID_RESPONSE",
+      "DataHub tag projection batchGet must return exactly one entity."
+    );
   }
-  const wrapper = (value as { schemaMetadata?: unknown }).schemaMetadata;
-  if (!wrapper || typeof wrapper !== "object" || Array.isArray(wrapper)) {
-    fail("INVALID_RESPONSE", "DataHub response is missing schemaMetadata.");
-  }
-  const aspect = (wrapper as { value?: unknown }).value;
-  if (!aspect || typeof aspect !== "object" || Array.isArray(aspect)) {
-    fail("INVALID_RESPONSE", "DataHub schemaMetadata value is absent.");
-  }
-  const fields = (aspect as { fields?: unknown }).fields;
-  if (!Array.isArray(fields)) {
-    fail("INVALID_RESPONSE", "DataHub schemaMetadata.fields must be an array.");
-  }
-  const matches = fields.filter(
-    (field) =>
-      field &&
-      typeof field === "object" &&
-      !Array.isArray(field) &&
-      (field as { fieldPath?: unknown }).fieldPath === target.columnPath
+  const entity = record(
+    value[0],
+    "DataHub tag projection batchGet entity must be an object."
   );
-  if (matches.length !== 1) {
+  if (entity["urn"] !== target.entityUrn) {
+    fail("INVALID_RESPONSE", "DataHub tag projection batchGet returned the wrong entity.");
+  }
+
+  const schemaMetadata = aspectValue(entity, "schemaMetadata", true)!;
+  const schemaFields = fieldsByPath(
+    schemaMetadata["fields"],
+    "schemaMetadata.fields"
+  );
+  const schemaField = schemaFields.get(target.columnPath);
+  if (!schemaField) {
     fail(
       "INVALID_RESPONSE",
       "The requested field must resolve to exactly one schemaMetadata field."
     );
   }
+
+  const editableSchemaMetadata = aspectValue(
+    entity,
+    "editableSchemaMetadata",
+    false
+  );
+  let editableField: Record<string, unknown> | undefined;
+  if (editableSchemaMetadata) {
+    editableField = fieldsByPath(
+      editableSchemaMetadata["editableSchemaFieldInfo"],
+      "editableSchemaMetadata.editableSchemaFieldInfo"
+    ).get(target.columnPath);
+  }
+
+  const tags = [
+    ...tagUrns(schemaField["globalTags"]),
+    ...tagUrns(editableField?.["globalTags"]),
+  ];
   return createTagProjection({
     entityUrn: target.entityUrn,
     columnPath: target.columnPath,
-    tags: tagUrns((matches[0] as { globalTags?: unknown }).globalTags),
+    tags: [...new Set(tags)].sort((a, b) => a.localeCompare(b)),
   });
 }
 
@@ -143,23 +205,34 @@ export class DirectGmsTagProjectionReader implements TagProjectionReader {
     ) {
       fail("INVALID_TARGET", "The tag projection target is invalid.");
     }
-    const response = await this.#fetch(endpoint(this.#gmsUrl, target.entityUrn), {
-      method: "GET",
+    const response = await this.#fetch(endpoint(this.#gmsUrl), {
+      method: "POST",
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${this.#token}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify([
+        {
+          urn: target.entityUrn,
+          schemaMetadata: {},
+          editableSchemaMetadata: {},
+        },
+      ]),
       redirect: "error",
       signal: AbortSignal.timeout(this.#requestTimeoutMs),
     });
     if (!response.ok) {
-      fail("HTTP_ERROR", `DataHub schemaMetadata read failed with HTTP ${response.status}.`);
+      fail(
+        "HTTP_ERROR",
+        `DataHub tag projection batchGet failed with HTTP ${response.status}.`
+      );
     }
     let body: unknown;
     try {
       body = await response.json();
     } catch {
-      fail("INVALID_RESPONSE", "DataHub schemaMetadata response is not valid JSON.");
+      fail("INVALID_RESPONSE", "DataHub tag projection batchGet is not valid JSON.");
     }
     return parseTagProjectionResponse(body, target);
   }

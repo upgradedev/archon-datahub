@@ -6,6 +6,7 @@ const REQUIRED_APPROVAL_SCOPE = "archon/approve";
 
 export interface RuntimeAuthConfig {
   schemaVersion: 1;
+  demoQuery: string;
   auth: {
     clientId: string;
     authorizationEndpoint: string;
@@ -119,10 +120,26 @@ function parseAppUri(value: unknown, appOrigin: string, label: string): string {
   return url.toString();
 }
 
+function parseDemoQuery(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 256 ||
+    value !== value.trim() ||
+    value === "*" ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new AuthError(
+      "Runtime demo query must be a narrow, trimmed, non-wildcard query.",
+    );
+  }
+  return value;
+}
+
 export function parseRuntimeConfig(value: unknown, appOrigin: string): RuntimeAuthConfig {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["schemaVersion", "auth"]) ||
+    !hasExactKeys(value, ["schemaVersion", "demoQuery", "auth"]) ||
     value.schemaVersion !== 1 ||
     !isRecord(value.auth) ||
     !hasExactKeys(value.auth, [
@@ -179,6 +196,7 @@ export function parseRuntimeConfig(value: unknown, appOrigin: string): RuntimeAu
 
   return {
     schemaVersion: 1,
+    demoQuery: parseDemoQuery(value.demoQuery),
     auth: {
       clientId: auth.clientId,
       authorizationEndpoint: authorizationEndpoint.toString(),
@@ -307,6 +325,8 @@ export class AuthController {
   }
 
   readonly getSnapshot = (): AuthSnapshot => this.snapshot;
+
+  readonly getDemoQuery = (): string | undefined => this.config?.demoQuery;
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -615,6 +635,7 @@ export class AuthController {
 const authController = new AuthController();
 
 export const initializeAuthentication = (): Promise<void> => authController.initialize();
+export const getDemoQuery = (): string | undefined => authController.getDemoQuery();
 export const beginSignIn = (): Promise<void> => authController.signIn();
 export const signOut = (): void => authController.signOut();
 export const getAccessToken = (): string => authController.getAccessToken();

@@ -25,6 +25,8 @@ import {
 } from "../../src/datahub/harvest-policy.js";
 
 const SALES = "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
+const RAW =
+  "urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD)";
 
 test("search returns the distinct catalogued dataset URNs", async () => {
   const urns = await new FakeDataHubMcpClient().search();
@@ -67,6 +69,24 @@ test("harvestSnapshot yields the current-view snapshot with knownUrns", async ()
   assert.equal(snap.entities.length, 3);
   assert.equal(snap.knownUrns.has(SALES), true);
   assert.equal(snap.knownUrns.has(UNCATALOGUED_UPSTREAM), false); // the gap
+  assert.equal(snap.downstreamByRoot.size, 3);
+});
+
+test("a one-root Fake audit derives downstream topology from the full fixture graph", async () => {
+  const snap = await new FakeDataHubMcpClient().harvestSnapshot("raw_orders");
+  assert.deepEqual(
+    snap.entities.map((entity) => entity.urn),
+    [RAW]
+  );
+  assert.deepEqual(
+    snap.downstreamByRoot.get(RAW)?.map(({ urn, minHops }) => ({
+      urn,
+      minHops,
+    })),
+    [{ urn: SALES, minHops: 1 }]
+  );
+  assert.equal(snap.knownUrns.has(SALES), true);
+  assert.equal(snap.knownUrns.has(UNCATALOGUED_UPSTREAM), false);
 });
 
 test("harvestFacts feeds the self-audit the baked-in contradiction + lineage gap", async () => {
@@ -98,9 +118,115 @@ test("entityToFacts emits no owner fact when ownership is empty", () => {
   assert.equal(facts.some((f) => f.kind === "ownership"), false);
 });
 
+test("lineage facts report only provider-confirmed unresolved references", () => {
+  const report = (upstreamResolved: boolean) => ({
+    source: "s",
+    scanId: "sc",
+    createdAt: "2026-06-01T00:00:00.000Z",
+    entity: {
+      urn: "urn:ds:root",
+      name: "root",
+      platform: "p",
+      source: "s",
+      deprecated: false,
+      upstreams: [
+        {
+          upstream: "urn:ds:outside-query",
+          upstreamResolved,
+        },
+      ],
+    },
+  });
+  const resolvedFacts = entityToFacts(report(true));
+  const unresolvedFacts = entityToFacts(report(false));
+  assert.deepEqual(
+    resolvedFacts.find((fact) => fact.kind === "lineage")?.metadata?.["refs"],
+    []
+  );
+  assert.equal(auditConsistency(resolvedFacts).absences.length, 0);
+  assert.deepEqual(
+    unresolvedFacts.find((fact) => fact.kind === "lineage")?.metadata?.["refs"],
+    ["urn:ds:outside-query"]
+  );
+  assert.deepEqual(
+    auditConsistency(unresolvedFacts).absences.map((absence) => absence.subject),
+    ["urn:ds:outside-query"]
+  );
+});
+
 test("snapshotFromReports uses the max scanId as the snapshot scanId", () => {
   const snap = snapshotFromReports(FIXTURE_REPORTS);
   assert.equal(snap.scanId, "scan-2026-07-01");
+});
+
+test("snapshotFromReports keeps externally proven topology outside the audited roots", () => {
+  const rootReport = {
+    source: "datahub",
+    scanId: "scan-live",
+    createdAt: "2026-07-25T00:00:00.000Z",
+    entity: {
+      urn: "urn:ds:root",
+      name: "root",
+      platform: "snowflake",
+      source: "datahub",
+      deprecated: false,
+      upstreams: [],
+    },
+  };
+  const proven = new Map([
+    [
+      rootReport.entity.urn,
+      [
+        {
+          urn: "urn:dashboard:consumer",
+          minHops: 1,
+          entityType: "DASHBOARD",
+          deprecated: false,
+        },
+      ],
+    ],
+  ]);
+  const snap = snapshotFromReports([rootReport], {
+    downstreamByRoot: proven,
+    knownLineageUrns: new Set(["urn:ds:resolved-upstream"]),
+  });
+  assert.deepEqual(
+    snap.entities.map((entity) => entity.urn),
+    ["urn:ds:root"]
+  );
+  assert.deepEqual(snap.downstreamByRoot.get("urn:ds:root"), [
+    {
+      urn: "urn:dashboard:consumer",
+      minHops: 1,
+      entityType: "DASHBOARD",
+      deprecated: false,
+    },
+  ]);
+  assert.equal(snap.knownUrns.has("urn:dashboard:consumer"), true);
+  assert.equal(snap.knownUrns.has("urn:ds:resolved-upstream"), true);
+});
+
+test("snapshotFromReports rejects missing externally proven root coverage", () => {
+  const report = {
+    source: "datahub",
+    scanId: "scan-live",
+    createdAt: "2026-07-25T00:00:00.000Z",
+    entity: {
+      urn: "urn:ds:root",
+      name: "root",
+      platform: "snowflake",
+      source: "datahub",
+      deprecated: true,
+      upstreams: [],
+    },
+  };
+  assert.throws(
+    () =>
+      snapshotFromReports([report], {
+        downstreamByRoot: new Map(),
+      }),
+    /Complete downstream topology is missing/
+  );
 });
 
 test("reportsToFacts flattens every report", () => {

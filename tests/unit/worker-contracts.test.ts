@@ -5,7 +5,10 @@ import {
   parseQueueMessage,
   WorkerContractError,
 } from "../../src/worker/contracts.js";
-import { parseTagProjectionResponse } from "../../src/datahub/tag-projection-reader-live.js";
+import {
+  DirectGmsTagProjectionReader,
+  parseTagProjectionResponse,
+} from "../../src/datahub/tag-projection-reader-live.js";
 import { RemediationError } from "../../src/remediation/control-loop.js";
 import {
   DynamoExecutionJournal,
@@ -137,45 +140,187 @@ test("worker contracts reject unknown fields, queue confusion, and forged roles"
   );
 });
 
-test("direct GMS projection keeps field tag URNs and fails closed on display names", () => {
+test("direct GMS projection unions base and editable field tag URNs", () => {
   const target = {
     entityUrn:
       "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
     columnPath: "email",
   };
   const projection = parseTagProjectionResponse(
-    {
-      schemaMetadata: {
-        value: {
-          fields: [
-            {
-              fieldPath: "email",
-              globalTags: { tags: [{ tag: "urn:li:tag:PII" }] },
-            },
-          ],
-        },
-      },
-    },
-    target
-  );
-  assert.deepEqual(projection.tags, ["urn:li:tag:PII"]);
-  assert.throws(() =>
-    parseTagProjectionResponse(
+    [
       {
+        urn: target.entityUrn,
         schemaMetadata: {
           value: {
             fields: [
               {
                 fieldPath: "email",
-                globalTags: { tags: [{ tag: "PII" }] },
+                globalTags: {
+                  tags: [
+                    { tag: "urn:li:tag:Ingested" },
+                    { tag: "urn:li:tag:PII" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+        editableSchemaMetadata: {
+          value: {
+            editableSchemaFieldInfo: [
+              {
+                fieldPath: "email",
+                globalTags: {
+                  tags: [
+                    { tag: "urn:li:tag:StewardApproved" },
+                    { tag: "urn:li:tag:PII" },
+                  ],
+                },
               },
             ],
           },
         },
       },
+    ],
+    target
+  );
+  assert.deepEqual(projection.tags, [
+    "urn:li:tag:Ingested",
+    "urn:li:tag:PII",
+    "urn:li:tag:StewardApproved",
+  ]);
+
+  const withoutEditableAspect = parseTagProjectionResponse(
+    [
+      {
+        urn: target.entityUrn,
+        schemaMetadata: {
+          value: {
+            fields: [{ fieldPath: "email" }],
+          },
+        },
+      },
+    ],
+    target
+  );
+  assert.deepEqual(withoutEditableAspect.tags, []);
+
+  assert.throws(() =>
+    parseTagProjectionResponse(
+      [
+        {
+          urn: target.entityUrn,
+          schemaMetadata: {
+            value: {
+              fields: [{ fieldPath: "email" }],
+            },
+          },
+          editableSchemaMetadata: {
+            value: {
+              editableSchemaFieldInfo: [
+                {
+                  fieldPath: "email",
+                  globalTags: { tags: [{ tag: "PII" }] },
+                },
+              ],
+            },
+          },
+        },
+      ],
       target
     )
   );
+  assert.throws(() =>
+    parseTagProjectionResponse(
+      [
+        {
+          urn: target.entityUrn,
+          schemaMetadata: {
+            value: {
+              fields: [
+                { fieldPath: "email" },
+                { fieldPath: "email" },
+              ],
+            },
+          },
+        },
+      ],
+      target
+    )
+  );
+});
+
+test("direct GMS projection uses the exact one-URN two-aspect batchGet contract", async () => {
+  const target = {
+    entityUrn:
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    columnPath: "email",
+  };
+  const expectedBody = JSON.stringify([
+    {
+      urn: target.entityUrn,
+      schemaMetadata: {},
+      editableSchemaMetadata: {},
+    },
+  ]);
+  let calls = 0;
+  const fetchFn = (async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ) => {
+    calls += 1;
+    assert.equal(
+      input,
+      "https://datahub.example/openapi/v3/entity/dataset/batchGet"
+    );
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(init?.headers, {
+      Accept: "application/json",
+      Authorization: "Bearer dedicated-read-token",
+      "Content-Type": "application/json",
+    });
+    assert.equal(init?.body, expectedBody);
+    assert.equal(init?.redirect, "error");
+    assert.ok(init?.signal instanceof AbortSignal);
+    return new Response(
+      JSON.stringify([
+        {
+          urn: target.entityUrn,
+          schemaMetadata: {
+            value: {
+              fields: [{ fieldPath: target.columnPath }],
+            },
+          },
+          editableSchemaMetadata: {
+            value: {
+              editableSchemaFieldInfo: [
+                {
+                  fieldPath: target.columnPath,
+                  globalTags: {
+                    tags: [{ tag: "urn:li:tag:PII" }],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ]),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }) as typeof fetch;
+  const reader = new DirectGmsTagProjectionReader({
+    gmsUrl: "https://datahub.example/",
+    token: "dedicated-read-token",
+    fetchFn,
+    requestTimeoutMs: 1_000,
+  });
+
+  const projection = await reader.readTagProjection(target);
+  assert.equal(calls, 1);
+  assert.deepEqual(projection.tags, ["urn:li:tag:PII"]);
 });
 
 test("an active remediation journal lease gets a bounded recovery delay", () => {

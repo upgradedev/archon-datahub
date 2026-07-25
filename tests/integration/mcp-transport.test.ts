@@ -44,7 +44,12 @@ test("MCP client can list the read-only audit tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, ["audit_catalog", "get_entity", "run_audit_loop", "search_datasets"]);
-    for (const t of tools) assert.equal((t.inputSchema as { type: string }).type, "object");
+    for (const t of tools) {
+      assert.equal((t.inputSchema as { type: string }).type, "object");
+      if (t.name !== "get_entity") {
+        assert.deepEqual((t.inputSchema as { required?: string[] }).required, ["query"]);
+      }
+    }
   } finally {
     await close();
   }
@@ -53,8 +58,10 @@ test("MCP client can list the read-only audit tools", async () => {
 test("audit_catalog round-trip over a real MCP Client returns findings + narrative", async () => {
   const { client, close } = await connect();
   try {
-    const report = payload(await client.callTool({ name: "audit_catalog", arguments: {} }));
-    assert.ok(report.findings.length >= 5);
+    const report = payload(
+      await client.callTool({ name: "audit_catalog", arguments: { query: "sales" } })
+    );
+    assert.ok(report.findings.length >= 1);
     assert.equal(report.findings[0].severity, "high");
     assert.ok(report.narrative);
     assert.equal(report.trace.length, 4);
@@ -66,7 +73,9 @@ test("audit_catalog round-trip over a real MCP Client returns findings + narrati
 test("run_audit_loop over MCP is human-gated (pending) and mutates nothing", async () => {
   const { client, close } = await connect();
   try {
-    const out = payload(await client.callTool({ name: "run_audit_loop", arguments: {} }));
+    const out = payload(
+      await client.callTool({ name: "run_audit_loop", arguments: { query: "sales" } })
+    );
     assert.equal(out.disposition, "pending");
     assert.equal(out.stopReason, "emitted_findings");
     assert.ok(out.trace.length >= 3);

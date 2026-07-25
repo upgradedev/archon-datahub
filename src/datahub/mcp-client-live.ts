@@ -24,7 +24,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { AuditFact } from "../types.js";
-import type { CatalogEntity, CatalogSnapshot, LineageEdge, Urn } from "./models.js";
+import type {
+  CatalogEntity,
+  CatalogSnapshot,
+  LineageEdge,
+  LineageTopologyNode,
+  Urn,
+} from "./models.js";
 import { reportsToFacts, type SourceReport } from "../audit/harvest.js";
 import type {
   AuditHarvest,
@@ -33,19 +39,32 @@ import type {
 } from "./mcp-client.js";
 import { snapshotFromReports } from "./mcp-client.js";
 import {
-  mapEntitiesStrict,
+  assertLineageRelationLimit,
+  completeEntitySchema,
+  mapDownstreamTopologyStrict,
+  mapEntity,
+  mapSchemaFieldPageStrict,
   mapSearchPageStrict,
   mapUpstreamEdgesStrict,
+  orderedEntitiesStrict,
   parseMcpReadToolResult,
+  reconcileUpstreamEdgesStrict,
+  schemaCompletionRequirement,
   type DhCleanedEntity,
+  type DhCleanedSchemaField,
   type DhLineageResponse,
+  type DhSchemaFieldPageResponse,
   type DhSearchResponse,
 } from "./live-mappers.js";
 import type {
   AspectVersionHistory,
   MutableAspectName,
 } from "./version-history.js";
-import { readAspectVersionHistory } from "./version-history-reader.js";
+import {
+  readAspectVersionHistory,
+  readCurrentUpstreamLineage,
+  type DeclaredUpstreamLineage,
+} from "./version-history-reader.js";
 import {
   DataHubHarvestError,
   deadlineSignal,
@@ -62,13 +81,45 @@ import {
 // the provenance axis. See DESIGN.md §Phase-2 and the README limits note.
 const LIVE_SOURCE = "datahub";
 const SEARCH_PAGE_SIZE = 50;
-const MAX_LINEAGE_RESULTS = 50;
 const MUTABLE_ASPECTS: readonly MutableAspectName[] = [
   "ownership",
   "schemaMetadata",
   "domains",
   "deprecation",
 ];
+
+interface LiveLineageTopology {
+  upstreamByRoot: Map<Urn, LineageEdge[]>;
+  downstreamByRoot: Map<Urn, LineageTopologyNode[]>;
+  knownLineageUrns: Set<Urn>;
+}
+
+interface DirectAspectHarvest {
+  declaredUpstreamsByRoot: Map<Urn, DeclaredUpstreamLineage[]>;
+  versionHistories: AspectVersionHistory[];
+}
+
+type DirectAspectTask =
+  | {
+      kind: "current-upstreams";
+      urn: Urn;
+    }
+  | {
+      kind: "history";
+      urn: Urn;
+      aspect: MutableAspectName;
+    };
+
+type DirectAspectResult =
+  | {
+      kind: "current-upstreams";
+      urn: Urn;
+      declared: DeclaredUpstreamLineage[];
+    }
+  | {
+      kind: "history";
+      history: AspectVersionHistory | null;
+    };
 
 function httpMcpUrl(): string | null {
   const explicit = process.env.DATAHUB_MCP_URL;
@@ -147,7 +198,7 @@ export class LiveDataHubMcpClient implements DataHubClient {
   async getLineage(urn: Urn): Promise<LineageEdge[]> {
     const policy = harvestPolicy("synchronous-preview");
     const signal = deadlineSignal(policy.harvestDeadlineMs);
-    return this.getLineageWithinPolicy(urn, () => true, policy, signal);
+    return this.getUpstreamLineageWithinPolicy(urn, policy, signal);
   }
 
   async harvestSnapshot(query?: string): Promise<CatalogSnapshot> {
@@ -197,57 +248,70 @@ export class LiveDataHubMcpClient implements DataHubClient {
     ).versionHistories;
   }
 
-  // Assemble provenance reports from the live catalog: search → get_entities → get_lineage.
+  // Assemble one completeness-bound live harvest. After the bounded search fixes the audited
+  // roots, entity/schema completion, bidirectional topology, current raw upstreamLineage,
+  // and retained history can run concurrently. The direct current aspect declares every
+  // edge (including dangling references); the MCP search independently proves which direct
+  // dataset URNs resolve. Topology neighbors augment identity/reachability only; they never
+  // become audited entities and never enter version-history work.
   // A single harvest = one source at one scan (scanId = today), because DataHub's MCP read
   // surface returns only the current value per aspect. Cross-source CONTRADICTION detection
-  // therefore needs aspect version history (systemMetadata / OpenAPI v3) which the MCP tools
-  // do not expose — it lights up across scans once a findings store diffs harvests
-  // (Phase 3). Lineage-gap + governance findings work fully on this surface today.
+  // therefore consumes retained aspect history (systemMetadata / OpenAPI v3) in this same
+  // harvest bundle; the MCP tools alone do not expose that evidence. Lineage-gap and
+  // governance findings likewise use the completeness-bound evidence assembled here.
   private async harvestWithinPolicy(
     query: string | undefined,
     policy: Readonly<LiveHarvestPolicy>,
     signal: AbortSignal
   ): Promise<AuditHarvest> {
-    const { reports, urns } = await this.reports(query, policy, signal);
-    return {
-      snapshot: snapshotFromReports(reports),
-      facts: reportsToFacts(reports),
-      versionHistories: await this.histories(urns, policy, signal),
-    };
-  }
-
-  private async reports(
-    query: string | undefined,
-    policy: Readonly<LiveHarvestPolicy>,
-    signal: AbortSignal
-  ): Promise<{ reports: SourceReport[]; urns: Urn[] }> {
     const urns = await this.searchWithinPolicy(query, policy, signal);
-    const entities = await this.getEntitiesWithinPolicy(urns, policy, signal);
-    const known = new Set<Urn>(entities.map((e) => e.urn));
-    const withLineage = await mapWithConcurrency(
-      entities,
-      policy.lineageConcurrency,
-      signal,
-      async (e) => ({
-        ...e,
-        upstreams: await this.getLineageWithinPolicy(
-          e.urn,
-          (u) => known.has(u),
-          policy,
-          signal
-        ),
-      })
+    const [entities, topology, directAspects] = await Promise.all([
+      this.getEntitiesWithinPolicy(urns, policy, signal),
+      this.getLineageTopologyWithinPolicy(urns, policy, signal),
+      this.directAspects(urns, policy, signal),
+    ]);
+    const reconciledUpstreamByRoot = new Map<Urn, LineageEdge[]>();
+    const withLineage = entities.map((entity) => {
+      const resolvedUpstreams = topology.upstreamByRoot.get(entity.urn);
+      const declaredUpstreams =
+        directAspects.declaredUpstreamsByRoot.get(entity.urn);
+      if (!resolvedUpstreams || !declaredUpstreams) {
+        throw new DataHubHarvestError(
+          "LINEAGE_RESPONSE_INCOMPLETE",
+          "DataHub lineage omitted an audited root from the completed current-view evidence."
+        );
+      }
+      const upstreams = reconcileUpstreamEdgesStrict(
+        declaredUpstreams,
+        resolvedUpstreams,
+        policy.maxLineageResultsPerDirection
+      );
+      reconciledUpstreamByRoot.set(entity.urn, upstreams);
+      return {
+        ...entity,
+        upstreams,
+      };
+    });
+    assertLineageRelationLimit(
+      reconciledUpstreamByRoot,
+      topology.downstreamByRoot,
+      policy.maxLineageRelations
     );
     const now = new Date().toISOString();
     const scanId = now.slice(0, 10);
+    const reports: SourceReport[] = withLineage.map((entity) => ({
+      source: entity.source || LIVE_SOURCE,
+      scanId,
+      createdAt: now,
+      entity,
+    }));
     return {
-      urns,
-      reports: withLineage.map((e) => ({
-        source: e.source || LIVE_SOURCE,
-        scanId,
-        createdAt: now,
-        entity: e,
-      })),
+      snapshot: snapshotFromReports(reports, {
+        downstreamByRoot: topology.downstreamByRoot,
+        knownLineageUrns: topology.knownLineageUrns,
+      }),
+      facts: reportsToFacts(reports),
+      versionHistories: directAspects.versionHistories,
     };
   }
 
@@ -335,12 +399,90 @@ export class LiveDataHubMcpClient implements DataHubClient {
       signal,
       policy.operationTimeoutMs
     )) as DhCleanedEntity[] | { entities?: DhCleanedEntity[] } | null;
-    return mapEntitiesStrict(response, urns, LIVE_SOURCE);
+    const ordered = orderedEntitiesStrict(response, urns);
+    const completed = await mapWithConcurrency(
+      ordered,
+      policy.schemaCompletionConcurrency,
+      signal,
+      (entity) => this.completeSchemaWithinPolicy(entity, policy, signal)
+    );
+    return completed.map((entity) => mapEntity(entity, LIVE_SOURCE));
   }
 
-  private async getLineageWithinPolicy(
+  private async completeSchemaWithinPolicy(
+    entity: DhCleanedEntity,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<DhCleanedEntity> {
+    const requirement = schemaCompletionRequirement(
+      entity,
+      policy.maxSchemaFieldsPerEntity
+    );
+    if (!requirement.required) return entity;
+    const urn = entity.urn;
+    if (typeof urn !== "string" || urn.length === 0) {
+      throw new DataHubHarvestError(
+        "ENTITY_RESPONSE_INCOMPLETE",
+        "A schema completion request requires its validated entity URN."
+      );
+    }
+
+    const fields: DhCleanedSchemaField[] = [];
+    const seen = new Set<string>();
+    let offset = 0;
+    let pages = 0;
+    while (offset < requirement.totalFields) {
+      if (pages >= policy.maxSchemaFieldPages) {
+        throw new DataHubHarvestError(
+          "SCHEMA_LIMIT_EXCEEDED",
+          `DataHub schema completion exceeded the ${policy.maxSchemaFieldPages}-page hosted safety limit.`
+        );
+      }
+      const response = (await this.call(
+        "list_schema_fields",
+        {
+          urn,
+          limit: policy.schemaFieldPageSize,
+          offset,
+        },
+        signal,
+        policy.operationTimeoutMs
+      )) as DhSchemaFieldPageResponse | null;
+      const page = mapSchemaFieldPageStrict(
+        response,
+        urn,
+        offset,
+        policy.schemaFieldPageSize,
+        policy.maxSchemaFieldsPerEntity
+      );
+      if (page.total !== requirement.totalFields) {
+        throw new DataHubHarvestError(
+          "SCHEMA_RESPONSE_INCOMPLETE",
+          "DataHub schema total changed between get_entities and list_schema_fields."
+        );
+      }
+      for (const field of page.fields) {
+        if (seen.has(field.fieldPath)) {
+          throw new DataHubHarvestError(
+            "SCHEMA_RESPONSE_INCOMPLETE",
+            "DataHub list_schema_fields returned a duplicate field across pages."
+          );
+        }
+        seen.add(field.fieldPath);
+        fields.push(field);
+      }
+      offset += page.fields.length;
+      pages += 1;
+    }
+    return completeEntitySchema(
+      entity,
+      fields,
+      requirement.totalFields
+    );
+  }
+
+  private async getUpstreamLineageWithinPolicy(
     urn: Urn,
-    isKnown: (urn: Urn) => boolean,
     policy: Readonly<LiveHarvestPolicy>,
     signal: AbortSignal
   ): Promise<LineageEdge[]> {
@@ -349,8 +491,9 @@ export class LiveDataHubMcpClient implements DataHubClient {
       {
         urn,
         upstream: true,
+        filter: "entity_type = dataset",
         max_hops: 1,
-        max_results: MAX_LINEAGE_RESULTS,
+        max_results: policy.maxLineageResultsPerDirection,
         offset: 0,
       },
       signal,
@@ -358,51 +501,202 @@ export class LiveDataHubMcpClient implements DataHubClient {
     )) as DhLineageResponse | null;
     return mapUpstreamEdgesStrict(
       response,
-      isKnown,
-      MAX_LINEAGE_RESULTS
+      policy.maxLineageResultsPerDirection
     );
   }
 
-  private async histories(
+  private async getDownstreamTopologyWithinPolicy(
+    urn: Urn,
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<LineageTopologyNode[]> {
+    const response = (await this.call(
+      "get_lineage",
+      {
+        urn,
+        upstream: false,
+        // Pinned MCP v0.6.0 defines max_hops=3 as unlimited-hop reachability.
+        max_hops: 3,
+        max_results: policy.maxLineageResultsPerDirection,
+        offset: 0,
+      },
+      signal,
+      policy.operationTimeoutMs
+    )) as DhLineageResponse | null;
+    return mapDownstreamTopologyStrict(
+      response,
+      policy.maxLineageResultsPerDirection
+    );
+  }
+
+  private async getLineageTopologyWithinPolicy(
     urns: readonly Urn[],
     policy: Readonly<LiveHarvestPolicy>,
     signal: AbortSignal
-  ): Promise<AspectVersionHistory[]> {
+  ): Promise<LiveLineageTopology> {
+    const upstreamByRoot = new Map<Urn, LineageEdge[]>();
+    const downstreamByRoot = new Map<Urn, LineageTopologyNode[]>();
+    for (const urn of urns) {
+      upstreamByRoot.set(urn, []);
+      downstreamByRoot.set(urn, []);
+    }
+    const work = urns.flatMap((root) => [
+      { root, direction: "upstream" as const },
+      { root, direction: "downstream" as const },
+    ]);
+    const results = await mapWithConcurrency(
+      work,
+      policy.lineageConcurrency,
+      signal,
+      async (task) => {
+        if (task.direction === "upstream") {
+          return {
+            ...task,
+            edges: await this.getUpstreamLineageWithinPolicy(
+              task.root,
+              policy,
+              signal
+            ),
+          };
+        }
+        return {
+          ...task,
+          nodes: await this.getDownstreamTopologyWithinPolicy(
+            task.root,
+            policy,
+            signal
+          ),
+        };
+      }
+    );
+
+    const knownLineageUrns = new Set<Urn>();
+    let relationCount = 0;
+    for (const result of results) {
+      if (result.direction === "upstream") {
+        upstreamByRoot.set(result.root, result.edges);
+        relationCount += result.edges.length;
+        for (const edge of result.edges) {
+          knownLineageUrns.add(edge.upstream);
+        }
+      } else {
+        downstreamByRoot.set(result.root, result.nodes);
+        relationCount += result.nodes.length;
+        for (const node of result.nodes) {
+          knownLineageUrns.add(node.urn);
+        }
+      }
+    }
+    if (relationCount > policy.maxLineageRelations) {
+      throw new DataHubHarvestError(
+        "LINEAGE_RESPONSE_INCOMPLETE",
+        `DataHub lineage exceeds the ${policy.maxLineageRelations}-relation hosted safety limit.`
+      );
+    }
+    return {
+      upstreamByRoot,
+      downstreamByRoot,
+      knownLineageUrns,
+    };
+  }
+
+  private async directAspects(
+    urns: readonly Urn[],
+    policy: Readonly<LiveHarvestPolicy>,
+    signal: AbortSignal
+  ): Promise<DirectAspectHarvest> {
     const gms = requireDirectHistoryCapability(
       process.env.DATAHUB_GMS_URL
     );
-    if (urns.length === 0) return [];
+    if (urns.length === 0) {
+      return {
+        declaredUpstreamsByRoot: new Map(),
+        versionHistories: [],
+      };
+    }
     if (urns.length > policy.maxEntities) {
       throw new DataHubHarvestError(
         "SEARCH_LIMIT_EXCEEDED",
-        `Version-history scope exceeds the ${policy.maxEntities}-URN hosted safety limit.`
+        `Direct-aspect scope exceeds the ${policy.maxEntities}-URN hosted safety limit.`
       );
     }
     const token = process.env.DATAHUB_GMS_TOKEN;
-    const work = urns.flatMap((urn) =>
-      MUTABLE_ASPECTS.map((aspect) => ({ urn, aspect }))
-    );
+    const work: DirectAspectTask[] = [];
+    for (const urn of urns) {
+      work.push({ kind: "current-upstreams", urn });
+      for (const aspect of MUTABLE_ASPECTS) {
+        work.push({ kind: "history", urn, aspect });
+      }
+    }
     const results = await mapWithConcurrency(
       work,
       policy.historyConcurrency,
       signal,
-      async ({ urn, aspect }): Promise<AspectVersionHistory | null> => {
+      async (task): Promise<DirectAspectResult> => {
+        if (task.kind === "current-upstreams") {
+          const declared = await readCurrentUpstreamLineage(
+            gms,
+            token,
+            task.urn,
+            {
+              requestTimeoutMs: policy.operationTimeoutMs,
+              signal,
+            }
+          );
+          return {
+            kind: "current-upstreams",
+            urn: task.urn,
+            declared,
+          };
+        }
         const versions = await readAspectVersionHistory(
           gms,
           token,
-          urn,
-          aspect,
+          task.urn,
+          task.aspect,
           {
             maxHistoricalVersions: policy.maxHistoricalVersions,
             requestTimeoutMs: policy.operationTimeoutMs,
             signal,
           }
         );
-        return versions.length > 0 ? { urn, aspect, versions } : null;
+        return {
+          kind: "history",
+          history:
+            versions.length > 0
+              ? {
+                  urn: task.urn,
+                  aspect: task.aspect,
+                  versions,
+                }
+              : null,
+        };
       }
     );
-    return results.filter(
-      (history): history is AspectVersionHistory => history !== null
-    );
+    const declaredUpstreamsByRoot = new Map<
+      Urn,
+      DeclaredUpstreamLineage[]
+    >();
+    const versionHistories: AspectVersionHistory[] = [];
+    for (const result of results) {
+      if (result.kind === "current-upstreams") {
+        if (declaredUpstreamsByRoot.has(result.urn)) {
+          throw new DataHubHarvestError(
+            "LINEAGE_RESPONSE_INCOMPLETE",
+            "DataHub direct-aspect harvest duplicated an audited root."
+          );
+        }
+        declaredUpstreamsByRoot.set(result.urn, result.declared);
+      } else if (result.history) {
+        versionHistories.push(result.history);
+      }
+    }
+    if (declaredUpstreamsByRoot.size !== urns.length) {
+      throw new DataHubHarvestError(
+        "LINEAGE_RESPONSE_INCOMPLETE",
+        "DataHub direct-aspect harvest omitted an audited root."
+      );
+    }
+    return { declaredUpstreamsByRoot, versionHistories };
   }
 }

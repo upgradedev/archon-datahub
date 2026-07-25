@@ -9,6 +9,12 @@ export type AuditExecutionProfile = "synchronous-preview" | "async-worker";
 
 export interface LiveHarvestPolicy {
   maxEntities: number;
+  schemaFieldPageSize: number;
+  maxSchemaFieldsPerEntity: number;
+  maxSchemaFieldPages: number;
+  schemaCompletionConcurrency: number;
+  maxLineageResultsPerDirection: number;
+  maxLineageRelations: number;
   maxHistoricalVersions: number;
   lineageConcurrency: number;
   historyConcurrency: number;
@@ -24,8 +30,14 @@ export const LIVE_HARVEST_POLICIES: Readonly<
     // One exact demo dataset keeps search, entity hydration, lineage, and all four
     // versioned-aspect reads within the public request budget.
     maxEntities: 1,
+    schemaFieldPageSize: 100,
+    maxSchemaFieldsPerEntity: 500,
+    maxSchemaFieldPages: 10,
+    schemaCompletionConcurrency: 1,
+    maxLineageResultsPerDirection: 50,
+    maxLineageRelations: 100,
     maxHistoricalVersions: 2,
-    lineageConcurrency: 1,
+    lineageConcurrency: 2,
     historyConcurrency: 4,
     operationTimeoutMs: 4_000,
     harvestDeadlineMs: 18_000,
@@ -35,6 +47,12 @@ export const LIVE_HARVEST_POLICIES: Readonly<
     // 25 * 4 aspects * (v0 + 12 retained + the required end probe), with eight
     // concurrent readers, is bounded well below the worker's two-hour callback.
     maxEntities: 25,
+    schemaFieldPageSize: 100,
+    maxSchemaFieldsPerEntity: 5_000,
+    maxSchemaFieldPages: 100,
+    schemaCompletionConcurrency: 4,
+    maxLineageResultsPerDirection: 50,
+    maxLineageRelations: 2_500,
     maxHistoricalVersions: 12,
     lineageConcurrency: 8,
     historyConcurrency: 8,
@@ -50,6 +68,8 @@ export type DataHubHarvestErrorCode =
   | "SEARCH_LIMIT_EXCEEDED"
   | "SEARCH_RESPONSE_INCOMPLETE"
   | "ENTITY_RESPONSE_INCOMPLETE"
+  | "SCHEMA_RESPONSE_INCOMPLETE"
+  | "SCHEMA_LIMIT_EXCEEDED"
   | "LINEAGE_RESPONSE_INCOMPLETE"
   | "HISTORY_CAPABILITY_REQUIRED"
   | "HARVEST_DEADLINE_EXCEEDED"

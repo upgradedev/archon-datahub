@@ -143,10 +143,10 @@ test("defaultAuditLoop + ALL_LOOP_TOOLS expose the read-only tool set", () => {
 
 test("MCP audit_catalog tool returns the pipeline report", async () => {
   const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
-  const res = await callAuditTool(deps, "audit_catalog", {});
+  const res = await callAuditTool(deps, "audit_catalog", { query: "sales" });
   assert.ok(!res.isError);
   const report = JSON.parse((res.content[0] as { text: string }).text);
-  assert.ok(report.findings.length >= 5);
+  assert.ok(report.findings.length >= 1);
   assert.ok(report.narrative);
 });
 
@@ -168,8 +168,23 @@ test("MCP get_entity errors on a missing urn, and unknown tools error", async ()
 
 test("MCP run_audit_loop returns pending findings + trace", async () => {
   const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
-  const res = await callAuditTool(deps, "run_audit_loop", {});
+  const res = await callAuditTool(deps, "run_audit_loop", { query: "sales" });
   const out = JSON.parse((res.content[0] as { text: string }).text);
   assert.equal(out.disposition, "pending");
   assert.ok(out.trace.length >= 3);
+});
+
+test("MCP hosted audit tools reject omitted, wildcard, or blank scope", async () => {
+  const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
+  for (const name of ["audit_catalog", "run_audit_loop", "search_datasets"]) {
+    for (const query of [undefined, "", "   ", "*"]) {
+      const res = await callAuditTool(
+        deps,
+        name,
+        query === undefined ? {} : { query }
+      );
+      assert.equal(res.isError, true);
+      assert.match((res.content[0] as { text: string }).text, /narrow|non-wildcard/u);
+    }
+  }
 });

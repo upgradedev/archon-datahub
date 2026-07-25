@@ -16,10 +16,12 @@ consistent:
   schema, domain, or deprecation. Archon distinguishes a stable ingestion source
   (`pipelineName`) from an execution (`runId`), so two runs of one pipeline never become a
   fabricated conflict.
-- **Lineage gaps and blast radius** — a missing upstream or risky asset is expanded into a
-  bounded, cycle-safe downstream impact graph.
+- **Lineage gaps and blast radius** — declared current `upstreamLineage` is reconciled
+  against resolved MCP topology, and a missing upstream or risky asset is expanded into a
+  bounded, cycle-safe downstream impact graph without treating query scope as absence.
 - **Governance controls G1–G6** — deterministic checks find missing ownership, domains,
-  descriptions, typing, and sensitive-field classification.
+  descriptions, typing, and sensitive-field classification. G6 accepts only exact
+  policy identifiers; an unrelated tag or glossary term never passes the control.
 - **Evidence, not opaque advice** — every result can be exported as JSON, Markdown, or
   SARIF and carries provenance, policy, and content digests.
 - **Governed G6 remediation** — only a missing classification tag can become an action.
@@ -200,13 +202,15 @@ uncertainty. Only the expected “no next retained version” response terminate
 enumeration normally.
 
 One pipeline run creates one fresh harvest bundle: its snapshot and fact stream derive from
-the same `search → get_entities → lineage` result, and version history reuses that exact URN
-set. Live search fails before hydration when its declared total exceeds the execution
-ceiling; every requested entity must be returned exactly once without a per-URN error; and
-lineage must return a complete, count-consistent upstream envelope. MCP `isError` responses
-are failures, never data. Every aspect history must terminate normally within its version
-bound, and a live hosted audit refuses MCP-only configuration without direct GMS history
-capability. The public preview
+the same narrow search roots. Exact entity hydration, full-schema completion, bidirectional
+MCP topology, current declared-lineage reconciliation, and retained history share that URN
+set and run under one deadline. Topology neighbors remain context and never expand the
+governance/history audit scope. Live search fails before hydration when its declared total
+exceeds the execution ceiling; every requested entity must be returned exactly once without
+a per-URN error; schema and lineage totals must remain complete and within policy. MCP
+`isError` responses are failures, never data. Every aspect history must terminate normally
+within its version bound, and a live hosted audit refuses MCP-only configuration without
+direct GMS history/current-lineage capability. The public preview
 allows one URN and two retained versions with an 18-second harvest deadline. The durable
 worker allows at most 25 URNs and 12 retained versions, uses controlled eight-way
 concurrency, and has a 75-minute harvest / 90-minute pipeline budget inside its two-hour
@@ -249,8 +253,8 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
   Lambda, DynamoDB conditional state, Standard Step Functions, encrypted
   SQS/DLQs, and an Object-Lock evidence bucket;
 - a deployment-generated `/runtime-config.json` that binds the immutable SPA to
-  each environment without rebuilding it and is served no-store through a
-  CloudFront caching-disabled behavior;
+  each environment without rebuilding it, carries the exact narrow hosted-demo query,
+  and is served no-store through a CloudFront caching-disabled behavior;
 - a strict three-callback async route: audit evidence, durable human-approval handoff, then
   approved G6 execution; approval alone can never be mistaken for a completed write;
 - a least-privilege control Lambda for public durable start/status, with immutable-evidence
@@ -286,6 +290,8 @@ The target AWS account must be CDK-bootstrapped in both the workload region and
 The deployment pipeline resolves the regional AWS-managed S3 and DynamoDB prefix-list IDs
 itself and keeps them distinct from those three external allowlists. Staging and production
 smoke evidence bind the query digest and reject `{}` / wildcard catalog sweeps. Each
+SPA reads that same exact query from runtime config and pre-fills the audit scope, so the
+judge path is one click while remaining bounded to the proven single dataset. Each
 deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
 contracts, including the exact ACM/WAF identities, KMS-encrypted retained WAF log groups,
 sampled-data protection, five-minute rate windows, exact enabled/rotating customer KMS

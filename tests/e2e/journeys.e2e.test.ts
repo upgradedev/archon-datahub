@@ -113,13 +113,19 @@ test("J5: dual-face MCP round-trip — audit_catalog + run_audit_loop over a rea
   const client = new Client({ name: "journey", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const audit = JSON.parse(((await client.callTool({ name: "audit_catalog", arguments: {} })) as {
+    const audit = JSON.parse(((await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "sales" },
+    })) as {
       content: Array<{ text: string }>;
     }).content[0]!.text);
-    assert.ok(audit.findings.length >= 5);
+    assert.ok(audit.findings.length >= 1);
     assert.ok(audit.narrative);
 
-    const loop = JSON.parse(((await client.callTool({ name: "run_audit_loop", arguments: {} })) as {
+    const loop = JSON.parse(((await client.callTool({
+      name: "run_audit_loop",
+      arguments: { query: "sales" },
+    })) as {
       content: Array<{ text: string }>;
     }).content[0]!.text);
     assert.equal(loop.disposition, "pending");

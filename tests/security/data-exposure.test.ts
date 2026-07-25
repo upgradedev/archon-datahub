@@ -56,7 +56,10 @@ test("data-exposure: the token never appears in the MCP tool output", async () =
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const res = (await client.callTool({ name: "audit_catalog", arguments: {} })) as { content: Array<{ text: string }> };
+    const res = (await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "sales" },
+    })) as { content: Array<{ text: string }> };
     assert.ok(!JSON.stringify(res).includes(SENTINEL), "token leaked over the MCP surface");
   } finally {
     await client.close();

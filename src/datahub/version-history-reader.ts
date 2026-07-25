@@ -35,15 +35,30 @@ export interface VersionHistoryReadOptions {
   signal?: AbortSignal;
 }
 
+export interface CurrentAspectReadOptions {
+  fetchFn?: typeof fetch;
+  requestTimeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export type DatasetLineageType = "COPY" | "TRANSFORMED" | "VIEW";
+
+export interface DeclaredUpstreamLineage {
+  upstream: string;
+  type: DatasetLineageType;
+}
+
 interface LocatedVersion {
   slot: number;
   entry: DhVersionedAspect;
 }
 
+type DirectAspectName = MutableAspectName | "upstreamLineage";
+
 function endpoint(
   gmsUrl: string,
   urn: string,
-  aspect: MutableAspectName,
+  aspect: DirectAspectName,
   version: number
 ): string {
   const base = gmsUrl.replace(/\/+$/, "");
@@ -53,20 +68,109 @@ function endpoint(
   );
 }
 
-function isWrappedAspect(value: unknown): value is DhVersionedAspect {
-  if (!value || typeof value !== "object") return false;
+function isDirectAspectEnvelope(value: unknown): value is DhVersionedAspect {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Partial<DhVersionedAspect>;
-  return candidate.value === null || (
-    typeof candidate.value === "object" &&
-    candidate.value !== null &&
-    !Array.isArray(candidate.value)
+  const validValue =
+    candidate.value === null ||
+    (typeof candidate.value === "object" &&
+      candidate.value !== null &&
+      !Array.isArray(candidate.value));
+  const validSystemMetadata =
+    candidate.systemMetadata === undefined ||
+    candidate.systemMetadata === null ||
+    (typeof candidate.systemMetadata === "object" &&
+      !Array.isArray(candidate.systemMetadata));
+  return (
+    Object.prototype.hasOwnProperty.call(candidate, "value") &&
+    validValue &&
+    validSystemMetadata
+  );
+}
+
+const DATASET_URN_PREFIX =
+  "urn:li:dataset:(urn:li:dataPlatform:";
+const DATASET_LINEAGE_TYPES = new Set<DatasetLineageType>([
+  "COPY",
+  "TRANSFORMED",
+  "VIEW",
+]);
+
+function isExactDatasetUrn(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !value.startsWith(DATASET_URN_PREFIX) ||
+    !value.endsWith(")") ||
+    /[\s\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    return false;
+  }
+  const tuple = value.slice(DATASET_URN_PREFIX.length, -1).split(",");
+  return (
+    tuple.length === 3 &&
+    tuple.every(
+      (part) =>
+        part.length > 0 &&
+        !part.includes("(") &&
+        !part.includes(")")
+    )
+  );
+}
+
+function invalidCurrentLineage(url: string, message: string): never {
+  throw new VersionHistoryReadError(
+    "INVALID_RESPONSE",
+    `DataHub current upstreamLineage response ${message}`,
+    url
+  );
+}
+
+function parseDeclaredUpstreams(
+  value: Record<string, unknown>,
+  url: string
+): DeclaredUpstreamLineage[] {
+  const upstreams = value["upstreams"];
+  if (!Array.isArray(upstreams)) {
+    invalidCurrentLineage(url, "did not contain a raw value.upstreams array");
+  }
+
+  const seen = new Set<string>();
+  const declared: DeclaredUpstreamLineage[] = [];
+  for (const raw of upstreams) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      invalidCurrentLineage(url, "contained a malformed upstream entry");
+    }
+    const entry = raw as Record<string, unknown>;
+    const dataset = entry["dataset"];
+    const type = entry["type"];
+    if (!isExactDatasetUrn(dataset)) {
+      invalidCurrentLineage(url, "contained an invalid dataset URN");
+    }
+    if (!DATASET_LINEAGE_TYPES.has(type as DatasetLineageType)) {
+      invalidCurrentLineage(url, "contained an invalid lineage type");
+    }
+    if (seen.has(dataset)) {
+      invalidCurrentLineage(url, "contained a duplicate dataset URN");
+    }
+    seen.add(dataset);
+    declared.push({
+      upstream: dataset,
+      type: type as DatasetLineageType,
+    });
+  }
+  return declared.sort((left, right) =>
+    left.upstream < right.upstream
+      ? -1
+      : left.upstream > right.upstream
+        ? 1
+        : 0
   );
 }
 
 async function readSlot(
   fetchFn: typeof fetch,
   url: string,
-  aspect: MutableAspectName,
+  aspect: DirectAspectName,
   headers: Record<string, string>,
   requestTimeoutMs: number,
   signal?: AbortSignal
@@ -76,6 +180,7 @@ async function readSlot(
     : AbortSignal.timeout(requestTimeoutMs);
   const response = await fetchFn(url, {
     headers,
+    redirect: "error",
     signal: requestSignal,
   });
   if (response.status === 404) return null;
@@ -88,9 +193,9 @@ async function readSlot(
     );
   }
 
-  let body: Record<string, unknown>;
+  let body: unknown;
   try {
-    body = (await response.json()) as Record<string, unknown>;
+    body = await response.json();
   } catch {
     throw new VersionHistoryReadError(
       "INVALID_RESPONSE",
@@ -99,16 +204,49 @@ async function readSlot(
       response.status
     );
   }
-  const wrapped = body?.[aspect];
-  if (!isWrappedAspect(wrapped)) {
+  if (!isDirectAspectEnvelope(body)) {
     throw new VersionHistoryReadError(
       "INVALID_RESPONSE",
-      `DataHub response did not contain a valid ${aspect} aspect wrapper`,
+      `DataHub direct ${aspect} response was not a valid GenericAspectV3 envelope`,
       url,
       response.status
     );
   }
-  return wrapped;
+  return body;
+}
+
+// A 404 means "no current declaration available" only after the full live harvest has
+// already proved this URN is an audited dataset root through search and strict hydration.
+// It is not resolution proof: the live audit reconciles [] against the complete MCP
+// direct-upstream result and rejects any resolved-but-undeclared URN.
+export async function readCurrentUpstreamLineage(
+  gmsUrl: string,
+  token: string | undefined,
+  urn: string,
+  options: CurrentAspectReadOptions = {}
+): Promise<DeclaredUpstreamLineage[]> {
+  const fetchFn = options.fetchFn ?? fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) {
+    throw new RangeError("requestTimeoutMs must be positive");
+  }
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const url = endpoint(gmsUrl, urn, "upstreamLineage", 0);
+  const current = await readSlot(
+    fetchFn,
+    url,
+    "upstreamLineage",
+    headers,
+    requestTimeoutMs,
+    options.signal
+  );
+  if (!current) return [];
+  if (current.value === null) {
+    invalidCurrentLineage(url, "contained a null current value");
+  }
+  return parseDeclaredUpstreams(current.value, url);
 }
 
 function dedupeAndOrder(located: LocatedVersion[]): DhVersionedAspect[] {

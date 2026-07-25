@@ -13,6 +13,7 @@ import {
   beginSignIn,
   getAccessToken,
   getAuthSnapshot,
+  getDemoQuery,
   initializeAuthentication,
   signOut,
   subscribeToAuth,
@@ -965,7 +966,7 @@ export function App() {
   });
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [type, setType] = useState<FindingType | "all">("all");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => getDemoQuery() ?? "");
   const [loading, setLoading] = useState(false);
   const [runError, setRunError] = useState<string>();
   const [controlLoop, setControlLoop] = useState<ControlLoopStatus>();
@@ -975,7 +976,16 @@ export function App() {
   const controller = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    void initializeAuthentication();
+    let active = true;
+    void initializeAuthentication().then(() => {
+      const demoQuery = getDemoQuery();
+      if (active && demoQuery) {
+        setQuery((current) => current || demoQuery);
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(
@@ -1033,6 +1043,11 @@ export function App() {
 
   const runAudit = async (event?: FormEvent) => {
     event?.preventDefault();
+    const scope = query.trim();
+    if (!scope || scope === "*") {
+      setRunError("Enter a narrow, non-wildcard dataset scope.");
+      return;
+    }
     controller.current?.abort();
     const nextController = new AbortController();
     controller.current = nextController;
@@ -1041,7 +1056,7 @@ export function App() {
     setControlLoop(undefined);
     try {
       const result = await loadAudit(
-        query,
+        scope,
         nextController.signal,
         (status, progressAudit) => {
           setControlLoop(status);
@@ -1143,7 +1158,7 @@ export function App() {
             <SourceBadge source={audit.source} />
             <button
               className="run-button"
-              disabled={loading}
+              disabled={loading || !query.trim() || query.trim() === "*"}
               id="judge-tour-run-audit"
               onClick={() => void runAudit()}
               type="button"

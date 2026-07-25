@@ -18,7 +18,7 @@ const findings: Finding[] = [
   {
     type: "governance_violation",
     severity: "high",
-    subject: "urn:li:dataset:(urn:li:dataPlatform:snowflake,prod.customer_360,PROD)#email",
+    subject: "urn:li:dataset:(urn:li:dataPlatform:snowflake,prod.customer_360,PROD)",
     summary: "Sensitive field email has no approved governance classification.",
     recommendation: "Add the PII tag through the digest-bound G6 approval workflow.",
     detail: {
@@ -50,7 +50,7 @@ const findings: Finding[] = [
           runId: "dbt-20260723-0927",
           observedAt: "2026-07-23T09:27:41.000Z",
           actor: "urn:li:corpuser:dbt-cloud",
-          value: "SchemaField(email), glossary=[Customer identifier]",
+          value: "SchemaField(email), tags=[]",
           status: "observed",
         },
       ],
@@ -63,11 +63,11 @@ const findings: Finding[] = [
       },
       approval: {
         approvalId: "approval-g6-customer-email-001",
-        expiresAt: "2026-08-10T20:59:00.000Z",
+        expiresAt: "2099-12-31T23:59:59.000Z",
         targetField: "customer_360.email",
         proposedTag: "urn:li:tag:PII",
-        before: ["urn:li:glossaryTerm:CustomerIdentifier"],
-        after: ["urn:li:glossaryTerm:CustomerIdentifier", "urn:li:tag:PII"],
+        before: [],
+        after: ["urn:li:tag:PII"],
         planDigest: "sha256:e6325c683b8c30605a0391d4915a22b17d0c27ba63dc378327ebfc5cb9d23b7f",
         risk: "low",
       },

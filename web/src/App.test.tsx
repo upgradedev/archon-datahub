@@ -12,6 +12,7 @@ vi.mock("./auth", () => ({
   beginSignIn: authMocks.beginSignIn,
   getAccessToken: vi.fn(() => "TEST_ONLY_TOKEN_000000000000"),
   getAuthSnapshot: () => authMocks.snapshot,
+  getDemoQuery: () => "customer_pii",
   initializeAuthentication: vi.fn(async () => undefined),
   signOut: authMocks.signOut,
   subscribeToAuth: () => () => undefined,
@@ -118,6 +119,7 @@ describe("Archon control plane", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
+    expect(await screen.findByDisplayValue("customer_pii")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     expect(await screen.findByText("Live DataHub")).toBeInTheDocument();
@@ -194,6 +196,7 @@ describe("Archon control plane", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
+    expect(await screen.findByDisplayValue("customer_pii")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     const evidence = await screen.findByTestId("terminal-evidence");

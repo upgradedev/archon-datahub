@@ -2112,8 +2112,20 @@ jobs:
           STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
           WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
         run: |
           set -euo pipefail
+          : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            $query != "*" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
           bucket="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonSpaBucketName' "${STACK_OUTPUTS}")"
           distribution_id="$(jq -er --arg stack "${STACK_NAME}" \
@@ -2157,8 +2169,10 @@ jobs:
             --arg redirectUri "${redirect_uri}" \
             --arg logoutUri "${logout_uri}" \
             --arg approvalScope "${approval_scope}" \
+            --arg demoQuery "${DATAHUB_DEMO_QUERY}" \
             '{
               schemaVersion: 1,
+              demoQuery: $demoQuery,
               auth: {
                 clientId: $clientId,
                 authorizationEndpoint: $authorizationEndpoint,
@@ -2478,7 +2492,9 @@ jobs:
           grep -qi '^content-type:[[:space:]]*application/json' "${runtime_headers}"
           grep -qi '^cache-control:.*no-store' "${runtime_headers}"
           jq -e --arg root "${APPLICATION_URL}/" \
+            --arg demoQuery "${DATAHUB_DEMO_QUERY}" \
             '.schemaVersion == 1
+             and .demoQuery == $demoQuery
              and .auth.redirectUri == $root
              and .auth.logoutUri == $root
              and .auth.scopes == ["openid", "email", "archon/approve"]' \
@@ -5311,8 +5327,20 @@ jobs:
           STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
           WEB_DIR: ${{ steps.artifacts.outputs.web_dir }}
+          DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
         run: |
           set -euo pipefail
+          : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
+          jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
+            ($query | length) >= 1 and
+            ($query | length) <= 256 and
+            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
+            $query != "*" and
+            $query == ($query | gsub("^\\s+|\\s+$"; ""))
+          ' >/dev/null || {
+            echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
+            exit 1
+          }
           bucket="$(jq -er --arg stack "${STACK_NAME}" \
             '.[$stack].ArchonSpaBucketName' "${STACK_OUTPUTS}")"
           distribution_id="$(jq -er --arg stack "${STACK_NAME}" \
@@ -5356,8 +5384,10 @@ jobs:
             --arg redirectUri "${redirect_uri}" \
             --arg logoutUri "${logout_uri}" \
             --arg approvalScope "${approval_scope}" \
+            --arg demoQuery "${DATAHUB_DEMO_QUERY}" \
             '{
               schemaVersion: 1,
+              demoQuery: $demoQuery,
               auth: {
                 clientId: $clientId,
                 authorizationEndpoint: $authorizationEndpoint,
@@ -5672,7 +5702,9 @@ jobs:
           grep -qi '^content-type:[[:space:]]*application/json' "${runtime_headers}"
           grep -qi '^cache-control:.*no-store' "${runtime_headers}"
           jq -e --arg root "${APPLICATION_URL}/" \
+            --arg demoQuery "${DATAHUB_DEMO_QUERY}" \
             '.schemaVersion == 1
+             and .demoQuery == $demoQuery
              and .auth.redirectUri == $root
              and .auth.logoutUri == $root
              and .auth.scopes == ["openid", "email", "archon/approve"]' \

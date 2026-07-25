@@ -10,12 +10,14 @@ import type { Finding } from "../types.js";
 import type { Classification } from "./classifier.js";
 
 const SYSTEM_PROMPT =
-  "You are Archon, a read-only metadata-governance analyst for a data catalog. You are " +
+  "You are Archon, the narration stage of a metadata-governance control plane. The audit " +
+  "and recommendation phase you are summarizing is read-only. You are " +
   "given the exact results of a deterministic self-audit (contradiction, lineage-gap, and " +
   "governance findings) plus a classification of the catalog. Write a concise, factual " +
   "executive summary for a data steward: what was audited, what was found, and why it " +
-  "matters. Never invent findings or numbers beyond those given. Make clear the agent is " +
-  "READ-ONLY — it recommends; a human disposes. 4–7 sentences.";
+  "matters. Never invent findings or numbers beyond those given. Make clear that no write " +
+  "occurs during audit or recommendation; a separate digest-bound action may execute only " +
+  "after an authenticated human approval. 4–7 sentences.";
 
 export class NarratorAgent {
   constructor(private client: LlmClient = hasLlmCreds() ? chatClient() : new FakeLlmClient(),

@@ -39,28 +39,30 @@ test("HTTP health contract is small, secured, and release-bound", async () => {
   });
 });
 
-test("HTTP preview returns a controlled error when a live query exceeds its ceiling", async () => {
-  class TooBroadClient extends FakeDataHubMcpClient {
-    override async harvestAudit(): Promise<never> {
-      throw new DataHubHarvestError(
-        "SEARCH_LIMIT_EXCEEDED",
-        "provider detail must not be returned"
-      );
+for (const code of ["SEARCH_LIMIT_EXCEEDED", "SCHEMA_LIMIT_EXCEEDED"] as const) {
+  test(`HTTP preview returns a controlled error when ${code} exceeds its ceiling`, async () => {
+    class TooBroadClient extends FakeDataHubMcpClient {
+      override async harvestAudit(): Promise<never> {
+        throw new DataHubHarvestError(
+          code,
+          "provider detail must not be returned"
+        );
+      }
     }
-  }
-  await withServer(async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/audits`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: "too-broad" }),
-    });
-    assert.equal(response.status, 422);
-    assert.deepEqual(await response.json(), {
-      error: "audit_scope_too_broad",
-      requestId: response.headers.get("x-request-id"),
-    });
-  }, new TooBroadClient());
-});
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/audits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "too-broad" }),
+      });
+      assert.equal(response.status, 422);
+      assert.deepEqual(await response.json(), {
+        error: "audit_scope_too_broad",
+        requestId: response.headers.get("x-request-id"),
+      });
+    }, new TooBroadClient());
+  });
+}
 
 test("POST /api/audits drives the real pipeline through the HTTP boundary", async () => {
   await withServer(async (baseUrl) => {

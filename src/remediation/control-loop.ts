@@ -231,7 +231,7 @@ export function verifyPostcondition(input: {
     {
       checkId: "TARGET_UNCHANGED",
       passed: targetUnchanged,
-      evidence: `Observed ${after.entityUrn}#${after.columnPath}.`,
+      evidence: `Observed target "${after.entityUrn}#${after.columnPath}".`,
     },
     {
       checkId: "PREEXISTING_TAGS_PRESERVED",

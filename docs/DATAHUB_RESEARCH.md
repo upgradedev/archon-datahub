@@ -114,6 +114,12 @@ Archon's production boundary keeps catalog reads and writes separate:
 
 Enabling mutation tools is therefore necessary but not sufficient authorization.
 
+The pinned MCP lineage search returns resolved graph entities, not proof that every
+declared current upstream still exists. Archon therefore reconciles those complete direct
+results with the direct-GMS `upstreamLineage` v0 aspect. Only a declared URN absent from
+the resolved result becomes a lineage gap; a neighbor outside the narrow audit query does
+not. Downstream nodes remain topology context rather than additional governance targets.
+
 ## Aspect history and provenance correctness
 
 An aspect is DataHub's atomic metadata-write unit. The official

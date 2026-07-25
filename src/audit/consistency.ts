@@ -23,9 +23,9 @@
 //                   distinct source, a contradiction means two sources of truth
 //                   disagree — the catalog is internally inconsistent.
 //   LINEAGE GAP   — a fact explicitly references another entity (metadata.refs, e.g.
-//                   a declared upstream lineage URN) that has NO catalogued fact in
-//                   the audited set — a dangling lineage edge: an upstream the
-//                   pipeline claims to read from that the catalog never ingested.
+//                   a provider-confirmed unresolved upstream lineage URN) — a dangling
+//                   edge the pipeline declares but the catalog cannot resolve. Query
+//                   scope alone is never treated as evidence of absence.
 //                   (Surfaced by the caller as a `lineage_gap` finding.)
 //
 // This is a PURE function over generic facts (no DB, no DataHub calls, no policy
@@ -71,8 +71,8 @@ export interface Contradiction {
   resolution: Resolution;
 }
 
-// A referenced entity (e.g. a declared lineage upstream) that no fact in the
-// audited set actually catalogues — a lineage gap.
+// A referenced entity the harvester proved unresolved (for example by reconciling
+// current declared lineage with resolved topology) — a lineage gap.
 export interface Absence {
   type: "absence";
   subject: string; // the referenced-but-missing entity
@@ -369,7 +369,7 @@ export function auditConsistency(facts: AuditFact[], opts: AuditOptions = {}): C
     }
   }
 
-  // ── Absences (lineage gaps): a referenced entity with no fact of its own ─────
+  // ── Absences (lineage gaps): provider-confirmed unresolved references ─────────
   const referencedBy = new Map<string, Array<{ factId: string; source: string | null }>>();
   for (const m of facts) {
     const refs = m.metadata?.["refs"];

@@ -34,6 +34,22 @@ export class ApiError extends Error {
   }
 }
 
+function narrowAuditQuery(value: string): string {
+  const query = value.trim();
+  if (
+    query.length < 1 ||
+    query.length > 256 ||
+    query === "*" ||
+    /[\u0000-\u001f\u007f]/u.test(query)
+  ) {
+    throw new ApiError(
+      "A narrow, non-wildcard dataset query is required.",
+      400,
+    );
+  }
+  return query;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -339,6 +355,7 @@ async function jsonResponse(response: Response): Promise<unknown> {
 }
 
 export async function requestAudit(query = "", signal?: AbortSignal): Promise<AuditEnvelope> {
+  const scope = narrowAuditQuery(query);
   const response = await fetch(AUDIT_PATH, {
     method: "POST",
     credentials: "same-origin",
@@ -346,7 +363,7 @@ export async function requestAudit(query = "", signal?: AbortSignal): Promise<Au
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(query.trim() ? { query: query.trim() } : {}),
+    body: JSON.stringify({ query: scope }),
     signal,
   });
   return parseAuditEnvelope(await jsonResponse(response));
@@ -356,6 +373,7 @@ export async function startControlLoop(
   query = "",
   signal?: AbortSignal,
 ): Promise<ControlLoopStart> {
+  const scope = narrowAuditQuery(query);
   const response = await fetch(CONTROL_LOOP_PATH, {
     method: "POST",
     credentials: "same-origin",
@@ -363,7 +381,7 @@ export async function startControlLoop(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(query.trim() ? { query: query.trim() } : {}),
+    body: JSON.stringify({ query: scope }),
     signal,
   });
   return parseControlLoopStart(await jsonResponse(response));

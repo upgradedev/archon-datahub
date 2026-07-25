@@ -88,7 +88,12 @@ test("availability executes one bounded read-only request without credentials", 
 
 test("public runtime, response, and header contracts are exact and sanitized", () => {
   assert.match(workflow, /"\$\{APPLICATION_URL\}\/runtime-config\.json"/u);
-  assert.match(workflow, /exact_keys\(\.; \["schemaVersion", "auth"\]\)/u);
+  assert.match(
+    workflow,
+    /exact_keys\(\.; \["schemaVersion", "demoQuery", "auth"\]\)/u
+  );
+  assert.match(workflow, /--arg demoQuery "\$\{AUDIT_QUERY\}"/u);
+  assert.match(workflow, /\.demoQuery == \$demoQuery/u);
   assert.match(
     workflow,
     /\.auth\.scopes == \["openid", "email", "archon\/approve"\]/u

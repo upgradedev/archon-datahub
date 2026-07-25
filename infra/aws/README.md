@@ -131,7 +131,8 @@ Content-Type: application/json
 The SPA loads `/runtime-config.json` before it enables sign-in. That
 environment-bound document contains only the public client ID, exact Cognito
 authorization/token/logout endpoints, the CloudFront-root redirect/logout URI,
-and `openid email archon/approve` scopes. It is created after the stack deploy,
+`openid email archon/approve` scopes, and the public-safe narrow demo query used to
+pre-fill the read-only audit. It is created after the stack deploy,
 is never baked into the build-once SPA archive, and is served by an explicit
 CloudFront caching-disabled behavior with `Cache-Control:
 no-cache,no-store,must-revalidate`. Access tokens remain in browser memory.
@@ -454,7 +455,9 @@ Do not pipe an unpinned installer from the default branch into a shell.
    `ArchonCloudFrontDistributionId`.
 
 6. Configure a required, trimmed, non-wildcard `DATAHUB_DEMO_QUERY` GitHub environment
-   variable that resolves to exactly one safe dataset. Smoke-test `ArchonApplicationUrl`,
+   variable that resolves to exactly one safe dataset. The deployment places that exact
+   value in runtime config and the SPA pre-fills it for a one-click bounded demo.
+   Smoke-test `ArchonApplicationUrl`,
    exact runtime-config bytes and no-store
    headers, the synchronous read-only `POST /api/audits` preview, and fail-closed
    control-loop schemas/status lookup. The workflow submits that query rather than `{}`,

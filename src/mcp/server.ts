@@ -29,32 +29,62 @@ export const MCP_TOOLS: Tool[] = [
     name: "audit_catalog",
     description:
       "Run the full read-only audit pipeline (classifier → lineage-analyzer → governance-auditor → " +
-      "narrator) over the DataHub catalog and return the findings + an executive summary. Read-only — " +
-      "the agent recommends, a human disposes.",
+      "narrator) over one narrowly scoped DataHub dataset and return the findings + an executive " +
+      "summary. The audit phase is read-only; any later governed action remains separately human-gated.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { query: { type: "string", description: "Optional search filter for the catalog." } },
+      properties: {
+        query: {
+          type: "string",
+          minLength: 1,
+          maxLength: 256,
+          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          description:
+            "Required narrow query that resolves to exactly one hosted demo dataset.",
+        },
+      },
+      required: ["query"],
     },
   },
   {
     name: "run_audit_loop",
     description:
       "Run the bounded multi-step ReAct audit loop (harvest → self-audit → governance → emit) and return " +
-      "the PENDING findings + the full step trace. Human-gated: nothing mutates the catalog.",
+      "the PENDING findings + the full step trace for one narrowly scoped dataset. This loop is read-only.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { query: { type: "string", description: "Optional search filter for the catalog." } },
+      properties: {
+        query: {
+          type: "string",
+          minLength: 1,
+          maxLength: 256,
+          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          description:
+            "Required narrow query that resolves to exactly one hosted demo dataset.",
+        },
+      },
+      required: ["query"],
     },
   },
   {
     name: "search_datasets",
-    description: "Search the DataHub catalog for dataset URNs matching a query. Read-only.",
+    description:
+      "Resolve a narrow DataHub dataset query. Hosted execution fails closed unless at most one dataset matches.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { query: { type: "string", description: "Search text (omit for all datasets)." } },
+      properties: {
+        query: {
+          type: "string",
+          minLength: 1,
+          maxLength: 256,
+          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          description: "Required non-wildcard dataset query.",
+        },
+      },
+      required: ["query"],
     },
   },
   {
@@ -81,6 +111,19 @@ function fail(message: string): CallToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
+function narrowQuery(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 256) return null;
+  const query = value.trim();
+  if (
+    query.length === 0 ||
+    query === "*" ||
+    /[\u0000-\u001f\u007f]/u.test(query)
+  ) {
+    return null;
+  }
+  return query;
+}
+
 // Dispatch one tool call against the agent. Extracted so it is unit-testable in
 // isolation and shared by the stdio + in-memory transports.
 export async function callAuditTool(
@@ -89,18 +132,24 @@ export async function callAuditTool(
   args: Record<string, unknown>
 ): Promise<CallToolResult> {
   try {
-    const query = typeof args.query === "string" ? args.query : undefined;
+    const query = narrowQuery(args.query);
     switch (name) {
-      case "audit_catalog":
+      case "audit_catalog": {
+        if (!query) return fail("audit_catalog requires a narrow, non-wildcard query.");
         return ok(
           await deps.pipeline.run(deps.datahub, query, {
             executionProfile: "synchronous-preview",
           })
         );
-      case "run_audit_loop":
+      }
+      case "run_audit_loop": {
+        if (!query) return fail("run_audit_loop requires a narrow, non-wildcard query.");
         return ok(await defaultAuditLoop().run(deps.datahub, query));
-      case "search_datasets":
+      }
+      case "search_datasets": {
+        if (!query) return fail("search_datasets requires a narrow, non-wildcard query.");
         return ok({ urns: await deps.datahub.search(query) });
+      }
       case "get_entity": {
         const urn = String(args.urn ?? "");
         if (!urn) return fail("get_entity requires a urn.");

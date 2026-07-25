@@ -193,12 +193,15 @@ jobs:
             echo "::error::The public runtime config must not redirect"
             exit 1
           fi
-          jq -e --arg root "${APPLICATION_URL}/" '
+          jq -e \
+            --arg root "${APPLICATION_URL}/" \
+            --arg demoQuery "${AUDIT_QUERY}" '
             def exact_keys($value; $wanted):
               ($value | type) == "object" and
               (($value | keys | sort) == ($wanted | sort));
-            exact_keys(.; ["schemaVersion", "auth"]) and
+            exact_keys(.; ["schemaVersion", "demoQuery", "auth"]) and
             .schemaVersion == 1 and
+            .demoQuery == $demoQuery and
             exact_keys(
               .auth;
               [

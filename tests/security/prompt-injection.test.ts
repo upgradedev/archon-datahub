@@ -106,7 +106,10 @@ test("prompt-injection: audit_catalog over MCP on a poisoned catalog returns rea
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const res = (await client.callTool({ name: "audit_catalog", arguments: {} })) as {
+    const res = (await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "injected_asset" },
+    })) as {
       isError?: boolean;
       content: Array<{ text: string }>;
     };
