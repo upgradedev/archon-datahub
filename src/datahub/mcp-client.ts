@@ -242,6 +242,40 @@ export function snapshotFromReports(
   return { scanId, entities, knownUrns, downstreamByRoot };
 }
 
+function historyReplayScanId(
+  histories: readonly AspectVersionHistory[]
+): string {
+  const versions = histories
+    .flatMap((history) => history.versions)
+    .map((version) => version.systemMetadata ?? null)
+    .sort((left, right) => {
+      const leftObserved =
+        typeof left?.lastObserved === "number" ? left.lastObserved : 0;
+      const rightObserved =
+        typeof right?.lastObserved === "number" ? right.lastObserved : 0;
+      return rightObserved - leftObserved;
+    });
+  const latest = versions[0];
+  const runId =
+    typeof latest?.runId === "string" ? latest.runId.trim() : "";
+  if (
+    runId.length > 0 &&
+    runId.length <= 480 &&
+    !/[\u0000-\u001F\u007F]/u.test(runId)
+  ) {
+    return `history:${runId}`;
+  }
+  const lastObserved =
+    typeof latest?.lastObserved === "number" &&
+    Number.isFinite(latest.lastObserved) &&
+    latest.lastObserved > 0
+      ? latest.lastObserved
+      : null;
+  return lastObserved === null
+    ? "history:replay"
+    : `history:${new Date(lastObserved).toISOString()}`;
+}
+
 // The offline DataHub client: serves a fixed report stream through the same interface
 // the live client implements. Injectable — tests pass their own reports; the default
 // is the shipped fixture catalog.
@@ -295,12 +329,20 @@ export class FakeDataHubMcpClient implements DataHubClient {
     // not change Fake semantics. The filter is evaluated once and both projections are
     // derived from that exact in-memory report bundle.
     const reports = this.filter(query);
+    const versionHistories = this.filterHistories(query);
+    const snapshot = snapshotFromReports(reports, {
+      topologyEntities: mergeLatest(this.reports),
+    });
     return {
-      snapshot: snapshotFromReports(reports, {
-        topologyEntities: mergeLatest(this.reports),
-      }),
+      snapshot:
+        snapshot.scanId.length > 0 || versionHistories.length === 0
+          ? snapshot
+          : {
+              ...snapshot,
+              scanId: historyReplayScanId(versionHistories),
+            },
       facts: reportsToFacts(reports),
-      versionHistories: this.filterHistories(query),
+      versionHistories,
     };
   }
 

@@ -207,6 +207,11 @@ test("J9: replay-cassette journey — real-shape GMS history recovers the confli
   // (empty current-view reports → the finding can come only from the cassette history).
   const client = new FakeDataHubMcpClient([], [history]);
   const report = await new AuditPipeline().run(client);
+  assert.match(
+    report.scanId,
+    /^history:/,
+    "a history-only replay must retain a non-empty evidence-bound scan identity"
+  );
   const owner = report.findings.find(
     (f) => f.type === "contradiction" && (f.detail as { attribute?: string }).attribute === "owner"
   );
