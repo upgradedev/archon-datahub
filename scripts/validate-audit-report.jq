@@ -21,7 +21,7 @@ def bounded_text($maximum):
     (utf16_length) as $length |
     $length > 0 and
     $length <= $maximum and
-    (test("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]") | not)
+    (test("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]") | not)
   end;
 
 def valid_instant:

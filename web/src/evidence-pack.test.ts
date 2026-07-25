@@ -147,9 +147,8 @@ describe("browser judge evidence pack", () => {
       ).modelProvenance = provenance;
 
       if (candidate.valid) {
-        await expect(buildBrowserEvidencePack(loaded)).resolves.toMatchObject({
-          schemaVersion: "archon.browser-evidence-pack/v1",
-        });
+        const pack = await buildBrowserEvidencePack(loaded);
+        expect(pack.schemaVersion).toBe("archon.browser-evidence-pack/v1");
       } else {
         await expect(buildBrowserEvidencePack(loaded)).rejects.toThrow(
           /model runtime provenance|public allowlist/iu,

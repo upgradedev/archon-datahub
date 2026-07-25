@@ -221,6 +221,7 @@ jobs:
           test "$(node --version)" = "v${INFRA_NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
       - name: Resolve all reviewed dependency policies into candidate locks
+        id: resolve-locks
         env:
           NPM_CONFIG_AUDIT: "false"
           NPM_CONFIG_ENGINE_STRICT: "true"
@@ -231,6 +232,7 @@ jobs:
           NPM_CONFIG_USERCONFIG: /dev/null
         run: |
           set -euo pipefail
+          lock_drift=false
           generation_root="${RUNNER_TEMP}/clean-lock-generation"
           mkdir -p \
             "${generation_root}/root" \
@@ -253,35 +255,35 @@ jobs:
           if ! cmp --silent \
             "${generation_root}/root/package-lock.json" \
             package-lock.json; then
-            echo "::error::Committed root lock differs from clean npm 10.9.8 resolution"
+            lock_drift=true
+            echo "::warning::Committed root lock differs from clean npm 10.9.8 resolution"
             diff -u \
               --label committed/package-lock.json \
               --label candidate/package-lock.json \
               package-lock.json \
               "${generation_root}/root/package-lock.json" || true
-            exit 1
           fi
           if ! cmp --silent \
             "${generation_root}/infra/package-lock.json" \
             infra/aws/package-lock.json; then
-            echo "::error::Committed infrastructure lock differs from clean npm 10.9.8 resolution"
+            lock_drift=true
+            echo "::warning::Committed infrastructure lock differs from clean npm 10.9.8 resolution"
             diff -u \
               --label committed/infra/aws/package-lock.json \
               --label candidate/infra/aws/package-lock.json \
               infra/aws/package-lock.json \
               "${generation_root}/infra/package-lock.json" || true
-            exit 1
           fi
           if ! cmp --silent \
             "${generation_root}/web/package-lock.json" \
             web/package-lock.json; then
-            echo "::error::Committed web lock differs from clean npm 10.9.8 resolution"
+            lock_drift=true
+            echo "::warning::Committed web lock differs from clean npm 10.9.8 resolution"
             diff -u \
               --label committed/web/package-lock.json \
               --label candidate/web/package-lock.json \
               web/package-lock.json \
               "${generation_root}/web/package-lock.json" || true
-            exit 1
           fi
           install -m 0644 \
             "${generation_root}/root/package-lock.json" \
@@ -292,13 +294,7 @@ jobs:
           install -m 0644 \
             "${generation_root}/web/package-lock.json" \
             web/package-lock.json
-          git diff --exit-code -- \
-            package.json \
-            package-lock.json \
-            infra/aws/package.json \
-            infra/aws/package-lock.json \
-            web/package.json \
-            web/package-lock.json
+          printf 'drift=%s\n' "${lock_drift}" >>"${GITHUB_OUTPUT}"
       - name: Seal candidate provenance before validation
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -473,13 +469,6 @@ jobs:
               .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256 and
               .candidates.web.packageJsonSha256 == $webManifestSha256
             ' "${candidate_dir}/provenance.json" >/dev/null
-          git diff --exit-code -- \
-            package.json \
-            package-lock.json \
-            infra/aws/package.json \
-            infra/aws/package-lock.json \
-            web/package.json \
-            web/package-lock.json
           jq -nS \
             --arg headSha "${checkout_sha}" \
             --arg runId "${GITHUB_RUN_ID}" \
@@ -508,6 +497,11 @@ jobs:
           path: ${{ runner.temp }}/lock-candidates/
           if-no-files-found: error
           retention-days: 1
+      - name: Require adoption of the remotely validated lock candidates
+        if: steps.resolve-locks.outputs.drift == 'true'
+        run: |
+          echo "::error::Committed locks differ from the remotely validated npm 10.9.8 candidates"
+          exit 1
 
   infra:
     name: AWS CDK build, test, synth, IaC gate
