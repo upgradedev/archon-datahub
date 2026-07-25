@@ -150,7 +150,9 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   const { deps } = await buildMcpServer({ datahub: new FakeDataHubMcpClient() });
-  const toolResult = await callAuditTool(deps, "audit_catalog", {});
+  const toolResult = await callAuditTool(deps, "audit_catalog", {
+    query: "sales",
+  });
   checks.push(
     check("T3", "technical", 6, "Dual-face MCP round-trip (our server serves audit_catalog)", () => ({
       ok: toolResult.isError !== true && JSON.parse(textOf(toolResult)).findings.length > 0,
