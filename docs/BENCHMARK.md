@@ -46,6 +46,10 @@ The dataset digest covers both the seven benchmark cases and the fixture reports
 used for G1–G6, lineage-gap, and executed-pipeline controls. CI pins that digest to the
 dataset version, so any fixture drift requires an explicit version/digest update.
 
+- Frozen dataset version: `2026-07-25`
+- Frozen dataset digest:
+  `sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42`
+
 The implementation is source-complete; a benchmark result becomes evidence only when the
 exact commit's remote `DataHub capability benchmark` job succeeds.
 

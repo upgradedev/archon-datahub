@@ -173,6 +173,20 @@ test("judge evidence identifier boundaries reject unknown URN extensions", () =>
       ),
     /unapproved DataHub URN/u
   );
+  assert.doesNotThrow(() =>
+    assertPublicJudgeEvidenceIdentifiers(
+      `scan-2026-07-01:${dataset}#amount:schema`,
+      "known-field-fact-id"
+    )
+  );
+  assert.throws(
+    () =>
+      assertPublicJudgeEvidenceIdentifiers(
+        `${dataset}#arbitrary`,
+        "unknown-field-extension"
+      ),
+    /unapproved DataHub URN/u
+  );
   assert.throws(
     () =>
       assertPublicJudgeEvidenceIdentifiers(

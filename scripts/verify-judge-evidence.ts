@@ -105,7 +105,9 @@ const PUBLIC_URNS = new Set([
   "urn:li:domain:sales",
   "urn:li:tag:PII",
 ]);
-const PUBLIC_FACT_ID_SUFFIXES = [
+const PUBLIC_DATASET_DERIVED_SUFFIXES = [
+  "#amount:schema",
+  "#amount",
   ":deprecation",
   ":domain",
   ":lineage",
@@ -145,22 +147,24 @@ function isDigest(value: unknown): value is Sha256Digest {
   return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
 }
 
-function hasPublicUrnBoundary(suffix: string): boolean {
+function hasPublicUrnBoundary(urn: string, suffix: string): boolean {
   if (suffix.length === 0) return true;
   const next = suffix[0]!;
-  if (next !== ":") return !/[A-Za-z0-9_.-]/u.test(next);
-  if (/^\s/u.test(suffix[1] ?? "")) return true;
+  if (next === ":" && /^\s/u.test(suffix[1] ?? "")) return true;
+  if (next !== ":" && next !== "#") {
+    return !/[A-Za-z0-9_.-]/u.test(next);
+  }
+  if (!urn.startsWith("urn:li:dataset:")) return false;
 
   // Audit fact IDs deterministically embed an already-approved entity URN before
-  // one closed aspect suffix (for example `<urn>:ownership`). Treat only those
-  // exact derived-ID suffixes as boundaries; extensions remain fail-closed.
-  return PUBLIC_FACT_ID_SUFFIXES.some((factSuffix) => {
-    if (!suffix.startsWith(factSuffix)) return false;
-    const following = suffix[factSuffix.length];
-    return (
-      following === undefined ||
-      !/[A-Za-z0-9_.:-]/u.test(following)
-    );
+  // one closed field/aspect suffix (for example `<urn>#amount:schema` or
+  // `<urn>:ownership`). Treat only those exact derived-ID suffixes as boundaries;
+  // extensions remain fail-closed.
+  return PUBLIC_DATASET_DERIVED_SUFFIXES.some((derivedSuffix) => {
+    if (!suffix.startsWith(derivedSuffix)) return false;
+    const remainder = suffix.slice(derivedSuffix.length);
+    if (remainder.length === 0 || /^:\s/u.test(remainder)) return true;
+    return !/[A-Za-z0-9_.:#-]/u.test(remainder[0]!);
   });
 }
 
@@ -194,7 +198,7 @@ export function assertPublicJudgeEvidenceIdentifiers(
       .find((urn) => {
         if (!text.startsWith(urn, urnOffset)) return false;
         const suffix = text.slice(urnOffset + urn.length);
-        return hasPublicUrnBoundary(suffix);
+        return hasPublicUrnBoundary(urn, suffix);
       });
     if (!allowed) fail(`${path} contains an unapproved DataHub URN.`);
     urnOffset += allowed.length;

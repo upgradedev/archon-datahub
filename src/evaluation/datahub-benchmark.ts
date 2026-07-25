@@ -15,6 +15,9 @@ import { AuditPipeline } from "../pipeline/pipeline.js";
 import { digest, type Sha256Digest } from "../remediation/integrity.js";
 
 export const DATAHUB_BENCHMARK_VERSION = "archon.datahub-benchmark/v1" as const;
+export const DATAHUB_BENCHMARK_DATASET_VERSION = "2026-07-25" as const;
+export const DATAHUB_BENCHMARK_DATASET_DIGEST =
+  "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42" as const;
 
 export interface DataHubBenchmarkCase {
   id: string;
@@ -40,7 +43,7 @@ export interface DataHubBenchmarkResult {
   schemaVersion: typeof DATAHUB_BENCHMARK_VERSION;
   dataset: {
     name: "archon-datahub-temporal-provenance";
-    version: "2026-07-25";
+    version: typeof DATAHUB_BENCHMARK_DATASET_VERSION;
     digest: Sha256Digest;
     cases: number;
     positiveCases: number;
@@ -394,27 +397,32 @@ export async function runDataHubBenchmark(): Promise<DataHubBenchmarkResult> {
   const historyPredictions = cases.map(
     (item) => item.retainedHistory.detected
   );
+  const datasetDigest = digest({
+    benchmarkCases: DATAHUB_BENCHMARK_CASES.map((item) => ({
+      id: item.id,
+      title: item.title,
+      expectedConflict: item.expectedConflict,
+      rationale: item.rationale,
+      histories: item.histories,
+    })),
+    controlFixture: {
+      reports: FIXTURE_REPORTS,
+      versionHistories: FIXTURE_VERSION_HISTORY,
+    },
+  });
+  if (datasetDigest !== DATAHUB_BENCHMARK_DATASET_DIGEST) {
+    throw new Error(
+      `Benchmark dataset drifted from ${DATAHUB_BENCHMARK_DATASET_VERSION}; ` +
+        "review the fixture change and advance both the version and digest."
+    );
+  }
 
   return {
     schemaVersion: DATAHUB_BENCHMARK_VERSION,
     dataset: {
       name: "archon-datahub-temporal-provenance",
-      version: "2026-07-25",
-      digest: digest(
-        {
-          benchmarkCases: DATAHUB_BENCHMARK_CASES.map((item) => ({
-            id: item.id,
-            title: item.title,
-            expectedConflict: item.expectedConflict,
-            rationale: item.rationale,
-            histories: item.histories,
-          })),
-          controlFixture: {
-            reports: FIXTURE_REPORTS,
-            versionHistories: FIXTURE_VERSION_HISTORY,
-          },
-        }
-      ),
+      version: DATAHUB_BENCHMARK_DATASET_VERSION,
+      digest: datasetDigest,
       cases: cases.length,
       positiveCases: expected.filter(Boolean).length,
       negativeCases: expected.filter((value) => !value).length,

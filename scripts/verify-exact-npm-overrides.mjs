@@ -2,8 +2,10 @@
 
 import assert from "node:assert/strict";
 import {
-  existsSync,
-  lstatSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
   readFileSync,
   realpathSync,
 } from "node:fs";
@@ -19,6 +21,11 @@ if (
 if (process.argv.length !== 3) {
   throw new Error("usage: verify-exact-npm-overrides.mjs <package-directory>");
 }
+assert.equal(
+  typeof constants.O_NOFOLLOW,
+  "number",
+  "CI runner must support atomic no-follow file opens"
+);
 
 const workspace = realpathSync(process.env.GITHUB_WORKSPACE);
 const packageDirectory = realpathSync(process.argv[2]);
@@ -30,10 +37,17 @@ if (
 }
 
 function readJson(file) {
-  const stat = lstatSync(file);
-  assert.equal(stat.isFile(), true, `${file} must be a regular file`);
-  assert.equal(stat.isSymbolicLink(), false, `${file} must not be a symlink`);
-  return JSON.parse(readFileSync(file, "utf8"));
+  const descriptor = openSync(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW
+  );
+  try {
+    const stat = fstatSync(descriptor);
+    assert.equal(stat.isFile(), true, `${file} must be a regular file`);
+    return JSON.parse(readFileSync(descriptor, "utf8"));
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 const packageJson = readJson(path.join(packageDirectory, "package.json"));
@@ -144,11 +158,6 @@ for (const [overrideName, overrideVersion] of overrides) {
       packageDirectory,
       ...lockPath.split("/"),
       "package.json"
-    );
-    assert.equal(
-      existsSync(installedPackageJson),
-      true,
-      `${lockPath} is absent from the exact npm installation`
     );
     const installed = readJson(installedPackageJson);
 

@@ -32,6 +32,10 @@ import { FIXTURE_VERSION_HISTORY } from "../src/datahub/fixtures.js";
 import { validateSnapshot } from "../src/governance/validator.js";
 import { computeBlastRadius } from "../src/datahub/blast-radius.js";
 import {
+  DATAHUB_BENCHMARK_DATASET_DIGEST,
+  DATAHUB_BENCHMARK_DATASET_VERSION,
+} from "../src/evaluation/datahub-benchmark.js";
+import {
   createTagProjection,
   createTrustedRemediationPolicy,
   planG6Remediation,
@@ -294,14 +298,19 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/unit/datahub-benchmark.test.ts",
     "docs/BENCHMARK.md",
   ];
+  const benchmarkDocument = read("docs/BENCHMARK.md");
   checks.push(
     check("I3", "innovation", 5, "Frozen DataHub benchmark has positive and false-positive controls", () => ({
       ok:
         benchmarkFiles.every((rel) => existsSync(p(rel))) &&
         packageDocument.includes("benchmark:datahub") &&
         ciSource.includes("DataHub capability benchmark") &&
+        ciSource.includes(DATAHUB_BENCHMARK_DATASET_VERSION) &&
+        ciSource.includes(DATAHUB_BENCHMARK_DATASET_DIGEST) &&
+        benchmarkDocument.includes(DATAHUB_BENCHMARK_DATASET_VERSION) &&
+        benchmarkDocument.includes(DATAHUB_BENCHMARK_DATASET_DIGEST) &&
         ciSource.includes("dataHubBenchmarkArtifactDigest"),
-      evidence: `${benchmarkFiles.filter((rel) => existsSync(p(rel))).length}/${benchmarkFiles.length} benchmark contracts present; CI gate=${ciSource.includes("benchmark:datahub")}; attestation binding=${ciSource.includes("dataHubBenchmarkArtifactDigest")}`,
+      evidence: `${benchmarkFiles.filter((rel) => existsSync(p(rel))).length}/${benchmarkFiles.length} benchmark contracts present; frozen=${DATAHUB_BENCHMARK_DATASET_VERSION}@${DATAHUB_BENCHMARK_DATASET_DIGEST}; CI pin=${ciSource.includes(DATAHUB_BENCHMARK_DATASET_DIGEST)}; attestation binding=${ciSource.includes("dataHubBenchmarkArtifactDigest")}`,
     }))
   );
 

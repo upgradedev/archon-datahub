@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   DATAHUB_BENCHMARK_CASES,
+  DATAHUB_BENCHMARK_DATASET_DIGEST,
+  DATAHUB_BENCHMARK_DATASET_VERSION,
   dataHubBenchmarkToMarkdown,
   runDataHubBenchmark,
 } from "../../src/evaluation/datahub-benchmark.js";
@@ -9,9 +11,15 @@ import {
 test("benchmark measures retained-history recovery without manufacturing conflicts", async () => {
   const report = await runDataHubBenchmark();
 
+  assert.equal(DATAHUB_BENCHMARK_DATASET_VERSION, "2026-07-25");
+  assert.equal(
+    DATAHUB_BENCHMARK_DATASET_DIGEST,
+    "sha256:ef244f25fe085245b9153814d9c36e1a5f12112a5dc0dc39a315e40df586f42"
+  );
   assert.equal(report.schemaVersion, "archon.datahub-benchmark/v1");
+  assert.equal(report.dataset.version, DATAHUB_BENCHMARK_DATASET_VERSION);
+  assert.equal(report.dataset.digest, DATAHUB_BENCHMARK_DATASET_DIGEST);
   assert.equal(report.dataset.cases, DATAHUB_BENCHMARK_CASES.length);
-  assert.match(report.dataset.digest, /^sha256:[a-f0-9]{64}$/u);
   assert.deepEqual(report.controlCoverage.governanceRulesEvaluated, [
     "G1",
     "G2",

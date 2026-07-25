@@ -404,6 +404,11 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(overrideVerifier, /override must be an exact version/u);
   assert.match(overrideVerifier, /resolved\.hostname,[\s\S]+"registry\.npmjs\.org"/u);
   assert.match(overrideVerifier, /\^sha512-/u);
+  assert.match(overrideVerifier, /O_NOFOLLOW/u);
+  assert.match(overrideVerifier, /fstatSync\(descriptor\)/u);
+  assert.match(overrideVerifier, /readFileSync\(descriptor/u);
+  assert.doesNotMatch(overrideVerifier, /lstatSync/u);
+  assert.doesNotMatch(overrideVerifier, /existsSync/u);
   assert.match(
     overrideVerifier,
     /exact-bundled-compensation-required/u
