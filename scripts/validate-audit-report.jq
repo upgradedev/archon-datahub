@@ -149,7 +149,9 @@ def valid_token_usage:
   end;
 
 def valid_model_provenance:
+  . as $provenance |
   if (
+    $provenance |
     exact_keys([
       "schemaVersion",
       "source",
@@ -164,25 +166,25 @@ def valid_model_provenance:
     not
   ) then
     false
-  elif .schemaVersion != "archon.model-runtime-provenance/v1" then
+  elif $provenance.schemaVersion != "archon.model-runtime-provenance/v1" then
     false
-  elif (.requestedModel | safe_model_id | not) then
+  elif ($provenance.requestedModel | safe_model_id | not) then
     false
-  elif .source == "deterministic-fixture" then
-    .modelCall == false and
-    .provider == "fixture" and
-    .returnedModel == null and
-    .providerResponseId == null and
-    .tokenUsage == null and
-    .latencyMs == null
-  elif .source == "live-provider" then
-    .modelCall == true and
-    (.provider | IN("custom", "qwen", "gemini", "openai", "anthropic")) and
-    (.returnedModel | safe_model_id) and
-    (.providerResponseId | safe_response_id) and
-    (.tokenUsage | valid_token_usage) and
-    (.latencyMs | safe_count) and
-    .latencyMs <= 3600000
+  elif $provenance.source == "deterministic-fixture" then
+    $provenance.modelCall == false and
+    $provenance.provider == "fixture" and
+    $provenance.returnedModel == null and
+    $provenance.providerResponseId == null and
+    $provenance.tokenUsage == null and
+    $provenance.latencyMs == null
+  elif $provenance.source == "live-provider" then
+    $provenance.modelCall == true and
+    ($provenance.provider | IN("custom", "qwen", "gemini", "openai", "anthropic")) and
+    ($provenance.returnedModel | safe_model_id) and
+    ($provenance.providerResponseId | safe_response_id) and
+    ($provenance.tokenUsage | valid_token_usage) and
+    ($provenance.latencyMs | safe_count) and
+    $provenance.latencyMs <= 3600000
   else
     false
   end;

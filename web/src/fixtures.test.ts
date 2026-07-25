@@ -26,9 +26,9 @@ describe("deterministic preview fixture", () => {
         after: ["urn:li:tag:PII"],
       }),
     );
-    expect(
-      finding?.detail.provenance?.map((event) => event.value),
-    ).not.toContainEqual(expect.stringMatching(/glossary/iu));
+    for (const event of finding?.detail.provenance ?? []) {
+      expect(event).not.toHaveProperty("value");
+    }
   });
 
   it("models a lineage gap from the unresolved upstream through its consumer topology", () => {
@@ -38,7 +38,7 @@ describe("deterministic preview fixture", () => {
 
     expect(finding).toBeDefined();
     expect(finding?.subject).toBe(PAYMENT_EVENTS_URN);
-    expect(finding?.detail.missingRef).toBe(PAYMENT_EVENTS_URN);
+    expect(finding?.detail).not.toHaveProperty("missingRef");
     expect(finding?.detail.blastRadius).toEqual(
       expect.objectContaining({
         rootUrn: PAYMENT_EVENTS_URN,

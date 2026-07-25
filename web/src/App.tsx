@@ -701,11 +701,6 @@ function ProvenanceView({ events = [] }: { events?: ProvenanceEvent[] }) {
               {event.status}
             </span>
           </div>
-          {event.value && (
-            <p className="mt-2 rounded-lg border border-white/[0.05] bg-black/10 px-3 py-2 font-mono text-[11px] leading-5 text-slate-400">
-              {event.value}
-            </p>
-          )}
         </li>
       ))}
     </ol>
