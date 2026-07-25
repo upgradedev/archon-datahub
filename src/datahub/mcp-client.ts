@@ -1,11 +1,10 @@
 // DataHub MCP client — the seam through which the agent CONSUMES DataHub metadata.
 //
-// The agent never talks to DataHub's GMS directly. It speaks the Model Context
-// Protocol to the OFFICIAL DataHub MCP server (`acryldata/mcp-server-datahub`), whose
-// read tools — `search`, `get_entities`, `get_lineage` (docs/DATAHUB_RESEARCH.md §3) —
-// are the exact surface a governance/lineage agent needs. This module defines OUR
-// interface over those tools (not acryldata's wire shapes), so the rest of the agent
-// is decoupled from the transport and runs identically against:
+// Current entity discovery and resolved topology use the OFFICIAL DataHub MCP server
+// (`acryldata/mcp-server-datahub`). Completeness-bound live audits complement those tools
+// with narrow direct-GMS reads for current declared lineage and retained aspect history.
+// This module defines OUR interface over that evidence (not acryldata's wire shapes), so
+// the rest of the agent is decoupled from the transports and runs identically against:
 //   • FakeDataHubMcpClient — deterministic fixtures, zero network (tests + CI + demo),
 //   • the live client (src/datahub/mcp-client-live.ts) — a thin adapter that maps the
 //     real MCP tool responses onto this same interface.
@@ -54,10 +53,10 @@ export interface DataHubClient {
   search(query?: string): Promise<Urn[]>;
   // `get_entities` — full metadata (aspects) for the given URNs (current view).
   getEntities(urns: Urn[]): Promise<CatalogEntity[]>;
-  // `get_lineage` — upstream lineage edges declared for one entity.
+  // `get_lineage` — provider-resolved upstream nodes for one entity.
   getLineage(urn: Urn): Promise<LineageEdge[]>;
-  // Convenience harvest: search → get_entities → get_lineage, assembled into the
-  // current-view snapshot the governance validator audits.
+  // Convenience harvest assembled into the completeness-bound current snapshot the
+  // governance validator audits.
   harvestSnapshot(query?: string): Promise<CatalogSnapshot>;
   // Provenance-aware harvest: the FULL fact stream across every source/scan, which the
   // self-audit consistency engine needs to see cross-source disagreements.

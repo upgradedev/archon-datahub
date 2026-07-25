@@ -126,7 +126,8 @@ function parseDemoQuery(value: unknown): string {
     value.length < 1 ||
     value.length > 256 ||
     value !== value.trim() ||
-    value === "*" ||
+    /[*?]/u.test(value) ||
+    value === "{}" ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw new AuthError(

@@ -1044,7 +1044,7 @@ export function App() {
   const runAudit = async (event?: FormEvent) => {
     event?.preventDefault();
     const scope = query.trim();
-    if (!scope || scope === "*") {
+    if (!scope || /[*?]/u.test(scope) || scope === "{}") {
       setRunError("Enter a narrow, non-wildcard dataset scope.");
       return;
     }
@@ -1158,7 +1158,12 @@ export function App() {
             <SourceBadge source={audit.source} />
             <button
               className="run-button"
-              disabled={loading || !query.trim() || query.trim() === "*"}
+              disabled={
+                loading ||
+                !query.trim() ||
+                /[*?]/u.test(query.trim()) ||
+                query.trim() === "{}"
+              }
               id="judge-tour-run-audit"
               onClick={() => void runAudit()}
               type="button"

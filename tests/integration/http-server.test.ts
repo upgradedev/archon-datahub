@@ -114,15 +114,17 @@ test("HTTP boundary rejects wrong methods, media types, and oversized/control in
       ).status,
       400
     );
-    assert.equal(
-      (
-        await fetch(`${baseUrl}/api/audits`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ query: "*" }),
-        })
-      ).status,
-      400
-    );
+    for (const query of ["*", "?", "**", "{}"]) {
+      assert.equal(
+        (
+          await fetch(`${baseUrl}/api/audits`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ query }),
+          })
+        ).status,
+        400
+      );
+    }
   });
 });

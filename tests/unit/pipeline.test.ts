@@ -177,7 +177,7 @@ test("MCP run_audit_loop returns pending findings + trace", async () => {
 test("MCP hosted audit tools reject omitted, wildcard, or blank scope", async () => {
   const deps = { datahub: new FakeDataHubMcpClient(), pipeline: fakePipeline() };
   for (const name of ["audit_catalog", "run_audit_loop", "search_datasets"]) {
-    for (const query of [undefined, "", "   ", "*"]) {
+    for (const query of [undefined, "", "   ", "*", "?", "**", "{}"]) {
       const res = await callAuditTool(
         deps,
         name,

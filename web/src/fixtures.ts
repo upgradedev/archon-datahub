@@ -127,18 +127,19 @@ const findings: Finding[] = [
   {
     type: "lineage_gap",
     severity: "medium",
-    subject: "urn:li:dataset:(urn:li:dataPlatform:dbt,marts.daily_revenue,PROD)",
+    subject: "urn:li:dataset:(urn:li:dataPlatform:kafka,payment_events,PROD)",
     summary: "An upstream payment_events edge resolves to no catalogued entity.",
     recommendation: "Restore the missing ingestion source or remove the stale lineage edge.",
     detail: {
       missingRef: "urn:li:dataset:(urn:li:dataPlatform:kafka,payment_events,PROD)",
       blastRadius: blast(
-        "urn:li:dataset:(urn:li:dataPlatform:dbt,marts.daily_revenue,PROD)",
+        "urn:li:dataset:(urn:li:dataPlatform:kafka,payment_events,PROD)",
         [
-          ["urn:li:dashboard:(looker,revenue-pulse)", 1],
-          ["urn:li:dashboard:(tableau,regional-sales)", 1],
+          ["urn:li:dataset:(urn:li:dataPlatform:dbt,marts.daily_revenue,PROD)", 1],
+          ["urn:li:dashboard:(looker,revenue-pulse)", 2],
+          ["urn:li:dashboard:(tableau,regional-sales)", 2],
         ],
-        "low",
+        "medium",
       ),
       provenance: [
         {

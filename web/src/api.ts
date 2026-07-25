@@ -39,7 +39,8 @@ function narrowAuditQuery(value: string): string {
   if (
     query.length < 1 ||
     query.length > 256 ||
-    query === "*" ||
+    /[*?]/u.test(query) ||
+    query === "{}" ||
     /[\u0000-\u001f\u007f]/u.test(query)
   ) {
     throw new ApiError(

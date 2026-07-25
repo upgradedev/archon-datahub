@@ -70,9 +70,9 @@ flowchart LR
   WORKER --> PIPE["Deterministic audit pipeline"]
   AMCP --> PIPE
   PIPE --> READ["Official DataHub MCP read adapter"]
-  PIPE --> HIST["Bounded GMS aspect-version reader"]
+  PIPE --> GMSREAD["Bounded GMS current/history readers"]
   READ --> DH["DataHub metadata graph"]
-  HIST --> DH
+  GMSREAD --> DH
   PIPE --> FIND["Findings + provenance + blast radius"]
   FIND --> DOSSIER["G6 evidence dossier + exact plan"]
   DOSSIER --> APPROVAL["Cognito approver + DynamoDB CAS"]
@@ -84,8 +84,9 @@ flowchart LR
 
 Important trust boundaries:
 
-- DataHub MCP supplies the supported read tools. A complementary direct GMS read recovers
-  retained aspect history because the current MCP view is latest-write-wins.
+- DataHub MCP supplies supported discovery, entity, schema-completion, and resolved-topology
+  reads. Complementary bounded direct GMS reads recover declared current lineage (including
+  dangling URNs) and retained aspect history hidden by the latest-write-wins MCP view.
 - Cross-source contradictions cannot fire from the MCP read tools alone: they require the
   bounded direct GMS version-history recovery path and distinct stable pipeline identities.
 - Unknown or unstable provenance fails closed. It may produce a drift candidate, never a

@@ -82,7 +82,7 @@ function queryFrom(body: Record<string, unknown>): string | undefined {
   if (/[\u0000-\u001f\u007f]/u.test(query)) {
     throw new HttpInputError(400, "query contains control characters");
   }
-  if (!query || query === "*") {
+  if (!query || /[*?]/u.test(query) || query === "{}") {
     throw new HttpInputError(400, "query must be narrow and cannot be a wildcard");
   }
   return query;

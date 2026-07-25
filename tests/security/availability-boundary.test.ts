@@ -10,6 +10,10 @@ const documentation = readFileSync(
   new URL("../../docs/AVAILABILITY.md", import.meta.url),
   "utf8"
 );
+const deploymentWorkflow = readFileSync(
+  new URL("../../.github/workflows/deploy.yml", import.meta.url),
+  "utf8"
+);
 
 test("availability is scheduled/manual on a protected, unprivileged observer", () => {
   assert.match(workflow, /^on:\n  schedule:/mu);
@@ -84,6 +88,22 @@ test("availability executes one bounded read-only request without credentials", 
   );
   assert.match(workflow, /public audit response must not set cookies/u);
   assert.match(workflow, /public audit response must not redirect/u);
+});
+
+test("deploy and availability enforce the same non-wildcard demo scope", () => {
+  for (const candidate of [workflow, deploymentWorkflow]) {
+    assert.match(
+      candidate,
+      /\(\$query \| test\("\[\*\?\]"\) \| not\) and\s+\$query != "\{\}"/u
+    );
+  }
+  assert.equal(
+    deploymentWorkflow.match(
+      /\(\$query \| test\("\[\*\?\]"\) \| not\) and\s+\$query != "\{\}"/gu
+    )?.length,
+    5
+  );
+  assert.doesNotMatch(deploymentWorkflow, /\$query != "\*" and/u);
 });
 
 test("public runtime, response, and header contracts are exact and sanitized", () => {

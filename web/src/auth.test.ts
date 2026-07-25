@@ -104,7 +104,16 @@ describe("runtime authentication config", () => {
         "https://app.archon.example",
       ),
     ).toThrow(/schema/i);
-    for (const demoQuery of ["", " customer_pii", "customer_pii ", "*", "customer\npii"]) {
+    for (const demoQuery of [
+      "",
+      " customer_pii",
+      "customer_pii ",
+      "*",
+      "?",
+      "**",
+      "{}",
+      "customer\npii",
+    ]) {
       expect(() =>
         parseRuntimeConfig(
           { ...runtimeConfig, demoQuery },

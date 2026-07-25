@@ -2120,7 +2120,8 @@ jobs:
             ($query | length) >= 1 and
             ($query | length) <= 256 and
             ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            $query != "*" and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
             $query == ($query | gsub("^\\s+|\\s+$"; ""))
           ' >/dev/null || {
             echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
@@ -2443,7 +2444,8 @@ jobs:
             ($query | length) >= 1 and
             ($query | length) <= 256 and
             ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            $query != "*" and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
             $query == ($query | gsub("^\\s+|\\s+$"; ""))
           ' >/dev/null || {
             echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
@@ -3546,7 +3548,8 @@ jobs:
             ($query | length) >= 1 and
             ($query | length) <= 256 and
             ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            $query != "*" and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
             $query == ($query | gsub("^\\s+|\\s+$"; ""))
           ' >/dev/null || {
             echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
@@ -5335,7 +5338,8 @@ jobs:
             ($query | length) >= 1 and
             ($query | length) <= 256 and
             ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            $query != "*" and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
             $query == ($query | gsub("^\\s+|\\s+$"; ""))
           ' >/dev/null || {
             echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
@@ -5659,7 +5663,8 @@ jobs:
             ($query | length) >= 1 and
             ($query | length) <= 256 and
             ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            $query != "*" and
+            ($query | test("[*?]") | not) and
+            $query != "{}" and
             $query == ($query | gsub("^\\s+|\\s+$"; ""))
           ' >/dev/null || {
             echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"

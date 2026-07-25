@@ -39,7 +39,8 @@ export const MCP_TOOLS: Tool[] = [
           type: "string",
           minLength: 1,
           maxLength: 256,
-          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          pattern:
+            "^(?!\\s*$)(?!\\s*\\{\\}\\s*$)(?!.*[*?])[^\\u0000-\\u001f\\u007f]+$",
           description:
             "Required narrow query that resolves to exactly one hosted demo dataset.",
         },
@@ -60,7 +61,8 @@ export const MCP_TOOLS: Tool[] = [
           type: "string",
           minLength: 1,
           maxLength: 256,
-          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          pattern:
+            "^(?!\\s*$)(?!\\s*\\{\\}\\s*$)(?!.*[*?])[^\\u0000-\\u001f\\u007f]+$",
           description:
             "Required narrow query that resolves to exactly one hosted demo dataset.",
         },
@@ -80,7 +82,8 @@ export const MCP_TOOLS: Tool[] = [
           type: "string",
           minLength: 1,
           maxLength: 256,
-          pattern: "^(?!\\s*$)(?!\\s*\\*\\s*$)[^\\u0000-\\u001f\\u007f]+$",
+          pattern:
+            "^(?!\\s*$)(?!\\s*\\{\\}\\s*$)(?!.*[*?])[^\\u0000-\\u001f\\u007f]+$",
           description: "Required non-wildcard dataset query.",
         },
       },
@@ -116,7 +119,8 @@ function narrowQuery(value: unknown): string | null {
   const query = value.trim();
   if (
     query.length === 0 ||
-    query === "*" ||
+    /[*?]/u.test(query) ||
+    query === "{}" ||
     /[\u0000-\u001f\u007f]/u.test(query)
   ) {
     return null;

@@ -193,7 +193,7 @@ describe("audit API", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    for (const query of ["", "   ", "*", " * "]) {
+    for (const query of ["", "   ", "*", " * ", "?", "**", "{}"]) {
       await expect(startControlLoop(query)).rejects.toMatchObject({ status: 400 });
       await expect(requestAudit(query)).rejects.toMatchObject({ status: 400 });
     }
