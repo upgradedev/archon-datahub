@@ -237,7 +237,7 @@ export function EvidencePack({
             className={`mt-3 text-[11px] ${
               active.state === "error"
                 ? "text-rose-200"
-                : "text-slate-500"
+                : "text-slate-400"
             }`}
           >
             {active.state === "ready" && pack
@@ -248,7 +248,7 @@ export function EvidencePack({
           </p>
         </div>
         <div className="rounded-xl border border-white/[0.06] bg-black/10 p-4">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-slate-500">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.13em] text-slate-400">
             Named self-consistency checks
           </p>
           {pack ? (
@@ -270,7 +270,7 @@ export function EvidencePack({
               ))}
             </ul>
           ) : (
-            <p className="mt-3 text-[11px] leading-5 text-slate-600">
+            <p className="mt-3 text-[11px] leading-5 text-slate-400">
               Downloads remain disabled until schema, fixed file set, digests,
               public projection, summary, internal source fields, and privacy
               scan all pass.

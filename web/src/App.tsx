@@ -296,8 +296,15 @@ function SeverityBadge({ severity }: { severity: Severity }) {
 }
 
 function SourceBadge({ source }: { source: LoadedAudit["source"] }) {
+  const label = source === "live" ? "Live DataHub" : "Fixture preview";
   return (
-    <span className={`source-badge ${source === "live" ? "source-live" : "source-fixture"}`}>
+    <span
+      aria-label={label}
+      className={`source-badge ${
+        source === "live" ? "source-live" : "source-fixture"
+      }`}
+      role="status"
+    >
       <span className="relative flex size-2" aria-hidden="true">
         <span
           className={`absolute inline-flex size-full rounded-full opacity-50 ${
@@ -310,7 +317,10 @@ function SourceBadge({ source }: { source: LoadedAudit["source"] }) {
           }`}
         />
       </span>
-      {source === "live" ? "Live DataHub" : "Fixture preview"}
+      <span className="sm:hidden">
+        {source === "live" ? "Live" : "Fixture"}
+      </span>
+      <span className="hidden sm:inline">{label}</span>
     </span>
   );
 }
@@ -452,15 +462,22 @@ function AuthControl({ auth }: { auth: AuthSnapshot }) {
   }
 
   const unavailable = auth.status === "error" && !auth.recoverable;
+  const label = unavailable
+    ? "Approval authentication unavailable"
+    : "Steward sign in";
   return (
     <button
+      aria-label={label}
       className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.04] px-2.5 py-1.5 text-[10px] font-semibold text-cyan-100 transition enabled:hover:border-cyan-300/30 enabled:hover:bg-cyan-300/[0.07] disabled:cursor-not-allowed disabled:border-white/[0.05] disabled:bg-transparent disabled:text-slate-400"
       disabled={unavailable}
       onClick={() => void beginSignIn().catch(() => undefined)}
       title={auth.status === "error" ? auth.message : "Authenticate through Cognito"}
       type="button"
     >
-      {unavailable ? "Approval auth unavailable" : "Steward sign in"}
+      <Icon className="size-3.5 sm:hidden" name="shield" />
+      <span className="hidden sm:inline">
+        {unavailable ? "Approval auth unavailable" : "Steward sign in"}
+      </span>
     </button>
   );
 }
@@ -1210,15 +1227,23 @@ export function App() {
           </span>
         </a>
         <nav aria-label="Primary" className="mt-10 flex flex-1 flex-col gap-2">
-          <a className="nav-item nav-active" href="#overview">
+          <a
+            aria-label="Overview"
+            className="nav-item nav-active"
+            href="#overview"
+          >
             <Icon name="graph" />
             <span className="hidden sm:inline">Overview</span>
           </a>
-          <a className="nav-item" href="#findings">
+          <a aria-label="Findings" className="nav-item" href="#findings">
             <Icon name="warning" />
             <span className="hidden sm:inline">Findings</span>
           </a>
-          <a className="nav-item" href="#control-review">
+          <a
+            aria-label="Review remediation"
+            className="nav-item"
+            href="#control-review"
+          >
             <Icon name="fingerprint" />
             <span className="hidden sm:inline">Review</span>
           </a>
@@ -1235,8 +1260,11 @@ export function App() {
       </aside>
 
       <div className="pl-[4.5rem] sm:pl-52">
-        <header className="topbar">
-          <form className="relative min-w-0 flex-1 sm:max-w-md" onSubmit={(event) => void runAudit(event)}>
+        <header className="topbar flex-wrap sm:flex-nowrap">
+          <form
+            className="relative order-2 min-w-0 basis-full sm:order-1 sm:basis-auto sm:max-w-md sm:flex-1"
+            onSubmit={(event) => void runAudit(event)}
+          >
             <label className="sr-only" htmlFor="catalog-scope">
               Scope audit by asset, domain, or platform
             </label>
@@ -1254,10 +1282,17 @@ export function App() {
               value={query}
             />
           </form>
-          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+          <div className="order-1 flex w-full min-w-0 items-center justify-end gap-2 sm:order-2 sm:w-auto sm:shrink-0 sm:gap-3">
             <AuthControl auth={auth} />
             <SourceBadge source={audit.source} />
             <button
+              aria-label={
+                controlLoop?.status === "AWAITING_APPROVAL"
+                  ? "Awaiting steward approval"
+                  : loading
+                    ? "Audit in progress"
+                    : "Run audit"
+              }
               className="run-button"
               disabled={
                 loading ||
