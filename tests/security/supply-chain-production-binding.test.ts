@@ -361,7 +361,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   );
   assert.doesNotMatch(dependencyReview, /allow-dependencies:/u);
 
-  assert.match(cdkPatch, /GITHUB_ACTIONS:-}" != "true"/u);
+  assert.match(cdkPatch, /GITHUB_ACTIONS:-\}" != "true"/u);
   assert.match(cdkPatch, /expected_cdk_version="2\.262\.1"/u);
   assert.match(
     cdkPatch,
