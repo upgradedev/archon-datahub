@@ -49,6 +49,14 @@ describe("Archon control plane", () => {
     expect(screen.getByRole("heading", { name: "Blast radius" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Source provenance" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Evidence dossier" })).toBeInTheDocument();
+    expect(document.getElementById("judge-tour-run-audit")).toBeInstanceOf(
+      HTMLButtonElement,
+    );
+    expect(document.getElementById("judge-tour-provenance")).toBeInstanceOf(
+      HTMLElement,
+    );
+    expect(document.getElementById("control-review")).toBeInstanceOf(HTMLElement);
+    expect(document.getElementById("judge-evidence")).toBeInstanceOf(HTMLElement);
     expect(
       screen.getByRole("img", { name: /integrity score/i }),
     ).not.toHaveAttribute("style");
@@ -189,6 +197,7 @@ describe("Archon control plane", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     const evidence = await screen.findByTestId("terminal-evidence");
+    expect(evidence).toHaveAttribute("id", "judge-tour-terminal-proof");
     expect(within(evidence).getByText("VERIFIED")).toBeInTheDocument();
     expect(within(evidence).getByText("5/5 passed")).toBeInTheDocument();
     expect(within(evidence).getByText("7")).toBeInTheDocument();

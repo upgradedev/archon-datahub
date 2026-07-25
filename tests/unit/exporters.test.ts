@@ -15,11 +15,15 @@ test("report exporters produce JSON, safe Markdown, and SARIF with stable finger
 
   const markdown = auditReportToMarkdown({
     ...report,
-    narrative: "<script>alert(1)</script>",
+    scanId: "scan`](/unsafe)\u0000",
+    narrative: "<script>alert(1)</script> [link](javascript:alert(2)) `breakout`",
   });
   assert.match(markdown, /## Findings/);
   assert.doesNotMatch(markdown, /<script>/iu);
   assert.match(markdown, /&lt;script&gt;/);
+  assert.doesNotMatch(markdown, /\u0000/u);
+  assert.doesNotMatch(markdown, /\]\(javascript:/iu);
+  assert.doesNotMatch(markdown, /`breakout`/u);
 
   const first = auditReportToSarif(report);
   const second = auditReportToSarif(report);

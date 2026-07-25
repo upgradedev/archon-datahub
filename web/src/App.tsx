@@ -7,6 +7,8 @@ import {
   type FormEvent,
 } from "react";
 import { loadAudit, submitApprovalDecision } from "./api";
+import { EvidencePack } from "./EvidencePack";
+import { GuidedTour } from "./GuidedTour";
 import {
   beginSignIn,
   getAccessToken,
@@ -213,6 +215,7 @@ function TerminalEvidence({ status }: { status: ControlLoopStatus }) {
       aria-label="Terminal execution evidence"
       className="mb-2 rounded-xl border border-emerald-300/15 bg-emerald-300/[0.025] p-3"
       data-testid="terminal-evidence"
+      id="judge-tour-terminal-proof"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
@@ -872,7 +875,7 @@ function FindingDetail({
     );
   }
   return (
-    <article>
+    <article id="judge-tour-provenance">
       <header className="border-b border-white/[0.06] px-5 py-5 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
           <SeverityBadge severity={finding.severity} />
@@ -994,6 +997,14 @@ export function App() {
   );
   const selected =
     filtered.find((finding) => findingIdentity(finding) === selectedId) ?? filtered[0];
+  const reviewProofTarget =
+    controlLoop?.status === "SUCCEEDED" &&
+    controlLoop.result &&
+    controlLoop.result.outcome !== "READ_ONLY_COMPLETE"
+      ? "judge-tour-terminal-proof"
+      : selected?.detail.approval
+        ? "control-review"
+        : "judge-evidence";
 
   useEffect(() => {
     if (selected && findingIdentity(selected) !== selectedId) {
@@ -1133,6 +1144,7 @@ export function App() {
             <button
               className="run-button"
               disabled={loading}
+              id="judge-tour-run-audit"
               onClick={() => void runAudit()}
               type="button"
             >
@@ -1298,6 +1310,8 @@ export function App() {
             <PipelineTrace trace={report.trace} />
           </div>
 
+          <EvidencePack audit={audit} controlLoop={controlLoop} />
+
           <section aria-labelledby="findings-title" className="mt-6" id="findings">
             <div className="panel-heading panel rounded-b-none border-b-0">
               <div>
@@ -1370,6 +1384,7 @@ export function App() {
           </footer>
         </main>
       </div>
+      <GuidedTour targetIds={{ "review-proof": reviewProofTarget }} />
     </div>
   );
 }

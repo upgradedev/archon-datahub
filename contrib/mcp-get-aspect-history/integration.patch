@@ -1,0 +1,40 @@
+diff --git a/src/mcp_server_datahub/tools/__init__.py b/src/mcp_server_datahub/tools/__init__.py
+--- a/src/mcp_server_datahub/tools/__init__.py
++++ b/src/mcp_server_datahub/tools/__init__.py
+@@ -3,3 +3,4 @@
++from .aspect_history import get_aspect_history
+ from .dataset_queries import get_dataset_queries
+ from .descriptions import update_description
+ from .documents import grep_documents, search_documents
+@@ -18,6 +19,7 @@ __all__ = [
+     "add_structured_properties",
+     "add_tags",
+     "enhanced_search",
++    "get_aspect_history",
+     "get_dataset_queries",
+     "get_entities",
+     "get_lineage",
+diff --git a/src/mcp_server_datahub/mcp_server.py b/src/mcp_server_datahub/mcp_server.py
+--- a/src/mcp_server_datahub/mcp_server.py
++++ b/src/mcp_server_datahub/mcp_server.py
+@@ -57,6 +57,7 @@ from .graphql_helpers import (  # noqa: F401 (re-exported for backward compat)
+ )
+ from .search_filter_parser import FILTER_DOCS
+ from .tools.assertions import get_dataset_assertions
++from .tools.aspect_history import get_aspect_history
+ from .tools.dataset_queries import get_dataset_queries
+ from .tools.descriptions import update_description
+ from .tools.documents import grep_documents, search_documents
+@@ -315,6 +316,12 @@ def register_search_tools(mcp_instance: FastMCP, is_oss: bool = False) -> None:
+     _register_tool(
+         mcp_instance, "get_entities", get_entities, tags={ToolType.SEARCH.value}
+     )
++    _register_tool(
++        mcp_instance,
++        "get_aspect_history",
++        get_aspect_history,
++        tags={ToolType.SEARCH.value},
++    )
+     _register_tool(
+         mcp_instance,
+         "list_schema_fields",

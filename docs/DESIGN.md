@@ -338,27 +338,34 @@ No local scan is accepted as release evidence.
 
 | Criterion | Design evidence |
 | --- | --- |
-| Use of DataHub | Official MCP read/write adapters, direct retained-history read, aspects, lineage, tags |
-| Technical execution | Deterministic engine, strict boundaries, tests, UI/API, locked IaC, pipeline security, immutable promotion |
-| Originality | Auditing the catalog's own temporal contradictions and governing a minimal corrective loop |
-| Real-world usefulness | Provenance, blast radius, least privilege, human approval, verification, receipts, rollback |
-| Submission quality | Judge-facing app, exporters, clear setup, transparent readiness and prior-work disclosure |
-| OSS bonus | Candidate DataHub Skill under `contrib/datahub-audit/`; bonus requires a real upstream contribution |
+| Use of DataHub | Official MCP read/write adapters, direct retained-history read, aspects, lineage, tags, and a frozen current-view-vs-history capability benchmark |
+| Technical execution | Deterministic engine, strict boundaries, tests, UI/API, locked IaC, pipeline-only security, reproducible judge evidence, scheduled availability proof, and immutable promotion |
+| Originality | Auditing the catalog's own temporal contradictions, measuring the current-view evidence boundary, and governing a minimal corrective loop |
+| Real-world usefulness | Provenance, blast radius, least privilege, human approval, verification, receipts, rollback, and ongoing public-path observation |
+| Submission quality | Judge-facing app, passive guided tour, exactly allowlisted/self-checked browser projection, attested CI evidence, clear setup, transparent readiness, and prior-work disclosure |
+| OSS bonus | Pinned `get_aspect_history` official-MCP candidate with a read-only allowlist, bounded provenance, registration patch, 13 focused tests, and exact-upstream CI application; local source alone is not claimed as bonus evidence |
 
 ## 10. Current proof state
 
 Source implementation is not synonymous with remote proof. The remaining authoritative
 gates are tracked in [READINESS.md](READINESS.md):
 
-- accept the current commit through remote CI/CodeQL/supply-chain workflows;
-- configure GitHub environments and `master` protection;
+- accept the current commit through remote CI, CodeQL, workflow-security, benchmark, judge
+  evidence, and supply-chain workflows;
+- configure GitHub environments and `master` protection, including a non-approving
+  `production-observer` and a trusted second collaborator for protected approvals;
 - configure AWS OIDC/account/secrets and retain deployment smoke evidence;
 - capture a real retained-history contradiction;
 - configure and run the source-complete
   [`governed-canary`](../.github/workflows/governed-canary.yml) proof for one isolated G6
   write, a pre-approval sealed plan/recovery binding, PKCE approval, verified receipt,
   separately approved rollback, and exact read-after-rollback;
-- contribute the OSS candidate upstream if it is accepted; and
-- only then finish sample outputs, screenshots, video, text, and Devpost submission.
+- retain a successful scheduled availability artifact bound to the newest production
+  promotion and its exact public bytes;
+- publish the distinct OSS candidate upstream only after the repository CI applies it to
+  the pinned upstream revision and passes its lint, type, and focused tests; and
+- only then capture final-release screenshots and finish the video, text, and Devpost
+  submission. The deterministic synthetic judge pack is prepared earlier by CI and remains
+  explicitly separate from live proof.
 
 Full disclosure of ported versus new work is in [NOTICE.md](../NOTICE.md).

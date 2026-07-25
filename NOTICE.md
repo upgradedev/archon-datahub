@@ -21,8 +21,11 @@ proprietary/organizational (non-Archon) code is included. This is a clean-room b
 The Microsoft Agents League, Google Vibecoding, OpenAI Buildweek, Kerdon, CockroachDB,
 and Backblaze projects were reviewed for **architecture patterns only**: exact-argument
 approval, deterministic state handoff, RED→GREEN verification, immutable delivery,
-content-addressed evidence, and build-once/promote-the-same-artifact deployment. No source
-file was copied from those projects.
+content-addressed evidence, passive judge orientation, independently verified public
+evidence, and build-once/promote-the-same-artifact deployment. Qwen evaluation-pack
+conventions informed the benchmark/evidence packaging; Kerdon and the OpenAI Buildweek
+work informed the passive tour and verification UX. No source file was copied from those
+projects.
 
 ## Ported files (reused as libraries, then re-aimed to DataHub)
 
@@ -80,11 +83,21 @@ file was copied from those projects.
   direct-GMS projection reader used for approval preconditions and post-write verification.
 - `src/reporting/exporters.ts` — **NEW.** JSON, safe Markdown, and SARIF 2.1.0 evidence
   exporters with stable finding fingerprints.
+- `src/evaluation/datahub-benchmark.ts`, `scripts/datahub-benchmark.ts`, and
+  `tests/unit/datahub-benchmark.test.ts` — **NEW.** The frozen DataHub temporal-provenance
+  capability benchmark, honest current-view boundary, negative controls, metrics, and
+  runner-temporary evidence projection.
+- `scripts/generate-judge-evidence.ts`, `scripts/verify-judge-evidence.ts`,
+  `scripts/deny-network.mjs`, and `tests/e2e/judge-evidence.e2e.test.ts` — **NEW.** The
+  deterministic synthetic audit → governed action → verified receipt → rollback evidence
+  chain, exact public-fixture and canonical-CI identity boundaries, network/child-process
+  deny preload, replay verifier, and checksum/manifest contracts.
 - `src/http/server.ts`, `Dockerfile`, `tsconfig.build.json` — **NEW.** The hardened,
   read-only production audit API and non-root container boundary.
 - `web/` — **NEW.** The responsive React/Tailwind evidence-review application. Its browser
   approval contract submits disposition and comment only; actor identity, tool, arguments,
-  and policy are rehydrated at the trusted server boundary.
+  and policy are rehydrated at the trusted server boundary. The WebCrypto evidence export
+  and passive three-step judge tour are project-specific new code.
 - `infra/` — **NEW.** AWS CDK reference architecture plus the secretless approval-handoff
   and capability-scoped start/status Lambdas for private S3 + CloudFront OAC,
   Cognito/WAF/API control plane, isolated audit and write workloads, durable approval state,
@@ -96,6 +109,15 @@ file was copied from those projects.
   **NEW.** The pipeline-native isolated write proof: immutable
   release/plan binding, Cognito Hosted UI PKCE, pre-mutation recovery evidence, a separately
   approved exact inverse, and direct read-after-rollback verification.
+- `.github/workflows/availability.yml`, `tests/security/availability-boundary.test.ts`,
+  and `docs/AVAILABILITY.md` — **NEW.** The credentialless scheduled production read-path
+  observation, exact deployment/runtime-byte provenance, bounded archive handling,
+  TOCTOU revalidation, and checksum-sealed availability evidence.
+- `contrib/mcp-get-aspect-history/` — **NEW.** A staged, project-authored contribution
+  candidate for `acryldata/mcp-server-datahub`, pinned to upstream commit
+  `9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9`. It contains the bounded read-only tool,
+  focused tests, machine-readable manifest, and a minimal registration patch; it is not
+  part of the Archon runtime and is not represented as submitted or accepted upstream.
 - `tests/security/*.test.ts` — **NEW.** The application-security pen-test suite (AuthZ /
   tool-boundary, prompt-injection, governance/contradiction-engine injection, sensitive-
   data-exposure), driving the real pipeline / loop / MCP surface offline.

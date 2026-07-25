@@ -235,6 +235,28 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
+  const packageDocument = read("package.json");
+  const ciSource = read(".github/workflows/ci.yml");
+  const judgeEvidenceFiles = [
+    "scripts/generate-judge-evidence.ts",
+    "scripts/verify-judge-evidence.ts",
+    "scripts/deny-network.mjs",
+    "tests/e2e/judge-evidence.e2e.test.ts",
+    "docs/JUDGE_EVIDENCE.md",
+  ];
+  checks.push(
+    check("T6", "technical", 5, "Judge evidence is replayed, verified, and attestation-bound", () => ({
+      ok:
+        judgeEvidenceFiles.every((rel) => existsSync(p(rel))) &&
+        packageDocument.includes("evidence:judge:generate") &&
+        packageDocument.includes("evidence:judge:verify") &&
+        packageDocument.includes("deny-network.mjs") &&
+        ciSource.includes("judge-evidence-a") &&
+        ciSource.includes("judgeEvidenceArtifactDigest"),
+      evidence: `${judgeEvidenceFiles.filter((rel) => existsSync(p(rel))).length}/${judgeEvidenceFiles.length} judge-pack source contracts present; CI replay=${ciSource.includes("judge-evidence-b")}; attestation binding=${ciSource.includes("judgeEvidenceArtifactDigest")}`,
+    }))
+  );
+
   // ── Innovation / Originality (25) — the differentiator, LIVE ──────────────────
   const vhFindings = new LineageAnalyzerAgent().analyzeVersionHistory(FIXTURE_VERSION_HISTORY);
   const vhContradictions = vhFindings.filter((f) => f.type === "contradiction");
@@ -266,8 +288,25 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
+  const benchmarkFiles = [
+    "src/evaluation/datahub-benchmark.ts",
+    "scripts/datahub-benchmark.ts",
+    "tests/unit/datahub-benchmark.test.ts",
+    "docs/BENCHMARK.md",
+  ];
   checks.push(
-    check("I3", "innovation", 6, "Version-history recovery has a dedicated test suite", () => ({
+    check("I3", "innovation", 5, "Frozen DataHub benchmark has positive and false-positive controls", () => ({
+      ok:
+        benchmarkFiles.every((rel) => existsSync(p(rel))) &&
+        packageDocument.includes("benchmark:datahub") &&
+        ciSource.includes("DataHub capability benchmark") &&
+        ciSource.includes("dataHubBenchmarkArtifactDigest"),
+      evidence: `${benchmarkFiles.filter((rel) => existsSync(p(rel))).length}/${benchmarkFiles.length} benchmark contracts present; CI gate=${ciSource.includes("benchmark:datahub")}; attestation binding=${ciSource.includes("dataHubBenchmarkArtifactDigest")}`,
+    }))
+  );
+
+  checks.push(
+    check("I4", "innovation", 6, "Version-history recovery has a dedicated test suite", () => ({
       ok:
         existsSync(p("tests/unit/version-history.test.ts")) &&
         existsSync(p("tests/unit/version-history-reader.test.ts")) &&
@@ -305,7 +344,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/security/governed-canary-boundary.test.ts",
   ];
   checks.push(
-    check("I4", "innovation", 8, "Closed-loop remediation is approval-, state-, and receipt-bound", () => ({
+    check("I5", "innovation", 8, "Closed-loop remediation is approval-, state-, and receipt-bound", () => ({
       ok:
         remediationFiles.every((rel) => existsSync(p(rel))) &&
         read("src/remediation/contracts.ts").includes("APPROVAL_ALREADY_USED") &&
@@ -504,7 +543,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   // SEC3 — the pen-test suite + a dedicated CI pen-test job (incl. the SCA/CVE dep-audit) exist.
-  const ci = read(".github/workflows/ci.yml");
+  const ci = ciSource;
   const secSuitePresent = [
     "tests/security/authz-tool-boundary.test.ts",
     "tests/security/prompt-injection.test.ts",
@@ -513,11 +552,15 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/security/remediation-boundary.test.ts",
     "tests/security/worker-boundary.test.ts",
     "tests/security/governed-canary-boundary.test.ts",
+    "tests/security/production-posture-boundary.test.ts",
+    "tests/security/supply-chain-production-binding.test.ts",
+    "tests/security/availability-boundary.test.ts",
   ].every((f) => existsSync(p(f)));
   const ciHasPenTest =
     /^\s{2}security:\s*$/m.test(ci) &&
     ci.includes("test:security") &&
-    /npm-audit-retry/.test(ci);
+    /npm-audit-retry/.test(ci) &&
+    existsSync(p(".github/workflows/availability.yml"));
   checks.push(
     check("SEC3", "security", 3, "Security suite + dedicated CI job (with SCA/CVE gate) present", () => ({
       ok: secSuitePresent && ciHasPenTest,

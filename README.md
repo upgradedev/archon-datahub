@@ -112,7 +112,9 @@ Important trust boundaries:
   until that release workflow succeeds.
 
 More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
-and [evidence-based readiness](docs/READINESS.md).
+[temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
+pack](docs/JUDGE_EVIDENCE.md), [production availability](docs/AVAILABILITY.md), and
+[evidence-based readiness](docs/READINESS.md).
 
 ## Run locally without external services
 
@@ -145,6 +147,29 @@ npm --prefix web run build
 
 Generated `dist/`, `coverage/`, `cdk.out/`, `readiness.json`, dependency directories, and
 test reports are ignored and must not be committed.
+
+## Judge-ready evidence without hand-authored outputs
+
+CI generates two complementary, explicitly labeled evidence products:
+
+- a frozen seven-case DataHub capability benchmark that measures a latest-write-wins
+  current-view boundary against Archon's retained-history path, including negative cases
+  for same-pipeline drift, unknown provenance, source agreement, and a single write; and
+- a deterministic synthetic judge pack produced by the real audit, G6 planning, approval,
+  execution-verification, receipt, rollback, JSON, Markdown, and SARIF functions.
+
+Both are replayed or contract-checked in CI, checksum-sealed, retained for 90 days, and
+their GitHub artifact digests are bound into the default-branch release attestation.
+The browser also offers an on-demand, exactly allowlisted application projection with
+WebCrypto self-consistency checks and an optional, passive three-step judge tour. It does
+not claim origin authenticity; the attested CI artifact is the external provenance path.
+Synthetic packs are never presented as live DataHub or deployment proof.
+
+The primary OSS bonus candidate is a bounded, read-only
+[`get_aspect_history` tool](contrib/mcp-get-aspect-history/) for the official DataHub MCP
+server. CI applies its exact source, tests, and registration patch to a pinned upstream
+revision before running upstream lint, type, and focused test contracts. It remains
+explicitly “staged, not submitted” until a real public upstream PR exists.
 
 ## Connect a real DataHub
 
@@ -286,12 +311,15 @@ output is not accepted as release evidence:
 | Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
 | Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/regional-WAF/network contracts |
+| Production availability | Six-hour read-only public-path probe with strict TLS/header/schema checks, exact CI/deployment/runtime-byte provenance, TOCTOU revalidation, and checksum-sealed 90-day evidence |
 
 Workflows:
 
-- [CI](.github/workflows/ci.yml) — root, web, AWS CDK, policy, security, load, staged
-  DataHub Skill contribution, and immutable artifact gates.
-- [CodeQL](.github/workflows/codeql.yml) — SAST on pull requests, `master`, and schedule.
+- [CI](.github/workflows/ci.yml) — root, web, AWS CDK, policy, security, load, benchmark,
+  reproducible judge evidence, exact-upstream DataHub MCP contribution tests, and immutable
+  artifact gates.
+- [CodeQL](.github/workflows/codeql.yml) — JavaScript/TypeScript and Python SAST on pull
+  requests, `master`, and schedule.
 - [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
   validation of the workflows themselves.
 - [Production supply chain](.github/workflows/supply-chain.yml) — automatic and exact-run
@@ -308,6 +336,9 @@ Workflows:
 - [Production posture](.github/workflows/production-posture.yml) — scheduled/manual,
   read-only-OIDC termination-protection, CloudFormation drift, alarm-subscription, and
   TOCTOU verification for all three production stacks, with signed 90-day evidence.
+- [Production availability](.github/workflows/availability.yml) — scheduled/manual,
+  credentialless observation of the public UI, runtime config, and one bounded read-only
+  audit, bound to the newest successful production promotion and exact runtime bytes.
 - [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
   a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then an
   exact-run governed write/rollback canary whose signed evidence is required before the
@@ -341,9 +372,11 @@ reference infrastructure, and CI/CD definitions. The authoritative remaining pro
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
-- GitHub `staging`, `production`, `datahub-demo`, `governed-canary`,
+- GitHub `staging`, `production`, `production-observer`, `datahub-demo`, `governed-canary`,
   `governed-canary-rollback`, and `governed-canary-recovery` environments and `master`
   protection must be configured;
+- production and the three governed-canary approval environments require a trusted second
+  collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
   user-gated;
 - a real retained-history contradiction and governed canary write/rollback need sanitized

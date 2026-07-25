@@ -409,11 +409,13 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  contrib:
-    name: DataHub ecosystem contribution contract
-    needs: secret-scan
+  benchmark:
+    name: DataHub capability benchmark
+    needs: build-test
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    outputs:
+      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -421,8 +423,178 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Validate staged read-only DataHub Skill contribution
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Measure current-view boundary against retained history
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/datahub-benchmark"
+          npm run benchmark:datahub -- --output "${output}"
+          test -f "${output}/datahub-benchmark.json"
+          test ! -L "${output}/datahub-benchmark.json"
+          test -f "${output}/datahub-benchmark.md"
+          test ! -L "${output}/datahub-benchmark.md"
+          test "$(find "${output}" -mindepth 1 -maxdepth 1 -type f | wc -l)" = "2"
+          test -z "$(find "${output}" -mindepth 1 -type l -print -quit)"
+          jq --exit-status '
+            .schemaVersion == "archon.datahub-benchmark/v1" and
+            (.dataset.digest | test("^sha256:[0-9a-f]{64}$")) and
+            .dataset.cases == 7 and
+            .dataset.positiveCases == 3 and
+            .dataset.negativeCases == 4 and
+            .systems.currentView.metrics.recall == 0 and
+            .systems.currentView.metrics.precision == null and
+            .systems.currentView.metrics.falsePositives == 0 and
+            .systems.retainedHistory.metrics.recall == 1 and
+            .systems.retainedHistory.metrics.precision == 1 and
+            .systems.retainedHistory.metrics.f1 == 1 and
+            .systems.retainedHistory.metrics.falsePositives == 0 and
+            .controlCoverage.governanceRulesEvaluated ==
+              ["G1", "G2", "G3", "G4", "G5", "G6"] and
+            .controlCoverage.lineageGapFindings >= 1 and
+            all(.cases[] | select(.expectedConflict == false);
+              .retainedHistory.detected == false)
+          ' "${output}/datahub-benchmark.json" >/dev/null
+          (
+            cd "${output}"
+            sha256sum datahub-benchmark.json datahub-benchmark.md >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+      - name: Upload immutable benchmark evidence
+        id: evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-benchmark-${{ github.sha }}
+          path: ${{ runner.temp }}/datahub-benchmark/
+          if-no-files-found: error
+          retention-days: 90
+
+  judge-evidence:
+    name: Reproducible judge evidence
+    needs: build-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Generate, replay, and verify the public judge pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          first="${RUNNER_TEMP}/judge-evidence-a"
+          replay="${RUNNER_TEMP}/judge-evidence-b"
+          npm run evidence:judge:generate -- \
+            --release-sha "${GITHUB_SHA}" \
+            --output "${first}"
+          npm run evidence:judge:generate -- \
+            --release-sha "${GITHUB_SHA}" \
+            --output "${replay}"
+          diff --recursive --no-dereference "${first}" "${replay}"
+          npm run evidence:judge:verify -- \
+            --release-sha "${GITHUB_SHA}" \
+            --input "${first}"
+          package_version="$(jq -er '.version' package.json)"
+          jq --exit-status \
+            --arg release "${GITHUB_SHA}" \
+            --arg toolVersion "${package_version}" '
+              .source.releaseSha == $release and
+              .source.toolVersion == $toolVersion
+            ' "${first}/manifest.json" >/dev/null
+          (
+            cd "${first}"
+            sha256sum --check --strict SHA256SUMS
+          )
+      - name: Upload only the verified judge evidence pack
+        id: evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: judge-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/judge-evidence-a/
+          if-no-files-found: error
+          retention-days: 90
+
+  contrib:
+    name: DataHub ecosystem contribution
+    needs: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+      - name: Validate staged contribution contracts
         run: npm run verify:contrib
+      - name: Apply the candidate to its exact upstream revision
+        id: upstream
+        shell: bash
+        env:
+          UPSTREAM_COMMIT: 9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9
+          UPSTREAM_REPOSITORY: https://github.com/acryldata/mcp-server-datahub.git
+        run: |
+          set -euo pipefail
+          upstream="${RUNNER_TEMP}/mcp-server-datahub"
+          test ! -e "${upstream}"
+          git init --quiet "${upstream}"
+          git -C "${upstream}" remote add origin "${UPSTREAM_REPOSITORY}"
+          git -C "${upstream}" fetch --quiet --depth=1 origin "${UPSTREAM_COMMIT}"
+          git -C "${upstream}" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "${upstream}" rev-parse HEAD)" = "${UPSTREAM_COMMIT}"
+          test -z "$(git -C "${upstream}" status --short)"
+
+          install -D -m 0644 \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
+            "${upstream}/src/mcp_server_datahub/tools/aspect_history.py"
+          install -D -m 0644 \
+            contrib/mcp-get-aspect-history/upstream/tests/test_mcp/test_get_aspect_history.py \
+            "${upstream}/tests/test_mcp/test_get_aspect_history.py"
+          git -C "${upstream}" apply --check \
+            "${GITHUB_WORKSPACE}/contrib/mcp-get-aspect-history/integration.patch"
+          git -C "${upstream}" apply \
+            "${GITHUB_WORKSPACE}/contrib/mcp-get-aspect-history/integration.patch"
+          git -C "${upstream}" add --intent-to-add \
+            src/mcp_server_datahub/tools/aspect_history.py \
+            tests/test_mcp/test_get_aspect_history.py
+          git -C "${upstream}" diff --check
+          test "$(
+            git -C "${upstream}" status --short | wc -l
+          )" = "4"
+          echo "directory=${upstream}" >>"${GITHUB_OUTPUT}"
+      - name: Run the exact upstream lint, type, and focused test contracts
+        shell: bash
+        env:
+          UPSTREAM_DIRECTORY: ${{ steps.upstream.outputs.directory }}
+        run: |
+          set -euo pipefail
+          cd "${UPSTREAM_DIRECTORY}"
+          uv sync \
+            --frozen \
+            --all-groups \
+            --no-cache
+          uv run ruff check \
+            src/mcp_server_datahub/tools/aspect_history.py \
+            tests/test_mcp/test_get_aspect_history.py
+          uv run mypy \
+            src/mcp_server_datahub/tools/aspect_history.py
+          uv run pytest \
+            tests/test_mcp/test_get_aspect_history.py \
+            tests/test_mcp/test_read_only.py \
+            --quiet
 
   security:
     name: Security and dependencies
@@ -1103,6 +1275,8 @@ jobs:
     needs:
       - secret-scan
       - build-test
+      - benchmark
+      - judge-evidence
       - web
       - contrib
       - infra
@@ -1140,9 +1314,13 @@ jobs:
       - name: Bind successful CI gates to exact release bytes
         env:
           BUILD_TEST_RESULT: ${{ needs.build-test.result }}
+          BENCHMARK_ARTIFACT_DIGEST: ${{ needs.benchmark.outputs.artifact_digest }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
           CONTAINER_RESULT: ${{ needs.container.result }}
           CONTRIB_RESULT: ${{ needs.contrib.result }}
           INFRA_RESULT: ${{ needs.infra.result }}
+          JUDGE_EVIDENCE_ARTIFACT_DIGEST: ${{ needs.judge-evidence.outputs.artifact_digest }}
+          JUDGE_EVIDENCE_RESULT: ${{ needs.judge-evidence.result }}
           LOAD_RESULT: ${{ needs.load.result }}
           MCP_DEPENDENCY_ARTIFACT_DIGEST: ${{ needs.mcp-dependency.outputs.artifact_digest }}
           MCP_DEPENDENCY_RESULT: ${{ needs.mcp-dependency.result }}
@@ -1187,6 +1365,11 @@ jobs:
             --arg runUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg secretScan "${SECRET_SCAN_RESULT}" \
             --arg buildTest "${BUILD_TEST_RESULT}" \
+            --arg benchmarkArtifactDigest "${BENCHMARK_ARTIFACT_DIGEST}" \
+            --arg benchmark "${BENCHMARK_RESULT}" \
+            --arg judgeEvidenceArtifactDigest \
+              "${JUDGE_EVIDENCE_ARTIFACT_DIGEST}" \
+            --arg judgeEvidence "${JUDGE_EVIDENCE_RESULT}" \
             --arg web "${WEB_RESULT}" \
             --arg contrib "${CONTRIB_RESULT}" \
             --arg infra "${INFRA_RESULT}" \
@@ -1209,6 +1392,8 @@ jobs:
                 gates: {
                   secretScan: $secretScan,
                   buildTest: $buildTest,
+                  dataHubBenchmark: $benchmark,
+                  judgeEvidence: $judgeEvidence,
                   web: $web,
                   contribution: $contrib,
                   infrastructure: $infra,
@@ -1221,6 +1406,12 @@ jobs:
                 dependencyEvidence: {
                   dataHubMcpSecurityArtifactDigest:
                     $mcpDependencyArtifactDigest
+                },
+                capabilityEvidence: {
+                  dataHubBenchmarkArtifactDigest:
+                    $benchmarkArtifactDigest,
+                  judgeEvidenceArtifactDigest:
+                    $judgeEvidenceArtifactDigest
                 }
               }
             ' >"${evidence_dir}/predicate.json"
@@ -1228,6 +1419,10 @@ jobs:
             .source.ref == "refs/heads/master" and
             ([.gates[]] | all(. == "success")) and
             (.dependencyEvidence.dataHubMcpSecurityArtifactDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            (.capabilityEvidence.dataHubBenchmarkArtifactDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            (.capabilityEvidence.judgeEvidenceArtifactDigest |
               test("^sha256:[0-9a-f]{64}$"))
           ' "${evidence_dir}/predicate.json" >/dev/null
 

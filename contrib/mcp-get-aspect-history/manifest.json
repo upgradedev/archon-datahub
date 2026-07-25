@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "name": "get-aspect-history",
+  "target": {
+    "repository": "https://github.com/acryldata/mcp-server-datahub",
+    "branch": "main",
+    "baseCommit": "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "baseCommitUrl": "https://github.com/acryldata/mcp-server-datahub/commit/9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "license": "Apache-2.0"
+  },
+  "artifacts": [
+    {
+      "source": "upstream/src/mcp_server_datahub/tools/aspect_history.py",
+      "destination": "src/mcp_server_datahub/tools/aspect_history.py",
+      "kind": "source"
+    },
+    {
+      "source": "upstream/tests/test_mcp/test_get_aspect_history.py",
+      "destination": "tests/test_mcp/test_get_aspect_history.py",
+      "kind": "test"
+    }
+  ],
+  "integrationPatch": "integration.patch",
+  "upstreamInspection": {
+    "performedAt": "2026-07-25",
+    "method": "read-only GitHub API and official source inspection",
+    "pullRequestStatesInspected": [
+      "open",
+      "closed"
+    ],
+    "issueStatesInspected": [
+      "open"
+    ],
+    "codeSearched": true,
+    "openPullRequestOverlapFound": false,
+    "closedPullRequestOverlapFound": false,
+    "issueOverlapFound": false,
+    "existingSymbolFound": false,
+    "queries": [
+      "get_aspect_history",
+      "aspect history",
+      "versioned aspect"
+    ]
+  },
+  "status": {
+    "state": "staged-not-submitted",
+    "pullRequestOpened": false,
+    "appliedToUpstream": false,
+    "localBuildRun": false,
+    "localTestsRun": false,
+    "localSecurityScanRun": false
+  },
+  "requiredCi": [
+    "ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
+    "pytest tests/test_mcp/test_get_aspect_history.py",
+    "pytest tests/test_mcp/test_read_only.py",
+    "repository type checks and full test suite"
+  ]
+}
