@@ -30,6 +30,7 @@ import {
   buildJudgeEvidencePack,
   JUDGE_EVIDENCE_ALL_PATHS,
 } from "../../scripts/generate-judge-evidence.js";
+import { assertPublicJudgeEvidenceIdentifiers } from "../../scripts/verify-judge-evidence.js";
 
 const RELEASE_SHA = "a".repeat(40);
 
@@ -142,12 +143,44 @@ test("judge evidence is reproducible and binds the real audit/remediation functi
   assert.equal(sarif.runs[0]!.results.length, report.findings.length);
 
   const publicBytes = [...first.files.values()].join("\n");
+  for (const [path, content] of first.files) {
+    assert.doesNotThrow(() =>
+      assertPublicJudgeEvidenceIdentifiers(content, path)
+    );
+  }
   assert.doesNotMatch(publicBytes, /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u);
   assert.doesNotMatch(publicBytes, /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/u);
   assert.doesNotMatch(publicBytes, /-----BEGIN .*PRIVATE KEY-----/u);
   assert.doesNotMatch(publicBytes, /"taskToken"\s*:/u);
   assert.match(first.files.get("README.md")!, /Synthetic offline fixture evidence/u);
   assert.match(first.files.get("SHA256SUMS")!, /manifest\.json/u);
+});
+
+test("judge evidence identifier boundaries reject unknown URN extensions", () => {
+  const dataset =
+    "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)";
+  assert.doesNotThrow(() =>
+    assertPublicJudgeEvidenceIdentifiers(
+      `scan-2026-07-01:${dataset}:ownership`,
+      "known-fact-id"
+    )
+  );
+  assert.throws(
+    () =>
+      assertPublicJudgeEvidenceIdentifiers(
+        `scan-2026-07-01:${dataset}:ownership-shadow`,
+        "extended-fact-id"
+      ),
+    /unapproved DataHub URN/u
+  );
+  assert.throws(
+    () =>
+      assertPublicJudgeEvidenceIdentifiers(
+        "urn:li:corpGroup:unapproved",
+        "unknown-urn"
+      ),
+    /unapproved DataHub URN/u
+  );
 });
 
 test("judge evidence rejects a non-exact release revision", async () => {

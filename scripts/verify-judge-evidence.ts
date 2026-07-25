@@ -105,6 +105,12 @@ const PUBLIC_URNS = new Set([
   "urn:li:domain:sales",
   "urn:li:tag:PII",
 ]);
+const PUBLIC_FACT_ID_SUFFIXES = [
+  ":deprecation",
+  ":domain",
+  ":lineage",
+  ":ownership",
+] as const;
 
 interface LoadedFile {
   bytes: Buffer;
@@ -139,7 +145,29 @@ function isDigest(value: unknown): value is Sha256Digest {
   return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value);
 }
 
-function assertPublicIdentifiers(text: string, path: string): void {
+function hasPublicUrnBoundary(suffix: string): boolean {
+  if (suffix.length === 0) return true;
+  const next = suffix[0]!;
+  if (next !== ":") return !/[A-Za-z0-9_.-]/u.test(next);
+  if (/^\s/u.test(suffix[1] ?? "")) return true;
+
+  // Audit fact IDs deterministically embed an already-approved entity URN before
+  // one closed aspect suffix (for example `<urn>:ownership`). Treat only those
+  // exact derived-ID suffixes as boundaries; extensions remain fail-closed.
+  return PUBLIC_FACT_ID_SUFFIXES.some((factSuffix) => {
+    if (!suffix.startsWith(factSuffix)) return false;
+    const following = suffix[factSuffix.length];
+    return (
+      following === undefined ||
+      !/[A-Za-z0-9_.:-]/u.test(following)
+    );
+  });
+}
+
+export function assertPublicJudgeEvidenceIdentifiers(
+  text: string,
+  path: string
+): void {
   for (
     const url of text.match(
       /https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~:/?@!$&'()*+,;=%#-]*)?/gu
@@ -166,10 +194,7 @@ function assertPublicIdentifiers(text: string, path: string): void {
       .find((urn) => {
         if (!text.startsWith(urn, urnOffset)) return false;
         const suffix = text.slice(urnOffset + urn.length);
-        if (suffix.length === 0) return true;
-        const next = suffix[0]!;
-        if (next === ":") return /^\s/u.test(suffix[1] ?? "");
-        return !/[A-Za-z0-9_.-]/u.test(next);
+        return hasPublicUrnBoundary(suffix);
       });
     if (!allowed) fail(`${path} contains an unapproved DataHub URN.`);
     urnOffset += allowed.length;
@@ -682,7 +707,7 @@ export async function verifyJudgeEvidenceDirectory(input: {
         fail(`${path} contains a ${credential.name}-shaped value.`);
       }
     }
-    assertPublicIdentifiers(text, path);
+    assertPublicJudgeEvidenceIdentifiers(text, path);
     files.set(path, { bytes, text });
   }
 
