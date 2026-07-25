@@ -18,7 +18,8 @@ test("report exporters produce JSON, safe Markdown, and SARIF with stable finger
     scanId: "scan`](/unsafe)\u0000",
     narrative:
       "<script>alert(1)</script> [link](javascript:alert(2)) " +
-      "[payload](DATA:text/html,unsafe) vbscript:msgbox(1) `breakout`",
+      "[payload](DATA:text/html,unsafe) vbscript:msgbox(1) `breakout` " +
+      "safe\u202Efdp.exe\u2066suffix",
   });
   assert.match(markdown, /## Findings/);
   assert.doesNotMatch(markdown, /<script>/iu);
@@ -26,7 +27,11 @@ test("report exporters produce JSON, safe Markdown, and SARIF with stable finger
   assert.doesNotMatch(markdown, /\u0000/u);
   assert.doesNotMatch(markdown, /\]\(javascript:/iu);
   assert.doesNotMatch(markdown, /\b(?:javascript|vbscript|data):/iu);
-  assert.match(markdown, /\[blocked-active-scheme\]/u);
+  assert.match(markdown, /blocked-active-scheme/u);
+  assert.doesNotMatch(
+    markdown,
+    /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u
+  );
   assert.doesNotMatch(markdown, /`breakout`/u);
 
   const first = auditReportToSarif(report);

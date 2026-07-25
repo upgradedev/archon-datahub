@@ -13,7 +13,7 @@ concurrency:
 
 env:
   NODE_VERSION: "22.23.1"
-  INFRA_NODE_VERSION: "24.18.0"
+  INFRA_NODE_VERSION: "22.23.1"
   CFN_GUARD_VERSION: "3.2.0"
   CFN_GUARD_ARCHIVE_SHA256: 9f8c4d9f15f7dd54a37ea70a5237ba00aba682fb1e6521a744d12259961dfc13
 
@@ -55,7 +55,9 @@ jobs:
         run: |
           set -euo pipefail
           for script in \
+            scripts/patch-cdk-brace-expansion.sh \
             scripts/observe-aws-live-runtime.sh \
+            scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
@@ -70,6 +72,8 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
+      - name: Verify every exact npm override
+        run: node scripts/verify-exact-npm-overrides.mjs .
       - name: Typecheck
         run: npm run typecheck
       - name: Production build
@@ -154,63 +158,230 @@ jobs:
           retention-days: 90
 
   infra-lock-candidate:
-    name: Generate and validate infrastructure lock candidate
+    name: Generate and validate reviewed lock candidates
     if: github.event_name == 'pull_request'
     needs: secret-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.INFRA_NODE_VERSION }}
-      - name: Resolve the reviewed dependency policy into a candidate lock
-        working-directory: infra/aws
-        run: >-
-          npm install
-          --package-lock-only
-          --ignore-scripts
-          --no-audit
-          --no-fund
-      - name: Install and validate the candidate exactly
-        working-directory: infra/aws
+      - name: Bind the generator to the exact PR head and package manager
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${PR_HEAD_SHA}"
+          test "$(node --version)" = "v${INFRA_NODE_VERSION}"
+          test "$(npm --version)" = "10.9.2"
+      - name: Resolve both reviewed dependency policies into candidate locks
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_ENGINE_STRICT: "true"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+          NPM_CONFIG_STRICT_SSL: "true"
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          set -euo pipefail
+          generation_root="${RUNNER_TEMP}/clean-lock-generation"
+          mkdir -p "${generation_root}/root" "${generation_root}/infra"
+          install -m 0644 package.json "${generation_root}/root/package.json"
+          install -m 0644 infra/aws/package.json \
+            "${generation_root}/infra/package.json"
+          for directory in root infra; do
+            (
+              cd "${generation_root}/${directory}"
+              npm install \
+                --package-lock-only \
+                --no-audit \
+                --no-fund
+            )
+          done
+          install -m 0644 \
+            "${generation_root}/root/package-lock.json" \
+            package-lock.json
+          install -m 0644 \
+            "${generation_root}/infra/package-lock.json" \
+            infra/aws/package-lock.json
+          git diff --exit-code -- package.json infra/aws/package.json
+      - name: Seal candidate provenance before validation
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/lock-candidates"
+          mkdir -p "${candidate_dir}"
+          install -m 0644 package-lock.json \
+            "${candidate_dir}/root-package-lock.json"
+          install -m 0644 infra/aws/package-lock.json \
+            "${candidate_dir}/infra-package-lock.json"
+
+          checkout_sha="$(git rev-parse HEAD)"
+          test "${checkout_sha}" = "${PR_HEAD_SHA}"
+          root_manifest_sha="$(sha256sum package.json | cut -d' ' -f1)"
+          root_lock_sha="$(sha256sum package-lock.json | cut -d' ' -f1)"
+          infra_manifest_sha="$(sha256sum infra/aws/package.json | cut -d' ' -f1)"
+          infra_lock_sha="$(sha256sum infra/aws/package-lock.json | cut -d' ' -f1)"
+          jq -nS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg checkoutSha "${checkout_sha}" \
+            --arg headRepository "${PR_HEAD_REPOSITORY}" \
+            --arg headSha "${PR_HEAD_SHA}" \
+            --arg baseSha "${PR_BASE_SHA}" \
+            --arg eventSha "${EVENT_SHA}" \
+            --arg pullRequestNumber "${PR_NUMBER}" \
+            --arg workflowRef "${WORKFLOW_REF}" \
+            --arg workflowSha "${WORKFLOW_SHA}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg nodeVersion "$(node --version)" \
+            --arg npmVersion "$(npm --version)" \
+            --arg rootManifestSha256 "${root_manifest_sha}" \
+            --arg rootLockSha256 "${root_lock_sha}" \
+            --arg infraManifestSha256 "${infra_manifest_sha}" \
+            --arg infraLockSha256 "${infra_lock_sha}" \
+            '{
+              schemaVersion: 1,
+              repository: $repository,
+              source: {
+                checkoutSha: $checkoutSha,
+                headRepository: $headRepository,
+                pullRequestHeadSha: $headSha,
+                pullRequestBaseSha: $baseSha,
+                pullRequestNumber: $pullRequestNumber,
+                eventMergeSha: $eventSha,
+                workflowRef: $workflowRef,
+                workflowSha: $workflowSha
+              },
+              generator: {
+                runId: $runId,
+                runAttempt: $runAttempt,
+                nodeVersion: $nodeVersion,
+                npmVersion: $npmVersion
+              },
+              candidates: {
+                root: {
+                  packageJsonSha256: $rootManifestSha256,
+                  lockFile: "root-package-lock.json",
+                  lockSha256: $rootLockSha256
+                },
+                infrastructure: {
+                  packageJsonSha256: $infraManifestSha256,
+                  lockFile: "infra-package-lock.json",
+                  lockSha256: $infraLockSha256
+                }
+              }
+            }' >"${candidate_dir}/provenance.json"
+          (
+            cd "${candidate_dir}"
+            sha256sum \
+              infra-package-lock.json \
+              provenance.json \
+              root-package-lock.json >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+      - name: Validate the root candidate exactly
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
+          node scripts/verify-exact-npm-overrides.mjs .
+          npm run typecheck
           npm run build
-          npm test -- --ci --coverage
+          npm test
+          npm run coverage
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
             --audit-level=high
-          node <<'NODE'
-          const lock = require("./package-lock.json");
-          const versions = Object.entries(lock.packages)
-            .filter(([path]) => path.endsWith("node_modules/brace-expansion"))
-            .map(([, metadata]) => metadata.version);
-          if (versions.length === 0 || versions.some((version) => version !== "5.0.8")) {
-            throw new Error(`Unexpected brace-expansion resolutions: ${versions.join(",")}`);
-          }
-          NODE
-      - name: Seal the validated lock candidate
-        shell: bash
+      - name: Validate the infrastructure candidate exactly
         run: |
           set -euo pipefail
-          candidate_dir="${RUNNER_TEMP}/infra-lock-candidate"
-          mkdir -p "${candidate_dir}"
-          install -m 0644 \
-            infra/aws/package-lock.json \
-            "${candidate_dir}/package-lock.json"
+          npm --prefix infra/aws ci --ignore-scripts
+          node scripts/verify-exact-npm-overrides.mjs infra/aws
+          bash scripts/patch-cdk-brace-expansion.sh infra/aws
+          npm --prefix infra/aws run build
+          npm --prefix infra/aws test -- --ci --coverage
+          bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
+      - name: Mark the exact candidates as remotely validated
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/lock-candidates"
+          checkout_sha="$(git rev-parse HEAD)"
+          test "${checkout_sha}" = "${PR_HEAD_SHA}"
           (
             cd "${candidate_dir}"
-            sha256sum package-lock.json >SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
-      - name: Upload the short-lived reviewed lock candidate
+          jq --exit-status \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg headRepository "${PR_HEAD_REPOSITORY}" \
+            --arg headSha "${checkout_sha}" \
+            --arg pullRequestNumber "${PR_NUMBER}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRef "${WORKFLOW_REF}" \
+            --arg workflowSha "${WORKFLOW_SHA}" \
+            --arg rootManifestSha256 "$(sha256sum package.json | cut -d' ' -f1)" \
+            --arg infraManifestSha256 "$(sha256sum infra/aws/package.json | cut -d' ' -f1)" \
+            '
+              .schemaVersion == 1 and
+              .repository == $repository and
+              .source.checkoutSha == $headSha and
+              .source.headRepository == $headRepository and
+              .source.pullRequestHeadSha == $headSha and
+              .source.pullRequestNumber == $pullRequestNumber and
+              .source.workflowRef == $workflowRef and
+              .source.workflowSha == $workflowSha and
+              .generator.runId == $runId and
+              .generator.runAttempt == $runAttempt and
+              .generator.nodeVersion == "v22.23.1" and
+              .generator.npmVersion == "10.9.2" and
+              .candidates.root.packageJsonSha256 == $rootManifestSha256 and
+              .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256
+            ' "${candidate_dir}/provenance.json" >/dev/null
+          git diff --exit-code -- package.json infra/aws/package.json
+          jq -nS \
+            --arg headSha "${checkout_sha}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            '{
+              schemaVersion: 1,
+              result: "root-and-infrastructure-candidates-validated",
+              headSha: $headSha,
+              runId: $runId,
+              runAttempt: $runAttempt,
+              gates: [
+                "root-typecheck-build-test-coverage-sca",
+                "infra-typecheck-test-coverage-exact-compensated-sca"
+              ]
+            }' >"${candidate_dir}/validation.json"
+          (
+            cd "${candidate_dir}"
+            sha256sum validation.json >>SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+      - name: Upload short-lived, source-bound validated lock candidates
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: infra-lock-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/infra-lock-candidate/
+          name: validated-lock-candidates-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/lock-candidates/
           if-no-files-found: error
           retention-days: 1
 
@@ -221,7 +392,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      security-events: write
     env:
       CDK_DEFAULT_ACCOUNT: "111111111111"
       AWS_REGION: eu-west-1
@@ -240,6 +410,10 @@ jobs:
       - name: Install locked infrastructure dependencies
         working-directory: infra/aws
         run: npm ci --ignore-scripts
+      - name: Verify every exact infrastructure override
+        run: node scripts/verify-exact-npm-overrides.mjs infra/aws
+      - name: Repair the exact vulnerable CDK bundled dependency
+        run: bash scripts/patch-cdk-brace-expansion.sh infra/aws
       - name: Package locked approval Lambda dependencies
         working-directory: infra/aws/lambda/approval
         run: npm ci --omit=dev --ignore-scripts
@@ -262,10 +436,14 @@ jobs:
         working-directory: infra/aws
         run: npm test -- --ci --coverage
       - name: Infrastructure SCA gate
-        working-directory: infra/aws
-        run: >-
-          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
-          --audit-level=high
+        run: bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
+      - name: Retain exact CDK dependency-compensation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cdk-dependency-compensation-${{ github.sha }}
+          path: ${{ runner.temp }}/cdk-brace-expansion-compensation/
+          if-no-files-found: error
+          retention-days: 90
       - name: Approval Lambda SCA gate
         working-directory: infra/aws/lambda/approval
         run: >-
@@ -397,6 +575,7 @@ jobs:
             done
           done
       - name: Scan synthesized IaC
+        id: trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
@@ -407,16 +586,20 @@ jobs:
           exit-code: "0"
           hide-progress: true
           version: v0.72.0
-      - name: Upload trusted IaC SARIF
-        if: >-
-          github.event_name == 'push' ||
-          github.event.pull_request.head.repo.full_name == github.repository
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - name: Retain partial synth and Guard failure evidence
+        if: always() && steps.trivy.outcome != 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          sarif_file: ${{ runner.temp }}/trivy-iac.sarif
-          category: trivy-aws-cdk
+          name: infra-partial-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/cdk.out/**/*.template.json
+            ${{ runner.temp }}/cdk.out/**/manifest.json
+            ${{ runner.temp }}/cdk.out/**/tree.json
+            ${{ runner.temp }}/cfn-guard-results.txt
+          if-no-files-found: warn
+          retention-days: 90
       - name: Retain synthesized IaC and scan evidence
-        if: always()
+        if: always() && steps.trivy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: infra-${{ github.sha }}
@@ -444,6 +627,49 @@ jobs:
               ([.runs[].results[]] | length) == 0
             ' \
             "${RUNNER_TEMP}/trivy-iac.sarif" >/dev/null
+
+  publish-infra-sarif:
+    name: Publish trusted default-branch IaC SARIF
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_name == github.event.repository.default_branch
+    needs: infra
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Download the exact successful IaC evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: infra-${{ github.sha }}
+          path: ${{ runner.temp }}/infra-evidence
+      - name: Revalidate zero-finding SARIF before publication
+        run: |
+          set -euo pipefail
+          sarif="${RUNNER_TEMP}/infra-evidence/trivy-iac.sarif"
+          test -f "${sarif}"
+          test ! -L "${sarif}"
+          test "$(find "${RUNNER_TEMP}/infra-evidence" \
+            -name trivy-iac.sarif -type f | wc -l)" = "1"
+          jq --exit-status \
+            '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length > 0) and
+              all(
+                .runs[];
+                (.tool.driver.name | ascii_downcase | contains("trivy")) and
+                (.results | type == "array")
+              ) and
+              ([.runs[].results[]] | length) == 0
+            ' "${sarif}" >/dev/null
+      - name: Upload trusted IaC SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/infra-evidence/trivy-iac.sarif
+          category: trivy-aws-cdk
 
   readiness:
     name: Hackathon readiness
@@ -671,6 +897,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Verify every exact npm override
+        run: node scripts/verify-exact-npm-overrides.mjs .
       - name: Application-security suite
         run: npm run test:security
       - name: SCA gate
@@ -1190,6 +1418,10 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+          # aws-cdk-lib@2.262.1 immutably bundles the sole affected path.
+          # The infra job replaces it with integrity-pinned 5.0.8 and accepts
+          # no other advisory/path through its exact compensating audit gate.
+          allow-ghsas: GHSA-mh99-v99m-4gvg
 
   load:
     name: Offline SLO

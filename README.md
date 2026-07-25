@@ -303,7 +303,7 @@ output is not accepted as release evidence:
 | Secret detection | Checksum-pinned Gitleaks |
 | SAST | CodeQL security-and-quality queries |
 | Application abuse cases | AuthZ/tool-boundary, prompt-injection, provenance injection, data-exposure, and remediation-boundary tests |
-| Dependency security | Root, web, infra, approval-Lambda, and control-Lambda fail-closed `npm audit` with bounded registry-transport retries; PR dependency review; Dependabot |
+| Dependency security | Root, web, approval-Lambda, and control-Lambda fail-closed `npm audit` with bounded registry-transport retries; exact override verification; infra-only checksum-pinned repair and receipt-bound exact-path audit compensation for the immutable `aws-cdk-lib` GHSA; PR dependency review; Dependabot |
 | IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
 | IaC scanner | Trivy config scan with an all-severity, zero-finding fail gate plus structurally validated SARIF |
 | Container hardening | Non-root/read-only runtime contract and isolated health boot |

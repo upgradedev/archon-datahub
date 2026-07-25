@@ -6,6 +6,33 @@ const workflow = readFileSync(
   new URL("../../.github/workflows/supply-chain.yml", import.meta.url),
   "utf8"
 );
+const ciWorkflow = readFileSync(
+  new URL("../../.github/workflows/ci.yml", import.meta.url),
+  "utf8"
+);
+const deploymentWorkflow = readFileSync(
+  new URL("../../.github/workflows/deploy.yml", import.meta.url),
+  "utf8"
+);
+const cdkPatch = readFileSync(
+  new URL("../../scripts/patch-cdk-brace-expansion.sh", import.meta.url),
+  "utf8"
+);
+const cdkAuditCompensation = readFileSync(
+  new URL(
+    "../../scripts/verify-cdk-npm-audit-compensation.sh",
+    import.meta.url
+  ),
+  "utf8"
+);
+const overrideVerifier = readFileSync(
+  new URL("../../scripts/verify-exact-npm-overrides.mjs", import.meta.url),
+  "utf8"
+);
+const infraDocumentation = readFileSync(
+  new URL("../../infra/aws/README.md", import.meta.url),
+  "utf8"
+);
 
 test("scheduled rescans bind exact live deployment, CI run, and subjects", () => {
   const resolverStart = workflow.indexOf("\n  resolve-production:");
@@ -258,5 +285,180 @@ test("scheduled rescans bind exact live deployment, CI run, and subjects", () =>
   assert.equal(
     workflow.match(/bash scripts\/verify-github-control-plane\.sh/gu)?.length,
     3
+  );
+});
+
+test("CDK bundled advisory is repaired and admitted only by an exact CI receipt", () => {
+  assert.match(ciWorkflow, /INFRA_NODE_VERSION: "22\.23\.1"/u);
+  assert.match(
+    ciWorkflow,
+    /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u
+  );
+  assert.match(ciWorkflow, /Seal candidate provenance before validation/u);
+  assert.match(ciWorkflow, /clean-lock-generation/u);
+  assert.match(ciWorkflow, /NPM_CONFIG_USERCONFIG: \/dev\/null/u);
+  assert.match(ciWorkflow, /NPM_CONFIG_REGISTRY: https:\/\/registry\.npmjs\.org\//u);
+  assert.match(ciWorkflow, /pullRequestHeadSha: \$headSha/u);
+  assert.match(ciWorkflow, /headRepository: \$headRepository/u);
+  assert.match(ciWorkflow, /pullRequestNumber: \$pullRequestNumber/u);
+  assert.match(ciWorkflow, /workflowRef: \$workflowRef/u);
+  assert.match(ciWorkflow, /workflowSha: \$workflowSha/u);
+  assert.match(ciWorkflow, /packageJsonSha256: \$infraManifestSha256/u);
+  assert.match(ciWorkflow, /lockSha256: \$infraLockSha256/u);
+
+  const infraStart = ciWorkflow.indexOf("\n  infra:");
+  const publisherStart = ciWorkflow.indexOf(
+    "\n  publish-infra-sarif:",
+    infraStart
+  );
+  const infra = ciWorkflow.slice(infraStart, publisherStart);
+  const install = infra.indexOf("Install locked infrastructure dependencies");
+  const overrides = infra.indexOf("Verify every exact infrastructure override");
+  const patch = infra.indexOf("Repair the exact vulnerable CDK bundled dependency");
+  const typecheck = infra.indexOf("Typecheck CDK and Lambda contract tests");
+  const audit = infra.indexOf("Infrastructure SCA gate");
+  const receipt = infra.indexOf(
+    "Retain exact CDK dependency-compensation evidence"
+  );
+  assert.ok(install >= 0);
+  assert.ok(overrides > install);
+  assert.ok(patch > overrides);
+  assert.ok(typecheck > patch);
+  assert.ok(audit > typecheck);
+  assert.ok(receipt > audit);
+  assert.match(
+    infra,
+    /bash scripts\/verify-cdk-npm-audit-compensation\.sh infra\/aws/u
+  );
+  assert.doesNotMatch(infra, /security-events: write/u);
+  assert.doesNotMatch(infra, /github\/codeql-action\/upload-sarif/u);
+  assert.match(infra, /Retain partial synth and Guard failure evidence/u);
+
+  const publisherEnd = ciWorkflow.indexOf("\n  readiness:", publisherStart);
+  const publisher = ciWorkflow.slice(publisherStart, publisherEnd);
+  assert.ok(publisherStart > infraStart);
+  assert.match(
+    publisher,
+    /github\.ref_name == github\.event\.repository\.default_branch/u
+  );
+  assert.match(publisher, /needs: infra/u);
+  assert.match(publisher, /security-events: write/u);
+  assert.match(publisher, /name: infra-\$\{\{ github\.sha \}\}/u);
+  assert.match(publisher, /\(\[\.runs\[\]\.results\[\]\] \| length\) == 0/u);
+  assert.ok(
+    publisher.indexOf("Revalidate zero-finding SARIF before publication") <
+      publisher.indexOf("Upload trusted IaC SARIF")
+  );
+
+  const dependencyReview = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  dependency-review:"),
+    ciWorkflow.indexOf("\n  load:")
+  );
+  assert.match(dependencyReview, /fail-on-severity: high/u);
+  assert.match(
+    dependencyReview,
+    /allow-ghsas: GHSA-mh99-v99m-4gvg/u
+  );
+  assert.doesNotMatch(dependencyReview, /allow-dependencies:/u);
+
+  assert.match(cdkPatch, /GITHUB_ACTIONS:-}" != "true"/u);
+  assert.match(cdkPatch, /expected_cdk_version="2\.262\.1"/u);
+  assert.match(
+    cdkPatch,
+    /aws-cdk-lib-2\.262\.1\.tgz[\s\S]+sha512-B6YP4r6ojUZCDhl\+qBu\/CrWzcipR8sIgshcqYvgw013sghPXmVkYdJ3yuI9\+DKML3YLSjQrHy1nGJs\+Nqq7JCg==/u
+  );
+  assert.match(cdkPatch, /vulnerable_version="5\.0\.7"/u);
+  assert.match(cdkPatch, /patched_version="5\.0\.8"/u);
+  assert.match(
+    cdkPatch,
+    /sha512-JZyDyq3D4AUifKTPOB7DELf6XsB3WdPuNxCtob1vFXPsSXhdAiHBWJ\/tJ8HAc9aH84BK\+5JFZLNkJKx3G9kzQg==/u
+  );
+  assert.match(cdkPatch, /archive_size <= 131072/u);
+  assert.match(cdkPatch, /The fixed-package archive contains an unsafe path/u);
+  assert.match(
+    cdkPatch,
+    /node_modules\/aws-cdk-lib\/node_modules\/brace-expansion/u
+  );
+  assert.match(cdkPatch, /assert\.deepEqual\(expand\("x\{a,b\}y"\)/u);
+  assert.match(cdkPatch, /installedTreeSha256/u);
+
+  assert.match(cdkAuditCompensation, /Object\.keys\(report\.vulnerabilities/u);
+  assert.match(cdkAuditCompensation, /high: 1, critical: 0, total: 1/u);
+  assert.match(
+    cdkAuditCompensation,
+    /node_modules\/aws-cdk-lib\/node_modules\/brace-expansion/u
+  );
+  assert.match(cdkAuditCompensation, /otherHighOrCritical: 0/u);
+  assert.match(cdkAuditCompensation, /sha256sum --check --strict SHA256SUMS/u);
+
+  assert.match(overrideVerifier, /Exact npm override verification is CI\/CD-only/u);
+  assert.match(overrideVerifier, /override must be an exact version/u);
+  assert.match(overrideVerifier, /resolved\.hostname,[\s\S]+"registry\.npmjs\.org"/u);
+  assert.match(overrideVerifier, /\^sha512-/u);
+  assert.match(
+    overrideVerifier,
+    /exact-bundled-compensation-required/u
+  );
+  assert.match(infraDocumentation, /Temporary bundled dependency compensation/u);
+  assert.match(
+    infraDocumentation,
+    /must be removed, rather than broadened/u
+  );
+});
+
+test("staging and production synth only with the same repaired CDK tree", () => {
+  assert.match(deploymentWorkflow, /NODE_VERSION: "22\.23\.1"/u);
+  const stagingStart = deploymentWorkflow.indexOf("\n  staging:");
+  const canaryStart = deploymentWorkflow.indexOf(
+    "\n  preproduction_canary:",
+    stagingStart
+  );
+  const productionStart = deploymentWorkflow.indexOf(
+    "\n  production:",
+    canaryStart
+  );
+  assert.ok(stagingStart >= 0);
+  assert.ok(canaryStart > stagingStart);
+  assert.ok(productionStart > canaryStart);
+
+  const staging = deploymentWorkflow.slice(stagingStart, canaryStart);
+  const production = deploymentWorkflow.slice(productionStart);
+  for (const [segment, synthName] of [
+    [staging, "Synthesize the exact staging deployment assembly"],
+    [production, "Synthesize the exact production deployment assembly"],
+  ] as const) {
+    const install = segment.indexOf("npm ci --prefix infra/aws --ignore-scripts");
+    const overrides = segment.indexOf(
+      "node scripts/verify-exact-npm-overrides.mjs infra/aws"
+    );
+    const patch = segment.indexOf(
+      "bash scripts/patch-cdk-brace-expansion.sh infra/aws"
+    );
+    const audit = segment.indexOf(
+      "bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws"
+    );
+    const synth = segment.indexOf(synthName);
+    assert.ok(install >= 0);
+    assert.ok(overrides > install);
+    assert.ok(patch > overrides);
+    assert.ok(audit > patch);
+    assert.ok(synth > audit);
+    assert.match(segment, /test "\$\(npm --version\)" = "10\.9\.2"/u);
+    assert.match(
+      segment,
+      /\$\{\{ runner\.temp \}\}\/cdk-brace-expansion-compensation\//u
+    );
+  }
+  assert.equal(
+    deploymentWorkflow.match(
+      /bash scripts\/patch-cdk-brace-expansion\.sh infra\/aws/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /bash scripts\/verify-cdk-npm-audit-compensation\.sh infra\/aws/gu
+    )?.length,
+    2
   );
 });

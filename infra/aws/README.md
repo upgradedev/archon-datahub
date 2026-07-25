@@ -76,6 +76,41 @@ worker still seals the report evidence but cannot create a remediation plan.
 The staging pipeline exercises that mode to `READ_ONLY_COMPLETE` and retains the
 sanitized terminal response hash.
 
+## Temporary bundled dependency compensation
+
+`aws-cdk-lib@2.262.1` immutably bundles `brace-expansion@5.0.7`. That version is
+affected by
+[GHSA-mh99-v99m-4gvg](https://github.com/advisories/GHSA-mh99-v99m-4gvg);
+`5.0.8` is the first patched release. npm overrides fix every ordinary
+occurrence but cannot rewrite a dependency embedded in the published CDK
+tarball. This is a build-time CDK dependency; it is not packaged into the
+Archon application container or either Lambda release candidate.
+
+The CI job and both protected staging/production deployment jobs therefore
+apply one narrow, fail-closed compensation before any CDK typecheck, test,
+synth, or deploy:
+
+1. verify every declared npm override and require the sole exception to be the
+   exact bundled path, version, package-lock metadata, and installed tree;
+2. download the official `brace-expansion@5.0.8` tarball over HTTPS and verify
+   its pinned npm SHA-512 integrity before bounded, path-safe extraction;
+3. replace only
+   `node_modules/aws-cdk-lib/node_modules/brace-expansion`, verify package
+   identity and API behavior, and seal the installed tree digest in a receipt;
+4. run npm audit and accept only one high finding with the exact GHSA, range,
+   immutable bundled path, and zero other high/critical findings, while binding
+   that report to the patch receipt and installed tree;
+5. retain the receipt, audit report, decision, and checksums for 90 days. PR
+   dependency review has the same single-GHSA exception and no severity-wide
+   suppression.
+
+This control must be removed, rather than broadened, when an exact reviewed
+`aws-cdk-lib` release bundles `brace-expansion >=5.0.8`. Retirement deletes the
+two compensation scripts and the Dependency Review exception, updates the lock,
+and requires the ordinary zero-high npm audit plus the full CDK/Guard/Trivy
+pipeline to pass. Dependabot's weekly infrastructure update remains the
+upstream-release monitor.
+
 The browser approval endpoint is:
 
 ```text

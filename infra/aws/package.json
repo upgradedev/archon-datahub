@@ -6,8 +6,10 @@
   "license": "Apache-2.0",
   "type": "commonjs",
   "engines": {
-    "node": ">=22.15.0"
+    "node": "^22.15.0",
+    "npm": "10.9.2"
   },
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "build": "tsc --noEmit",
     "test": "jest --runInBand",
@@ -15,7 +17,7 @@
     "synth": "cdk synth --quiet"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.190.0",
+    "aws-cdk-lib": "2.262.1",
     "constructs": "^10.4.2"
   },
   "devDependencies": {

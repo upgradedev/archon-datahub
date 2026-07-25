@@ -41,7 +41,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: "24.18.0"
+  NODE_VERSION: "22.23.1"
   CFN_GUARD_VERSION: "3.2.0"
   CFN_GUARD_ARCHIVE_SHA256: 9f8c4d9f15f7dd54a37ea70a5237ba00aba682fb1e6521a744d12259961dfc13
   AWS_PAGER: ""
@@ -805,9 +805,13 @@ jobs:
       - name: Validate CDK source without rebuilding release artifacts
         run: |
           set -euo pipefail
+          test "$(npm --version)" = "10.9.2"
           npm ci --prefix infra/aws --ignore-scripts
+          node scripts/verify-exact-npm-overrides.mjs infra/aws
+          bash scripts/patch-cdk-brace-expansion.sh infra/aws
           npm --prefix infra/aws run build
           npm --prefix infra/aws test
+          bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
 
       - name: Revalidate exact control plane before staging AWS trust
         env:
@@ -963,6 +967,7 @@ jobs:
             ${{ runner.temp }}/staging-deploy-assembly.manifest.sha256
             ${{ runner.temp }}/staging-cfn-guard-results.txt
             ${{ runner.temp }}/staging-trivy-iac.sarif
+            ${{ runner.temp }}/cdk-brace-expansion-compensation/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
@@ -4000,7 +4005,11 @@ jobs:
       - name: Install locked CDK dependencies
         run: |
           set -euo pipefail
+          test "$(npm --version)" = "10.9.2"
           npm ci --prefix infra/aws --ignore-scripts
+          node scripts/verify-exact-npm-overrides.mjs infra/aws
+          bash scripts/patch-cdk-brace-expansion.sh infra/aws
+          bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
 
       - name: Revalidate exact control plane before production AWS trust
         env:
@@ -4153,6 +4162,7 @@ jobs:
             ${{ runner.temp }}/production-deploy-assembly.manifest.sha256
             ${{ runner.temp }}/production-cfn-guard-results.txt
             ${{ runner.temp }}/production-trivy-iac.sarif
+            ${{ runner.temp }}/cdk-brace-expansion-compensation/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30

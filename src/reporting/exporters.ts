@@ -107,7 +107,8 @@ export function auditReportToSarif(
 function markdownText(value: unknown): string {
   return String(value)
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, " ")
-    .replace(/\b(?:javascript|vbscript|data):/giu, "[blocked-active-scheme] ")
+    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu, "")
+    .replace(/\b(?:javascript|vbscript|data):/giu, "blocked-active-scheme ")
     .replaceAll("\\", "\\\\")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
