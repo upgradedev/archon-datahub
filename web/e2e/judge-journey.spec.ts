@@ -16,7 +16,9 @@ test("completes the deterministic judge journey without acquiring mutation autho
       name: /Know when your catalog stops telling one truth/i,
     }),
   ).toBeVisible();
-  await expect(page.getByText("Fixture preview", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("status", { name: "Fixture preview" }),
+  ).toBeVisible();
   await expect(
     page.getByText(/Approval authentication is fail-closed/i),
   ).toBeVisible();
