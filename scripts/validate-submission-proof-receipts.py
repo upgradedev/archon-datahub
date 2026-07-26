@@ -16,7 +16,9 @@ import hashlib
 import ipaddress
 import json
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import parse_qs, urlsplit
@@ -3218,38 +3220,103 @@ def derive_live(
     ]
 
 
-def derive_standard(
+def standard_subject_names(
+    source_registry: dict[str, Any],
+) -> set[str]:
+    exact(
+        source_registry["mode"],
+        "standard-v1",
+        "standard source mode",
+    )
+    names = [source_registry["predicateFile"]]
+    for proof_id in sorted(source_registry["proofIds"]):
+        names.append(f"proofs/{proof_id}.json")
+        names.extend(
+            configured["name"]
+            for configured in configured_support_rows(
+                source_registry,
+                proof_id,
+            )
+        )
+    if (
+        len(names) != len(set(names))
+        or source_registry["subjectInventory"] in names
+    ):
+        fail("standard source registry contains colliding artifact paths")
+    return set(names)
+
+
+def validate_standard_source(
     source_dir: Path,
     source_registry: dict[str, Any],
     repository: str,
     release: str,
     run_id: int,
     run_attempt: int,
-    artifact_id: int,
-    artifact_name_value: str,
-    artifact_digest: str,
-    predicate_digest: str,
-    subject_set_digest: str,
-    verification_set_digest: str,
-    notice_path: Path | None,
-) -> list[dict[str, Any]]:
+    notice_path: Path,
+) -> dict[str, Any]:
+    """Validate one complete standard producer artifact before attestation."""
+
+    exact(source_registry["mode"], "standard-v1", "standard source mode")
+    exact(repository, REPOSITORY, "standard source repository")
+    release_sha(release)
+    positive_int(run_id, "standard source runId")
+    positive_int(run_attempt, "standard source runAttempt")
+    if (
+        not source_dir.is_dir()
+        or source_dir.is_symlink()
+        or not notice_path.is_file()
+        or notice_path.is_symlink()
+        or notice_path.name != "NOTICE.md"
+    ):
+        fail("standard source and NOTICE must be regular canonical paths")
+
+    inventory_name = source_registry["subjectInventory"]
+    expected_subject_names = standard_subject_names(source_registry)
+    expected_files = expected_subject_names | {inventory_name}
+    exact_retained_tree(source_dir, expected_files, "standard source")
     source_inventory = load_checksum_inventory(
-        source_dir / source_registry["subjectInventory"],
-        source_registry["subjectInventory"],
+        source_dir / inventory_name,
+        inventory_name,
         "standard subject inventory",
     )
     exact(
-        subject_set_digest,
-        checksum_subject_set_digest(source_inventory),
-        "standard subjectSetDigest",
+        set(source_inventory),
+        expected_subject_names,
+        "standard subject inventory names",
     )
+    actual_inventory_text = (
+        source_dir / inventory_name
+    ).read_text(encoding="utf-8")
+    exact(
+        actual_inventory_text,
+        checksum_inventory_text(source_inventory),
+        "standard subject inventory canonical order",
+    )
+    for name, expected_digest in source_inventory.items():
+        exact(
+            sha256_file(source_dir / name),
+            expected_digest,
+            f"standard subject inventory digest for {name}",
+        )
+
     envelopes: dict[
         str,
         tuple[dict[str, Any], Path, list[dict[str, str]]],
     ] = {}
-    for proof_id in source_registry["proofIds"]:
-        envelope, path = upstream_envelope(source_dir, proof_id, repository, release)
-        validate_facts(proof_id, envelope["facts"], release, notice_path=notice_path)
+    for proof_id in sorted(source_registry["proofIds"]):
+        envelope, path = upstream_envelope(
+            source_dir,
+            proof_id,
+            repository,
+            release,
+        )
+        validate_facts(
+            proof_id,
+            envelope["facts"],
+            release,
+            notice_path=notice_path,
+        )
         support_subjects = resolved_support_subjects(
             source_dir,
             source_registry,
@@ -3310,7 +3377,53 @@ def derive_standard(
     ]
     exact(predicate["proofs"], expected_proofs, "upstream predicate.proofs")
     exact(predicate["result"], "verified", "upstream predicate.result")
-    exact(predicate_digest, sha256_file(predicate_path), "upstream predicate digest")
+
+    return {
+        "envelopes": envelopes,
+        "predicate": predicate,
+        "predicateDigest": sha256_file(predicate_path),
+        "subjectSetDigest": checksum_subject_set_digest(source_inventory),
+        "subjectCount": len(source_inventory),
+    }
+
+
+def derive_standard(
+    source_dir: Path,
+    source_registry: dict[str, Any],
+    repository: str,
+    release: str,
+    run_id: int,
+    run_attempt: int,
+    artifact_id: int,
+    artifact_name_value: str,
+    artifact_digest: str,
+    predicate_digest: str,
+    subject_set_digest: str,
+    verification_set_digest: str,
+    notice_path: Path | None,
+) -> list[dict[str, Any]]:
+    if notice_path is None:
+        fail("standard sources require the exact NOTICE path")
+    validated = validate_standard_source(
+        source_dir,
+        source_registry,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    )
+    exact(
+        subject_set_digest,
+        validated["subjectSetDigest"],
+        "standard subjectSetDigest",
+    )
+    exact(
+        predicate_digest,
+        validated["predicateDigest"],
+        "upstream predicate digest",
+    )
+    envelopes = validated["envelopes"]
 
     receipts = []
     for proof_id, (envelope, path, support_subjects) in sorted(envelopes.items()):
@@ -3490,13 +3603,19 @@ def load_checksum_inventory(
     return subjects
 
 
+def checksum_inventory_text(subjects: dict[str, str]) -> str:
+    rows: list[str] = []
+    for name, digest in sorted(subjects.items()):
+        safe_relative_name(name, "checksum inventory subject name")
+        sha256_digest(digest, f"checksum inventory digest for {name}")
+        rows.append(f"{digest.removeprefix('sha256:')}  {name}\n")
+    if not 1 <= len(rows) <= 512:
+        fail("checksum inventory must contain 1..512 subjects")
+    return "".join(rows)
+
+
 def checksum_subject_set_digest(subjects: dict[str, str]) -> str:
-    return sha256_text(
-        "".join(
-            f"{digest.removeprefix('sha256:')}  {name}\n"
-            for name, digest in sorted(subjects.items())
-        )
-    )
+    return sha256_text(checksum_inventory_text(subjects))
 
 
 def attestation_subjects(subjects: dict[str, str]) -> list[dict[str, Any]]:
@@ -3543,6 +3662,422 @@ def retained_file_set_digest(root: Path, names: set[str]) -> str:
         for name in sorted(names)
     )
     return sha256_text(projection)
+
+
+def canonical_capture_timestamp(value: str | None = None) -> str:
+    if value is None:
+        value = (
+            dt.datetime.now(dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    observed = fresh(value, "standard capture timestamp", dt.timedelta(days=7))
+    exact(
+        value,
+        observed.replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "standard capture timestamp",
+    )
+    return value
+
+
+def load_standard_facts(
+    facts_dir: Path,
+    source_registry: dict[str, Any],
+    release: str,
+    notice_path: Path,
+) -> dict[str, dict[str, Any]]:
+    if not facts_dir.is_dir() or facts_dir.is_symlink():
+        fail("standard facts directory must be a regular directory")
+    expected_files = {
+        f"{proof_id}.json" for proof_id in source_registry["proofIds"]
+    }
+    exact_retained_tree(facts_dir, expected_files, "standard facts directory")
+    facts_by_id: dict[str, dict[str, Any]] = {}
+    for proof_id in sorted(source_registry["proofIds"]):
+        facts = record(
+            load_json(facts_dir / f"{proof_id}.json", f"{proof_id} facts"),
+            f"{proof_id} facts",
+        )
+        validate_facts(
+            proof_id,
+            facts,
+            release,
+            notice_path=notice_path,
+        )
+        facts_by_id[proof_id] = facts
+    return facts_by_id
+
+
+def standard_support_subject_value(
+    proof_id: str,
+    role: str,
+    facts: dict[str, Any],
+    repository: str,
+    release: str,
+    captured_at: str,
+) -> dict[str, Any]:
+    bindings = expected_support_bindings(proof_id, role, facts)
+    data = [
+        {
+            "schemaVersion": SUPPORT_RECORD_SCHEMA,
+            "recordType": role,
+            "observedAt": captured_at,
+            "evidence": bindings,
+        }
+    ]
+    capture_bytes = canonical_json_text(data).encode("utf-8")
+    return {
+        "schemaVersion": SUPPORT_SCHEMA,
+        "proofId": proof_id,
+        "role": role,
+        "repository": repository,
+        "releaseSha": release,
+        "factsDigest": canonical_json_digest(facts),
+        "capture": {
+            "schemaVersion": SUPPORT_CAPTURE_SCHEMA,
+            "capturedAt": captured_at,
+            "digest": sha256_bytes(capture_bytes),
+            "sizeBytes": len(capture_bytes),
+            "recordCount": 1,
+            "data": data,
+        },
+        "sanitized": True,
+        "bindings": bindings,
+    }
+
+
+def assemble_standard_source(
+    output_dir: Path,
+    facts_dir: Path,
+    source_registry: dict[str, Any],
+    repository: str,
+    release: str,
+    run_id: int,
+    run_attempt: int,
+    notice_path: Path,
+    *,
+    captured_at: str | None = None,
+) -> dict[str, Any]:
+    exact(source_registry["mode"], "standard-v1", "standard source mode")
+    exact(repository, REPOSITORY, "standard source repository")
+    release_sha(release)
+    positive_int(run_id, "standard source runId")
+    positive_int(run_attempt, "standard source runAttempt")
+    if (
+        not notice_path.is_file()
+        or notice_path.is_symlink()
+        or notice_path.name != "NOTICE.md"
+    ):
+        fail("standard source NOTICE must be a regular canonical path")
+    if (
+        not output_dir.is_dir()
+        or output_dir.is_symlink()
+        or any(output_dir.iterdir())
+    ):
+        fail("standard output directory must be a new empty regular directory")
+    captured_at = canonical_capture_timestamp(captured_at)
+    facts_by_id = load_standard_facts(
+        facts_dir,
+        source_registry,
+        release,
+        notice_path,
+    )
+
+    envelopes: dict[
+        str,
+        tuple[dict[str, Any], Path, list[dict[str, str]]],
+    ] = {}
+    for proof_id in sorted(source_registry["proofIds"]):
+        facts = facts_by_id[proof_id]
+        support_subjects: list[dict[str, str]] = []
+        for configured in configured_support_rows(source_registry, proof_id):
+            role = configured["role"]
+            name = configured["name"]
+            support_path = output_dir / name
+            write_json(
+                support_path,
+                standard_support_subject_value(
+                    proof_id,
+                    role,
+                    facts,
+                    repository,
+                    release,
+                    captured_at,
+                ),
+            )
+            support_subjects.append(
+                {
+                    "role": role,
+                    "name": name,
+                    "digest": sha256_file(support_path),
+                }
+            )
+
+        envelope_path = output_dir / "proofs" / f"{proof_id}.json"
+        envelope = {
+            "schemaVersion": UPSTREAM_SCHEMA,
+            "id": proof_id,
+            "repository": repository,
+            "releaseSha": release,
+            "facts": facts,
+            "supportSubjects": support_subjects,
+        }
+        write_json(envelope_path, envelope)
+        envelopes[proof_id] = (
+            envelope,
+            envelope_path,
+            support_subjects,
+        )
+
+    predicate = {
+        "schemaVersion": UPSTREAM_PREDICATE_SCHEMA,
+        "repository": repository,
+        "releaseSha": release,
+        "source": {
+            "workflowPath": source_registry["workflowPath"],
+            "runId": run_id,
+            "runAttempt": run_attempt,
+        },
+        "proofs": [
+            {
+                "id": proof_id,
+                "subjects": [
+                    {
+                        "role": "proof-envelope",
+                        "name": f"proofs/{proof_id}.json",
+                        "digest": sha256_file(envelope_path),
+                    },
+                    *support_subjects,
+                ],
+            }
+            for proof_id, (
+                _,
+                envelope_path,
+                support_subjects,
+            ) in sorted(envelopes.items())
+        ],
+        "result": "verified",
+    }
+    write_json(output_dir / source_registry["predicateFile"], predicate)
+
+    subject_names = standard_subject_names(source_registry)
+    exact_retained_tree(
+        output_dir,
+        subject_names,
+        "assembled standard subjects",
+    )
+    inventory = {
+        name: sha256_file(output_dir / name)
+        for name in subject_names
+    }
+    inventory_path = output_dir / source_registry["subjectInventory"]
+    if inventory_path.exists() or inventory_path.is_symlink():
+        fail("refusing to overwrite standard subject inventory")
+    inventory_path.write_bytes(
+        checksum_inventory_text(inventory).encode("utf-8")
+    )
+    return validate_standard_source(
+        output_dir,
+        source_registry,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    )
+
+
+def standard_source_projection(
+    source_key: str,
+    source_registry: dict[str, Any],
+    repository: str,
+    release: str,
+    run_attempt: int,
+    validated: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": "archon.submission-standard-source-validation/v1",
+        "repository": repository,
+        "releaseSha": release,
+        "sourceKey": source_key,
+        "workflowPath": source_registry["workflowPath"],
+        "artifactName": artifact_name(
+            source_registry,
+            release,
+            run_attempt,
+        ),
+        "predicateType": source_registry["predicateType"],
+        "predicateDigest": validated["predicateDigest"],
+        "subjectSetDigest": validated["subjectSetDigest"],
+        "subjectCount": validated["subjectCount"],
+        "proofIds": sorted(source_registry["proofIds"]),
+        "result": "verified",
+    }
+
+
+def resolve_regular_path(
+    path: Path,
+    label: str,
+    *,
+    directory: bool,
+) -> Path:
+    if path.is_symlink():
+        fail(f"{label} must not be a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        fail(f"{label} cannot be resolved: {error}")
+    if (
+        (directory and not resolved.is_dir())
+        or (not directory and not resolved.is_file())
+        or resolved.is_symlink()
+    ):
+        fail(f"{label} must be a regular {'directory' if directory else 'file'}")
+    return resolved
+
+
+def standard_command_context(
+    args: argparse.Namespace,
+) -> tuple[
+    dict[str, Any],
+    str,
+    str,
+    int,
+    int,
+    Path,
+]:
+    registry, sources = load_registry(args.registry)
+    source_key = nonempty(args.source_key, "sourceKey", 64)
+    if source_key not in sources:
+        fail(f"source key {source_key!r} is not registered")
+    source = sources[source_key]
+    exact(source["mode"], "standard-v1", "standard source mode")
+    repository = nonempty(args.repository, "repository", 180)
+    exact(repository, registry["repository"], "repository")
+    release = release_sha(args.release_sha)
+    run_id = positive_int(args.run_id, "runId")
+    run_attempt = positive_int(args.run_attempt, "runAttempt")
+    notice_path = resolve_regular_path(
+        args.notice,
+        "NOTICE",
+        directory=False,
+    )
+    exact(notice_path.name, "NOTICE.md", "NOTICE filename")
+    return (
+        source,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    )
+
+
+def print_standard_source_projection(value: dict[str, Any]) -> None:
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+
+def assemble_standard_command(args: argparse.Namespace) -> None:
+    (
+        source,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    ) = standard_command_context(args)
+    facts_dir = resolve_regular_path(
+        args.facts_dir,
+        "facts directory",
+        directory=True,
+    )
+    output_name = nonempty(args.output_dir.name, "output directory name", 180)
+    output_parent = resolve_regular_path(
+        args.output_dir.parent,
+        "output parent",
+        directory=True,
+    )
+    output_dir = output_parent / output_name
+    if output_dir.exists() or output_dir.is_symlink():
+        fail("output directory must not already exist")
+
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_name}.assembling-",
+            dir=output_parent,
+        )
+    )
+    published = False
+    try:
+        validated = assemble_standard_source(
+            staging_dir,
+            facts_dir,
+            source,
+            repository,
+            release,
+            run_id,
+            run_attempt,
+            notice_path,
+        )
+        if output_dir.exists() or output_dir.is_symlink():
+            fail("output directory appeared during assembly")
+        try:
+            staging_dir.rename(output_dir)
+        except OSError as error:
+            fail(f"standard source could not be published atomically: {error}")
+        published = True
+    finally:
+        if not published and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    print_standard_source_projection(
+        standard_source_projection(
+            args.source_key,
+            source,
+            repository,
+            release,
+            run_attempt,
+            validated,
+        )
+    )
+
+
+def validate_standard_source_command(args: argparse.Namespace) -> None:
+    (
+        source,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    ) = standard_command_context(args)
+    source_dir = resolve_regular_path(
+        args.source_dir,
+        "standard source directory",
+        directory=True,
+    )
+    validated = validate_standard_source(
+        source_dir,
+        source,
+        repository,
+        release,
+        run_id,
+        run_attempt,
+        notice_path,
+    )
+    print_standard_source_projection(
+        standard_source_projection(
+            args.source_key,
+            source,
+            repository,
+            release,
+            run_attempt,
+            validated,
+        )
+    )
 
 
 def validate_gh_verification(
@@ -4051,6 +4586,29 @@ def parser() -> argparse.ArgumentParser:
     validate_registry = commands.add_parser("validate-registry")
     validate_registry.add_argument("--registry", type=Path, required=True)
     validate_registry.set_defaults(handler=validate_registry_command)
+
+    assemble_standard = commands.add_parser("assemble-standard")
+    assemble_standard.add_argument("--registry", type=Path, required=True)
+    assemble_standard.add_argument("--source-key", required=True)
+    assemble_standard.add_argument("--facts-dir", type=Path, required=True)
+    assemble_standard.add_argument("--output-dir", type=Path, required=True)
+    assemble_standard.add_argument("--repository", required=True)
+    assemble_standard.add_argument("--release-sha", required=True)
+    assemble_standard.add_argument("--run-id", type=int, required=True)
+    assemble_standard.add_argument("--run-attempt", type=int, required=True)
+    assemble_standard.add_argument("--notice", type=Path, required=True)
+    assemble_standard.set_defaults(handler=assemble_standard_command)
+
+    validate_standard = commands.add_parser("validate-standard-source")
+    validate_standard.add_argument("--registry", type=Path, required=True)
+    validate_standard.add_argument("--source-key", required=True)
+    validate_standard.add_argument("--source-dir", type=Path, required=True)
+    validate_standard.add_argument("--repository", required=True)
+    validate_standard.add_argument("--release-sha", required=True)
+    validate_standard.add_argument("--run-id", type=int, required=True)
+    validate_standard.add_argument("--run-attempt", type=int, required=True)
+    validate_standard.add_argument("--notice", type=Path, required=True)
+    validate_standard.set_defaults(handler=validate_standard_source_command)
 
     derive = commands.add_parser("derive")
     derive.add_argument("--registry", type=Path, required=True)

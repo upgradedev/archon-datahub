@@ -9,7 +9,7 @@ import importlib.util
 import json
 import tempfile
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1106,6 +1106,490 @@ def materialize_standard_source(
         {receipt["id"]: receipt for receipt in receipts},
         predicate,
     )
+
+
+STANDARD_SOURCE_SUBJECT_COUNTS = {
+    "project-access": 15,
+    "content-review": 16,
+    "operations": 9,
+    "judge-pack": 4,
+    "bonus-oss": 4,
+    "bonus-feedback": 3,
+    "devpost-confirmation": 6,
+}
+
+
+def write_standard_facts_directory(
+    root: Path,
+    source_key: str,
+    *,
+    facts_override: dict[str, dict] | None = None,
+) -> Path:
+    facts_dir = root / f"{source_key}-facts"
+    facts_dir.mkdir()
+    selected = facts_override or {
+        proof_id: facts_by_id[proof_id]
+        for proof_id in sources[source_key]["proofIds"]
+    }
+    for proof_id, facts in selected.items():
+        validator.write_json(
+            facts_dir / f"{proof_id}.json",
+            copy.deepcopy(facts),
+        )
+    return facts_dir
+
+
+def assemble_standard_fixture(
+    root: Path,
+    source_key: str,
+    name: str,
+    *,
+    captured_at: str | None = None,
+) -> tuple[Path, dict]:
+    facts_dir = write_standard_facts_directory(
+        root,
+        source_key,
+    )
+    output_dir = root / name
+    output_dir.mkdir()
+    validated = validator.assemble_standard_source(
+        output_dir,
+        facts_dir,
+        sources[source_key],
+        validator.REPOSITORY,
+        RELEASE,
+        991,
+        1,
+        NOTICE_PATH,
+        captured_at=captured_at or iso(),
+    )
+    return output_dir, validated
+
+
+def reseal_standard_inventory(root: Path, source_key: str) -> None:
+    source = sources[source_key]
+    inventory = {
+        name: validator.sha256_file(root / name)
+        for name in validator.standard_subject_names(source)
+    }
+    (root / source["subjectInventory"]).write_bytes(
+        validator.checksum_inventory_text(inventory).encode("utf-8")
+    )
+
+
+with tempfile.TemporaryDirectory(
+    prefix="submission-standard-assembler-"
+) as raw:
+    temporary = Path(raw)
+    for index, (
+        source_key,
+        expected_subject_count,
+    ) in enumerate(STANDARD_SOURCE_SUBJECT_COUNTS.items()):
+        source_root = temporary / f"source-{index}"
+        source_root.mkdir()
+        output_dir, validated = assemble_standard_fixture(
+            source_root,
+            source_key,
+            "assembled",
+        )
+        source = sources[source_key]
+        expected_subjects = validator.standard_subject_names(source)
+        expected_files = expected_subjects | {source["subjectInventory"]}
+        assert len(expected_subjects) == expected_subject_count
+        validator.exact_retained_tree(
+            output_dir,
+            expected_files,
+            f"{source_key} assembled source",
+        )
+        inventory = validator.load_checksum_inventory(
+            output_dir / source["subjectInventory"],
+            source["subjectInventory"],
+            f"{source_key} assembled inventory",
+        )
+        assert set(inventory) == expected_subjects
+        assert (
+            output_dir / source["subjectInventory"]
+        ).read_bytes() == validator.checksum_inventory_text(
+            inventory
+        ).encode("utf-8")
+        assert validated["subjectCount"] == expected_subject_count
+        assert (
+            validated["subjectSetDigest"]
+            == validator.checksum_subject_set_digest(inventory)
+        )
+        assert (
+            validated["predicateDigest"]
+            == validator.sha256_file(
+                output_dir / source["predicateFile"]
+            )
+        )
+        projection = validator.standard_source_projection(
+            source_key,
+            source,
+            validator.REPOSITORY,
+            RELEASE,
+            1,
+            validated,
+        )
+        assert projection == {
+            "schemaVersion": (
+                "archon.submission-standard-source-validation/v1"
+            ),
+            "repository": validator.REPOSITORY,
+            "releaseSha": RELEASE,
+            "sourceKey": source_key,
+            "workflowPath": source["workflowPath"],
+            "artifactName": validator.artifact_name(
+                source,
+                RELEASE,
+                1,
+            ),
+            "predicateType": source["predicateType"],
+            "predicateDigest": validated["predicateDigest"],
+            "subjectSetDigest": validated["subjectSetDigest"],
+            "subjectCount": expected_subject_count,
+            "proofIds": sorted(source["proofIds"]),
+            "result": "verified",
+        }
+        receipts = validator.derive_standard(
+            output_dir,
+            source,
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            992,
+            validator.artifact_name(source, RELEASE, 1),
+            DIGEST,
+            validated["predicateDigest"],
+            validated["subjectSetDigest"],
+            DIGEST,
+            NOTICE_PATH,
+        )
+        assert {receipt["id"] for receipt in receipts} == set(
+            source["proofIds"]
+        )
+
+
+with tempfile.TemporaryDirectory(
+    prefix="submission-standard-determinism-"
+) as raw:
+    temporary = Path(raw)
+    first_root = temporary / "first"
+    second_root = temporary / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    deterministic_timestamp = iso()
+    first, _ = assemble_standard_fixture(
+        first_root,
+        "bonus-feedback",
+        "assembled",
+        captured_at=deterministic_timestamp,
+    )
+    second, _ = assemble_standard_fixture(
+        second_root,
+        "bonus-feedback",
+        "assembled",
+        captured_at=deterministic_timestamp,
+    )
+    deterministic_files = (
+        validator.standard_subject_names(sources["bonus-feedback"])
+        | {sources["bonus-feedback"]["subjectInventory"]}
+    )
+    assert {
+        name: (first / name).read_bytes()
+        for name in deterministic_files
+    } == {
+        name: (second / name).read_bytes()
+        for name in deterministic_files
+    }
+
+
+with tempfile.TemporaryDirectory(
+    prefix="submission-standard-tamper-"
+) as raw:
+    temporary = Path(raw)
+
+    support_root = temporary / "support"
+    support_root.mkdir()
+    support_output, _ = assemble_standard_fixture(
+        support_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    support_path = (
+        support_output
+        / "support"
+        / "BONUS-FEEDBACK"
+        / "feedback-confirmation.json"
+    )
+    support = validator.load_json(support_path, "assembled support")
+    support["bindings"]["oneEntryPerEntrant"] = False
+    support_path.write_text(
+        validator.canonical_json_text(support),
+        encoding="utf-8",
+        newline="\n",
+    )
+    reseal_standard_inventory(support_output, "bonus-feedback")
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            support_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted a resealed false support binding",
+    )
+
+    predicate_root = temporary / "predicate"
+    predicate_root.mkdir()
+    predicate_output, _ = assemble_standard_fixture(
+        predicate_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    predicate_path = predicate_output / "attestation-predicate.json"
+    predicate = validator.load_json(
+        predicate_path,
+        "assembled predicate",
+    )
+    predicate["source"]["runAttempt"] = 2
+    predicate_path.write_text(
+        validator.canonical_json_text(predicate),
+        encoding="utf-8",
+        newline="\n",
+    )
+    reseal_standard_inventory(predicate_output, "bonus-feedback")
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            predicate_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted a resealed wrong predicate run attempt",
+    )
+
+    inventory_root = temporary / "inventory"
+    inventory_root.mkdir()
+    inventory_output, _ = assemble_standard_fixture(
+        inventory_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    inventory_path = inventory_output / "SHA256SUMS"
+    rows = inventory_path.read_text(encoding="utf-8").splitlines()
+    inventory_path.write_text(
+        "\n".join(reversed(rows)) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            inventory_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted a noncanonical inventory order",
+    )
+
+    extra_root = temporary / "extra"
+    extra_root.mkdir()
+    extra_output, _ = assemble_standard_fixture(
+        extra_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    (extra_output / "unexpected.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            extra_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source ignored an extra artifact file",
+    )
+
+
+with tempfile.TemporaryDirectory(
+    prefix="submission-standard-failure-"
+) as raw:
+    temporary = Path(raw)
+    invalid_facts = copy.deepcopy(facts_by_id["BONUS-FEEDBACK"])
+    invalid_facts["oneEntryPerEntrant"] = False
+    invalid_root = temporary / "invalid"
+    invalid_root.mkdir()
+    facts_dir = write_standard_facts_directory(
+        invalid_root,
+        "bonus-feedback",
+        facts_override={"BONUS-FEEDBACK": invalid_facts},
+    )
+    output_dir = temporary / "must-not-appear"
+    expect_rejected(
+        lambda: validator.assemble_standard_command(
+            SimpleNamespace(
+                registry=REGISTRY_PATH,
+                source_key="bonus-feedback",
+                facts_dir=facts_dir,
+                output_dir=output_dir,
+                repository=validator.REPOSITORY,
+                release_sha=RELEASE,
+                run_id=991,
+                run_attempt=1,
+                notice=NOTICE_PATH,
+            )
+        ),
+        "assembler accepted invalid facts",
+    )
+    assert not output_dir.exists()
+    assert not list(
+        temporary.glob(".must-not-appear.assembling-*")
+    ), "failed assembly leaked a staging directory"
+
+    extra_facts_root = temporary / "extra-facts"
+    extra_facts_root.mkdir()
+    extra_facts_dir = write_standard_facts_directory(
+        extra_facts_root,
+        "bonus-feedback",
+    )
+    validator.write_json(
+        extra_facts_dir / "EXTRA.json",
+        {"unregistered": True},
+    )
+    empty_output = temporary / "empty-output"
+    empty_output.mkdir()
+    expect_rejected(
+        lambda: validator.assemble_standard_source(
+            empty_output,
+            extra_facts_dir,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+            captured_at=iso(),
+        ),
+        "assembler accepted an extra facts file",
+    )
+    assert not list(empty_output.iterdir())
+
+    symlink_root = temporary / "symlink-facts"
+    symlink_root.mkdir()
+    symlink_target = symlink_root / "outside.json"
+    validator.write_json(
+        symlink_target,
+        facts_by_id["BONUS-FEEDBACK"],
+    )
+    symlink_facts = symlink_root / "facts"
+    symlink_facts.mkdir()
+    (
+        symlink_facts / "BONUS-FEEDBACK.json"
+    ).symlink_to(symlink_target)
+    symlink_output = temporary / "symlink-output"
+    symlink_output.mkdir()
+    expect_rejected(
+        lambda: validator.assemble_standard_source(
+            symlink_output,
+            symlink_facts,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+            captured_at=iso(),
+        ),
+        "assembler accepted a symlinked facts file",
+    )
+    assert not list(symlink_output.iterdir())
+
+    native_output = temporary / "native-output"
+    native_output.mkdir()
+    expect_rejected(
+        lambda: validator.assemble_standard_source(
+            native_output,
+            extra_facts_dir,
+            sources["live-datahub"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+            captured_at=iso(),
+        ),
+        "standard assembler accepted a native-live source",
+    )
+    assert not list(native_output.iterdir())
+
+
+assemble_args = validator.parser().parse_args(
+    [
+        "assemble-standard",
+        "--registry",
+        str(REGISTRY_PATH),
+        "--source-key",
+        "bonus-feedback",
+        "--facts-dir",
+        "facts",
+        "--output-dir",
+        "output",
+        "--repository",
+        validator.REPOSITORY,
+        "--release-sha",
+        RELEASE,
+        "--run-id",
+        "991",
+        "--run-attempt",
+        "1",
+        "--notice",
+        str(NOTICE_PATH),
+    ]
+)
+assert assemble_args.handler is validator.assemble_standard_command
+validate_standard_args = validator.parser().parse_args(
+    [
+        "validate-standard-source",
+        "--registry",
+        str(REGISTRY_PATH),
+        "--source-key",
+        "bonus-feedback",
+        "--source-dir",
+        "source",
+        "--repository",
+        validator.REPOSITORY,
+        "--release-sha",
+        RELEASE,
+        "--run-id",
+        "991",
+        "--run-attempt",
+        "1",
+        "--notice",
+        str(NOTICE_PATH),
+    ]
+)
+assert (
+    validate_standard_args.handler
+    is validator.validate_standard_source_command
+)
 
 
 with tempfile.TemporaryDirectory(prefix="submission-evidence-contracts-") as raw:
