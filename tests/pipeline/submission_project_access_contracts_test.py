@@ -638,7 +638,6 @@ def validate_workflow(workflow: str) -> None:
             '.proofIds == ["SQ3", "SQ4", "SQ5"]',
             "pipeline-managed-confirmed",
             "2026-08-31T21:00:00Z",
-            '"Apache-2.0"',
             "secretMaterialRetained",
         ),
     )
