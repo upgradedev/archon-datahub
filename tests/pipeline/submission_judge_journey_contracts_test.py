@@ -949,6 +949,7 @@ tamper_cases = {
     "duplicate latest artifacts accepted": replace_in_step(
         workflow_text,
         "attest",
+        "Resolve one immutable producer artifact",
         "                  if length == 1 then .[0]\n",
         "                  if length >= 1 then .[0]\n",
     ),
