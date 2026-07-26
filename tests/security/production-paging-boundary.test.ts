@@ -847,7 +847,10 @@ function assertEvidenceBoundary(source: string): void {
     ),
     2
   );
-  assert.match(attest, /\.workflow_run\.id == \$runId/u);
+  assert.match(
+    attest,
+    /\.workflow_run\.id == \(\$runId \| tonumber\)/u
+  );
   assert.match(attest, /\.workflow_run\.head_sha == \$sha/u);
   assert.match(attest, /\.expired == false/u);
   assert.match(attest, /\.digest == \$digest/u);

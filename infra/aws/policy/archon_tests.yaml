@@ -693,8 +693,8 @@
                 Principal:
                   Service: cloudwatch.amazonaws.com
                 Action:
-                  - kms:GenerateDataKey*
                   - kms:Decrypt
+                  - kms:GenerateDataKey*
                 Resource: "*"
                 Condition:
                   StringEquals:
@@ -766,13 +766,7 @@
                 Resource:
                   Fn::Join:
                     - ""
-                    - - "arn:"
-                      - Ref: AWS::Partition
-                      - ":logs:"
-                      - Ref: AWS::Region
-                      - ":"
-                      - Ref: AWS::AccountId
-                      - ":log-group:sns/"
+                    - - "arn:aws:logs:eu-west-1:111111111111:log-group:sns/"
                       - Ref: AWS::Region
                       - "/"
                       - Ref: AWS::AccountId
@@ -786,13 +780,7 @@
                 Resource:
                   Fn::Join:
                     - ""
-                    - - "arn:"
-                      - Ref: AWS::Partition
-                      - ":logs:"
-                      - Ref: AWS::Region
-                      - ":"
-                      - Ref: AWS::AccountId
-                      - ":log-group:sns/"
+                    - - "arn:aws:logs:eu-west-1:111111111111:log-group:sns/"
                       - Ref: AWS::Region
                       - "/"
                       - Ref: AWS::AccountId
@@ -801,11 +789,11 @@
                 Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
                 Effect: Allow
                 Action:
-                  - kms:Encrypt
-                  - kms:ReEncrypt*
                   - kms:Decrypt
-                  - kms:GenerateDataKey*
                   - kms:Describe*
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
                 Resource:
                   Fn::GetAtt:
                     - LogsKey
@@ -1016,13 +1004,7 @@
                 Resource:
                   Fn::Join:
                     - ""
-                    - - "arn:"
-                      - Ref: AWS::Partition
-                      - ":logs:"
-                      - Ref: AWS::Region
-                      - ":"
-                      - Ref: AWS::AccountId
-                      - ":log-group:sns/"
+                    - - "arn:aws:logs:eu-west-1:111111111111:log-group:sns/"
                       - Ref: AWS::Region
                       - "/"
                       - Ref: AWS::AccountId
@@ -1059,13 +1041,7 @@
                 Resource:
                   Fn::Join:
                     - ""
-                    - - "arn:"
-                      - Ref: AWS::Partition
-                      - ":logs:"
-                      - Ref: AWS::Region
-                      - ":"
-                      - Ref: AWS::AccountId
-                      - ":log-group:sns/"
+                    - - "arn:aws:logs:eu-west-1:111111111111:log-group:sns/"
                       - Ref: AWS::Region
                       - "/"
                       - Ref: AWS::AccountId
@@ -1128,11 +1104,11 @@
               - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
                 Effect: Allow
                 Action:
-                  - kms:Encrypt
-                  - kms:ReEncrypt*
                   - kms:Decrypt
-                  - kms:GenerateDataKey*
                   - kms:Describe*
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
                 Resource:
                   Fn::GetAtt:
                     - OtherLogsKey
@@ -1203,11 +1179,11 @@
               - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
                 Effect: Allow
                 Action:
-                  - kms:Encrypt
-                  - kms:ReEncrypt*
                   - kms:Decrypt
-                  - kms:GenerateDataKey*
                   - kms:Describe*
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:ReEncrypt*
                 Resource:
                   Fn::GetAtt:
                     - LogsKey
@@ -1287,8 +1263,8 @@
                 Principal:
                   Service: cloudwatch.amazonaws.com
                 Action:
-                  - kms:GenerateDataKey*
                   - kms:Decrypt
+                  - kms:GenerateDataKey*
                 Resource: "*"
                 Condition:
                   StringEquals:
@@ -1341,8 +1317,8 @@
                 Principal:
                   Service: cloudwatch.amazonaws.com
                 Action:
-                  - kms:GenerateDataKey*
                   - kms:Decrypt
+                  - kms:GenerateDataKey*
                 Resource: "*"
                 Condition:
                   StringEquals:
