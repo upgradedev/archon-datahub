@@ -1000,11 +1000,15 @@ run_apply() {
   local operation="$1"
   local password="${2:-}"
   local username="${3:-${email}}"
+  local caller_index=0
   local client_config_stage=""
   local manager_reason=""
   local reason=""
   local status=0
-  contract_case="run-apply-${operation}-caller-${BASH_LINENO[0]:-unknown}"
+  if [[ "${FUNCNAME[1]:-}" == "expect_failure" ]]; then
+    caller_index=1
+  fi
+  contract_case="run-apply-${operation}-caller-${BASH_LINENO[caller_index]:-unknown}"
 
   if env \
     -u AWS_DEFAULT_PROFILE \
