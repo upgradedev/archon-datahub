@@ -136,8 +136,9 @@ Important trust boundaries:
 
 More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
 [temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
-pack](docs/JUDGE_EVIDENCE.md), [production availability](docs/AVAILABILITY.md), and
-[protected judge access](docs/JUDGE_ACCESS.md), plus [evidence-based
+pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
+[production availability](docs/AVAILABILITY.md), and [protected judge
+access](docs/JUDGE_ACCESS.md), plus [evidence-based
 readiness](docs/READINESS.md).
 
 ## Run locally without external services

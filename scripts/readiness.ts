@@ -11,9 +11,12 @@
 //     never make the entry submission-ready.
 //
 // Final submission readiness is fail-closed. Public deployment/access, public Apache-2.0
-// source detection, English submission material/video, retained remote samples, judging-
-// period availability, completed Devpost fields/URLs, final cross-medium disclosure review,
-// and live DataHub proof remain explicit blockers until externally verified.
+// source detection, English submission material/video, an active judging-period monitor,
+// final cross-medium disclosure review, and live DataHub proof remain explicit blockers
+// until a protected workflow supplies an exactly bound evidence manifest and seals the
+// unsigned projection with the required GitHub attestation. No local/API caller can emit
+// a trusted ready claim. Recommended sample outputs, post-submit confirmation, and bonus
+// evidence are reported separately.
 //
 //   npm run readiness        # prints the report + writes readiness.json + sets exit code
 
@@ -100,9 +103,28 @@ export interface ReadinessBlocker {
   evidence: string;
 }
 
+export type ExternalProofRole =
+  | "eligibility"
+  | "operational-monitor"
+  | "recommended"
+  | "post-submit";
+
+export interface BonusCheck {
+  id: "BONUS-OSS" | "BONUS-FEEDBACK";
+  title: string;
+  status: CheckStatus;
+  evidence: string;
+}
+
 export interface ReadinessReport {
   generatedAt: string;
   projectionKind: "evidence-coverage-not-judge-score";
+  projectionTrust: {
+    status: "unsigned-projection";
+    readyClaimAllowed: false;
+    requiredSignerWorkflow: string;
+    requiredPredicateType: typeof READINESS_EVIDENCE_SEAL_PREDICATE_TYPE;
+  };
   officialCriteria: CriterionSummary[];
   judgingEvidencePercent: number;
   capabilityEvidence: {
@@ -112,10 +134,32 @@ export interface ReadinessReport {
     checks: CapabilityCheck[];
   };
   submission: {
-    status: "ready" | "blocked";
-    ready: boolean;
+    status: "evidence-complete-awaiting-seal" | "blocked";
+    /**
+     * Unsigned projections can never assert readiness. A consumer may treat
+     * evidenceCompleteForSealing as ready only after verifying the sealed artifact
+     * attestation described by projectionTrust.
+     */
+    ready: false;
+    readyToSubmit: false;
+    submitted: false;
+    evidenceCompleteForSealing: boolean;
+    postSubmitEvidenceComplete: boolean;
     internalBlockers: ReadinessBlocker[];
     externalBlockers: ReadinessBlocker[];
+    recommendedEvidenceOutstanding: ReadinessBlocker[];
+    postSubmitBlockers: ReadinessBlocker[];
+  };
+  bonus: {
+    allBonusesReady: boolean;
+    checks: BonusCheck[];
+    outstanding: ReadinessBlocker[];
+  };
+  externalEvidence: {
+    status: "not-provided" | "accepted" | "rejected";
+    acceptedProofIds: string[];
+    acceptedBonusIds: BonusCheck["id"][];
+    errors: string[];
   };
   checks: Check[];
   userGated: Array<{ id: string; title: string; evidence: string }>;
@@ -152,25 +196,140 @@ export const REQUIRED_CAPABILITY_AXIS_IDS = [
   "security",
 ] as const satisfies readonly CapabilityAxisId[];
 
-// These proofs must remain represented even after an individual check changes from
-// user-gated to pass. Omitting a check is a schema failure, never a way to become ready.
-export const REQUIRED_EXTERNAL_PROOFS = [
-  { id: "D4", criterion: "use-of-datahub" },
-  { id: "U3", criterion: "real-world-usefulness" },
-  { id: "SQ3", criterion: "submission-quality" },
-  { id: "SQ4", criterion: "submission-quality" },
-  { id: "SQ5", criterion: "submission-quality" },
-  { id: "SQ6", criterion: "submission-quality" },
-  { id: "SQ7", criterion: "submission-quality" },
-  { id: "SQ8", criterion: "submission-quality" },
-  { id: "SQ9", criterion: "submission-quality" },
-  { id: "SQ10", criterion: "submission-quality" },
-  { id: "SQ11", criterion: "submission-quality" },
-] as const satisfies ReadonlyArray<{ id: string; criterion: CriterionId }>;
+// Every external proof remains represented even after it passes. Role is part of the
+// fail-closed schema: recommended evidence and post-submit confirmation cannot silently
+// become eligibility blockers, while an operational monitor is a present-tense launch
+// requirement rather than an impossible promise that the future has already happened.
+export const EXTERNAL_PROOFS = [
+  { id: "D4", criterion: "use-of-datahub", role: "eligibility" },
+  { id: "U3", criterion: "real-world-usefulness", role: "eligibility" },
+  { id: "SQ3", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ4", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ5", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ6", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ7", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ8", criterion: "submission-quality", role: "eligibility" },
+  { id: "SQ9", criterion: "submission-quality", role: "recommended" },
+  {
+    id: "SQ10",
+    criterion: "submission-quality",
+    role: "operational-monitor",
+  },
+  { id: "SQ11", criterion: "submission-quality", role: "post-submit" },
+] as const satisfies ReadonlyArray<{
+  id: string;
+  criterion: CriterionId;
+  role: ExternalProofRole;
+}>;
+
+/** Eligibility proofs only; recommended and post-submit evidence are intentionally absent. */
+export const REQUIRED_EXTERNAL_PROOFS = EXTERNAL_PROOFS.filter(
+  (proof) =>
+    proof.role === "eligibility" || proof.role === "operational-monitor"
+);
 
 export const REQUIRED_EXTERNAL_PROOF_IDS = REQUIRED_EXTERNAL_PROOFS.map(
   (proof) => proof.id
 );
+
+export const READINESS_EVIDENCE_SCHEMA_VERSION =
+  "archon.submission-readiness-evidence/v1" as const;
+export const READINESS_EVIDENCE_PREDICATE_TYPE =
+  "https://archon.datahub.dev/attestations/submission-readiness/v1" as const;
+export const READINESS_EVIDENCE_SEAL_PREDICATE_TYPE =
+  "https://archon.datahub.dev/attestations/submission-readiness-seal/v1" as const;
+export const READINESS_EVIDENCE_WORKFLOW_PATH =
+  ".github/workflows/submission-readiness.yml" as const;
+export const READINESS_EVIDENCE_SOURCE_WORKFLOW_PATH =
+  ".github/workflows/submission-evidence.yml" as const;
+export const READINESS_EVIDENCE_ENVIRONMENT = "submission-readiness" as const;
+export const READINESS_REPOSITORY = "upgradedev/archon-datahub" as const;
+
+export interface ReadinessEvidenceBinding {
+  repository: typeof READINESS_REPOSITORY;
+  releaseSha: string;
+  source: {
+    workflowPath: typeof READINESS_EVIDENCE_SOURCE_WORKFLOW_PATH;
+    runId: number;
+    producerRunAttempt: number;
+    attestationRunAttempt: number;
+  };
+  artifact: {
+    name: string;
+    id: number;
+    digest: string;
+  };
+  predicate: {
+    type: typeof READINESS_EVIDENCE_PREDICATE_TYPE;
+    digest: string;
+  };
+  approval: {
+    environment: typeof READINESS_EVIDENCE_ENVIRONMENT;
+    workflowPath: typeof READINESS_EVIDENCE_WORKFLOW_PATH;
+    workflowRef: string;
+    runId: number;
+    runAttempt: number;
+    environmentId: number;
+    reviewerId: number;
+    receiptDigest: string;
+  };
+}
+
+export interface ReadinessEvidenceInput {
+  /**
+   * Untrusted JSON. It is accepted only when every field matches expectedBinding and the
+   * complete strict schema below. The caller must derive expectedBinding from independently
+   * verified GitHub API, artifact-attestation, and protected-environment facts.
+   */
+  manifest: unknown;
+  expectedBinding: unknown;
+}
+
+export interface ReadinessOptions {
+  /**
+   * Deliberately programmatic only: the ordinary CLI/CI path never reads a workstation
+   * JSON file or environment override. A protected verifier may call computeReadiness()
+   * with this value after independently verifying the source run and attestation.
+   */
+  externalEvidence?: ReadinessEvidenceInput;
+}
+
+interface ValidatedEvidenceProof {
+  id: string;
+  criterion: CriterionId;
+  status: "verified";
+  evidence: string;
+  receipt: {
+    name: string;
+    digest: string;
+  };
+}
+
+interface ValidatedEvidenceBonus {
+  id: BonusCheck["id"];
+  status: "verified";
+  evidence: string;
+  receipt: {
+    name: string;
+    digest: string;
+  };
+}
+
+interface ValidatedReadinessEvidence {
+  schemaVersion: typeof READINESS_EVIDENCE_SCHEMA_VERSION;
+  binding: ReadinessEvidenceBinding;
+  proofs: ValidatedEvidenceProof[];
+  bonuses: ValidatedEvidenceBonus[];
+}
+
+interface EvidenceProjection {
+  checks: Check[];
+  bonusChecks: BonusCheck[];
+  status: ReadinessReport["externalEvidence"]["status"];
+  acceptedProofIds: string[];
+  acceptedBonusIds: BonusCheck["id"][];
+  errors: string[];
+}
 
 const GATE_THRESHOLD = 95;
 
@@ -229,7 +388,693 @@ const MUTATION_TOOLS = [
   "add_structured_properties",
 ];
 
-export async function computeReadiness(): Promise<ReadinessReport> {
+const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const RELEASE_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const SAFE_ARTIFACT_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SAFE_RECEIPT_NAME_PATTERN =
+  /^receipts\/[A-Za-z0-9][A-Za-z0-9._/-]{0,180}\.json$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  path: string,
+  errors: string[]
+): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (
+    actual.length !== wanted.length ||
+    actual.some((key, index) => key !== wanted[index])
+  ) {
+    errors.push(
+      `${path} keys must be exactly [${wanted.join(", ")}]; got [${actual.join(", ")}]`
+    );
+    return false;
+  }
+  return true;
+}
+
+function positiveSafeInteger(
+  value: unknown,
+  path: string,
+  errors: string[]
+): value is number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value <= 0
+  ) {
+    errors.push(`${path} must be a positive safe integer`);
+    return false;
+  }
+  return true;
+}
+
+function exactString(
+  value: unknown,
+  expected: string,
+  path: string,
+  errors: string[]
+): boolean {
+  if (value !== expected) {
+    errors.push(`${path} must equal ${expected}`);
+    return false;
+  }
+  return true;
+}
+
+function digestString(
+  value: unknown,
+  path: string,
+  errors: string[]
+): value is string {
+  if (typeof value !== "string" || !SHA256_PATTERN.test(value)) {
+    errors.push(`${path} must be a lowercase sha256:<64-hex> digest`);
+    return false;
+  }
+  return true;
+}
+
+function parseEvidenceBinding(
+  value: unknown,
+  path: string,
+  errors: string[]
+): ReadinessEvidenceBinding | undefined {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object`);
+    return undefined;
+  }
+  if (
+    !hasExactKeys(
+      value,
+      [
+        "repository",
+        "releaseSha",
+        "source",
+        "artifact",
+        "predicate",
+        "approval",
+      ],
+      path,
+      errors
+    )
+  ) {
+    return undefined;
+  }
+
+  const source = value.source;
+  const artifact = value.artifact;
+  const predicate = value.predicate;
+  const approval = value.approval;
+  if (!isRecord(source)) errors.push(`${path}.source must be an object`);
+  if (!isRecord(artifact)) errors.push(`${path}.artifact must be an object`);
+  if (!isRecord(predicate)) errors.push(`${path}.predicate must be an object`);
+  if (!isRecord(approval)) errors.push(`${path}.approval must be an object`);
+  if (
+    !isRecord(source) ||
+    !isRecord(artifact) ||
+    !isRecord(predicate) ||
+    !isRecord(approval)
+  ) {
+    return undefined;
+  }
+
+  const nestedKeysValid =
+    hasExactKeys(
+      source,
+      [
+        "workflowPath",
+        "runId",
+        "producerRunAttempt",
+        "attestationRunAttempt",
+      ],
+      `${path}.source`,
+      errors
+    ) &&
+    hasExactKeys(
+      artifact,
+      ["name", "id", "digest"],
+      `${path}.artifact`,
+      errors
+    ) &&
+    hasExactKeys(
+      predicate,
+      ["type", "digest"],
+      `${path}.predicate`,
+      errors
+    ) &&
+    hasExactKeys(
+      approval,
+      [
+        "environment",
+        "workflowPath",
+        "workflowRef",
+        "runId",
+        "runAttempt",
+        "environmentId",
+        "reviewerId",
+        "receiptDigest",
+      ],
+      `${path}.approval`,
+      errors
+    );
+  if (!nestedKeysValid) return undefined;
+
+  const repositoryValid = exactString(
+    value.repository,
+    READINESS_REPOSITORY,
+    `${path}.repository`,
+    errors
+  );
+  const releaseShaValid =
+    typeof value.releaseSha === "string" &&
+    RELEASE_SHA_PATTERN.test(value.releaseSha);
+  if (!releaseShaValid) {
+    errors.push(`${path}.releaseSha must be a lowercase 40-hex commit`);
+  }
+  const sourceWorkflowValid = exactString(
+    source.workflowPath,
+    READINESS_EVIDENCE_SOURCE_WORKFLOW_PATH,
+    `${path}.source.workflowPath`,
+    errors
+  );
+  const sourceRunValid = positiveSafeInteger(
+    source.runId,
+    `${path}.source.runId`,
+    errors
+  );
+  const sourceProducerAttemptValid = positiveSafeInteger(
+    source.producerRunAttempt,
+    `${path}.source.producerRunAttempt`,
+    errors
+  );
+  const sourceAttestationAttemptValid = positiveSafeInteger(
+    source.attestationRunAttempt,
+    `${path}.source.attestationRunAttempt`,
+    errors
+  );
+  const sourceAttemptOrderValid =
+    sourceProducerAttemptValid &&
+    sourceAttestationAttemptValid &&
+    (source.producerRunAttempt as number) <=
+      (source.attestationRunAttempt as number);
+  if (!sourceAttemptOrderValid) {
+    errors.push(
+      `${path}.source.producerRunAttempt must not exceed attestationRunAttempt`
+    );
+  }
+  const expectedArtifactName =
+    typeof value.releaseSha === "string" && sourceProducerAttemptValid
+      ? `submission-evidence-${value.releaseSha}-${source.producerRunAttempt}`
+      : "";
+  const artifactNameValid =
+    typeof artifact.name === "string" &&
+    SAFE_ARTIFACT_NAME_PATTERN.test(artifact.name) &&
+    artifact.name === expectedArtifactName;
+  if (!artifactNameValid) {
+    errors.push(
+      `${path}.artifact.name must equal submission-evidence-<releaseSha>-<producerRunAttempt>`
+    );
+  }
+  const artifactIdValid = positiveSafeInteger(
+    artifact.id,
+    `${path}.artifact.id`,
+    errors
+  );
+  const artifactDigestValid = digestString(
+    artifact.digest,
+    `${path}.artifact.digest`,
+    errors
+  );
+  const predicateTypeValid = exactString(
+    predicate.type,
+    READINESS_EVIDENCE_PREDICATE_TYPE,
+    `${path}.predicate.type`,
+    errors
+  );
+  const predicateDigestValid = digestString(
+    predicate.digest,
+    `${path}.predicate.digest`,
+    errors
+  );
+  const approvalEnvironmentValid = exactString(
+    approval.environment,
+    READINESS_EVIDENCE_ENVIRONMENT,
+    `${path}.approval.environment`,
+    errors
+  );
+  const approvalWorkflowPathValid = exactString(
+    approval.workflowPath,
+    READINESS_EVIDENCE_WORKFLOW_PATH,
+    `${path}.approval.workflowPath`,
+    errors
+  );
+  const expectedWorkflowRef =
+    `${READINESS_REPOSITORY}/${READINESS_EVIDENCE_WORKFLOW_PATH}` +
+    "@refs/heads/master";
+  const approvalWorkflowRefValid = exactString(
+    approval.workflowRef,
+    expectedWorkflowRef,
+    `${path}.approval.workflowRef`,
+    errors
+  );
+  const approvalRunValid = positiveSafeInteger(
+    approval.runId,
+    `${path}.approval.runId`,
+    errors
+  );
+  const approvalAttemptValid = positiveSafeInteger(
+    approval.runAttempt,
+    `${path}.approval.runAttempt`,
+    errors
+  );
+  const approvalEnvironmentIdValid = positiveSafeInteger(
+    approval.environmentId,
+    `${path}.approval.environmentId`,
+    errors
+  );
+  const approvalReviewerIdValid = positiveSafeInteger(
+    approval.reviewerId,
+    `${path}.approval.reviewerId`,
+    errors
+  );
+  const approvalReceiptDigestValid = digestString(
+    approval.receiptDigest,
+    `${path}.approval.receiptDigest`,
+    errors
+  );
+
+  if (
+    !repositoryValid ||
+    !releaseShaValid ||
+    !sourceWorkflowValid ||
+    !sourceRunValid ||
+    !sourceProducerAttemptValid ||
+    !sourceAttestationAttemptValid ||
+    !sourceAttemptOrderValid ||
+    !artifactNameValid ||
+    !artifactIdValid ||
+    !artifactDigestValid ||
+    !predicateTypeValid ||
+    !predicateDigestValid ||
+    !approvalEnvironmentValid ||
+    !approvalWorkflowPathValid ||
+    !approvalWorkflowRefValid ||
+    !approvalRunValid ||
+    !approvalAttemptValid ||
+    !approvalEnvironmentIdValid ||
+    !approvalReviewerIdValid ||
+    !approvalReceiptDigestValid
+  ) {
+    return undefined;
+  }
+
+  return {
+    repository: READINESS_REPOSITORY,
+    releaseSha: value.releaseSha as string,
+    source: {
+      workflowPath: READINESS_EVIDENCE_SOURCE_WORKFLOW_PATH,
+      runId: source.runId as number,
+      producerRunAttempt: source.producerRunAttempt as number,
+      attestationRunAttempt: source.attestationRunAttempt as number,
+    },
+    artifact: {
+      name: artifact.name as string,
+      id: artifact.id as number,
+      digest: artifact.digest as string,
+    },
+    predicate: {
+      type: READINESS_EVIDENCE_PREDICATE_TYPE,
+      digest: predicate.digest as string,
+    },
+    approval: {
+      environment: READINESS_EVIDENCE_ENVIRONMENT,
+      workflowPath: READINESS_EVIDENCE_WORKFLOW_PATH,
+      workflowRef: approval.workflowRef as string,
+      runId: approval.runId as number,
+      runAttempt: approval.runAttempt as number,
+      environmentId: approval.environmentId as number,
+      reviewerId: approval.reviewerId as number,
+      receiptDigest: approval.receiptDigest as string,
+    },
+  };
+}
+
+function safeEvidenceText(
+  value: unknown,
+  path: string,
+  errors: string[]
+): value is string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > 2000 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    errors.push(
+      `${path} must be 1..2000 printable characters with no control characters`
+    );
+    return false;
+  }
+  return true;
+}
+
+function parseReceipt(
+  value: unknown,
+  path: string,
+  errors: string[]
+): { name: string; digest: string } | undefined {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object`);
+    return undefined;
+  }
+  if (!hasExactKeys(value, ["name", "digest"], path, errors)) {
+    return undefined;
+  }
+  const nameValid =
+    typeof value.name === "string" &&
+    SAFE_RECEIPT_NAME_PATTERN.test(value.name) &&
+    !value.name.includes("..") &&
+    !value.name.includes("//") &&
+    !/(^|\/)\.(\/|$)/.test(value.name) &&
+    !value.name.startsWith("/");
+  if (!nameValid) {
+    errors.push(
+      `${path}.name must be a safe receipts/<name>.json relative path`
+    );
+  }
+  const digestValid = digestString(value.digest, `${path}.digest`, errors);
+  return nameValid && digestValid
+    ? { name: value.name as string, digest: value.digest as string }
+    : undefined;
+}
+
+export function validateReadinessEvidenceManifest(
+  input: ReadinessEvidenceInput
+):
+  | { ok: true; manifest: ValidatedReadinessEvidence }
+  | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const expectedBinding = parseEvidenceBinding(
+    input.expectedBinding,
+    "expectedBinding",
+    errors
+  );
+  const value = input.manifest;
+  if (!isRecord(value)) {
+    errors.push("manifest must be an object");
+    return { ok: false, errors };
+  }
+  if (
+    !hasExactKeys(
+      value,
+      ["schemaVersion", "binding", "proofs", "bonuses"],
+      "manifest",
+      errors
+    )
+  ) {
+    return { ok: false, errors };
+  }
+  const schemaValid = exactString(
+    value.schemaVersion,
+    READINESS_EVIDENCE_SCHEMA_VERSION,
+    "manifest.schemaVersion",
+    errors
+  );
+  const binding = parseEvidenceBinding(value.binding, "manifest.binding", errors);
+  if (
+    expectedBinding &&
+    binding &&
+    JSON.stringify(binding) !== JSON.stringify(expectedBinding)
+  ) {
+    errors.push(
+      "manifest.binding must exactly match the independently verified expectedBinding"
+    );
+  }
+
+  const proofs: ValidatedEvidenceProof[] = [];
+  const proofIds = new Set<string>();
+  if (!Array.isArray(value.proofs)) {
+    errors.push("manifest.proofs must be an array");
+  } else {
+    for (const [index, candidate] of value.proofs.entries()) {
+      const path = `manifest.proofs[${index}]`;
+      if (!isRecord(candidate)) {
+        errors.push(`${path} must be an object`);
+        continue;
+      }
+      if (
+        !hasExactKeys(
+          candidate,
+          ["id", "criterion", "status", "evidence", "receipt"],
+          path,
+          errors
+        )
+      ) {
+        continue;
+      }
+      if (typeof candidate.id !== "string") {
+        errors.push(`${path}.id must be a string`);
+        continue;
+      }
+      const registry = EXTERNAL_PROOFS.find(
+        (proof) => proof.id === candidate.id
+      );
+      if (!registry) {
+        errors.push(`${path}.id is not a registered external proof`);
+        continue;
+      }
+      if (proofIds.has(candidate.id)) {
+        errors.push(`${path}.id duplicates ${candidate.id}`);
+        continue;
+      }
+      proofIds.add(candidate.id);
+      const criterionValid = exactString(
+        candidate.criterion,
+        registry.criterion,
+        `${path}.criterion`,
+        errors
+      );
+      const statusValid = exactString(
+        candidate.status,
+        "verified",
+        `${path}.status`,
+        errors
+      );
+      const evidenceValid = safeEvidenceText(
+        candidate.evidence,
+        `${path}.evidence`,
+        errors
+      );
+      const receipt = parseReceipt(candidate.receipt, `${path}.receipt`, errors);
+      if (criterionValid && statusValid && evidenceValid && receipt) {
+        proofs.push({
+          id: candidate.id,
+          criterion: registry.criterion,
+          status: "verified",
+          evidence: candidate.evidence as string,
+          receipt,
+        });
+      }
+    }
+  }
+
+  const bonuses: ValidatedEvidenceBonus[] = [];
+  const bonusIds = new Set<string>();
+  const registeredBonusIds = new Set<BonusCheck["id"]>([
+    "BONUS-OSS",
+    "BONUS-FEEDBACK",
+  ]);
+  if (!Array.isArray(value.bonuses)) {
+    errors.push("manifest.bonuses must be an array");
+  } else {
+    for (const [index, candidate] of value.bonuses.entries()) {
+      const path = `manifest.bonuses[${index}]`;
+      if (!isRecord(candidate)) {
+        errors.push(`${path} must be an object`);
+        continue;
+      }
+      if (
+        !hasExactKeys(
+          candidate,
+          ["id", "status", "evidence", "receipt"],
+          path,
+          errors
+        )
+      ) {
+        continue;
+      }
+      if (
+        typeof candidate.id !== "string" ||
+        !registeredBonusIds.has(candidate.id as BonusCheck["id"])
+      ) {
+        errors.push(`${path}.id is not a registered bonus proof`);
+        continue;
+      }
+      if (bonusIds.has(candidate.id)) {
+        errors.push(`${path}.id duplicates ${candidate.id}`);
+        continue;
+      }
+      bonusIds.add(candidate.id);
+      const statusValid = exactString(
+        candidate.status,
+        "verified",
+        `${path}.status`,
+        errors
+      );
+      const evidenceValid = safeEvidenceText(
+        candidate.evidence,
+        `${path}.evidence`,
+        errors
+      );
+      const receipt = parseReceipt(candidate.receipt, `${path}.receipt`, errors);
+      if (statusValid && evidenceValid && receipt) {
+        bonuses.push({
+          id: candidate.id as BonusCheck["id"],
+          status: "verified",
+          evidence: candidate.evidence as string,
+          receipt,
+        });
+      }
+    }
+  }
+
+  if (
+    errors.length > 0 ||
+    !schemaValid ||
+    !binding ||
+    !expectedBinding
+  ) {
+    return { ok: false, errors };
+  }
+  return {
+    ok: true,
+    manifest: {
+      schemaVersion: READINESS_EVIDENCE_SCHEMA_VERSION,
+      binding,
+      proofs,
+      bonuses,
+    },
+  };
+}
+
+export function createBonusChecks(): BonusCheck[] {
+  return [
+    {
+      id: "BONUS-OSS",
+      title: "Accepted public contribution to the DataHub ecosystem",
+      status: "user-gated",
+      evidence:
+        "USER-GATED BONUS: CI validation of a local candidate is not an accepted public contribution; retain the public upstream PR and acceptance evidence before claiming this bonus.",
+    },
+    {
+      id: "BONUS-FEEDBACK",
+      title: "Optional Most Valuable Feedback entry",
+      status: "user-gated",
+      evidence:
+        "USER-GATED OPTIONAL PRIZE: retain confirmation of the separate, one-per-entrant feedback form without treating it as a Project deliverable.",
+    },
+  ];
+}
+
+export function applyReadinessEvidence(
+  checks: Check[],
+  bonusChecks: BonusCheck[],
+  input?: ReadinessEvidenceInput
+): EvidenceProjection {
+  const unchanged = (): EvidenceProjection => ({
+    checks: checks.map((candidate) => ({ ...candidate })),
+    bonusChecks: bonusChecks.map((candidate) => ({ ...candidate })),
+    status: "not-provided",
+    acceptedProofIds: [],
+    acceptedBonusIds: [],
+    errors: [],
+  });
+  if (!input) return unchanged();
+
+  const validated = validateReadinessEvidenceManifest(input);
+  if (!validated.ok) {
+    return {
+      ...unchanged(),
+      status: "rejected",
+      errors: validated.errors,
+    };
+  }
+
+  const targetErrors: string[] = [];
+  for (const proof of validated.manifest.proofs) {
+    const matching = checks.filter((candidate) => candidate.id === proof.id);
+    if (
+      matching.length !== 1 ||
+      matching[0]!.criterion !== proof.criterion ||
+      matching[0]!.status !== "user-gated"
+    ) {
+      targetErrors.push(
+        `proof ${proof.id} must target exactly one user-gated check with criterion ${proof.criterion}`
+      );
+    }
+  }
+  for (const bonus of validated.manifest.bonuses) {
+    const matching = bonusChecks.filter((candidate) => candidate.id === bonus.id);
+    if (matching.length !== 1 || matching[0]!.status !== "user-gated") {
+      targetErrors.push(
+        `bonus ${bonus.id} must target exactly one user-gated bonus check`
+      );
+    }
+  }
+  if (targetErrors.length > 0) {
+    return {
+      ...unchanged(),
+      status: "rejected",
+      errors: targetErrors,
+    };
+  }
+
+  const proofById = new Map<string, ValidatedEvidenceProof>(
+    validated.manifest.proofs.map((proof) => [proof.id, proof] as const)
+  );
+  const bonusById = new Map<BonusCheck["id"], ValidatedEvidenceBonus>(
+    validated.manifest.bonuses.map((bonus) => [bonus.id, bonus] as const)
+  );
+  return {
+    checks: checks.map((candidate): Check => {
+      const proof = proofById.get(candidate.id);
+      return proof
+        ? {
+            ...candidate,
+            status: "pass",
+            evidence:
+              `VERIFIED EXTERNAL EVIDENCE: ${proof.evidence}; ` +
+              `receipt=${proof.receipt.name}@${proof.receipt.digest}`,
+          }
+        : { ...candidate };
+    }),
+    bonusChecks: bonusChecks.map((candidate): BonusCheck => {
+      const proof = bonusById.get(candidate.id);
+      return proof
+        ? {
+            ...candidate,
+            status: "pass",
+            evidence:
+              `VERIFIED BONUS EVIDENCE: ${proof.evidence}; ` +
+              `receipt=${proof.receipt.name}@${proof.receipt.digest}`,
+          }
+        : { ...candidate };
+    }),
+    status: "accepted",
+    acceptedProofIds: validated.manifest.proofs.map((proof) => proof.id),
+    acceptedBonusIds: validated.manifest.bonuses.map((bonus) => bonus.id),
+    errors: [],
+  };
+}
+
+export async function computeReadiness(
+  options: ReadinessOptions = {}
+): Promise<ReadinessReport> {
   const checks: Check[] = [];
   const capabilityChecks: CapabilityCheck[] = [];
 
@@ -649,26 +1494,26 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   checks.push(
-    check("SQ9", "submission-quality", 2, "Retained remote sample-output artifact", () => ({
+    check("SQ9", "submission-quality", 2, "Recommended retained sample-output artifact", () => ({
       gated: true,
       evidence:
-        "USER-GATED: retain the exact successful remote judge-evidence artifact and expose its sanitized JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback samples without presenting fixture output as live proof.",
+        "USER-GATED RECOMMENDATION (NONBLOCKING): retain the exact successful remote judge-evidence artifact and expose its sanitized JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback samples without presenting fixture output as live proof.",
     }))
   );
 
   checks.push(
-    check("SQ10", "submission-quality", 4, "Free testing access throughout judging", () => ({
+    check("SQ10", "submission-quality", 4, "Judging-period availability monitor and recovery path active", () => ({
       gated: true,
       evidence:
-        "USER-GATED: prove the deployed application and pipeline-managed judge access remain free, reachable, monitored, and recoverable through 2026-08-31 17:00 Eastern Time.",
+        "USER-GATED OPERATIONAL MONITOR: before submission, prove that free application/judge access, scheduled reachability checks, alerting, credential rotation, and rollback/recovery are active for the judging window. The monitor keeps evaluating through 2026-08-31 17:00 Eastern Time; readiness does not pretend future uptime has already occurred.",
     }))
   );
 
   checks.push(
-    check("SQ11", "submission-quality", 2, "Completed and verified Devpost entry", () => ({
+    check("SQ11", "submission-quality", 2, "Post-submit Devpost entry confirmation", () => ({
       gated: true,
       evidence:
-        "USER-GATED: complete every required Devpost field before the deadline and verify every submitted project, source, video, and testing-access URL as a logged-out visitor.",
+        "USER-GATED POST-SUBMIT: after submission, retain confirmation that every required Devpost field was submitted before the deadline and verify every project, source, video, and testing-access URL as a logged-out visitor. This confirmation cannot block the earlier ready-to-submit decision.",
     }))
   );
 
@@ -772,7 +1617,16 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
-  return summarize(checks, capabilityChecks);
+  const evidenceProjection = applyReadinessEvidence(
+    checks,
+    createBonusChecks(),
+    options.externalEvidence
+  );
+  return summarize(
+    evidenceProjection.checks,
+    capabilityChecks,
+    evidenceProjection
+  );
 }
 
 function textOf(r: { content?: Array<{ type: string; text?: string }> }): string {
@@ -781,17 +1635,57 @@ function textOf(r: { content?: Array<{ type: string; text?: string }> }): string
 
 export function evaluateSubmission(
   checks: Check[],
-  capabilityChecks: CapabilityCheck[]
+  capabilityChecks: CapabilityCheck[],
+  additionalInternalBlockers: ReadinessBlocker[] = []
 ): ReadinessReport["submission"] {
+  const roleById = new Map<string, ExternalProofRole>(
+    EXTERNAL_PROOFS.map((proof) => [proof.id, proof.role] as const)
+  );
+  const isReadyToSubmitCheck = (candidate: Check): boolean => {
+    const role = roleById.get(candidate.id);
+    return role !== "recommended" && role !== "post-submit";
+  };
   const externalBlockers = checks
-    .filter((check) => check.status === "user-gated")
+    .filter(
+      (candidate) =>
+        candidate.status === "user-gated" &&
+        isReadyToSubmitCheck(candidate)
+    )
+    .map((check) => ({
+      id: check.id,
+      title: check.title,
+      evidence: check.evidence,
+    }));
+  const recommendedEvidenceOutstanding = checks
+    .filter(
+      (candidate) =>
+        roleById.get(candidate.id) === "recommended" &&
+        candidate.status !== "pass"
+    )
+    .map((check) => ({
+      id: check.id,
+      title: check.title,
+      evidence: check.evidence,
+    }));
+  const postSubmitBlockers = checks
+    .filter(
+      (candidate) =>
+        roleById.get(candidate.id) === "post-submit" &&
+        candidate.status !== "pass"
+    )
     .map((check) => ({
       id: check.id,
       title: check.title,
       evidence: check.evidence,
     }));
   const internalById = new Map<string, ReadinessBlocker>();
-  for (const check of checks.filter((candidate) => candidate.status === "fail")) {
+  for (const blocker of additionalInternalBlockers) {
+    internalById.set(blocker.id, blocker);
+  }
+  for (const check of checks.filter(
+    (candidate) =>
+      candidate.status === "fail" && isReadyToSubmitCheck(candidate)
+  )) {
     internalById.set(check.id, {
       id: check.id,
       title: check.title,
@@ -840,11 +1734,11 @@ export function evaluateSubmission(
       "Every capability evidence check ID must occur exactly once."
     );
   }
-  for (const id of duplicateIds(REQUIRED_EXTERNAL_PROOF_IDS)) {
+  for (const id of duplicateIds(EXTERNAL_PROOFS.map((proof) => proof.id))) {
     addStructureBlocker(
       `STRUCTURE:duplicate-external-proof-id:${id}`,
       `Duplicate external-proof registry ID: ${id}`,
-      "Every required external-proof ID must occur exactly once in the registry."
+      "Every external-proof ID must occur exactly once in the registry."
     );
   }
   const officialIds = new Set(checks.map((check) => check.id));
@@ -901,13 +1795,13 @@ export function evaluateSubmission(
       });
     }
   }
-  for (const proof of REQUIRED_EXTERNAL_PROOFS) {
+  for (const proof of EXTERNAL_PROOFS) {
     const matching = checks.filter((check) => check.id === proof.id);
     if (matching.length === 0) {
       addStructureBlocker(
         `STRUCTURE:external-proof:${proof.id}`,
         `Missing required external-proof check: ${proof.id}`,
-        "Required public/live/submission proof must stay explicitly represented until it passes."
+        "Every public/live/recommended/post-submit proof must stay explicitly represented."
       );
     } else if (
       matching.length === 1 &&
@@ -921,21 +1815,59 @@ export function evaluateSubmission(
     }
   }
   const internalBlockers = [...internalById.values()];
-  const ready =
+  const evidenceCompleteForSealing =
     internalBlockers.length === 0 &&
-    checks.every((check) => check.status === "pass") &&
+    checks.filter(isReadyToSubmitCheck).every((check) => check.status === "pass") &&
     capabilityChecks.every((check) => check.status === "pass");
+  const postSubmitEvidenceComplete =
+    checks.filter((candidate) => candidate.id === "SQ11").length === 1 &&
+    checks.find((candidate) => candidate.id === "SQ11")!.status === "pass";
   return {
-    status: ready ? "ready" : "blocked",
-    ready,
+    status: evidenceCompleteForSealing
+      ? "evidence-complete-awaiting-seal"
+      : "blocked",
+    ready: false,
+    readyToSubmit: false,
+    submitted: false,
+    evidenceCompleteForSealing,
+    postSubmitEvidenceComplete,
     internalBlockers,
     externalBlockers,
+    recommendedEvidenceOutstanding,
+    postSubmitBlockers,
   };
+}
+
+/**
+ * Derive only repository-owned offline engineering capability checks. Every external
+ * proof is excluded regardless of status, so accepted eligibility evidence can never
+ * inflate (and recommended/post-submit failures can never reduce) the offline CI metric.
+ */
+export function createEngineeringCapabilityChecks(
+  checks: Check[]
+): CapabilityCheck[] {
+  const externalProofIds = new Set<string>(
+    EXTERNAL_PROOFS.map((proof) => proof.id)
+  );
+  return checks
+    .filter(
+      (candidate) =>
+        candidate.status !== "user-gated" && !externalProofIds.has(candidate.id)
+    )
+    .map((candidate): CapabilityCheck => ({
+      id: `ENG-${candidate.id}`,
+      axis: "engineering",
+      weight: candidate.weight,
+      status: candidate.status === "pass" ? "pass" : "fail",
+      title: candidate.title,
+      evidence: candidate.evidence,
+    }));
 }
 
 function summarize(
   checks: Check[],
-  securityCapabilityChecks: CapabilityCheck[]
+  securityCapabilityChecks: CapabilityCheck[],
+  evidenceProjection: EvidenceProjection
 ): ReadinessReport {
   const officialCriteria: CriterionSummary[] = (Object.keys(CRITERION_WEIGHT) as CriterionId[]).map((id) => {
     const cs = checks.filter((c) => c.criterion === id);
@@ -964,16 +1896,7 @@ function summarize(
     )
   );
 
-  const engineeringCapabilityChecks: CapabilityCheck[] = checks
-    .filter((c) => c.status !== "user-gated")
-    .map((c) => ({
-      id: `ENG-${c.id}`,
-      axis: "engineering",
-      weight: c.weight,
-      status: c.status === "pass" ? "pass" : "fail",
-      title: c.title,
-      evidence: c.evidence,
-    }));
+  const engineeringCapabilityChecks = createEngineeringCapabilityChecks(checks);
   const capabilityChecks = [...engineeringCapabilityChecks, ...securityCapabilityChecks];
   const capabilityTotal = capabilityChecks.reduce((sum, c) => sum + c.weight, 0);
   const capabilityPassed = capabilityChecks
@@ -997,12 +1920,41 @@ function summarize(
   });
 
   // Fail closed as the scorecard evolves. The 95% capability threshold is only the CI
-  // regression gate; final readiness requires every official and capability check to pass.
-  const submission = evaluateSubmission(checks, capabilityChecks);
+  // regression gate. Eligibility excludes only an explicitly classified recommendation
+  // and post-submit confirmation; a rejected evidence manifest is an internal blocker.
+  const evidenceBlockers: ReadinessBlocker[] =
+    evidenceProjection.status === "rejected"
+      ? [
+          {
+            id: "EVIDENCE:manifest",
+            title: "External readiness evidence manifest rejected",
+            evidence: evidenceProjection.errors.join(" | "),
+          },
+        ]
+      : [];
+  const submission = evaluateSubmission(
+    checks,
+    capabilityChecks,
+    evidenceBlockers
+  );
+  const bonusOutstanding = evidenceProjection.bonusChecks
+    .filter((candidate) => candidate.status !== "pass")
+    .map((candidate) => ({
+      id: candidate.id,
+      title: candidate.title,
+      evidence: candidate.evidence,
+    }));
 
   return {
     generatedAt: new Date().toISOString(),
     projectionKind: "evidence-coverage-not-judge-score",
+    projectionTrust: {
+      status: "unsigned-projection",
+      readyClaimAllowed: false,
+      requiredSignerWorkflow:
+        `github.com/${READINESS_REPOSITORY}/${READINESS_EVIDENCE_WORKFLOW_PATH}`,
+      requiredPredicateType: READINESS_EVIDENCE_SEAL_PREDICATE_TYPE,
+    },
     officialCriteria,
     judgingEvidencePercent,
     capabilityEvidence: {
@@ -1016,6 +1968,17 @@ function summarize(
       checks: capabilityChecks,
     },
     submission,
+    bonus: {
+      allBonusesReady: bonusOutstanding.length === 0,
+      checks: evidenceProjection.bonusChecks,
+      outstanding: bonusOutstanding,
+    },
+    externalEvidence: {
+      status: evidenceProjection.status,
+      acceptedProofIds: evidenceProjection.acceptedProofIds,
+      acceptedBonusIds: evidenceProjection.acceptedBonusIds,
+      errors: evidenceProjection.errors,
+    },
     checks,
     userGated: checks
       .filter((c) => c.status === "user-gated")
@@ -1064,9 +2027,15 @@ if (isMain) {
         );
       }
       console.log(
-        `FINAL SUBMISSION: ${report.submission.status.toUpperCase()} ` +
+        `SUBMISSION STATE: ${report.submission.status.toUpperCase()} ` +
           `(${report.submission.internalBlockers.length} internal failure(s), ` +
-          `${report.submission.externalBlockers.length} required external proof(s) outstanding)`
+          `${report.submission.externalBlockers.length} eligibility proof(s) outstanding, ` +
+          `${report.submission.recommendedEvidenceOutstanding.length} recommendation(s) outstanding, ` +
+          `${report.submission.postSubmitBlockers.length} post-submit confirmation(s) outstanding)`
+      );
+      console.log(
+        "TRUST: unsigned projection; readyToSubmit remains false until the " +
+          `${report.projectionTrust.requiredPredicateType} attestation is verified`
       );
       for (const blocker of report.submission.internalBlockers) {
         console.log(`   • ${blocker.id}: ${blocker.title}`);
@@ -1074,12 +2043,19 @@ if (isMain) {
       for (const blocker of report.submission.externalBlockers) {
         console.log(`   • ${blocker.id}: ${blocker.title}`);
       }
+      console.log(
+        `EXTERNAL EVIDENCE MANIFEST: ${report.externalEvidence.status.toUpperCase()}`
+      );
+      console.log(
+        `BONUS AXIS: ${report.bonus.allBonusesReady ? "COMPLETE" : "INCOMPLETE"} ` +
+          `(${report.bonus.outstanding.length} optional proof(s) outstanding)`
+      );
       console.log(bar);
 
       writeFileSync(p("readiness.json"), JSON.stringify(report, null, 2) + "\n");
       console.log("wrote readiness.json\n");
-      // CI enforces the offline regression gate. External submission blockers remain
-      // visible in the report but require real URLs/credentials/media/live proof.
+      // Ordinary CI enforces only the offline regression gate and deliberately provides
+      // no external manifest. A protected verifier supplies evidence programmatically.
       process.exit(report.capabilityEvidence.gate.passed ? 0 : 1);
     })
     .catch((err) => {

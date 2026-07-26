@@ -65,6 +65,8 @@ jobs:
             scripts/verify-github-control-plane.sh \
             scripts/verify-judge-emergency-control-plane.sh \
             scripts/verify-judge-environment-approval.sh \
+            scripts/collect-submission-evidence-source.sh \
+            scripts/verify-submission-readiness-source.sh \
             scripts/validate-model-provenance-corpus.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
@@ -77,6 +79,8 @@ jobs:
           bash tests/pipeline/aws-security-contracts.test.sh
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_evidence_contracts_test.py
           bash tests/pipeline/judge-user-contracts.test.sh
           bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh

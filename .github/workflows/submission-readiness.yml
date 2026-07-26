@@ -1,0 +1,988 @@
+name: Submission readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      source_run_id:
+        description: Exact successful source workflow run ID
+        required: true
+        type: string
+      source_run_attempt:
+        description: Exact successful source attestation run attempt
+        required: true
+        type: string
+      source_producer_run_attempt:
+        description: Exact source artifact producer run attempt
+        required: true
+        type: string
+      source_artifact_id:
+        description: Exact source evidence artifact ID
+        required: true
+        type: string
+      source_artifact_name:
+        description: Exact source evidence artifact name
+        required: true
+        type: string
+      source_artifact_digest:
+        description: Exact GitHub artifact sha256 digest
+        required: true
+        type: string
+      predicate_digest:
+        description: Exact custom attestation predicate sha256 digest
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-readiness-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.23.1"
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-readiness/v1
+
+jobs:
+  collect:
+    name: Collect exact attested source evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.binding.outputs.artifact_name }}
+      source_binding_digest: ${{ steps.binding.outputs.source_binding_digest }}
+    steps:
+      - name: Validate exact controller and inputs
+        env:
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_NAME: ${{ inputs.source_artifact_name }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_WORKFLOW_PATH: .github/workflows/submission-evidence.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-readiness.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${SOURCE_WORKFLOW_PATH}" = \
+            ".github/workflows/submission-evidence.yml"
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${SOURCE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${SOURCE_PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( SOURCE_PRODUCER_RUN_ATTEMPT <= SOURCE_RUN_ATTEMPT ))
+          [[ "${SOURCE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${SOURCE_ARTIFACT_NAME}" = \
+            "submission-evidence-${RELEASE_SHA}-${SOURCE_PRODUCER_RUN_ATTEMPT}"
+          [[ "${SOURCE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PREDICATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+      - name: Verify protected review environment posture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/submission-readiness")"
+          jq -e '
+            .name == "submission-readiness" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] |
+              length
+            ) == 1 and
+            any(
+              .protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              (.reviewers | length) >= 1 and
+              all(
+                .reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | length) > 0
+              )
+            )
+          ' <<<"${environment_json}" >/dev/null || {
+            echo "::error::submission-readiness requires individual reviewers, prevent-self-review, and a custom branch policy"
+            exit 1
+          }
+          policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/submission-readiness/deployment-branch-policies?per_page=100")"
+          jq -e '
+            .total_count == 1 and
+            .branch_policies[0].name == "master"
+          ' <<<"${policies}" >/dev/null || {
+            echo "::error::submission-readiness must allow only master"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch and verify exact source bytes, inventory, receipts, and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_NAME: ${{ inputs.source_artifact_name }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_WORKFLOW_PATH: .github/workflows/submission-evidence.yml
+          VERIFIED_OUTPUT_DIR: ${{ runner.temp }}/submission-readiness-collected
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          bash scripts/verify-submission-readiness-source.sh
+
+      - name: Bind collected source
+        id: binding
+        env:
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          binding="${RUNNER_TEMP}/submission-readiness-collected/source-binding.json"
+          test -f "${binding}"
+          test ! -L "${binding}"
+          digest="sha256:$(sha256sum "${binding}" | awk '{print $1}')"
+          {
+            echo "artifact_name=readiness-collected-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "source_binding_digest=${digest}"
+          } >>"${GITHUB_OUTPUT}"
+          approval="APPROVE ARCHON SUBMISSION READINESS run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} source_run_id=${SOURCE_RUN_ID} source_producer_run_attempt=${SOURCE_PRODUCER_RUN_ATTEMPT} source_attestation_run_attempt=${SOURCE_RUN_ATTEMPT} artifact_id=${SOURCE_ARTIFACT_ID} artifact_digest=${SOURCE_ARTIFACT_DIGEST} predicate_digest=${PREDICATE_DIGEST}"
+          {
+            echo "### Independent readiness review required"
+            echo
+            echo "Approve the protected \`submission-readiness\` environment with this exact comment:"
+            echo
+            echo "\`${approval}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload collected evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.binding.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-readiness-collected
+          if-no-files-found: error
+          retention-days: 90
+
+  review:
+    name: Independently approve and revalidate
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: submission-readiness
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.bundle.outputs.artifact_name }}
+      producer_run_attempt: ${{ steps.bundle.outputs.producer_run_attempt }}
+    steps:
+      - name: Verify exact independent environment approval
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-readiness.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          expected_approval="APPROVE ARCHON SUBMISSION READINESS run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} source_run_id=${SOURCE_RUN_ID} source_producer_run_attempt=${SOURCE_PRODUCER_RUN_ATTEMPT} source_attestation_run_attempt=${SOURCE_RUN_ATTEMPT} artifact_id=${SOURCE_ARTIFACT_ID} artifact_digest=${SOURCE_ARTIFACT_DIGEST} predicate_digest=${PREDICATE_DIGEST}"
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/submission-readiness")"
+          environment_id="$(jq -er '
+            select(
+              .name == "submission-readiness" and
+              (.id | type) == "number" and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == true and
+              ($rules[0].reviewers | length) >= 1 and
+              all(
+                $rules[0].reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | length) > 0
+              )
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid independent reviewer posture")
+            end
+          ' <<<"${environment_json}")" || {
+            echo "::error::submission-readiness reviewer posture changed"
+            exit 1
+          }
+          policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/submission-readiness/deployment-branch-policies?per_page=100")"
+          jq -e '
+            .total_count == 1 and
+            .branch_policies[0].name == "master"
+          ' <<<"${policies}" >/dev/null
+          approvals="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
+          matched="$(jq -ce \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg environment "submission-readiness" \
+            --arg expected "${expected_approval}" \
+            --arg triggeringActor "${GITHUB_TRIGGERING_ACTOR}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | type) == "array" and
+                  (.environments | length) == 1 and
+                  .environments[0].name == $environment and
+                  .environments[0].id == $environmentId and
+                  (.user | type) == "object" and
+                  (.user.id | type) == "number" and
+                  (.user.login | type) == "string" and
+                  (.user.id as $id | ($reviewerIds | index($id)) != null) and
+                  (.user.login | ascii_downcase) != ($actor | ascii_downcase) and
+                  (.user.login | ascii_downcase) !=
+                    ($triggeringActor | ascii_downcase)
+                )
+              ] |
+              if length == 1 then
+                .[0]
+              else
+                error("expected exactly one matching independent approval")
+              end
+            ' <<<"${approvals}")" || {
+            echo "::error::missing exact independent approval comment: ${expected_approval}"
+            exit 1
+          }
+          approval_dir="${RUNNER_TEMP}/submission-readiness-approval"
+          test ! -e "${approval_dir}"
+          mkdir --mode=0700 "${approval_dir}"
+          receipt="${approval_dir}/approval-receipt.json"
+          jq -cnS \
+            --arg comment "$(jq -er '.comment' <<<"${matched}")" \
+            --arg environment "submission-readiness" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg reviewerLogin "$(jq -er '.user.login' <<<"${matched}")" \
+            --arg sourceArtifactDigest "${SOURCE_ARTIFACT_DIGEST}" \
+            --arg workflowPath ".github/workflows/submission-readiness.yml" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerId "$(jq -er '.user.id' <<<"${matched}")" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson sourceArtifactId "${SOURCE_ARTIFACT_ID}" \
+            --argjson sourceAttestationRunAttempt "${SOURCE_RUN_ATTEMPT}" \
+            --argjson sourceProducerRunAttempt "${SOURCE_PRODUCER_RUN_ATTEMPT}" \
+            --argjson sourceRunId "${SOURCE_RUN_ID}" '
+              {
+                schemaVersion:
+                  "archon.submission-readiness-approval/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  ref: $workflowRef,
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                environment: {
+                  name: $environment,
+                  id: $environmentId
+                },
+                approval: {
+                  reviewer: {
+                    id: $reviewerId,
+                    login: $reviewerLogin
+                  },
+                  comment: $comment
+                },
+                source: {
+                  runId: $sourceRunId,
+                  producerRunAttempt: $sourceProducerRunAttempt,
+                  attestationRunAttempt: $sourceAttestationRunAttempt,
+                  artifactId: $sourceArtifactId,
+                  artifactDigest: $sourceArtifactDigest
+                }
+              }
+            ' >"${receipt}"
+          receipt_digest="sha256:$(sha256sum "${receipt}" | awk '{print $1}')"
+          {
+            echo "environment_id=${environment_id}"
+            echo "receipt_digest=${receipt_digest}"
+            echo "receipt_path=${receipt}"
+            echo "reviewer_id=$(jq -er '.user.id' <<<"${matched}")"
+          } >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate exact collected artifact metadata before download
+        env:
+          COLLECTED_ARTIFACT_DIGEST: ${{ needs.collect.outputs.artifact_digest }}
+          COLLECTED_ARTIFACT_ID: ${{ needs.collect.outputs.artifact_id }}
+          COLLECTED_ARTIFACT_NAME: ${{ needs.collect.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${COLLECTED_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${COLLECTED_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${COLLECTED_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${COLLECTED_ARTIFACT_DIGEST}" \
+            --arg name "${COLLECTED_ARTIFACT_NAME}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson artifactId "${COLLECTED_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 536870912 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact_json}" >/dev/null || {
+            echo "::error::Collected readiness artifact metadata drifted before download"
+            exit 1
+          }
+
+      - name: Download exact collected receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.collect.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-readiness-collected-download
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Verify collected receipt inventory
+        env:
+          COLLECTED_ARTIFACT_DIGEST: ${{ needs.collect.outputs.artifact_digest }}
+          COLLECTED_ARTIFACT_ID: ${{ needs.collect.outputs.artifact_id }}
+          COLLECTED_ARTIFACT_NAME: ${{ needs.collect.outputs.artifact_name }}
+          COLLECTED_BINDING_DIGEST: ${{ needs.collect.outputs.source_binding_digest }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${COLLECTED_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${COLLECTED_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${COLLECTED_ARTIFACT_DIGEST}" \
+            --arg name "${COLLECTED_ARTIFACT_NAME}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson artifactId "${COLLECTED_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 536870912 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact_json}" >/dev/null
+          collected="${RUNNER_TEMP}/submission-readiness-collected-download"
+          if find "${collected}" -type l -print -quit | grep -q .; then
+            echo "::error::collected artifact contains a symlink"
+            exit 1
+          fi
+          test -f "${collected}/VERIFIED-SHA256SUMS"
+          test ! -L "${collected}/VERIFIED-SHA256SUMS"
+          (
+            cd "${collected}"
+            sha256sum --check --strict VERIFIED-SHA256SUMS
+            find . -type f -printf '%P\n' |
+              grep -v '^VERIFIED-SHA256SUMS$' |
+              LC_ALL=C sort >"${RUNNER_TEMP}/collected-actual-files.txt"
+            awk '{print $2}' VERIFIED-SHA256SUMS |
+              LC_ALL=C sort >"${RUNNER_TEMP}/collected-inventory-files.txt"
+          )
+          diff -u \
+            "${RUNNER_TEMP}/collected-actual-files.txt" \
+            "${RUNNER_TEMP}/collected-inventory-files.txt"
+          binding="${collected}/source-binding.json"
+          test "sha256:$(sha256sum "${binding}" | awk '{print $1}')" = \
+            "${COLLECTED_BINDING_DIGEST}"
+
+      - name: Independently fetch and reverify source after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_NAME: ${{ inputs.source_artifact_name }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_WORKFLOW_PATH: .github/workflows/submission-evidence.yml
+          VERIFIED_OUTPUT_DIR: ${{ runner.temp }}/submission-readiness-reviewed-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          bash scripts/verify-submission-readiness-source.sh
+          reviewed="${RUNNER_TEMP}/submission-readiness-reviewed-source/source-binding.json"
+          collected="${RUNNER_TEMP}/submission-readiness-collected-download/source-binding.json"
+          cmp --silent "${reviewed}" "${collected}" || {
+            echo "::error::independent source binding differs from collected binding"
+            exit 1
+          }
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install exact release dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build canonical manifest and evaluate readiness
+        id: evaluate
+        env:
+          APPROVAL_ENVIRONMENT_ID: ${{ steps.approval.outputs.environment_id }}
+          APPROVAL_RECEIPT_DIGEST: ${{ steps.approval.outputs.receipt_digest }}
+          APPROVAL_REVIEWER_ID: ${{ steps.approval.outputs.reviewer_id }}
+          PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_ARTIFACT_DIGEST: ${{ inputs.source_artifact_digest }}
+          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
+          SOURCE_ARTIFACT_NAME: ${{ inputs.source_artifact_name }}
+          SOURCE_PRODUCER_RUN_ATTEMPT: ${{ inputs.source_producer_run_attempt }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_WORKFLOW_PATH: .github/workflows/submission-evidence.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          claims="${RUNNER_TEMP}/submission-readiness-reviewed-source/source/claims.json"
+          output_dir="${RUNNER_TEMP}/submission-readiness-evaluated"
+          test ! -e "${output_dir}"
+          mkdir --mode=0700 "${output_dir}"
+          expected="${output_dir}/expected-binding.json"
+          manifest="${output_dir}/readiness-evidence.json"
+          report="${output_dir}/readiness.json"
+          jq -cnS \
+            --arg approvalEnvironment "submission-readiness" \
+            --arg approvalReceiptDigest "${APPROVAL_RECEIPT_DIGEST}" \
+            --arg approvalWorkflowPath ".github/workflows/submission-readiness.yml" \
+            --arg approvalWorkflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg artifactDigest "${SOURCE_ARTIFACT_DIGEST}" \
+            --arg artifactName "${SOURCE_ARTIFACT_NAME}" \
+            --arg predicateDigest "${PREDICATE_DIGEST}" \
+            --arg predicateType "${PREDICATE_TYPE}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sourceWorkflowPath "${SOURCE_WORKFLOW_PATH}" \
+            --argjson approvalEnvironmentId "${APPROVAL_ENVIRONMENT_ID}" \
+            --argjson approvalReviewerId "${APPROVAL_REVIEWER_ID}" \
+            --argjson approvalRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson approvalRunId "${GITHUB_RUN_ID}" \
+            --argjson artifactId "${SOURCE_ARTIFACT_ID}" \
+            --argjson sourceAttestationRunAttempt "${SOURCE_RUN_ATTEMPT}" \
+            --argjson sourceProducerRunAttempt "${SOURCE_PRODUCER_RUN_ATTEMPT}" \
+            --argjson sourceRunId "${SOURCE_RUN_ID}" '
+              {
+                repository: $repository,
+                releaseSha: $releaseSha,
+                source: {
+                  workflowPath: $sourceWorkflowPath,
+                  runId: $sourceRunId,
+                  producerRunAttempt: $sourceProducerRunAttempt,
+                  attestationRunAttempt: $sourceAttestationRunAttempt
+                },
+                artifact: {
+                  name: $artifactName,
+                  id: $artifactId,
+                  digest: $artifactDigest
+                },
+                predicate: {
+                  type: $predicateType,
+                  digest: $predicateDigest
+                },
+                approval: {
+                  environment: $approvalEnvironment,
+                  workflowPath: $approvalWorkflowPath,
+                  workflowRef: $approvalWorkflowRef,
+                  runId: $approvalRunId,
+                  runAttempt: $approvalRunAttempt,
+                  environmentId: $approvalEnvironmentId,
+                  reviewerId: $approvalReviewerId,
+                  receiptDigest: $approvalReceiptDigest
+                }
+              }
+            ' >"${expected}"
+          jq -nS \
+            --slurpfile binding "${expected}" \
+            --slurpfile claims "${claims}" '
+              {
+                schemaVersion:
+                  "archon.submission-readiness-evidence/v1",
+                binding: $binding[0],
+                proofs: $claims[0].proofs,
+                bonuses: $claims[0].bonuses
+              }
+            ' >"${manifest}"
+          EVIDENCE_MANIFEST="${manifest}" \
+          EXPECTED_BINDING="${expected}" \
+          READINESS_OUTPUT="${report}" \
+            node \
+              --import ./scripts/offline-env.mjs \
+              --import tsx \
+              --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { computeReadiness } from "./scripts/readiness.ts";
+
+          const manifest = JSON.parse(
+            readFileSync(process.env.EVIDENCE_MANIFEST, "utf8")
+          );
+          const expectedBinding = JSON.parse(
+            readFileSync(process.env.EXPECTED_BINDING, "utf8")
+          );
+          const report = await computeReadiness({
+            externalEvidence: { manifest, expectedBinding },
+          });
+          writeFileSync(
+            process.env.READINESS_OUTPUT,
+            `${JSON.stringify(report, null, 2)}\n`,
+            { mode: 0o600 }
+          );
+          if (
+            report.externalEvidence.status !== "accepted" ||
+            !report.submission.evidenceCompleteForSealing ||
+            report.submission.ready ||
+            report.submission.readyToSubmit ||
+            report.submission.status !== "evidence-complete-awaiting-seal" ||
+            report.projectionTrust.status !== "unsigned-projection" ||
+            report.projectionTrust.readyClaimAllowed ||
+            report.submission.internalBlockers.length !== 0 ||
+            report.submission.externalBlockers.length !== 0
+          ) {
+            throw new Error(
+              "protected evidence is not an unsigned, fail-closed seal candidate"
+            );
+          }
+          NODE
+          jq -e \
+            --arg release "${RELEASE_SHA}" '
+              .externalEvidence.status == "accepted" and
+              .submission.status ==
+                "evidence-complete-awaiting-seal" and
+              .submission.evidenceCompleteForSealing == true and
+              .submission.ready == false and
+              .submission.readyToSubmit == false and
+              .submission.submitted == false and
+              .projectionTrust.status == "unsigned-projection" and
+              .projectionTrust.readyClaimAllowed == false and
+              (.submission.internalBlockers | length) == 0 and
+              (.submission.externalBlockers | length) == 0 and
+              (
+                [
+                  "D4", "U3", "SQ3", "SQ4", "SQ5",
+                  "SQ6", "SQ7", "SQ8", "SQ10"
+                ] -
+                .externalEvidence.acceptedProofIds |
+                length
+              ) == 0
+            ' "${report}" >/dev/null
+          echo "output_dir=${output_dir}" >>"${GITHUB_OUTPUT}"
+
+      - name: Assemble reviewed evidence bundle
+        id: bundle
+        env:
+          APPROVAL_RECEIPT_PATH: ${{ steps.approval.outputs.receipt_path }}
+          EVALUATED_DIR: ${{ steps.evaluate.outputs.output_dir }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/submission-readiness-reviewed"
+          test ! -e "${bundle}"
+          mkdir --mode=0700 "${bundle}"
+          cp "${EVALUATED_DIR}/expected-binding.json" "${bundle}/"
+          cp "${EVALUATED_DIR}/readiness-evidence.json" "${bundle}/"
+          cp "${EVALUATED_DIR}/readiness.json" "${bundle}/"
+          cp "${APPROVAL_RECEIPT_PATH}" \
+            "${bundle}/approval-receipt.json"
+          cp "${RUNNER_TEMP}/submission-readiness-reviewed-source/source-binding.json" \
+            "${bundle}/source-binding.json"
+          cp -R "${RUNNER_TEMP}/submission-readiness-reviewed-source/source" \
+            "${bundle}/source"
+          cp -R "${RUNNER_TEMP}/submission-readiness-reviewed-source/verification" \
+            "${bundle}/source-attestation-verification"
+          inventory="${RUNNER_TEMP}/submission-readiness-reviewed-SHA256SUMS"
+          (
+            cd "${bundle}"
+            find . -type f -printf '%P\n' |
+              LC_ALL=C sort |
+              while IFS= read -r relative; do
+                sha256sum "${relative}"
+              done >"${inventory}"
+            mv "${inventory}" SHA256SUMS
+          )
+          {
+            echo "artifact_name=readiness-reviewed-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Upload independently reviewed evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-readiness-reviewed
+          if-no-files-found: error
+          retention-days: 90
+
+  seal:
+    name: Seal canonical readiness evidence
+    needs:
+      - collect
+      - review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate exact sealing context
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEW_ARTIFACT_DIGEST: ${{ needs.review.outputs.artifact_digest }}
+          REVIEW_ARTIFACT_ID: ${{ needs.review.outputs.artifact_id }}
+          REVIEW_ARTIFACT_NAME: ${{ needs.review.outputs.artifact_name }}
+          REVIEW_RUN_ATTEMPT: ${{ needs.review.outputs.producer_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-readiness.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${REVIEW_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${REVIEW_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${REVIEW_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( REVIEW_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          test "${REVIEW_ARTIFACT_NAME}" = \
+            "readiness-reviewed-${RELEASE_SHA}-${REVIEW_RUN_ATTEMPT}"
+
+      - name: Validate exact reviewed artifact metadata before download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEW_ARTIFACT_DIGEST: ${{ needs.review.outputs.artifact_digest }}
+          REVIEW_ARTIFACT_ID: ${{ needs.review.outputs.artifact_id }}
+          REVIEW_ARTIFACT_NAME: ${{ needs.review.outputs.artifact_name }}
+          REVIEW_RUN_ATTEMPT: ${{ needs.review.outputs.producer_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REVIEW_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${REVIEW_ARTIFACT_DIGEST}" \
+            --arg name "${REVIEW_ARTIFACT_NAME}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson artifactId "${REVIEW_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 536870912 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact_json}" >/dev/null || {
+            echo "::error::Reviewed readiness artifact metadata drifted before download"
+            exit 1
+          }
+
+      - name: Download exact reviewed artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.review.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-readiness-seal
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Revalidate reviewed artifact and canonical state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEW_ARTIFACT_DIGEST: ${{ needs.review.outputs.artifact_digest }}
+          REVIEW_ARTIFACT_ID: ${{ needs.review.outputs.artifact_id }}
+          REVIEW_ARTIFACT_NAME: ${{ needs.review.outputs.artifact_name }}
+          REVIEW_RUN_ATTEMPT: ${{ needs.review.outputs.producer_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REVIEW_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${REVIEW_ARTIFACT_DIGEST}" \
+            --arg name "${REVIEW_ARTIFACT_NAME}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson artifactId "${REVIEW_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 536870912 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact_json}" >/dev/null
+          bundle="${RUNNER_TEMP}/submission-readiness-seal"
+          if find "${bundle}" -type l -print -quit | grep -q .; then
+            echo "::error::reviewed artifact contains a symlink"
+            exit 1
+          fi
+          for file in \
+            SHA256SUMS \
+            approval-receipt.json \
+            expected-binding.json \
+            readiness-evidence.json \
+            readiness.json \
+            source-binding.json; do
+            test -f "${bundle}/${file}"
+            test ! -L "${bundle}/${file}"
+          done
+          (
+            cd "${bundle}"
+            sha256sum --check --strict SHA256SUMS
+            find . -type f -printf '%P\n' |
+              grep -v '^SHA256SUMS$' |
+              LC_ALL=C sort >"${RUNNER_TEMP}/reviewed-actual-files.txt"
+            awk '{print $2}' SHA256SUMS |
+              LC_ALL=C sort >"${RUNNER_TEMP}/reviewed-inventory-files.txt"
+          )
+          diff -u \
+            "${RUNNER_TEMP}/reviewed-actual-files.txt" \
+            "${RUNNER_TEMP}/reviewed-inventory-files.txt"
+          test "sha256:$(sha256sum "${bundle}/approval-receipt.json" | awk '{print $1}')" = \
+            "$(jq -er '.approval.receiptDigest' "${bundle}/expected-binding.json")"
+          cmp --silent \
+            <(jq -cS . "${bundle}/expected-binding.json") \
+            <(jq -cS '.binding' "${bundle}/readiness-evidence.json")
+          jq -ne \
+            --slurpfile approval "${bundle}/approval-receipt.json" \
+            --slurpfile binding "${bundle}/expected-binding.json" \
+            --slurpfile source "${bundle}/source-binding.json" '
+              ($approval | length) == 1 and
+              ($binding | length) == 1 and
+              ($source | length) == 1 and
+              $approval[0].schemaVersion ==
+                "archon.submission-readiness-approval/v1" and
+              $source[0].schemaVersion ==
+                "archon.submission-readiness-source-binding/v1" and
+              $binding[0].repository == $approval[0].repository and
+              $binding[0].repository == $source[0].repository and
+              $binding[0].releaseSha == $approval[0].releaseSha and
+              $binding[0].releaseSha == $source[0].releaseSha and
+              $binding[0].source == $source[0].source and
+              $binding[0].artifact == $source[0].artifact and
+              $binding[0].predicate == $source[0].predicate and
+              $binding[0].source.runId ==
+                $approval[0].source.runId and
+              $binding[0].source.producerRunAttempt ==
+                $approval[0].source.producerRunAttempt and
+              $binding[0].source.attestationRunAttempt ==
+                $approval[0].source.attestationRunAttempt and
+              $binding[0].artifact.id ==
+                $approval[0].source.artifactId and
+              $binding[0].artifact.digest ==
+                $approval[0].source.artifactDigest and
+              $binding[0].approval.environment ==
+                $approval[0].environment.name and
+              $binding[0].approval.environmentId ==
+                $approval[0].environment.id and
+              $binding[0].approval.workflowPath ==
+                $approval[0].workflow.path and
+              $binding[0].approval.workflowRef ==
+                $approval[0].workflow.ref and
+              $binding[0].approval.runId ==
+                $approval[0].workflow.runId and
+              $binding[0].approval.runAttempt ==
+                $approval[0].workflow.runAttempt and
+              $binding[0].approval.reviewerId ==
+                $approval[0].approval.reviewer.id
+            ' >/dev/null
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --argjson runAttempt "${REVIEW_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .repository == $repository and
+              .releaseSha == $release and
+              .approval.environment == "submission-readiness" and
+              .approval.workflowPath ==
+                ".github/workflows/submission-readiness.yml" and
+              .approval.workflowRef == $workflowRef and
+              .approval.runId == $runId and
+              .approval.runAttempt == $runAttempt
+            ' "${bundle}/expected-binding.json" >/dev/null
+          jq -e '
+            .externalEvidence.status == "accepted" and
+            .submission.status ==
+              "evidence-complete-awaiting-seal" and
+            .submission.evidenceCompleteForSealing == true and
+            .submission.ready == false and
+            .submission.readyToSubmit == false and
+            .submission.submitted == false and
+            .projectionTrust == {
+              status: "unsigned-projection",
+              readyClaimAllowed: false,
+              requiredSignerWorkflow:
+                "github.com/upgradedev/archon-datahub/.github/workflows/submission-readiness.yml",
+              requiredPredicateType:
+                "https://archon.datahub.dev/attestations/submission-readiness-seal/v1"
+            } and
+            (.submission.internalBlockers | length) == 0 and
+            (.submission.externalBlockers | length) == 0
+          ' "${bundle}/readiness.json" >/dev/null
+
+      - name: Attest canonical readiness subjects
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/submission-readiness-seal/SHA256SUMS
+            ${{ runner.temp }}/submission-readiness-seal/approval-receipt.json
+            ${{ runner.temp }}/submission-readiness-seal/readiness-evidence.json
+            ${{ runner.temp }}/submission-readiness-seal/readiness.json
+            ${{ runner.temp }}/submission-readiness-seal/source-binding.json
+          predicate-type: https://archon.datahub.dev/attestations/submission-readiness-seal/v1
+          predicate-path: ${{ runner.temp }}/submission-readiness-seal/readiness-evidence.json
+
+      - name: Upload sealed readiness evidence
+        id: sealed
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: submission-readiness-${{ inputs.release_sha }}
+          path: ${{ runner.temp }}/submission-readiness-seal
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record sealed evidence
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SEALED_ARTIFACT_DIGEST: ${{ steps.sealed.outputs.artifact-digest }}
+          SEALED_ARTIFACT_ID: ${{ steps.sealed.outputs.artifact-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${SEALED_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${SEALED_ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "### Submission readiness evidence sealed"
+            echo
+            echo "- Release: \`${RELEASE_SHA}\`"
+            echo "- Artifact ID: \`${SEALED_ARTIFACT_ID}\`"
+            echo "- Artifact digest: \`sha256:${SEALED_ARTIFACT_DIGEST}\`"
+            echo "- Result: exact protected evidence is ready to submit"
+          } >>"${GITHUB_STEP_SUMMARY}"

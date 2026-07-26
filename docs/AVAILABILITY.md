@@ -5,9 +5,15 @@ probe of the public production path. It runs every six hours at minute 17 and ca
 started from GitHub Actions when a release needs immediate verification.
 
 The workflow deliberately uses the existing `production-observer` GitHub environment but
-does not use AWS credentials, OIDC, or long-lived secrets. Its only credential is the
+does not use AWS credentials, cloud-deployment authority, or long-lived secrets. Its
 short-lived repository-scoped `GITHUB_TOKEN`, with `contents: read` and `actions: read`,
-used to bind public observations to GitHub's release evidence.
+binds public observations to GitHub's release evidence. `id-token: write` and
+`attestations: write` exist only in a dependent attestation job, not in the network-facing
+probe job. That isolated job pins the uploaded artifact's ID, name, digest, owning run, and
+head SHA through the GitHub API; downloads only that artifact ID; rechecks its exact
+inventory, checksums, subjects, and predicate; and then invokes the pinned GitHub
+artifact-attestation action. The OIDC capability is therefore never available to the
+probe script and is never used to assume a cloud role.
 
 ## Configuration
 
@@ -101,12 +107,22 @@ exactly:
   rollback-selector CI ID, newest-deployment identifiers, and explicit
   public-byte/final-recheck results;
 - `manifest.json` — `archon.production-availability-manifest/v1`, binding the exact
-  `availability.json` SHA-256 and byte count; and
-- `SHA256SUMS` — checksums for both JSON files, verified before upload.
+  `availability.json` SHA-256 and byte count;
+- `attestation-predicate.json` —
+  `archon.production-availability-attestation/v1`, binding the exact repository,
+  release, workflow run/attempt and event, scheduled six-hour monitor contract, observed
+  time/result, deployment run/attempt/artifact, public-origin/read-response hashes, and
+  the two evidence-file digests;
+- `availability-subject.sha256` — the exact subject set for the custom
+  `production-availability/v1` GitHub attestation; and
+- `SHA256SUMS` — a complete inventory of the other four files, verified before upload.
 
 Raw HTML, runtime config, audit output, query text, request/scan IDs, and the downloaded
 deployment archive remain under `runner.temp` and are not uploaded. Public client/auth
-origins and IDs are represented only by hashes in the retained projection.
+origins and IDs are represented only by hashes in the retained projection. The
+attestation signs the exact local predicate and both evidence subjects; a later
+submission-evidence consumer must still enforce freshness and the rest of the judging
+operations contract.
 
 ## Honest scope
 

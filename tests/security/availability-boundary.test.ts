@@ -39,10 +39,17 @@ test("availability is scheduled/manual on a protected, unprivileged observer", (
   assert.match(workflow, /environment: production-observer/u);
   assert.match(
     workflow,
-    /permissions:\n      actions: read\n      contents: read/u
+    /environment: production-observer\n    permissions:\n      actions: read\n      contents: read/u
   );
-  assert.doesNotMatch(workflow, /^\s+(?:id-token|deployments|packages):/mu);
-  assert.doesNotMatch(workflow, /^\s+[A-Za-z-]+: write\s*$/mu);
+  assert.match(
+    workflow,
+    /attest:\n    name: Independently revalidate and attest availability evidence[\s\S]*?permissions:\n      actions: read\n      attestations: write\n      contents: read\n      id-token: write/u
+  );
+  assert.doesNotMatch(workflow, /^\s+(?:deployments|packages):/mu);
+  assert.deepEqual(
+    workflow.match(/^\s+[A-Za-z-]+: write\s*$/gmu)?.map((line) => line.trim()),
+    ["attestations: write", "id-token: write"]
+  );
   assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./u);
   assert.doesNotMatch(
     workflow,
@@ -52,6 +59,8 @@ test("availability is scheduled/manual on a protected, unprivileged observer", (
   const actions = workflow.match(/^\s+uses:\s+\S+/gmu) ?? [];
   assert.deepEqual(actions.map((line) => line.trim()), [
     "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26",
   ]);
 });
 
@@ -418,7 +427,7 @@ test("control-plane, newest deployment, CI, and artifact are rechecked before se
   assert.match(workflow, /masterAncestor: true/u);
 });
 
-test("evidence is minimal, checksum-sealed, retained, and honestly documented", () => {
+test("evidence is minimal, checksum-sealed, attested, retained, and honestly documented", () => {
   assert.match(
     workflow,
     /evidence_dir="\$\{RUNNER_TEMP\}\/availability-evidence"/u
@@ -431,7 +440,41 @@ test("evidence is minimal, checksum-sealed, retained, and honestly documented", 
   assert.match(workflow, /sha256sum --check --strict SHA256SUMS/u);
   assert.match(
     workflow,
-    /printf '%s\\n' SHA256SUMS availability\.json manifest\.json/u
+    /schemaVersion:\s+"archon\.production-availability-attestation\/v1"/u
+  );
+  assert.match(
+    workflow,
+    /predicate-type: https:\/\/github\.com\/upgradedev\/archon-datahub\/attestations\/production-availability\/v1/u
+  );
+  assert.match(
+    workflow,
+    /artifact-ids: \$\{\{ needs\.probe\.outputs\.artifact_id \}\}/u
+  );
+  assert.match(
+    workflow,
+    /subject-checksums: \$\{\{ runner\.temp \}\}\/availability-attestation\/availability-subject\.sha256/u
+  );
+  assert.match(
+    workflow,
+    /predicate-path: \$\{\{ runner\.temp \}\}\/availability-attestation\/attestation-predicate\.json/u
+  );
+  assert.match(
+    workflow,
+    /printf '%s\\n' \\\s+SHA256SUMS \\\s+attestation-predicate\.json \\\s+availability-subject\.sha256 \\\s+availability\.json \\\s+manifest\.json/u
+  );
+  assert.match(
+    workflow,
+    /sha256sum --check --strict availability-subject\.sha256/u
+  );
+  assert.match(workflow, /maximumExpectedGapMinutes: 420/u);
+  assert.match(workflow, /result: "public-read-path-verified"/u);
+  assert.match(workflow, /\.workflow_run\.head_sha == \$sha/u);
+  assert.match(workflow, /\.workflow_run\.id == \$runId/u);
+  assert.match(workflow, /\.digest == \$digest/u);
+  assert.match(workflow, /\.name == \$name/u);
+  assert.match(
+    workflow,
+    /uses: actions\/attest@59d89421af93a897026c735860bf21b6eb4f7b26/u
   );
   assert.match(
     workflow,
@@ -450,7 +493,14 @@ test("evidence is minimal, checksum-sealed, retained, and honestly documented", 
   assert.match(documentation, /production-observer/u);
   assert.match(documentation, /does not contain a release SHA/u);
   assert.match(documentation, /does not provide an SLA/u);
-  assert.match(documentation, /does not use AWS credentials, OIDC, or long-lived secrets/u);
+  assert.match(
+    documentation,
+    /does not use AWS credentials, cloud-deployment authority, or long-lived secrets/u
+  );
+  assert.match(
+    documentation,
+    /id-token: write[\s\S]*?attestations: write[\s\S]*only in a dependent attestation job[\s\S]*never available to the probe script/u
+  );
   assert.match(
     documentation,
     /never calls an approval,\s+remediation, or rollback route/u

@@ -1,0 +1,1606 @@
+#!/usr/bin/env python3
+"""Remote-CI contract tests for the submission evidence trust boundary."""
+
+from __future__ import annotations
+
+import copy
+import datetime as dt
+import importlib.util
+import json
+import tempfile
+from pathlib import Path
+from types import ModuleType
+
+
+ROOT = Path(__file__).resolve().parents[2]
+VALIDATOR_PATH = ROOT / "scripts" / "validate-submission-proof-receipts.py"
+REGISTRY_PATH = ROOT / "scripts" / "submission-evidence-registry.json"
+NOTICE_PATH = ROOT / "NOTICE.md"
+RELEASE = "a" * 40
+DIGEST = "sha256:" + ("b" * 64)
+ALT_DIGEST = "sha256:" + ("c" * 64)
+NOW = (
+    dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
+).replace(microsecond=0)
+BONUS_EVENT = min(
+    NOW,
+    dt.datetime(2026, 8, 9, 12, 0, 0, tzinfo=dt.timezone.utc),
+)
+if BONUS_EVENT < dt.datetime(2026, 7, 6, 13, 0, 0, tzinfo=dt.timezone.utc):
+    BONUS_EVENT = dt.datetime(2026, 7, 6, 13, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def iso(value: dt.datetime = NOW) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def load_validator() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "submission_evidence_validator", VALIDATOR_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError("validator module cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+validator = load_validator()
+registry, sources = validator.load_registry(REGISTRY_PATH)
+TESTING_DIGEST = validator.sha256_file(ROOT / "docs" / "JUDGE_TESTING.md")
+
+
+def expect_rejected(callable_value, message: str) -> None:
+    try:
+        callable_value()
+    except validator.ContractError:
+        return
+    raise AssertionError(message)
+
+
+def valid_facts() -> dict[str, dict]:
+    application = "https://www.datahub.com"
+    application_digest = validator.sha256_text(application)
+    application_origin_sha256 = application_digest.removeprefix("sha256:")
+    deployment = {
+        "workflowPath": ".github/workflows/deploy.yml",
+        "runId": 201,
+        "runAttempt": 2,
+        "artifactId": 202,
+        "artifactName": f"deployment-evidence-{RELEASE}-2",
+        "artifactDigest": DIGEST,
+        "predicateType": (
+            "https://github.com/upgradedev/archon-datahub/"
+            "attestations/production-deployment/v1"
+        ),
+        "predicateDigest": DIGEST,
+    }
+    identity_digest = DIGEST
+    lifecycle_operations = []
+    for index, (operation, result, receipt_character) in enumerate(
+        (
+            ("provision", "provisioned-and-readback-verified", "d"),
+            ("rotate", "rotated-and-readback-verified", "e"),
+            ("deactivate", "deactivated-and-readback-verified", "f"),
+            ("reactivate", "reactivated-and-readback-verified", "1"),
+        )
+    ):
+        receipt_digest = "sha256:" + (receipt_character * 64)
+        attempt = index + 1
+        lifecycle_operations.append(
+            {
+                "operation": operation,
+                "workflowPath": ".github/workflows/judge-user.yml",
+                "stage": "production",
+                "runId": 210 + index,
+                "runAttempt": attempt,
+                "artifactId": 220 + index,
+                "artifactName": (
+                    f"judge-user-operation-{operation}-{RELEASE}-{attempt}"
+                ),
+                "artifactDigest": DIGEST,
+                "predicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/judge-user-operation/v1"
+                ),
+                "predicateDigest": DIGEST,
+                "verificationDigest": DIGEST,
+                "releaseSha": RELEASE,
+                "identityDigest": identity_digest,
+                "applicationOriginSha256": application_origin_sha256,
+                "operationReceiptDigest": receipt_digest,
+                "performedAt": iso(NOW - dt.timedelta(hours=4 - index)),
+                "result": result,
+                "sanitized": True,
+                "secretMaterialRetained": False,
+            }
+        )
+    history_digest = DIGEST
+    notice_digest = validator.sha256_file(NOTICE_PATH)
+    disclosure_set_digest = validator.canonical_json_digest(
+        {
+            "noticeDigest": notice_digest,
+            "preExistingWorkInventoryDigest": DIGEST,
+            "thirdPartyInventoryDigest": DIGEST,
+        }
+    )
+    rules = {
+        "officialRulesUrl": "https://datahub.devpost.com/rules",
+        "snapshotDigest": DIGEST,
+        "submissionStart": "2026-07-06T13:00:00Z",
+        "submissionEnd": "2026-08-10T21:00:00Z",
+    }
+    facts = {
+        "D4": {
+            "applicationUrl": application,
+            "evidenceClass": "LIVE_DEPLOYED_DATAHUB",
+            "liveDataHubRead": True,
+            "retainedHistoryRead": True,
+            "stableSourceCount": 2,
+            "recoveredContradictions": 1,
+            "governedWrite": {
+                "workflowRunId": 101,
+                "result": "write-verified-and-rollback-proven",
+                "rollbackSubjectDigest": DIGEST,
+                "rollbackEvidenceDigest": DIGEST,
+                "attestationPredicateDigest": DIGEST,
+                "attestationVerificationDigest": DIGEST,
+            },
+            "provenAt": iso(),
+        },
+        "U3": {
+            "evidenceClass": "LIVE_DEPLOYED_DATAHUB",
+            "datasetUrnDigest": DIGEST,
+            "classification": {
+                "totalEntities": 1,
+                "withLineage": 1,
+                "sensitiveEntities": 1,
+            },
+            "findings": {
+                "totalCount": 3,
+                "g6": {
+                    "exactTarget": True,
+                    "fieldPath": "email",
+                    "classificationAbsent": True,
+                    "blastRootBound": True,
+                    "downstreamCount": 0,
+                    "maxHops": 3,
+                    "truncated": False,
+                    "impact": "none",
+                },
+                "danglingLineage": {
+                    "exactUpstream": True,
+                    "upstreamAbsent": True,
+                    "blastRootBound": True,
+                    "targetConsumerMinHops": 1,
+                    "downstreamCount": 1,
+                    "maxHops": 3,
+                    "truncated": False,
+                    "impact": "low",
+                },
+                "retainedHistory": {
+                    "exactTarget": True,
+                    "attribute": "owner",
+                    "provenanceCount": 2,
+                    "stableSourceCount": 2,
+                    "statuses": ["conflicting", "trusted"],
+                    "retainedOwnershipHistorySha256": "c" * 64,
+                },
+            },
+            "provenAt": iso(),
+        },
+        "SQ3": {
+            "applicationUrl": application,
+            "applicationOriginDigest": application_digest,
+            "deployment": copy.deepcopy(deployment),
+            "observation": {
+                "observedAt": iso(),
+                "loggedOutAccessible": True,
+                "httpStatus": 200,
+                "redirectsObserved": 0,
+                "strictTls": True,
+                "releaseMatched": True,
+                "availabilityRunId": 203,
+                "availabilityRunAttempt": 3,
+                "availabilityArtifactId": 204,
+                "availabilityArtifactName": (
+                    f"production-availability-{RELEASE}-3"
+                ),
+                "availabilityArtifactDigest": DIGEST,
+                "availabilityPredicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/production-availability/v1"
+                ),
+                "availabilityPredicateDigest": DIGEST,
+            },
+        },
+        "SQ4": {
+            "applicationUrl": application,
+            "authenticationRequired": True,
+            "accessMode": "pipeline-managed-confirmed",
+            "deployment": copy.deepcopy(deployment),
+            "judgeUserLifecycle": {
+                "releaseSha": RELEASE,
+                "stage": "production",
+                "identityDigest": identity_digest,
+                "applicationOriginSha256": application_origin_sha256,
+                "chainDigest": validator.canonical_json_digest(
+                    lifecycle_operations
+                ),
+                "operations": lifecycle_operations,
+                "sanitized": True,
+                "secretMaterialRetained": False,
+            },
+            "freshJudgeJourney": {
+                "workflowPath": ".github/workflows/submission-judge-journey.yml",
+                "stage": "production",
+                "runId": 230,
+                "runAttempt": 1,
+                "artifactId": 231,
+                "artifactName": f"submission-judge-journey-{RELEASE}-1",
+                "artifactDigest": DIGEST,
+                "predicateType": (
+                    "https://archon.datahub.dev/attestations/"
+                    "submission-judge-journey/v1"
+                ),
+                "predicateDigest": DIGEST,
+                "verificationDigest": DIGEST,
+                "releaseSha": RELEASE,
+                "identityDigest": identity_digest,
+                "applicationOriginSha256": application_origin_sha256,
+                "journeyStartedAt": iso(NOW - dt.timedelta(minutes=30)),
+                "journeyCompletedAt": iso(NOW - dt.timedelta(minutes=10)),
+                "identityIsFresh": True,
+                "loginSucceeded": True,
+                "startSucceeded": True,
+                "statusPollingSucceeded": True,
+                "terminalReceiptVerified": True,
+                "logoutIsolationVerified": True,
+                "terminalReceiptDigest": DIGEST,
+                "sanitized": True,
+                "secretMaterialRetained": False,
+            },
+            "testingInstructionsPath": "docs/JUDGE_TESTING.md",
+            "testingInstructionsDigest": TESTING_DIGEST,
+            "credentialRotation": {
+                "pipelineManagedConfirmed": True,
+                "secretMaterialRetained": False,
+                "rotationTested": True,
+                "recoveryTested": True,
+            },
+            "freeAccess": True,
+            "accessValidThrough": "2026-08-31T21:00:00Z",
+            "observedAt": iso(),
+        },
+        "SQ5": {
+            "repositoryUrl": "https://github.com/upgradedev/archon-datahub",
+            "releaseUrl": (
+                f"https://github.com/upgradedev/archon-datahub/tree/{RELEASE}"
+            ),
+            "licenseUrl": (
+                f"https://github.com/upgradedev/archon-datahub/blob/"
+                f"{RELEASE}/LICENSE"
+            ),
+            "defaultBranch": "master",
+            "releaseVisible": True,
+            "loggedOutAccessible": True,
+            "completeSource": True,
+            "licenseSpdx": "Apache-2.0",
+            "hostingUiDetectedLicense": True,
+            "observedAt": iso(),
+        },
+        "SQ6": {
+            "allWrittenFieldsComplete": True,
+            "submissionLanguage": "en",
+            "testingInstructionsLanguage": "en",
+            "completeEnglishTranslation": True,
+            "submissionFieldsDigest": DIGEST,
+            "testingInstructionsPath": "docs/JUDGE_TESTING.md",
+            "testingInstructionsDigest": TESTING_DIGEST,
+            "claimsDigest": DIGEST,
+            "reviewedAt": iso(),
+        },
+        "SQ7": {
+            "videoUrl": "https://www.youtube.com/watch?v=ArchonDemo1",
+            "publiclyAccessible": True,
+            "loggedOutAccessible": True,
+            "durationSeconds": 179,
+            "spokenLanguage": "en",
+            "subtitlesLanguage": "none",
+            "completeEnglishTranslation": True,
+            "functioningProjectShown": True,
+            "thirdPartyMarksAndMusicAuthorized": True,
+            "allThirdPartyMaterialAuthorized": True,
+            "mediaReviewDigest": DIGEST,
+            "shownApplicationUrl": application,
+            "claimsDigest": DIGEST,
+            "reviewedAt": iso(),
+        },
+        "SQ8": {
+            "rules": copy.deepcopy(rules),
+            "projectHistory": {
+                "projectStartedAt": "2026-07-06T20:26:56Z",
+                "repositoryCreatedAt": "2026-07-06T20:31:38Z",
+                "rootCommitSha": "2" * 40,
+                "rootCommitAuthoredAt": "2026-07-06T20:26:56Z",
+                "rootCommitCommittedAt": "2026-07-06T20:26:56Z",
+                "rootCommitParentCount": 0,
+                "releaseCommitSha": RELEASE,
+                "releaseCommitCommittedAt": iso(NOW - dt.timedelta(minutes=5)),
+                "reachableCommitCount": 12,
+                "allReachableCommitsWithinSubmissionPeriod": True,
+                "historyDigest": history_digest,
+            },
+            "reviewedSurfaces": [
+                "NOTICE.md",
+                "repository-history",
+                "submission-fields",
+                "testing-instructions",
+                "video",
+            ],
+            "noticeDigest": notice_digest,
+            "repositoryHistoryDigest": history_digest,
+            "submissionFieldsDigest": DIGEST,
+            "testingInstructionsDigest": TESTING_DIGEST,
+            "submissionClaimsDigest": DIGEST,
+            "videoClaimsDigest": DIGEST,
+            "preExistingWorkInventoryDigest": DIGEST,
+            "thirdPartyInventoryDigest": DIGEST,
+            "disclosureSetDigest": disclosure_set_digest,
+            "allNonStandardPreExistingWorkDisclosed": True,
+            "workDescribedAndSubmittedBuiltDuringPeriod": True,
+            "standardToolsOnlyExcludedFromDisclosure": True,
+            "thirdPartyIntegrationsAuthorized": True,
+            "originalWorkOwnershipReviewed": True,
+            "crossMediumConsistent": True,
+            "reviewApproval": {
+                "environment": "submission-content-review",
+                "workflowActorId": 601,
+                "triggeringActorId": 602,
+                "reviewerId": 603,
+                "approvalReceiptDigest": DIGEST,
+            },
+            "finalizedAt": iso(NOW - dt.timedelta(minutes=1)),
+            "reviewedAt": iso(),
+        },
+        "SQ9": {
+            "evidenceClass": "SYNTHETIC_OFFLINE_FIXTURE",
+            "ci": {
+                "workflowPath": ".github/workflows/ci.yml",
+                "runId": 301,
+                "runAttempt": 1,
+                "predicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/ci-release/v1"
+                ),
+                "predicateDigest": DIGEST,
+            },
+            "artifact": {
+                "id": 302,
+                "name": f"judge-evidence-{RELEASE}",
+                "digest": DIGEST,
+            },
+            "manifestDigest": DIGEST,
+            "formats": [
+                "approval",
+                "dossier",
+                "json",
+                "markdown",
+                "plan",
+                "receipt",
+                "rollback",
+                "sarif",
+            ],
+            "sanitized": True,
+            "notLiveProof": True,
+        },
+        "SQ10": {
+            "applicationUrl": application,
+            "availability": {
+                "workflowPath": ".github/workflows/availability.yml",
+                "runId": 401,
+                "runAttempt": 4,
+                "artifactId": 402,
+                "artifactName": f"production-availability-{RELEASE}-4",
+                "artifactDigest": DIGEST,
+                "predicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/production-availability/v1"
+                ),
+                "predicateDigest": DIGEST,
+                "observedAt": iso(),
+                "result": "passed",
+            },
+            "posture": {
+                "workflowPath": ".github/workflows/production-posture.yml",
+                "runId": 403,
+                "runAttempt": 5,
+                "artifactId": 404,
+                "artifactName": f"production-posture-{RELEASE}-5",
+                "artifactDigest": DIGEST,
+                "predicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/production-posture/v1"
+                ),
+                "predicateDigest": DIGEST,
+                "observedAt": iso(),
+                "result": "passed",
+            },
+            "alerting": {
+                "alarmsActive": True,
+                "snsSubscriptionConfirmed": True,
+                "externalPagingDeliveryTested": True,
+                "lastPagingTestAt": iso(),
+            },
+            "recovery": {
+                "rollbackPathTested": True,
+                "credentialRotationTested": True,
+                "lastRecoveryTestAt": iso(),
+            },
+            "access": {
+                "freeJudgeAccess": True,
+                "confirmedCredentialOrPublicNoAuth": True,
+                "validThrough": "2026-08-31T21:00:00Z",
+            },
+            "monitoringWindow": {
+                "schedule": "17 */6 * * *",
+                "active": True,
+                "through": "2026-08-31T21:00:00Z",
+            },
+        },
+        "SQ11": {
+            "rules": {
+                **copy.deepcopy(rules),
+                "judgingStart": "2026-08-17T14:00:00Z",
+                "judgingEnd": "2026-08-31T21:00:00Z",
+            },
+            "challengeUrl": "https://datahub.devpost.com/",
+            "devpostProjectUrl": "https://devpost.com/software/archon-datahub",
+            "submissionStatus": "submitted",
+            "submittedAt": iso(NOW - dt.timedelta(seconds=30)),
+            "confirmationDigest": DIGEST,
+            "allRequiredFieldsSubmitted": True,
+            "challengeEntryVisible": True,
+            "descriptionDigest": DIGEST,
+            "submissionFieldsDigest": DIGEST,
+            "testingInstructionsDigest": TESTING_DIGEST,
+            "submissionClaimsDigest": DIGEST,
+            "videoClaimsDigest": DIGEST,
+            "applicationUrl": application,
+            "applicationAuthenticationRequired": True,
+            "repositoryUrl": "https://github.com/upgradedev/archon-datahub",
+            "videoUrl": "https://www.youtube.com/watch?v=ArchonDemo1",
+            "loggedOutVerification": {
+                "observedAt": iso(),
+                "devpostEntry": {
+                    "url": "https://devpost.com/software/archon-datahub",
+                    "httpStatus": 200,
+                    "loggedOutAccessible": True,
+                    "redirectsObserved": 0,
+                    "loginRequired": False,
+                },
+                "application": {
+                    "url": application,
+                    "httpStatus": 200,
+                    "loggedOutAccessible": True,
+                    "redirectsObserved": 0,
+                    "loginRequired": True,
+                },
+                "repository": {
+                    "url": "https://github.com/upgradedev/archon-datahub",
+                    "httpStatus": 200,
+                    "loggedOutAccessible": True,
+                    "redirectsObserved": 0,
+                    "loginRequired": False,
+                },
+                "video": {
+                    "url": "https://www.youtube.com/watch?v=ArchonDemo1",
+                    "httpStatus": 200,
+                    "loggedOutAccessible": True,
+                    "redirectsObserved": 0,
+                    "loginRequired": False,
+                },
+            },
+            "preSubmitSeal": {
+                "workflowPath": ".github/workflows/submission-readiness.yml",
+                "runId": 701,
+                "runAttempt": 1,
+                "artifactId": 702,
+                "artifactName": f"submission-readiness-{RELEASE}",
+                "artifactDigest": DIGEST,
+                "inventoryDigest": DIGEST,
+                "subjectSetDigest": DIGEST,
+                "predicateType": (
+                    "https://archon.datahub.dev/attestations/"
+                    "submission-readiness-seal/v1"
+                ),
+                "predicateDigest": DIGEST,
+                "readinessEvidenceDigest": DIGEST,
+                "readinessDigest": DIGEST,
+                "sourceBindingDigest": DIGEST,
+                "approvalReceiptDigest": DIGEST,
+                "sealedAt": iso(NOW - dt.timedelta(minutes=1)),
+            },
+            "reviewApproval": {
+                "environment": "submission-devpost-confirmation",
+                "workflowActorId": 703,
+                "triggeringActorId": 704,
+                "reviewerId": 705,
+                "approvalReceiptDigest": ALT_DIGEST,
+            },
+        },
+        "BONUS-OSS": {
+            "upstreamRepositoryUrl": "https://github.com/acryldata/mcp-server-datahub",
+            "pullRequestUrl": "https://github.com/acryldata/mcp-server-datahub/pull/12345",
+            "state": "merged",
+            "publiclyAccessible": True,
+            "acceptedByMaintainer": True,
+            "acceptedAt": iso(BONUS_EVENT),
+            "patchDigest": DIGEST,
+            "validatedCandidateDigest": DIGEST,
+            "ciValidation": {
+                "workflowPath": ".github/workflows/ci.yml",
+                "runId": 501,
+                "runAttempt": 1,
+                "artifactId": 502,
+                "artifactName": f"oss-validation-receipt-{RELEASE}",
+                "artifactDigest": DIGEST,
+            },
+        },
+        "BONUS-FEEDBACK": {
+            "officialRulesUrl": "https://datahub.devpost.com/rules",
+            "confirmationDigest": DIGEST,
+            "submittedAt": iso(BONUS_EVENT),
+            "oneEntryPerEntrant": True,
+            "separateFromProjectSubmission": True,
+        },
+    }
+    return facts
+
+
+def make_receipt(proof_id: str, facts: dict) -> dict:
+    source = validator.source_for_proof(proof_id, sources)
+    attempt = 1
+    return {
+        "schemaVersion": validator.RECEIPT_SCHEMA,
+        "id": proof_id,
+        "criterion": validator.PROOF_CRITERIA[proof_id],
+        "repository": validator.REPOSITORY,
+        "releaseSha": RELEASE,
+        "source": {
+            "workflowPath": source["workflowPath"],
+            "runId": 900 + len(proof_id),
+            "runAttempt": attempt,
+            "artifact": {
+                "id": 1000 + len(proof_id),
+                "name": validator.artifact_name(source, RELEASE, attempt),
+                "digest": DIGEST,
+            },
+            "attestation": {
+                "predicateType": source["predicateType"],
+                "predicateDigest": DIGEST,
+                "subjectSetDigest": DIGEST,
+                "verificationSetDigest": DIGEST,
+                "subjects": [
+                    {
+                        "role": subject["role"],
+                        "name": subject["name"],
+                        "digest": DIGEST,
+                    }
+                    for subject in validator.expected_receipt_subject_names(
+                        source,
+                        proof_id,
+                    )
+                ],
+            },
+        },
+        "facts": facts,
+    }
+
+
+facts_by_id = valid_facts()
+for registered_id, facts in facts_by_id.items():
+    validator.validate_facts(
+        registered_id,
+        facts,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    )
+    validator.validate_receipt(
+        make_receipt(registered_id, facts),
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    )
+    expect_rejected(
+        lambda proof_id=registered_id: validator.validate_facts(
+            proof_id, {}, RELEASE, notice_path=NOTICE_PATH
+        ),
+        f"{registered_id} accepted an empty literal-only receipt",
+    )
+
+
+def rejects_mutation(
+    proof_id: str, mutate, description: str
+) -> None:
+    changed = copy.deepcopy(facts_by_id[proof_id])
+    mutate(changed)
+    expect_rejected(
+        lambda: validator.validate_facts(
+            proof_id, changed, RELEASE, notice_path=NOTICE_PATH
+        ),
+        description,
+    )
+
+
+def mutate_sq4_lifecycle_stage(value: dict, stage: str) -> None:
+    lifecycle = value["judgeUserLifecycle"]
+    lifecycle["stage"] = stage
+    for operation in lifecycle["operations"]:
+        operation["stage"] = stage
+    lifecycle["chainDigest"] = validator.canonical_json_digest(
+        lifecycle["operations"]
+    )
+    value["freshJudgeJourney"]["stage"] = stage
+
+
+def mutate_sq4_application_origin(value: dict, digest: str) -> None:
+    lifecycle = value["judgeUserLifecycle"]
+    lifecycle["applicationOriginSha256"] = digest
+    for operation in lifecycle["operations"]:
+        operation["applicationOriginSha256"] = digest
+    lifecycle["chainDigest"] = validator.canonical_json_digest(
+        lifecycle["operations"]
+    )
+    value["freshJudgeJourney"]["applicationOriginSha256"] = digest
+
+
+rejects_mutation(
+    "SQ3",
+    lambda value: value.update(applicationUrl="http://wrong.example"),
+    "SQ3 accepted a non-HTTPS or origin-mismatched URL",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: value["freshJudgeJourney"].update(terminalReceiptVerified=False),
+    "SQ4 accepted an incomplete fresh-judge journey",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: mutate_sq4_lifecycle_stage(value, "staging"),
+    "SQ4 accepted lifecycle and journey receipts from staging",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: mutate_sq4_application_origin(value, "a" * 64),
+    "SQ4 accepted lifecycle and journey receipts for another application origin",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: value["judgeUserLifecycle"]["operations"].pop(2),
+    "SQ4 accepted a lifecycle without all four exact operation receipts",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: value["judgeUserLifecycle"]["operations"][3].update(
+        operationReceiptDigest=DIGEST
+    ),
+    "SQ4 accepted an operation list that differs from its aggregate chain",
+)
+rejects_mutation(
+    "SQ5",
+    lambda value: value.update(licenseSpdx="MIT"),
+    "SQ5 accepted the wrong detected license",
+)
+rejects_mutation(
+    "SQ6",
+    lambda value: value.update(submissionLanguage="el"),
+    "SQ6 accepted non-English final fields",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(durationSeconds=180),
+    "SQ7 accepted a three-minute video",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(spokenLanguage="el", subtitlesLanguage="none"),
+    "SQ7 accepted a video without English accessibility",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(videoUrl="https://www.youtube.com/"),
+    "SQ7 accepted a provider homepage without an exact video ID",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(videoUrl="https://evil.youtube.com/watch?v=ArchonDemo1"),
+    "SQ7 accepted an unapproved video-provider subdomain",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(
+        videoUrl="https://youtube.com/watch?v=ArchonDemo1"
+    ),
+    "SQ7 accepted a redirecting bare YouTube alias",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(videoUrl="https://youtu.be/ArchonDemo1"),
+    "SQ7 accepted a redirecting shortened YouTube alias",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(videoUrl="https://www.vimeo.com/12345"),
+    "SQ7 accepted a redirecting Vimeo alias",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value.update(allThirdPartyMaterialAuthorized=False),
+    "SQ7 accepted unreviewed third-party material",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value.update(crossMediumConsistent=False),
+    "SQ8 accepted an inconsistent disclosure review",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["projectHistory"].update(
+        projectStartedAt="2026-07-06T12:59:59Z",
+        rootCommitAuthoredAt="2026-07-06T12:59:59Z",
+    ),
+    "SQ8 accepted a project started before the New Projects Only period",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["rules"].update(
+        officialRulesUrl="https://datahub.devpost.com/"
+    ),
+    "SQ8 accepted a non-rules source for New Projects Only",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["projectHistory"].update(
+        releaseCommitCommittedAt=iso(NOW + dt.timedelta(days=1))
+    ),
+    "SQ8 accepted future repository history",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["projectHistory"].update(
+        allReachableCommitsWithinSubmissionPeriod=False
+    ),
+    "SQ8 accepted out-of-period reachable history",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["projectHistory"].update(
+        releaseCommitCommittedAt="2026-07-06T20:25:00Z"
+    ),
+    "SQ8 accepted impossible repository/release chronology",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value.update(preExistingWorkInventoryDigest=ALT_DIGEST),
+    "SQ8 accepted a disclosure inventory no longer bound to NOTICE",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"].update(externalPagingDeliveryTested=False),
+    "SQ10 accepted untested external paging",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["availability"].update(
+        observedAt=iso(NOW - dt.timedelta(hours=8))
+    ),
+    "SQ10 accepted a stale availability observation",
+)
+rejects_mutation(
+    "SQ11",
+    lambda value: value.update(devpostProjectUrl="https://devpost.com/software/"),
+    "SQ11 accepted a Devpost listing without a project slug",
+)
+rejects_mutation(
+    "SQ11",
+    lambda value: value["loggedOutVerification"]["devpostEntry"].update(
+        loginRequired=True
+    ),
+    "SQ11 accepted a login-gated Devpost entry",
+)
+rejects_mutation(
+    "SQ11",
+    lambda value: value["preSubmitSeal"].update(
+        readinessEvidenceDigest=ALT_DIGEST
+    ),
+    "SQ11 accepted a pre-submit seal predicate mismatch",
+)
+rejects_mutation(
+    "SQ11",
+    lambda value: value["rules"].update(
+        judgingStart="2026-08-18T14:00:00Z"
+    ),
+    "SQ11 accepted altered official judging dates",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value.update(
+        upstreamRepositoryUrl="https://github.com/attacker/mcp-server-datahub"
+    ),
+    "BONUS-OSS accepted the wrong upstream repository",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value.update(submittedAt="2026-07-06T12:59:59Z"),
+    "BONUS-FEEDBACK accepted a pre-period confirmation",
+)
+
+expect_rejected(
+    lambda: validator.public_https_url(
+        "https://www.datahub.com:70000",
+        "invalidPort",
+    ),
+    "public HTTPS validation accepted an invalid port",
+)
+expect_rejected(
+    lambda: validator.public_https_url(
+        "https://archon.example",
+        "reservedHost",
+    ),
+    "public HTTPS validation accepted a reserved DNS suffix",
+)
+
+wrong_source = make_receipt("SQ5", facts_by_id["SQ5"])
+wrong_source["source"]["workflowPath"] = ".github/workflows/ci.yml"
+expect_rejected(
+    lambda: validator.validate_receipt(
+        wrong_source,
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    ),
+    "receipt accepted the wrong registered source workflow",
+)
+wrong_release = make_receipt("SQ5", facts_by_id["SQ5"])
+wrong_release["releaseSha"] = "d" * 40
+expect_rejected(
+    lambda: validator.validate_receipt(
+        wrong_release,
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    ),
+    "receipt accepted the wrong release",
+)
+wrong_repository = make_receipt("SQ5", facts_by_id["SQ5"])
+wrong_repository["repository"] = "attacker/repository"
+expect_rejected(
+    lambda: validator.validate_receipt(
+        wrong_repository,
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    ),
+    "receipt accepted the wrong repository",
+)
+
+def write_support_subject(
+    path: Path,
+    proof_id: str,
+    role: str,
+    facts: dict,
+) -> None:
+    captured_at = iso()
+    bindings = validator.expected_support_bindings(proof_id, role, facts)
+    data = [
+        {
+            "schemaVersion": validator.SUPPORT_RECORD_SCHEMA,
+            "recordType": role,
+            "observedAt": captured_at,
+            "evidence": bindings,
+        }
+    ]
+    capture_bytes = validator.canonical_json_text(data).encode("utf-8")
+    validator.write_json(
+        path,
+        {
+            "schemaVersion": validator.SUPPORT_SCHEMA,
+            "proofId": proof_id,
+            "role": role,
+            "repository": validator.REPOSITORY,
+            "releaseSha": RELEASE,
+            "factsDigest": validator.canonical_json_digest(facts),
+            "capture": {
+                "schemaVersion": validator.SUPPORT_CAPTURE_SCHEMA,
+                "capturedAt": captured_at,
+                "digest": validator.sha256_bytes(capture_bytes),
+                "sizeBytes": len(capture_bytes),
+                "recordCount": 1,
+                "data": data,
+            },
+            "sanitized": True,
+            "bindings": bindings,
+        },
+    )
+
+
+def materialize_standard_source(
+    aggregate_root: Path,
+    source_key: str,
+    source_facts: dict[str, dict],
+) -> tuple[Path, dict[str, dict], dict]:
+    source = sources[source_key]
+    subject_root = aggregate_root / "upstream-subjects" / source_key
+    verification_root = aggregate_root / "upstream-verification" / source_key
+    receipt_dir = aggregate_root / "receipts"
+    subject_root.mkdir(parents=True)
+    verification_root.mkdir(parents=True)
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    envelopes: dict[str, tuple[dict, Path, list[dict]]] = {}
+    for proof_id in source["proofIds"]:
+        facts = source_facts[proof_id]
+        support_rows = []
+        for configured in validator.configured_support_rows(source, proof_id):
+            support_path = subject_root / configured["name"]
+            write_support_subject(
+                support_path,
+                proof_id,
+                configured["role"],
+                facts,
+            )
+            support_rows.append(
+                {
+                    "role": configured["role"],
+                    "name": configured["name"],
+                    "digest": validator.sha256_file(support_path),
+                }
+            )
+        envelope_path = subject_root / "proofs" / f"{proof_id}.json"
+        envelope = {
+            "schemaVersion": validator.UPSTREAM_SCHEMA,
+            "id": proof_id,
+            "repository": validator.REPOSITORY,
+            "releaseSha": RELEASE,
+            "facts": facts,
+            "supportSubjects": support_rows,
+        }
+        validator.write_json(envelope_path, envelope)
+        envelopes[proof_id] = (envelope, envelope_path, support_rows)
+    predicate = {
+        "schemaVersion": validator.UPSTREAM_PREDICATE_SCHEMA,
+        "repository": validator.REPOSITORY,
+        "releaseSha": RELEASE,
+        "source": {
+            "workflowPath": source["workflowPath"],
+            "runId": 991,
+            "runAttempt": 1,
+        },
+        "proofs": [
+            {
+                "id": proof_id,
+                "subjects": [
+                    {
+                        "role": "proof-envelope",
+                        "name": f"proofs/{proof_id}.json",
+                        "digest": validator.sha256_file(envelope_path),
+                    },
+                    *support_rows,
+                ],
+            }
+            for proof_id, (
+                _,
+                envelope_path,
+                support_rows,
+            ) in sorted(envelopes.items())
+        ],
+        "result": "verified",
+    }
+    predicate_path = subject_root / source["predicateFile"]
+    validator.write_json(predicate_path, predicate)
+    predicate_digest = validator.sha256_file(predicate_path)
+    inventory_path = subject_root / source["subjectInventory"]
+    inventory_subjects = {
+        path.relative_to(subject_root).as_posix(): validator.sha256_file(path)
+        for path in subject_root.rglob("*")
+        if path.is_file() and path != inventory_path
+    }
+    inventory_path.write_text(
+        "".join(
+            f"{digest.removeprefix('sha256:')}  {name}\n"
+            for name, digest in sorted(inventory_subjects.items())
+        ),
+        encoding="utf-8",
+    )
+    subject_set_digest = validator.checksum_subject_set_digest(
+        inventory_subjects
+    )
+    verification_names: set[str] = set()
+    for proof in predicate["proofs"]:
+        for subject in proof["subjects"]:
+            name = f"{proof['id']}--{subject['role']}.json"
+            verification_names.add(name)
+            validator.write_json(
+                verification_root / name,
+                {
+                    "schemaVersion": (
+                        "archon.upstream-attestation-verification/v1"
+                    ),
+                    "repository": validator.REPOSITORY,
+                    "releaseSha": RELEASE,
+                    "proofId": proof["id"],
+                    "role": subject["role"],
+                    "subject": {
+                        "name": subject["name"],
+                        "digest": subject["digest"],
+                    },
+                    "predicate": {
+                        "type": source["predicateType"],
+                        "digest": predicate_digest,
+                    },
+                    "statement": {
+                        "predicateType": source["predicateType"],
+                        "predicate": predicate,
+                        "subject": validator.attestation_subjects(
+                            inventory_subjects
+                        ),
+                    },
+                },
+            )
+    verification_set_digest = validator.retained_file_set_digest(
+        verification_root,
+        verification_names,
+    )
+    receipts = validator.derive_standard(
+        subject_root,
+        source,
+        validator.REPOSITORY,
+        RELEASE,
+        991,
+        1,
+        992,
+        validator.artifact_name(source, RELEASE, 1),
+        DIGEST,
+        predicate_digest,
+        subject_set_digest,
+        verification_set_digest,
+        NOTICE_PATH,
+    )
+    for receipt in receipts:
+        validator.write_json(
+            receipt_dir / f"{receipt['id']}.json",
+            receipt,
+        )
+    validator.write_json(
+        verification_root / "binding.json",
+        {
+            "schemaVersion": validator.UPSTREAM_BINDING_SCHEMA,
+            "repository": validator.REPOSITORY,
+            "releaseSha": RELEASE,
+            "sourceKey": source_key,
+            "source": {
+                "workflowPath": source["workflowPath"],
+                "runId": 991,
+                "runAttempt": 1,
+            },
+            "artifact": {
+                "id": 992,
+                "name": validator.artifact_name(source, RELEASE, 1),
+                "digest": DIGEST,
+            },
+            "attestation": {
+                "predicateType": source["predicateType"],
+                "predicateDigest": predicate_digest,
+                "verificationSetDigest": verification_set_digest,
+                "subjectSetDigest": subject_set_digest,
+            },
+            "proofIds": source["proofIds"],
+        },
+    )
+    return (
+        receipt_dir,
+        {receipt["id"]: receipt for receipt in receipts},
+        predicate,
+    )
+
+
+with tempfile.TemporaryDirectory(prefix="submission-evidence-contracts-") as raw:
+    temporary = Path(raw)
+    receipt_dir, retained_receipts, retained_predicate = (
+        materialize_standard_source(
+            temporary,
+            "bonus-feedback",
+            {"BONUS-FEEDBACK": facts_by_id["BONUS-FEEDBACK"]},
+        )
+    )
+    loaded = validator.load_receipt_directory(
+        receipt_dir,
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        NOTICE_PATH,
+    )
+    validator.revalidate_retained_sources(
+        receipt_dir,
+        loaded,
+        sources,
+        validator.REPOSITORY,
+        RELEASE,
+        NOTICE_PATH,
+    )
+    support_path = (
+        temporary
+        / "upstream-subjects"
+        / "bonus-feedback"
+        / "support"
+        / "BONUS-FEEDBACK"
+        / "feedback-confirmation.json"
+    )
+    retained_inventory_subjects = validator.load_checksum_inventory(
+        temporary
+        / "upstream-subjects"
+        / "bonus-feedback"
+        / "SHA256SUMS",
+        "SHA256SUMS",
+        "retained fixture inventory",
+    )
+    expected_statement_subjects = validator.attestation_subjects(
+        retained_inventory_subjects
+    )
+    feedback_receipt = retained_receipts["BONUS-FEEDBACK"]
+    feedback_attestation = feedback_receipt["source"]["attestation"]
+    feedback_subject = next(
+        subject
+        for subject in feedback_attestation["subjects"]
+        if subject["role"] == "feedback-confirmation"
+    )
+    verification_projection = {
+        "schemaVersion": "archon.upstream-attestation-verification/v1",
+        "repository": validator.REPOSITORY,
+        "releaseSha": RELEASE,
+        "proofId": "BONUS-FEEDBACK",
+        "role": "feedback-confirmation",
+        "subject": {
+            "name": feedback_subject["name"],
+            "digest": feedback_subject["digest"],
+        },
+        "predicate": {
+            "type": sources["bonus-feedback"]["predicateType"],
+            "digest": feedback_attestation["predicateDigest"],
+        },
+    }
+    tampered_support = validator.load_json(support_path, "support fixture")
+    tampered_support["capture"]["data"][0]["evidence"][
+        "oneEntryPerEntrant"
+    ] = False
+    tampered_path = temporary / "tampered-support.json"
+    validator.write_json(tampered_path, tampered_support)
+    expect_rejected(
+        lambda: validator.validate_support_subject(
+            tampered_path,
+            "BONUS-FEEDBACK",
+            "feedback-confirmation",
+            validator.REPOSITORY,
+            RELEASE,
+            facts_by_id["BONUS-FEEDBACK"],
+        ),
+        "support validation accepted capture bytes that differ from the binding",
+    )
+    forged_verification = temporary / "forged-verification.json"
+    validator.write_json(
+        forged_verification,
+        {
+            **verification_projection,
+            "statement": {
+                "predicateType": sources["bonus-feedback"]["predicateType"],
+                "predicate": {"forged": True},
+                "subject": expected_statement_subjects,
+            },
+        },
+    )
+    expect_rejected(
+        lambda: validator.validate_gh_verification(
+            forged_verification,
+            validator.REPOSITORY,
+            RELEASE,
+            "BONUS-FEEDBACK",
+            "feedback-confirmation",
+            sources["bonus-feedback"]["predicateType"],
+            feedback_attestation["predicateDigest"],
+            retained_predicate,
+            feedback_subject["name"],
+            feedback_subject["digest"],
+            expected_statement_subjects,
+            "forged verification",
+        ),
+        "protected validation accepted a forged upstream predicate statement",
+    )
+    extra_subject_verification = temporary / "extra-subject-verification.json"
+    validator.write_json(
+        extra_subject_verification,
+        {
+            **verification_projection,
+            "statement": {
+                "predicateType": sources["bonus-feedback"]["predicateType"],
+                "predicate": retained_predicate,
+                "subject": [
+                    *expected_statement_subjects,
+                    {
+                        "name": "unregistered.json",
+                        "digest": {"sha256": "c" * 64},
+                    },
+                ],
+            },
+        },
+    )
+    expect_rejected(
+        lambda: validator.validate_gh_verification(
+            extra_subject_verification,
+            validator.REPOSITORY,
+            RELEASE,
+            "BONUS-FEEDBACK",
+            "feedback-confirmation",
+            sources["bonus-feedback"]["predicateType"],
+            feedback_attestation["predicateDigest"],
+            retained_predicate,
+            feedback_subject["name"],
+            feedback_subject["digest"],
+            expected_statement_subjects,
+            "extra-subject verification",
+        ),
+        "upstream verification accepted a subject outside the exact inventory",
+    )
+    wrong_subject_set_receipts = copy.deepcopy(retained_receipts)
+    wrong_subject_set_receipts["BONUS-FEEDBACK"]["source"]["attestation"][
+        "subjectSetDigest"
+    ] = ALT_DIGEST
+    expect_rejected(
+        lambda: validator.revalidate_retained_sources(
+            receipt_dir,
+            wrong_subject_set_receipts,
+            sources,
+            validator.REPOSITORY,
+            RELEASE,
+            NOTICE_PATH,
+        ),
+        "protected validation accepted a receipt bound to the wrong full subject set",
+    )
+    extra_subject = (
+        temporary / "upstream-subjects" / "bonus-feedback" / "extra.json"
+    )
+    extra_subject.write_text("{}\n", encoding="utf-8")
+    expect_rejected(
+        lambda: validator.revalidate_retained_sources(
+            receipt_dir,
+            retained_receipts,
+            sources,
+            validator.REPOSITORY,
+            RELEASE,
+            NOTICE_PATH,
+        ),
+        "retained source validation ignored an extra file",
+    )
+    (receipt_dir / "ignored.txt").write_text(
+        "must be rejected\n",
+        encoding="utf-8",
+    )
+    expect_rejected(
+        lambda: validator.load_receipt_directory(
+            receipt_dir,
+            sources,
+            validator.REPOSITORY,
+            RELEASE,
+            NOTICE_PATH,
+        ),
+        "receipt inventory ignored an extra non-JSON file",
+    )
+
+with tempfile.TemporaryDirectory(prefix="native-live-subject-set-") as raw:
+    native_root = Path(raw) / "upstream-subjects" / "live-datahub"
+    native_root.mkdir(parents=True)
+    for name, value in {
+        "proof.json": {"kind": "live-proof"},
+        "deployment-evidence.json": {"kind": "deployment"},
+        "deployed-datahub-semantic-proof.json": {"kind": "semantic"},
+        "sealed-extra.json": {"kind": "additional-attested-evidence"},
+    }.items():
+        validator.write_json(native_root / name, value)
+    native_predicate = {
+        "schemaVersion": "archon.live-datahub-proof-attestation/v4",
+        "result": "verified",
+    }
+    native_predicate_path = native_root / "attestation-predicate.json"
+    validator.write_json(native_predicate_path, native_predicate)
+    native_inventory_rows = [
+        "proof.json",
+        "sealed-extra.json",
+        "deployment-evidence.json",
+        "deployed-datahub-semantic-proof.json",
+    ]
+    native_inventory_path = native_root / "proof-subject.sha256"
+    native_inventory_path.write_text(
+        "".join(
+            f"{validator.sha256_file(native_root / name).removeprefix('sha256:')}"
+            f"  {name}\n"
+            for name in native_inventory_rows
+        ),
+        encoding="utf-8",
+    )
+    native_inventory = validator.load_checksum_inventory(
+        native_inventory_path,
+        "proof-subject.sha256",
+        "native fixture inventory",
+    )
+    assert "attestation-predicate.json" not in native_inventory
+    validator.exact_retained_tree(
+        native_root,
+        {
+            *native_inventory,
+            "proof-subject.sha256",
+            "attestation-predicate.json",
+        },
+        "native fixture retained tree",
+    )
+    native_source = sources["live-datahub"]
+    native_predicate_digest = validator.sha256_file(native_predicate_path)
+    native_subject_digest = validator.sha256_file(
+        native_root / "deployment-evidence.json"
+    )
+    native_projection = {
+        "schemaVersion": "archon.upstream-attestation-verification/v1",
+        "repository": validator.REPOSITORY,
+        "releaseSha": RELEASE,
+        "proofId": "D4",
+        "role": "deployment-evidence",
+        "subject": {
+            "name": "deployment-evidence.json",
+            "digest": native_subject_digest,
+        },
+        "predicate": {
+            "type": native_source["predicateType"],
+            "digest": native_predicate_digest,
+        },
+        "statement": {
+            "predicateType": native_source["predicateType"],
+            "predicate": native_predicate,
+            "subject": validator.attestation_subjects(native_inventory),
+        },
+    }
+    native_verification = Path(raw) / "D4--deployment-evidence.json"
+    validator.write_json(native_verification, native_projection)
+    validator.validate_gh_verification(
+        native_verification,
+        validator.REPOSITORY,
+        RELEASE,
+        "D4",
+        "deployment-evidence",
+        native_source["predicateType"],
+        native_predicate_digest,
+        native_predicate,
+        "deployment-evidence.json",
+        native_subject_digest,
+        validator.attestation_subjects(native_inventory),
+        "native multi-subject verification",
+    )
+    native_with_predicate = copy.deepcopy(native_projection)
+    native_with_predicate["statement"]["subject"].append(
+        {
+            "name": "attestation-predicate.json",
+            "digest": {
+                "sha256": native_predicate_digest.removeprefix("sha256:")
+            },
+        }
+    )
+    native_bad_verification = Path(raw) / "native-extra-subject.json"
+    validator.write_json(native_bad_verification, native_with_predicate)
+    expect_rejected(
+        lambda: validator.validate_gh_verification(
+            native_bad_verification,
+            validator.REPOSITORY,
+            RELEASE,
+            "D4",
+            "deployment-evidence",
+            native_source["predicateType"],
+            native_predicate_digest,
+            native_predicate,
+            "deployment-evidence.json",
+            native_subject_digest,
+            validator.attestation_subjects(native_inventory),
+            "native predicate-outside-inventory verification",
+        ),
+        "native verification accepted the predicate outside its exact subject inventory",
+    )
+
+with tempfile.TemporaryDirectory(prefix="submission-registry-contracts-") as raw:
+    weakened_registry = copy.deepcopy(registry)
+    project_access = next(
+        item
+        for item in weakened_registry["sources"]
+        if item["key"] == "project-access"
+    )
+    project_access["supportSubjects"]["SQ4"].pop()
+    weakened_registry_path = Path(raw) / "weakened-registry.json"
+    validator.write_json(weakened_registry_path, weakened_registry)
+    expect_rejected(
+        lambda: validator.load_registry(weakened_registry_path),
+        "registry accepted a missing required proof-support role",
+    )
+
+producer = (ROOT / ".github/workflows/submission-evidence.yml").read_text(
+    encoding="utf-8"
+)
+collector = (ROOT / "scripts/collect-submission-evidence-source.sh").read_text(
+    encoding="utf-8"
+)
+consumer = (ROOT / "scripts/verify-submission-readiness-source.sh").read_text(
+    encoding="utf-8"
+)
+availability = (ROOT / ".github/workflows/availability.yml").read_text(
+    encoding="utf-8"
+)
+
+for forbidden_input in (
+    "claims_json:",
+    "evidence_json:",
+    "artifact_path:",
+    "source_workflow:",
+    "application_url:",
+    "video_url:",
+):
+    assert forbidden_input not in producer, (
+        f"producer exposed arbitrary input {forbidden_input}"
+    )
+for required_binding in (
+    "SOURCE_RUN_ID",
+    ".workflow_run.id == $runId",
+    ".workflow_run.head_sha == $release",
+    "actual_artifact_digest",
+    "zipfile.ZipFile",
+    "duplicate canonical ZIP path",
+    "extracted_bytes",
+    "67108864",
+    "--signer-workflow",
+    "--signer-digest",
+    "--predicate-type",
+    "length == 1",
+    "registered-subjects.tsv",
+    "upstream-subjects",
+    "--verification-set-digest",
+    "subjectSetDigest",
+):
+    assert required_binding in collector, (
+        f"collector lost exact binding {required_binding}"
+    )
+assert (
+    'semantic_validator="scripts/validate-submission-proof-receipts.py"'
+    in consumer
+)
+assert 'python3 "${semantic_validator}" validate-bundle' in consumer
+assert 'test "${#archive_entries[@]}" -le 1024' in consumer
+assert 'test "${extracted_bytes}" -le 67108864' in consumer
+assert "zipfile.ZipFile" in consumer
+assert "duplicate canonical ZIP path" in consumer
+assert "fresh-upstream-attestation-verification/v1" in consumer
+assert "upstreamVerificationSetDigest" in consumer
+assert "SOURCE_PRODUCER_RUN_ATTEMPT" in consumer
+assert "(( SOURCE_PRODUCER_RUN_ATTEMPT <= SOURCE_RUN_ATTEMPT ))" in consumer
+assert '--argjson attempt "${SOURCE_RUN_ATTEMPT}"' in consumer
+assert '--argjson runAttempt "${SOURCE_PRODUCER_RUN_ATTEMPT}"' in consumer
+assert consumer.count('gh attestation verify "${upstream_subject}"') == 1
+assert "exactly one fresh upstream statement must match" in consumer
+assert consumer.count("bash scripts/verify-submission-readiness-source.sh") == 0
+assert "\n  attest:\n" in producer
+produce_job, attest_job = producer.split("\n  attest:\n", maxsplit=1)
+assert "attestations: read" in produce_job
+assert "attestations: write" not in produce_job
+assert "id-token: write" not in produce_job
+assert "attestations: write" in attest_job
+assert "id-token: write" in attest_job
+assert producer.count("attestations: write") == 1
+assert producer.count("id-token: write") == 1
+assert (
+    "artifact-ids: ${{ needs.produce.outputs.artifact_id }}" in attest_job
+)
+assert ".id == $artifactId" in attest_job
+assert ".digest == $digest" in attest_job
+assert ".workflow_run.id == $runId" in attest_job
+assert ".workflow_run.head_sha == $sha" in attest_job
+assert attest_job.index("/actions/artifacts/${ARTIFACT_ID}") < attest_job.index(
+    "actions/download-artifact@"
+)
+assert (
+    "PRODUCER_RUN_ATTEMPT: "
+    "${{ needs.produce.outputs.producer_run_attempt }}" in attest_job
+)
+assert "${GITHUB_RUN_ATTEMPT}" not in attest_job
+assert (
+    '"submission-evidence-${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}"'
+    in attest_job
+)
+assert (
+    registry["aggregate"]["artifactNameTemplate"]
+    == "submission-evidence-{releaseSha}-{runAttempt}"
+)
+assert producer.count(
+    "scripts/validate-submission-proof-receipts.py build-bundle"
+) == 2
+assert "submission-evidence-derived" in attest_job
+assert (
+    'cmp --silent "${derived}/claims.json" "${output}/claims.json"'
+    in attest_job
+)
+assert (
+    'cmp --silent "${derived}/predicate.json" "${output}/predicate.json"'
+    in attest_job
+)
+assert (
+    "subject-checksums: "
+    "${{ runner.temp }}/submission-evidence-subjects.sha256" in attest_job
+)
+for required_availability_contract in (
+    "attestations: write",
+    "id-token: write",
+    "archon.production-availability-attestation/v1",
+    "availability-subject.sha256",
+    "attestations/production-availability/v1",
+    "actions/attest@",
+):
+    assert required_availability_contract in availability, (
+        "availability lost custom attestation contract "
+        f"{required_availability_contract}"
+    )
+
+expected_sources = {
+    "D4": "live-datahub",
+    "U3": "live-datahub",
+    "SQ3": "project-access",
+    "SQ4": "project-access",
+    "SQ5": "project-access",
+    "SQ6": "content-review",
+    "SQ7": "content-review",
+    "SQ8": "content-review",
+    "SQ9": "judge-pack",
+    "SQ10": "operations",
+    "SQ11": "devpost-confirmation",
+    "BONUS-OSS": "bonus-oss",
+    "BONUS-FEEDBACK": "bonus-feedback",
+}
+for proof_id, source_key in expected_sources.items():
+    assert proof_id in sources[source_key]["proofIds"]
+assert {source["key"] for source in registry["sources"] if source["required"]} == {
+    "live-datahub",
+    "project-access",
+    "content-review",
+    "operations",
+}
+assert "post_submit_run_id:" in producer
+for intentionally_absent_producer in (
+    "submission-project-access.yml",
+    "submission-judge-journey.yml",
+    "submission-content-review.yml",
+    "submission-operations.yml",
+    "submission-judge-pack.yml",
+    "submission-bonus-oss.yml",
+    "submission-bonus-feedback.yml",
+    "submission-devpost-confirmation.yml",
+):
+    assert not (ROOT / ".github" / "workflows" / intentionally_absent_producer).exists(), (
+        "a placeholder producer appeared without its dedicated contract tests: "
+        f"{intentionally_absent_producer}"
+    )
+
+print(
+    json.dumps(
+        {
+            "schemaVersion": "archon.submission-evidence-contract-test/v1",
+            "validatedProofIds": sorted(facts_by_id),
+            "result": "passed",
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+)

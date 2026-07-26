@@ -34,14 +34,24 @@ coverage, as defined below.
    disjoint from the unchanged official IDs.
 
 Final readiness is fail-closed. The 95% offline threshold is never reused as a submission
-threshold: `submission.ready = true` requires every official check and every engineering
-and security capability check to pass. It also requires all five official criterion IDs,
-both capability axes, and every registered external-proof check to remain present with its
-exact criterion mapping. Check IDs must be globally unambiguous and every evidence weight
-must be positive; a missing, duplicate, mis-mapped, or invalidly weighted check is itself
-an internal blocker. The report exposes internal failures
-separately from external proof blockers and remains `submission.status = "blocked"` while
-any of these external proofs is absent:
+threshold. The readiness projection is deliberately **unsigned**: it always emits
+`submission.ready = false`, `submission.readyToSubmit = false`, and
+`submission.submitted = false`. When every eligibility and capability check has passed,
+it may emit only `submission.evidenceCompleteForSealing = true` with status
+`evidence-complete-awaiting-seal`; otherwise its status is `blocked`. That flag is a
+request to the protected sealing boundary, not a trusted ready-to-submit decision. A
+consumer may establish trusted readiness only by verifying the exact
+`https://archon.datahub.dev/attestations/submission-readiness-seal/v1` predicate signed by
+`.github/workflows/submission-readiness.yml` for the canonical sealed subjects. The
+post-submit `SQ11` confirmation remains a separate fact and cannot create a circular
+pre-submit prerequisite or make the unsigned projection claim submission.
+
+All five official criterion IDs, both capability axes, and every registered external-proof
+check must remain present with its exact criterion and readiness role. Check IDs must be
+globally unambiguous and every evidence weight must be positive; a missing, duplicate,
+mis-mapped, or invalidly weighted check is itself an internal blocker. The report exposes
+internal failures separately from eligibility blockers, recommended evidence, and
+post-submit confirmation. Eligibility remains blocked while any of these proofs is absent:
 
 - a stable public working-project URL;
 - functioning fresh-judge access, including credentials and testing instructions if auth
@@ -51,16 +61,175 @@ any of these external proofs is absent:
   complete English translation);
 - a public demonstration video shorter than three minutes, with English
   narration/subtitles or a complete English translation;
-- a retained successful remote judge-evidence artifact with sanitized sample outputs;
-- free, monitored application and judge access throughout the full judging period;
-- a completed Devpost entry whose project, source, video, and access URLs have been
-  verified while logged out;
+- an active availability monitor, alert/recovery path, credential-rotation path, and free
+  judge access configured for the full judging period;
 - a final cross-review of `NOTICE.md`, repository history, Devpost text, and video for
   consistent reused-work and third-party disclosures; and
 - retained live DataHub/deployed-application proof for the behavior and usefulness claimed.
 
+The retained sanitized sample-output pack is still recommended by Devpost and contributes
+to the judging-evidence projection, but `SQ9` is explicitly nonblocking. `SQ11` records the
+completed, logged-out-verified Devpost entry only after submission. `SQ10` requires an
+active monitor and recovery mechanism before submission and then remains an ongoing
+operational obligation; it does not falsely claim that future uptime has already occurred.
+
+The `bonus` axis is independent of official eligibility. `BONUS-OSS` requires public
+upstream contribution/acceptance evidence, and `BONUS-FEEDBACK` requires confirmation of
+the separate optional feedback entry. `bonus.allBonusesReady` never changes
+`submission.evidenceCompleteForSealing` or any readiness trust decision.
+
+### Strict external-evidence transition
+
+Ordinary `npm run readiness` and regular CI deliberately have no file, environment, or
+workstation-JSON override for external proof. With no manifest, every external proof stays
+`user-gated`. The programmatic `computeReadiness({ externalEvidence })` path is reserved
+for a protected verifier that has independently checked GitHub API metadata, the exact
+artifact bytes/checksums, and its attestation before constructing `expectedBinding`.
+
+The accepted manifest schema is
+`archon.submission-readiness-evidence/v1`. It binds, exactly:
+
+- repository `upgradedev/archon-datahub` and a lowercase 40-hex release SHA;
+- hard-whitelisted source workflow
+  `.github/workflows/submission-evidence.yml`, run ID, immutable artifact-producer
+  attempt, and successful attestation attempt, with producer attempt not later than
+  attestation attempt;
+- artifact name `submission-evidence-<releaseSha>-<producerRunAttempt>`, numeric
+  artifact ID, and lowercase SHA-256 digest;
+- predicate type
+  `https://archon.datahub.dev/attestations/submission-readiness/v1` and predicate digest;
+- protected environment `submission-readiness`; and
+- verifier workflow `.github/workflows/submission-readiness.yml` on
+  `refs/heads/master`, with its exact run ID/attempt, environment ID, independent reviewer
+  ID, and approval-receipt digest.
+
+Every proof also carries its exact registered ID/criterion, literal `verified` state,
+sanitized evidence summary, and a named SHA-256-bound receipt. Unknown keys, unknown or
+duplicate IDs, malformed values, mapping changes, binding differences, non-user-gated
+targets, and repository/release/run/artifact/predicate/approval mismatches reject the
+whole manifest: no partial proof is applied, and the report adds
+`EVIDENCE:manifest` as an internal blocker. A valid manifest may be partial; only its
+verified proofs transition and all others stay visibly gated. The verifier—not this
+projection—owns artifact/attestation acquisition and trust establishment.
+
+The deterministic aggregate **producer** is
+`.github/workflows/submission-evidence.yml`. Its dispatch surface accepts only the exact
+current release SHA and hard-registered upstream run IDs—never a claims document, JSON
+blob, URL, workflow path, artifact path, or local file. For each registry row it verifies
+the exact same-repository workflow path, release, branch, run/attempt, artifact
+ID/name/digest/ownership, bounded canonical ZIP inventory, local checksums, signer
+workflow, source digest/ref, custom predicate, and one exact matching attestation for
+**every** registered proof envelope and proof-specific support subject. Each standard
+support subject embeds one sanitized canonical capture whose bytes, size, record count,
+role, fact subset, repository, and release are recomputed. The aggregate retains the exact
+full upstream subject-inventory bytes, every inventoried regular file, predicate,
+deterministic verification projections, and full subject/verification set digests. It
+derives one distinct canonical receipt per proof, reruns the
+proof-specific semantic validator and inventories the complete aggregate. That
+network-facing producer has only `actions: read`, `attestations: read`, and
+`contents: read`; it cannot request an OIDC token or write an attestation. A dependent
+secretless job first pins the retained artifact's ID, name, digest, size, owning run, and
+head SHA through the GitHub API, downloads only that ID, rechecks the complete inventory,
+rebuilds the canonical claims/predicate/semantic projection byte-for-byte with the
+immutable producer attempt, and only then attests `claims.json` and `SHA256SUMS`.
+`id-token: write` and `attestations: write` exist only in that dependent job. A retry of
+only the attester therefore signs the original producer-attempt subjects instead of
+silently rebuilding claims for the retry attempt. The protected consumer separately
+binds the immutable producer attempt used by `predicate.json` and the latest successful
+workflow/attestation attempt, so an attester-only retry remains both verifiable and
+unambiguous.
+
+The validator does not accept `{}`, a generic `verified: true`, or arbitrary evidence
+text. It enforces exact proof-to-source mappings and receipt schemas, public HTTPS URL
+binding, a complete fresh-judge journey, exact Apache-2.0 repository detection, English
+written-material contracts, a public English-accessible provider video of 1–179 seconds
+with an exact video ID and rights review for all third-party material, official-period
+New Projects Only repository history and cross-medium disclosure digests, non-live `SQ9`
+classification, exact accepted
+`acryldata/mcp-server-datahub` contribution provenance, and fresh availability, posture,
+paging, recovery, credential-rotation, and judging-window facts. Cross-proof URL,
+instructions, and claims digests must agree. `SQ4` requires four ordered, attested,
+sanitized judge-user operation receipts plus a separate exact fresh-journey artifact and
+terminal receipt. The lifecycle aggregate, every operation, and the journey must all bind
+`stage: production` and the SHA-256 of the canonical application origin; a successful
+workflow status or a valid receipt from staging or another origin is insufficient. The
+protected consumer reruns this same validation—including freshness—during both collection
+and independent review and reruns `gh attestation verify` for every retained upstream
+envelope/support against the exact registered signer workflow, release, ref, predicate,
+queried subject, and source-mode-aware **full attested subject inventory**. Retained
+producer verification JSON is explanatory evidence, never the protected trust oracle.
+
+The protected **review/sealer** path is
+`.github/workflows/submission-readiness.yml`:
+
+1. `collect` accepts only exact identifiers/digests—not JSON or a workstation path—and
+   fetches one successful same-repository, current-master source run and artifact through
+   the GitHub API. The producer identity is not selectable: both the TypeScript contract
+   and CI verifier require `.github/workflows/submission-evidence.yml`. Collection verifies
+   the raw artifact ZIP digest, safe/unique archive paths, complete inner `SHA256SUMS`,
+   every named proof receipt, canonical claims/predicate contracts, proof-specific
+   semantic/cross-proof/freshness rules, fresh upstream attestations over every registered
+   envelope/support subject, and GitHub attestations over both aggregate claims and
+   inventory.
+2. `review` is bound to the `submission-readiness` environment. It requires one exact
+   approval comment from a configured individual reviewer who is neither the actor nor
+   triggering actor, validates the collected artifact metadata before downloading its
+   bytes, then independently refetches and reruns the complete source verifier after
+   approval. It constructs the canonical manifest and separate expected binding,
+   invokes the unsigned programmatic readiness projection, and fails unless
+   `evidenceCompleteForSealing == true`, status is
+   `evidence-complete-awaiting-seal`, all of `ready`, `readyToSubmit`, and `submitted`
+   remain false, and no internal or eligibility blocker exists.
+3. `seal` resolves and bounds the exact reviewed artifact through the GitHub API before
+   download, revalidates its inventory and approval receipt, and attests the exact
+   canonical manifest/readiness/source/approval subject set with predicate
+   `submission-readiness-seal/v1`, and retains a 90-day sealed artifact. Only successful
+   verification of that seal—not the unsigned projection—establishes trusted readiness.
+   The reviewed artifact exports its immutable producer attempt; a seal-only retry uses
+   that attempt for approval/binding validation while requiring it not to exceed the
+   current retry attempt.
+
+The source artifact contract is intentionally fail-closed:
+`claims.json`, `predicate.json`, `SHA256SUMS`, and every referenced receipt must be
+regular, checksum-bound files; the custom predicate must be signed by the exact source
+workflow/release. Claims must include `D4`, `U3`, `SQ3`–`SQ8`, and `SQ10`. `SQ9`,
+`SQ11`, and the two bonus receipts remain optional in this bundle. If an upstream receipt
+does not yet exist, the workflow fails; it never creates a passing claim for it. The
+environment must be configured with prevent-self-review, at least one individual reviewer,
+and a master-only custom branch policy before this path can run.
+
+For producers, `claimsDigest` is the SHA-256 of the exact `claims.json` bytes.
+`receiptSetDigest` is the SHA-256 of the newline-terminated output of
+`jq -cS '[.proofs[], .bonuses[]] | map({id, receipt}) | sort_by(.id)' claims.json`.
+`SHA256SUMS` inventories every other regular file exactly once and never inventories
+itself. `predicate.json` uses schema
+`archon.submission-readiness-predicate/v1`, contains only
+`schemaVersion`, `repository`, `releaseSha`, `source`, `artifactName`,
+`claimsDigest`, and `receiptSetDigest`, and must be the exact custom predicate attached to
+attestations for both `claims.json` and `SHA256SUMS`.
+
+The aggregate producer now exists and is executable, but it is intentionally not
+pass-capable without real upstream evidence. The existing attested
+`.github/workflows/live-datahub-proof.yml` v4 artifact can produce `D4` and `U3`.
+Availability evidence now also has an isolated, checksum-bound
+`production-availability/v1` attestation, but it is only one input to later operational
+proof and cannot alone satisfy `SQ3` or `SQ10`.
+
+The registry deliberately reserves required standard producers that do **not** yet exist:
+`.github/workflows/submission-project-access.yml` for `SQ3`–`SQ5`,
+`.github/workflows/submission-content-review.yml` for `SQ6`–`SQ8`, and
+`.github/workflows/submission-operations.yml` for `SQ10`. Optional registered producers
+for `SQ9`, post-submit `SQ11`, `BONUS-OSS`, and `BONUS-FEEDBACK` are also absent, as is
+the dedicated fresh judge-journey producer required by `SQ4`. Consequently the aggregate
+workflow fails closed when any required run is missing or comes from another workflow; it
+does not reinterpret the existing judge-user, CI fixture, availability, posture, or local
+OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and paging,
+fresh judge access, license detection, disclosure approval, credential rotation, public
+upstream acceptance, and feedback confirmation must come from those real dedicated
+pipelines rather than manual JSON or synthetic passes.
+
 These blockers cannot be cleared by fixture output, source inspection, or a green offline
-CI gate. **Current final submission status: BLOCKED / NOT READY.**
+CI gate. **Current ready-to-submit status: BLOCKED / NOT READY.**
 
 ## Project submitted to the challenge
 
@@ -121,11 +290,11 @@ The five official Stage Two criteria are equally weighted.
 | Public source repository with all source, assets, instructions, and visible Apache 2.0 license | Local repository and license material exist; **public completeness and license detection are unverified and submission-blocking.** | Merge/publish the accepted commit, verify logged-out access to the complete repository, verify the repository About panel detects Apache 2.0, and verify a clean judge can follow setup instructions. |
 | Text description | **Deferred-to-end; required.** | Write the final English Devpost description only after the live claims and URLs are fixed. A separate blog post is not listed as a required deliverable. |
 | Demonstration video | **Deferred-to-end; required; submission-blocking.** | Publish a public video shorter than three minutes on YouTube, Vimeo, or Youku; show the functioning deployed project; provide English narration/subtitles or a complete English translation; use only authorized marks/music; provide the public URL. |
-| Sample outputs | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified**. | Retain the exact remote `judge-evidence-<sha>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
-| Testing access through the judging period | **User-gated.** | Keep the application free and available through **2026-08-31, 17:00 Eastern Time**, monitor it, and retain rollback plus protected credential-rotation paths throughout that window. |
+| Sample outputs (recommended, not an official required deliverable) | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified; nonblocking in `SQ9`**. | Retain the exact remote `judge-evidence-<sha>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
+| Testing access through the judging period | **User-gated operational requirement.** | Before submission, activate free judge access, scheduled monitoring/alerting, rollback, recovery, and protected credential rotation. Keep those controls active through **2026-08-31, 17:00 Eastern Time**; the readiness projection records active controls, not fictional proof of future uptime. |
 | English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
 | New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
-| Completed Devpost entry | **Deferred-to-end.** | Enter every required field and submit before the deadline; verify every URL in an unauthenticated browser. |
+| Completed Devpost entry | **Deferred-to-end; post-submit confirmation (`SQ11`).** | Once the protected readiness seal has been independently verified, enter every required field and submit before the deadline; then verify every URL in an unauthenticated browser and retain the confirmation. The unsigned projection itself never sets `readyToSubmit`. |
 
 A separate blog post is not listed as a required deliverable. The optional Most Valuable
 Feedback form above is likewise separate from the Project submission, but it must be
