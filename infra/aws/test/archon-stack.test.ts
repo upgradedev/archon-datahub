@@ -1842,7 +1842,7 @@ describe("Archon AWS reference architecture", () => {
     ).toContain("aws:SourceAccount");
     expect(
       JSON.stringify(cloudWatchTopicStatement.Condition)
-    ).toContain("archon-staging-alarms");
+    ).toContain(":alarm:*");
     platform.hasOutput("ArchonAlarmDeliveryLogGroupName", {});
   });
 
