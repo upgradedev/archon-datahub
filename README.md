@@ -137,9 +137,12 @@ Important trust boundaries:
 More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
 [temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
 pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
+[attested submission judge pack](docs/SUBMISSION_JUDGE_PACK.md),
 [production availability](docs/AVAILABILITY.md), [production paging delivery
 proof](docs/PRODUCTION_PAGING_TEST.md), and [protected judge
-access](docs/JUDGE_ACCESS.md), plus [evidence-based readiness](docs/READINESS.md).
+access](docs/JUDGE_ACCESS.md), [final submission content
+review](docs/SUBMISSION_CONTENT_REVIEW.md), plus [evidence-based
+readiness](docs/READINESS.md).
 
 ## Run locally without external services
 
@@ -437,6 +440,24 @@ Workflows:
   [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
 - [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
   exact-parent `workflow_run` compensation for failed or cancelled canaries.
+- [Submission operations](.github/workflows/submission-operations.yml) —
+  independently reconstructs SQ10 from exact attested availability, posture,
+  paging, governed-canary, project-access, and live-DataHub runs, then retains
+  and signs the nine-subject operational-readiness inventory.
+- [Submission judge pack](.github/workflows/submission-judge-pack.yml) —
+  converts the exact successful current-release CI judge artifact and its
+  signed release predicate into the optional four-subject SQ9 evidence source,
+  explicitly labeled as sanitized synthetic fixture evidence rather than live
+  proof. Its operating contract is in
+  [docs/SUBMISSION_JUDGE_PACK.md](docs/SUBMISSION_JUDGE_PACK.md).
+- [Submission content review](.github/workflows/submission-content-review.yml) —
+  protected independent review of the exact final Devpost copy, public
+  under-three-minute video, complete repository history, prior-work/media
+  disclosures, and cross-medium claims. It independently reconstructs SQ6,
+  SQ7, and SQ8, retains 16 checksum-sealed subjects for 90 days, and verifies
+  the persisted full-subject GitHub attestation. The fail-closed operating
+  contract is in
+  [docs/SUBMISSION_CONTENT_REVIEW.md](docs/SUBMISSION_CONTENT_REVIEW.md).
 
 CI also enforces an intentionally offline core-path SLO through `load/audit.js`: ten
 concurrent virtual users complete 200 deterministic pipeline/MCP iterations with zero
@@ -457,8 +478,9 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
 - GitHub `staging`, `production`, `production-observer`, `production-paging-test`,
   `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
-  `judge-access-production`, `governed-canary`, `governed-canary-rollback`, and
-  `governed-canary-recovery` environments and `master` protection must be configured;
+  `judge-access-production`, `governed-canary`, `governed-canary-rollback`,
+  `governed-canary-recovery`, and `submission-content-review` environments and
+  `master` protection must be configured;
 - production, demo-seed, judge-access, and the three governed-canary approval
   environments require a trusted second collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
@@ -466,7 +488,8 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - a real retained-history contradiction and governed canary write/rollback need sanitized
   evidence;
 - screenshots, the under-three-minute public video, Devpost copy, and optional public post
-  are intentionally last.
+  are intentionally last; the content-review workflow remains fail-closed until
+  its canonical final JSON, public video, and independent environment reviewer exist.
 
 ## Prior-work disclosure
 

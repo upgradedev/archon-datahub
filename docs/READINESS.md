@@ -218,10 +218,32 @@ proof and cannot alone satisfy `SQ3` or `SQ10`.
 The protected `.github/workflows/submission-project-access.yml` and its dedicated
 `.github/workflows/submission-judge-journey.yml` support producer now exist for `SQ3`–`SQ5`
 and fail closed until the hosted production application and judge identity are configured.
-The registry still reserves two required standard producers that do **not** yet exist:
-`.github/workflows/submission-content-review.yml` for `SQ6`–`SQ8` and
-`.github/workflows/submission-operations.yml` for `SQ10`. Optional registered producers
-for `SQ9`, post-submit `SQ11`, `BONUS-OSS`, and `BONUS-FEEDBACK` are also absent.
+The required `.github/workflows/submission-operations.yml` standard-v1 producer now exists
+for `SQ10`. It accepts only exact scalar run IDs, independently verifies the registered
+live/project-access sources plus the checksum-bound availability, posture, paging, and
+governed-canary artifacts, reconstructs all facts again in a separate retry-safe attester,
+and signs the exact nine-subject inventory. In particular, availability time remains the
+attested upstream observation rather than the later public probe, alarm inventory is the
+exact ten operational alarms within the fourteen-alarm stack topology, and governed-canary
+verification stays bound to the raw verification digest already sealed by deployment
+evidence. It is source-complete but cannot pass until fresh successful remote upstream
+runs exist for the exact release.
+
+The protected `.github/workflows/submission-content-review.yml` standard-v1 producer now
+exists for `SQ6`–`SQ8`. It independently reconstructs the exact final Devpost fields,
+credentialless public-video observation, complete repository history, disclosures, and
+cross-medium claims; binds the protected environment approval to the candidate and its
+transitive source digests; and signs the exact sixteen-subject inventory. It is
+source-complete but intentionally cannot pass before the canonical final content JSON,
+public under-three-minute video, fresh project-access evidence, and trusted independent
+environment reviewer exist.
+
+The optional `.github/workflows/submission-judge-pack.yml` standard-v1 producer now exists
+for `SQ9`. It resolves only the latest successful current-release `master` CI push and its
+exact-attempt judge/container artifacts, verifies the signed CI release predicate, labels
+the evidence as a sanitized synthetic offline fixture rather than live proof, independently
+reconstructs the facts, and signs the exact four-subject inventory. Post-submit `SQ11`,
+`BONUS-OSS`, and `BONUS-FEEDBACK` producers are still absent.
 Consequently the aggregate workflow fails closed when any required run is missing or comes
 from another workflow; it does not reinterpret CI fixtures, availability, posture, paging,
 or local OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and
@@ -291,7 +313,7 @@ The five official Stage Two criteria are equally weighted.
 | Public source repository with all source, assets, instructions, and visible Apache 2.0 license | Local repository and license material exist; **public completeness and license detection are unverified and submission-blocking.** | Merge/publish the accepted commit, verify logged-out access to the complete repository, verify the repository About panel detects Apache 2.0, and verify a clean judge can follow setup instructions. |
 | Text description | **Deferred-to-end; required.** | Write the final English Devpost description only after the live claims and URLs are fixed. A separate blog post is not listed as a required deliverable. |
 | Demonstration video | **Deferred-to-end; required; submission-blocking.** | Publish a public video shorter than three minutes on YouTube, Vimeo, or Youku; show the functioning deployed project; provide English narration/subtitles or a complete English translation; use only authorized marks/music; provide the public URL. |
-| Sample outputs (recommended, not an official required deliverable) | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified; nonblocking in `SQ9`**. | Retain the exact remote `judge-evidence-<sha>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
+| Sample outputs (recommended, not an official required deliverable) | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified; nonblocking in `SQ9`**. | Retain the exact remote `judge-evidence-<sha>-<run-attempt>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
 | Testing access through the judging period | **User-gated operational requirement.** | Before submission, activate free judge access, scheduled monitoring/alerting, rollback, recovery, and protected credential rotation. Keep those controls active through **2026-08-31, 17:00 Eastern Time**; the readiness projection records active controls, not fictional proof of future uptime. |
 | English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
 | New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |

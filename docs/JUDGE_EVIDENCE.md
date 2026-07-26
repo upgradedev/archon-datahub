@@ -127,10 +127,12 @@ npm run evidence:judge:verify -- \
 ```
 
 Only the verified first directory is uploaded as
-`judge-evidence-${{ github.sha }}`, with a 90-day retention period and
-`if-no-files-found: error`; the replay directory remains ephemeral. The job depends on the
-ordinary build-and-test gate, and the upload-artifact digest is a required field in the
-default-branch release-attestation predicate. The in-memory E2E contract is also part of
+`judge-evidence-${{ github.sha }}-${{ github.run_attempt }}`, with a 90-day retention
+period and `if-no-files-found: error`; the replay directory remains ephemeral. The job
+depends on the ordinary build-and-test gate. CI normalizes the upload action's bare digest
+exactly once to the Actions API `sha256:<hex>` form and binds that value, the immutable
+artifact ID, attempt-scoped name, and producer attempt into the default-branch release
+attestation predicate. The in-memory E2E contract is also part of
 the explicit E2E, aggregate-test, and coverage command lists.
 
 This integration is source-complete. It becomes retained CI evidence only after the exact

@@ -213,6 +213,7 @@ SUPPORT_BINDING_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("SQ7", "provider-metadata"): (
         "videoUrl",
         "durationSeconds",
+        "providerResponseDigests",
         "spokenLanguage",
         "subtitlesLanguage",
         "reviewedAt",
@@ -221,6 +222,7 @@ SUPPORT_BINDING_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
         "videoUrl",
         "publiclyAccessible",
         "loggedOutAccessible",
+        "providerResponseDigests",
         "reviewedAt",
     ),
     ("SQ7", "functioning-footage-review"): (
@@ -1797,6 +1799,7 @@ def validate_facts(
                 "publiclyAccessible",
                 "loggedOutAccessible",
                 "durationSeconds",
+                "providerResponseDigests",
                 "spokenLanguage",
                 "subtitlesLanguage",
                 "completeEnglishTranslation",
@@ -1814,6 +1817,19 @@ def validate_facts(
         exact(facts["publiclyAccessible"], True, f"{label}.publiclyAccessible")
         exact(facts["loggedOutAccessible"], True, f"{label}.loggedOutAccessible")
         bounded_int(facts["durationSeconds"], f"{label}.durationSeconds", 1, 179)
+        response_digests = exact_keys(
+            facts["providerResponseDigests"],
+            {"preparedResponseDigest", "reviewResponseDigest"},
+            f"{label}.providerResponseDigests",
+        )
+        sha256_digest(
+            response_digests["preparedResponseDigest"],
+            f"{label}.providerResponseDigests.preparedResponseDigest",
+        )
+        sha256_digest(
+            response_digests["reviewResponseDigest"],
+            f"{label}.providerResponseDigests.reviewResponseDigest",
+        )
         spoken = nonempty(facts["spokenLanguage"], f"{label}.spokenLanguage", 12)
         subtitles = nonempty(facts["subtitlesLanguage"], f"{label}.subtitlesLanguage", 12)
         if spoken != "none" and LANGUAGE_RE.fullmatch(spoken) is None:
@@ -2043,9 +2059,18 @@ def validate_facts(
             facts["reviewApproval"],
             {
                 "environment",
+                "workflowPath",
+                "runId",
+                "runAttempt",
+                "environmentId",
                 "workflowActorId",
                 "triggeringActorId",
                 "reviewerId",
+                "candidateRunAttempt",
+                "candidateArtifactId",
+                "candidateArtifactDigest",
+                "candidateDigest",
+                "approvalCommentDigest",
                 "approvalReceiptDigest",
             },
             f"{label}.reviewApproval",
@@ -2054,6 +2079,23 @@ def validate_facts(
             approval["environment"],
             "submission-content-review",
             f"{label}.reviewApproval.environment",
+        )
+        exact(
+            approval["workflowPath"],
+            ".github/workflows/submission-content-review.yml",
+            f"{label}.reviewApproval.workflowPath",
+        )
+        positive_int(
+            approval["runId"],
+            f"{label}.reviewApproval.runId",
+        )
+        review_attempt = positive_int(
+            approval["runAttempt"],
+            f"{label}.reviewApproval.runAttempt",
+        )
+        positive_int(
+            approval["environmentId"],
+            f"{label}.reviewApproval.environmentId",
         )
         actor_id = positive_int(
             approval["workflowActorId"],
@@ -2069,6 +2111,31 @@ def validate_facts(
         )
         if reviewer_id in {actor_id, triggering_id}:
             fail(f"{label}.reviewApproval reviewer must be independent")
+        candidate_attempt = positive_int(
+            approval["candidateRunAttempt"],
+            f"{label}.reviewApproval.candidateRunAttempt",
+        )
+        if candidate_attempt > review_attempt:
+            fail(
+                f"{label}.reviewApproval.candidateRunAttempt exceeds "
+                "the reviewed producer attempt"
+            )
+        positive_int(
+            approval["candidateArtifactId"],
+            f"{label}.reviewApproval.candidateArtifactId",
+        )
+        sha256_digest(
+            approval["candidateArtifactDigest"],
+            f"{label}.reviewApproval.candidateArtifactDigest",
+        )
+        sha256_digest(
+            approval["candidateDigest"],
+            f"{label}.reviewApproval.candidateDigest",
+        )
+        sha256_digest(
+            approval["approvalCommentDigest"],
+            f"{label}.reviewApproval.approvalCommentDigest",
+        )
         sha256_digest(
             approval["approvalReceiptDigest"],
             f"{label}.reviewApproval.approvalReceiptDigest",
@@ -2131,11 +2198,20 @@ def validate_facts(
         sha256_digest(ci["predicateDigest"], f"{label}.ci.predicateDigest")
         artifact = exact_keys(
             facts["artifact"],
-            {"id", "name", "digest"},
+            {"id", "name", "digest", "producerAttempt"},
             f"{label}.artifact",
         )
         positive_int(artifact["id"], f"{label}.artifact.id")
-        exact(artifact["name"], f"judge-evidence-{release}", f"{label}.artifact.name")
+        producer_attempt = positive_int(
+            artifact["producerAttempt"], f"{label}.artifact.producerAttempt"
+        )
+        if producer_attempt > ci["runAttempt"]:
+            fail(f"{label}.artifact.producerAttempt exceeds the CI run attempt")
+        exact(
+            artifact["name"],
+            f"judge-evidence-{release}-{producer_attempt}",
+            f"{label}.artifact.name",
+        )
         sha256_digest(artifact["digest"], f"{label}.artifact.digest")
         sha256_digest(facts["manifestDigest"], f"{label}.manifestDigest")
         exact(
@@ -3300,6 +3376,35 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
             "SQ4/SQ10 credential-rotation timestamp",
         )
     if {"SQ6", "SQ7", "SQ8"}.issubset(receipts):
+        sq8_approval = receipts["SQ8"]["facts"]["reviewApproval"]
+        sq8_source = receipts["SQ8"]["source"]
+        exact(
+            sq8_approval["workflowPath"],
+            sq8_source["workflowPath"],
+            "SQ8 approval/source workflow path",
+        )
+        exact(
+            sq8_approval["runId"],
+            sq8_source["runId"],
+            "SQ8 approval/source run ID",
+        )
+        exact(
+            sq8_approval["runAttempt"],
+            sq8_source["runAttempt"],
+            "SQ8 approval/source run attempt",
+        )
+        if sq8_approval["candidateArtifactId"] == sq8_source["artifact"]["id"]:
+            fail("SQ8 candidate and reviewed artifacts must be distinct")
+        exact(
+            receipts["SQ7"]["facts"]["reviewedAt"],
+            receipts["SQ6"]["facts"]["reviewedAt"],
+            "SQ6/SQ7 common review timestamp",
+        )
+        exact(
+            receipts["SQ8"]["facts"]["reviewedAt"],
+            receipts["SQ6"]["facts"]["reviewedAt"],
+            "SQ6/SQ8 common review timestamp",
+        )
         exact(
             receipts["SQ8"]["facts"]["submissionFieldsDigest"],
             receipts["SQ6"]["facts"]["submissionFieldsDigest"],

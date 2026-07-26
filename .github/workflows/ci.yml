@@ -83,9 +83,15 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_evidence_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_content_review_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_judge_journey_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_judge_pack_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_project_access_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_operations_contracts_test.py
           bash tests/pipeline/judge-user-contracts.test.sh
           bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh
@@ -113,6 +119,7 @@ jobs:
           path: coverage/
           if-no-files-found: warn
           retention-days: 90
+          overwrite: true
 
   web:
     name: Web typecheck, coverage, browser journey, build
@@ -157,6 +164,7 @@ jobs:
           path: web/coverage/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Web SCA gate
         working-directory: web
         run: >-
@@ -183,6 +191,7 @@ jobs:
             web/test-results/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Package deterministic SPA candidate
         shell: bash
         run: |
@@ -215,6 +224,7 @@ jobs:
             ${{ runner.temp }}/archon-web.tar.gz.sha256
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   infra-lock-candidate:
     name: Generate and validate reviewed lock candidates
@@ -516,6 +526,7 @@ jobs:
           path: ${{ runner.temp }}/lock-candidates/
           if-no-files-found: error
           retention-days: 1
+          overwrite: true
       - name: Require adoption of the remotely validated lock candidates
         if: steps.resolve-locks.outputs.drift == 'true'
         run: |
@@ -581,6 +592,7 @@ jobs:
           path: ${{ runner.temp }}/cdk-brace-expansion-compensation/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Approval Lambda SCA gate
         working-directory: infra/aws/lambda/approval
         run: >-
@@ -633,6 +645,7 @@ jobs:
             ${{ runner.temp }}/archon-lambdas.tar.gz.sha256
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Synthesize staging and production CloudFormation
         shell: bash
         run: |
@@ -735,6 +748,7 @@ jobs:
             ${{ runner.temp }}/cfn-guard-results.txt
           if-no-files-found: warn
           retention-days: 90
+          overwrite: true
       - name: Retain synthesized IaC and scan evidence
         if: always() && steps.trivy.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -748,6 +762,7 @@ jobs:
             ${{ runner.temp }}/trivy-iac.sarif
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Fail on any IaC finding or malformed scan evidence
         shell: bash
         run: |
@@ -832,6 +847,7 @@ jobs:
           path: readiness.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   benchmark:
     name: DataHub capability benchmark
@@ -839,7 +855,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+      artifact_digest: sha256:${{ steps.evidence.outputs['artifact-digest'] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -896,6 +912,7 @@ jobs:
           path: ${{ runner.temp }}/datahub-benchmark/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   judge-evidence:
     name: Reproducible judge evidence
@@ -903,7 +920,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+      artifact_id: ${{ steps.evidence.outputs['artifact-id'] }}
+      artifact_name: judge-evidence-${{ github.sha }}-${{ github.run_attempt }}
+      artifact_digest: sha256:${{ steps.evidence.outputs['artifact-digest'] }}
+      producer_attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -944,10 +964,11 @@ jobs:
         id: evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: judge-evidence-${{ github.sha }}
+          name: judge-evidence-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/judge-evidence-a/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   contrib:
     name: DataHub ecosystem contribution
@@ -955,7 +976,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     outputs:
-      validation_receipt_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+      validation_receipt_digest: sha256:${{ steps.evidence.outputs['artifact-digest'] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1211,6 +1232,7 @@ jobs:
           path: ${{ runner.temp }}/oss-validation-receipt/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   security:
     name: Security and dependencies
@@ -1241,7 +1263,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
-      artifact_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
+      artifact_digest: sha256:${{ steps.evidence.outputs['artifact-digest'] }}
     permissions:
       contents: read
       security-events: write
@@ -1743,6 +1765,7 @@ jobs:
           path: ${{ runner.temp }}/datahub-mcp-security/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   dependency-review:
     name: Dependency review
@@ -1785,6 +1808,11 @@ jobs:
     needs: [secret-scan, build-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.candidate.outputs['artifact-id'] }}
+      artifact_name: container-${{ github.sha }}
+      artifact_digest: sha256:${{ steps.candidate.outputs['artifact-digest'] }}
+      producer_attempt: ${{ github.run_attempt }}
     permissions:
       contents: read
       security-events: write
@@ -1861,6 +1889,7 @@ jobs:
           path: ${{ runner.temp }}/trivy-container.sarif
           if-no-files-found: warn
           retention-days: 90
+          overwrite: true
       - name: Fail on high or critical container findings or malformed evidence
         run: |
           set -euo pipefail
@@ -1885,6 +1914,7 @@ jobs:
           )
           docker image inspect "archon-datahub:${GITHUB_SHA}" > "${RUNNER_TEMP}/image-inspect.json"
       - name: Upload exact candidate
+        id: candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: container-${{ github.sha }}
@@ -1895,6 +1925,7 @@ jobs:
             ${{ runner.temp }}/health.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
       - name: Candidate logs
         if: failure()
         run: docker logs archon-candidate
@@ -1929,8 +1960,9 @@ jobs:
       - name: Download exact container candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: container-${{ github.sha }}
+          artifact-ids: ${{ needs.container.outputs.artifact_id }}
           path: ${{ runner.temp }}/container
+          merge-multiple: true
 
       - name: Download exact SPA candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1949,11 +1981,19 @@ jobs:
           BUILD_TEST_RESULT: ${{ needs.build-test.result }}
           BENCHMARK_ARTIFACT_DIGEST: ${{ needs.benchmark.outputs.artifact_digest }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+          CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CONTAINER_ARTIFACT_DIGEST: ${{ needs.container.outputs.artifact_digest }}
+          CONTAINER_ARTIFACT_ID: ${{ needs.container.outputs.artifact_id }}
+          CONTAINER_ARTIFACT_NAME: ${{ needs.container.outputs.artifact_name }}
+          CONTAINER_PRODUCER_ATTEMPT: ${{ needs.container.outputs.producer_attempt }}
           CONTAINER_RESULT: ${{ needs.container.result }}
           CONTRIB_ARTIFACT_DIGEST: ${{ needs.contrib.outputs.validation_receipt_digest }}
           CONTRIB_RESULT: ${{ needs.contrib.result }}
           INFRA_RESULT: ${{ needs.infra.result }}
           JUDGE_EVIDENCE_ARTIFACT_DIGEST: ${{ needs.judge-evidence.outputs.artifact_digest }}
+          JUDGE_EVIDENCE_ARTIFACT_ID: ${{ needs.judge-evidence.outputs.artifact_id }}
+          JUDGE_EVIDENCE_ARTIFACT_NAME: ${{ needs.judge-evidence.outputs.artifact_name }}
+          JUDGE_EVIDENCE_PRODUCER_ATTEMPT: ${{ needs.judge-evidence.outputs.producer_attempt }}
           JUDGE_EVIDENCE_RESULT: ${{ needs.judge-evidence.result }}
           LOAD_RESULT: ${{ needs.load.result }}
           MCP_DEPENDENCY_ARTIFACT_DIGEST: ${{ needs.mcp-dependency.outputs.artifact_digest }}
@@ -1969,6 +2009,19 @@ jobs:
           lambda_dir="${RUNNER_TEMP}/lambdas"
           evidence_dir="${RUNNER_TEMP}/ci-release-attestation"
           mkdir -p "${evidence_dir}"
+
+          [[ "${CI_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${JUDGE_EVIDENCE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${JUDGE_EVIDENCE_PRODUCER_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${JUDGE_EVIDENCE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${JUDGE_EVIDENCE_ARTIFACT_NAME}" = \
+            "judge-evidence-${GITHUB_SHA}-${JUDGE_EVIDENCE_PRODUCER_ATTEMPT}"
+          [[ "${CONTAINER_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CONTAINER_PRODUCER_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CONTAINER_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${CONTAINER_ARTIFACT_NAME}" = "container-${GITHUB_SHA}"
+          (( JUDGE_EVIDENCE_PRODUCER_ATTEMPT <= CI_RUN_ATTEMPT ))
+          (( CONTAINER_PRODUCER_ATTEMPT <= CI_RUN_ATTEMPT ))
 
           test -f "${container_dir}/archon-image.tar.gz"
           test -f "${container_dir}/archon-image.tar.gz.sha256"
@@ -1997,12 +2050,19 @@ jobs:
             --arg commit "${GITHUB_SHA}" \
             --arg ref "${GITHUB_REF}" \
             --arg runUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${CI_RUN_ATTEMPT}" \
             --arg secretScan "${SECRET_SCAN_RESULT}" \
             --arg buildTest "${BUILD_TEST_RESULT}" \
             --arg benchmarkArtifactDigest "${BENCHMARK_ARTIFACT_DIGEST}" \
             --arg benchmark "${BENCHMARK_RESULT}" \
             --arg judgeEvidenceArtifactDigest \
               "${JUDGE_EVIDENCE_ARTIFACT_DIGEST}" \
+            --argjson judgeEvidenceArtifactId \
+              "${JUDGE_EVIDENCE_ARTIFACT_ID}" \
+            --arg judgeEvidenceArtifactName \
+              "${JUDGE_EVIDENCE_ARTIFACT_NAME}" \
+            --argjson judgeEvidenceProducerAttempt \
+              "${JUDGE_EVIDENCE_PRODUCER_ATTEMPT}" \
             --arg judgeEvidence "${JUDGE_EVIDENCE_RESULT}" \
             --arg web "${WEB_RESULT}" \
             --arg contribArtifactDigest "${CONTRIB_ARTIFACT_DIGEST}" \
@@ -2014,7 +2074,12 @@ jobs:
             --arg mcpDependencyArtifactDigest \
               "${MCP_DEPENDENCY_ARTIFACT_DIGEST}" \
             --arg mcpDependency "${MCP_DEPENDENCY_RESULT}" \
-            --arg container "${CONTAINER_RESULT}" '
+            --arg container "${CONTAINER_RESULT}" \
+            --argjson containerArtifactId "${CONTAINER_ARTIFACT_ID}" \
+            --arg containerArtifactName "${CONTAINER_ARTIFACT_NAME}" \
+            --arg containerArtifactDigest "${CONTAINER_ARTIFACT_DIGEST}" \
+            --argjson containerProducerAttempt \
+              "${CONTAINER_PRODUCER_ATTEMPT}" '
               {
                 schemaVersion: "archon.ci-release/v1",
                 source: {
@@ -2022,7 +2087,8 @@ jobs:
                   commit: $commit,
                   ref: $ref,
                   event: "push",
-                  workflowRun: $runUrl
+                  workflowRun: $runUrl,
+                  runAttempt: $runAttempt
                 },
                 gates: {
                   secretScan: $secretScan,
@@ -2049,11 +2115,35 @@ jobs:
                     $judgeEvidenceArtifactDigest,
                   ossContributionValidationArtifactDigest:
                     $contribArtifactDigest
+                },
+                releaseArtifacts: {
+                  judgeEvidence: {
+                    id: $judgeEvidenceArtifactId,
+                    name: $judgeEvidenceArtifactName,
+                    digest: $judgeEvidenceArtifactDigest,
+                    producerAttempt: $judgeEvidenceProducerAttempt
+                  },
+                  container: {
+                    id: $containerArtifactId,
+                    name: $containerArtifactName,
+                    digest: $containerArtifactDigest,
+                    producerAttempt: $containerProducerAttempt
+                  }
                 }
               }
             ' >"${evidence_dir}/predicate.json"
           jq -e '
+            (keys | sort) == [
+              "capabilityEvidence",
+              "dependencyEvidence",
+              "gates",
+              "releaseArtifacts",
+              "schemaVersion",
+              "source"
+            ] and
             .source.ref == "refs/heads/master" and
+            (.source.runAttempt | type) == "number" and
+            .source.runAttempt > 0 and
             ([.gates[]] | all(. == "success")) and
             (.dependencyEvidence.dataHubMcpSecurityArtifactDigest |
               test("^sha256:[0-9a-f]{64}$")) and
@@ -2062,6 +2152,37 @@ jobs:
             (.capabilityEvidence.judgeEvidenceArtifactDigest |
               test("^sha256:[0-9a-f]{64}$")) and
             (.capabilityEvidence.ossContributionValidationArtifactDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            (.releaseArtifacts | keys | sort) ==
+              ["container", "judgeEvidence"] and
+            (.releaseArtifacts.judgeEvidence | keys | sort) ==
+              ["digest", "id", "name", "producerAttempt"] and
+            (.releaseArtifacts.judgeEvidence.id | type) == "number" and
+            .releaseArtifacts.judgeEvidence.id > 0 and
+            (.releaseArtifacts.judgeEvidence.producerAttempt | type) ==
+              "number" and
+            .releaseArtifacts.judgeEvidence.producerAttempt > 0 and
+            .releaseArtifacts.judgeEvidence.producerAttempt <=
+              .source.runAttempt and
+            .releaseArtifacts.judgeEvidence.name ==
+              (
+                "judge-evidence-" + .source.commit + "-" +
+                (.releaseArtifacts.judgeEvidence.producerAttempt | tostring)
+              ) and
+            .releaseArtifacts.judgeEvidence.digest ==
+              .capabilityEvidence.judgeEvidenceArtifactDigest and
+            (.releaseArtifacts.container | keys | sort) ==
+              ["digest", "id", "name", "producerAttempt"] and
+            (.releaseArtifacts.container.id | type) == "number" and
+            .releaseArtifacts.container.id > 0 and
+            (.releaseArtifacts.container.producerAttempt | type) ==
+              "number" and
+            .releaseArtifacts.container.producerAttempt > 0 and
+            .releaseArtifacts.container.producerAttempt <=
+              .source.runAttempt and
+            .releaseArtifacts.container.name ==
+              ("container-" + .source.commit) and
+            (.releaseArtifacts.container.digest |
               test("^sha256:[0-9a-f]{64}$"))
           ' "${evidence_dir}/predicate.json" >/dev/null
 

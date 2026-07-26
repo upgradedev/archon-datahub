@@ -311,6 +311,10 @@ def valid_facts() -> dict[str, dict]:
             "publiclyAccessible": True,
             "loggedOutAccessible": True,
             "durationSeconds": 179,
+            "providerResponseDigests": {
+                "preparedResponseDigest": DIGEST,
+                "reviewResponseDigest": ALT_DIGEST,
+            },
             "spokenLanguage": "en",
             "subtitlesLanguage": "none",
             "completeEnglishTranslation": True,
@@ -361,9 +365,18 @@ def valid_facts() -> dict[str, dict]:
             "crossMediumConsistent": True,
             "reviewApproval": {
                 "environment": "submission-content-review",
+                "workflowPath": ".github/workflows/submission-content-review.yml",
+                "runId": 903,
+                "runAttempt": 1,
+                "environmentId": 604,
                 "workflowActorId": 601,
                 "triggeringActorId": 602,
                 "reviewerId": 603,
+                "candidateRunAttempt": 1,
+                "candidateArtifactId": 2003,
+                "candidateArtifactDigest": ALT_DIGEST,
+                "candidateDigest": DIGEST,
+                "approvalCommentDigest": ALT_DIGEST,
                 "approvalReceiptDigest": DIGEST,
             },
             "finalizedAt": iso(NOW - dt.timedelta(minutes=1)),
@@ -383,8 +396,9 @@ def valid_facts() -> dict[str, dict]:
             },
             "artifact": {
                 "id": 302,
-                "name": f"judge-evidence-{RELEASE}",
+                "name": f"judge-evidence-{RELEASE}-1",
                 "digest": DIGEST,
+                "producerAttempt": 1,
             },
             "manifestDigest": DIGEST,
             "formats": [
@@ -698,6 +712,15 @@ for registered_id, facts in facts_by_id.items():
         f"{registered_id} accepted an empty literal-only receipt",
     )
 
+sq9_partial_attester_retry = copy.deepcopy(facts_by_id["SQ9"])
+sq9_partial_attester_retry["ci"]["runAttempt"] = 2
+validator.validate_facts(
+    "SQ9",
+    sq9_partial_attester_retry,
+    RELEASE,
+    notice_path=NOTICE_PATH,
+)
+
 sq3_availability_support = validator.expected_support_bindings(
     "SQ3",
     "availability-verification",
@@ -815,6 +838,30 @@ def rejects_sq10_cross_mutation(mutate, description: str) -> None:
                 "SQ10": make_receipt("SQ10", changed),
             }
         ),
+        description,
+    )
+
+
+def rejects_content_cross_mutation(
+    proof_id: str, mutate, description: str
+) -> None:
+    changed = copy.deepcopy(facts_by_id[proof_id])
+    mutate(changed)
+    validator.validate_facts(
+        proof_id,
+        changed,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    )
+    receipts = {
+        content_id: make_receipt(
+            content_id,
+            changed if content_id == proof_id else facts_by_id[content_id],
+        )
+        for content_id in ("SQ6", "SQ7", "SQ8")
+    }
+    expect_rejected(
+        lambda: validator.cross_validate(receipts),
         description,
     )
 
@@ -1006,6 +1053,23 @@ rejects_mutation(
     "SQ8 accepted a disclosure inventory no longer bound to NOTICE",
 )
 rejects_mutation(
+    "SQ9",
+    lambda value: value["artifact"].pop("producerAttempt"),
+    "SQ9 accepted an artifact without its producer attempt",
+)
+rejects_mutation(
+    "SQ9",
+    lambda value: value["artifact"].update(producerAttempt=2),
+    "SQ9 accepted an artifact produced after its attesting CI attempt",
+)
+rejects_mutation(
+    "SQ9",
+    lambda value: value["artifact"].update(
+        name=f"judge-evidence-{RELEASE}"
+    ),
+    "SQ9 accepted a judge artifact name detached from its producer attempt",
+)
+rejects_mutation(
     "SQ10",
     lambda value: value["alerting"].update(externalPagingDeliveryTested=False),
     "SQ10 accepted untested external paging",
@@ -1162,6 +1226,56 @@ rejects_sq10_cross_mutation(
         validThrough="2026-09-01T21:00:00Z"
     ),
     "SQ10 accepted judge-access validity different from its SQ4 evidence",
+)
+rejects_content_cross_mutation(
+    "SQ7",
+    lambda value: value.update(
+        reviewedAt=iso(NOW - dt.timedelta(minutes=1))
+    ),
+    "SQ6/SQ7/SQ8 accepted different review timestamps",
+)
+rejects_content_cross_mutation(
+    "SQ8",
+    lambda value: value["reviewApproval"].update(runId=904),
+    "SQ8 accepted approval provenance from a different workflow run",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["reviewApproval"].update(
+        workflowPath=".github/workflows/submission-readiness.yml"
+    ),
+    "SQ8 accepted approval provenance from a different workflow",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value["providerResponseDigests"].update(
+        preparedResponseDigest="sha256:invalid"
+    ),
+    "SQ7 accepted an invalid prepared provider-response digest",
+)
+rejects_mutation(
+    "SQ7",
+    lambda value: value["providerResponseDigests"].pop(
+        "reviewResponseDigest"
+    ),
+    "SQ7 accepted a missing independent review-response digest",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["reviewApproval"].update(candidateRunAttempt=2),
+    "SQ8 accepted a candidate produced after the reviewed artifact",
+)
+rejects_content_cross_mutation(
+    "SQ8",
+    lambda value: value["reviewApproval"].update(candidateArtifactId=1003),
+    "SQ8 accepted one artifact as both candidate and reviewed evidence",
+)
+rejects_mutation(
+    "SQ8",
+    lambda value: value["reviewApproval"].update(
+        candidateArtifactDigest="sha256:invalid"
+    ),
+    "SQ8 accepted an invalid candidate artifact digest",
 )
 rejects_mutation(
     "SQ11",
@@ -2766,9 +2880,6 @@ assert {source["key"] for source in registry["sources"] if source["required"]} =
 }
 assert "post_submit_run_id:" in producer
 for intentionally_absent_producer in (
-    "submission-content-review.yml",
-    "submission-operations.yml",
-    "submission-judge-pack.yml",
     "submission-bonus-oss.yml",
     "submission-bonus-feedback.yml",
     "submission-devpost-confirmation.yml",
