@@ -394,39 +394,35 @@ JSON
       --argjson logoutUrls "${logout_urls}" \
       --arg defaultRedirect "${default_redirect}" '
         {
-          UserPoolClient: (
-            {
-              UserPoolId: $pool,
-              ClientId: "JudgeClient123",
-              ClientName: "archon-staging-spa",
-              PreventUserExistenceErrors: $preventUserExistenceErrors,
-              EnableTokenRevocation: true,
-              AccessTokenValidity: 15,
-              IdTokenValidity: 15,
-              RefreshTokenValidity: 1,
-              ExplicitAuthFlows: $authFlows,
-              AllowedOAuthFlows: $oauthFlows,
-              AllowedOAuthFlowsUserPoolClient: true,
-              AllowedOAuthScopes: $oauthScopes,
-              CallbackURLs: $callbackUrls,
-              LogoutURLs: $logoutUrls,
-              SupportedIdentityProviders: ["COGNITO"],
-              ReadAttributes: ["email"],
-              TokenValidityUnits: {
-                AccessToken: "minutes",
-                IdToken: "minutes",
-                RefreshToken: "days"
-              }
-            } +
-            (
-              if $defaultRedirect == "" then
-                {}
-              else
-                {DefaultRedirectURI: $defaultRedirect}
-              end
+          UserPoolClient: {
+            UserPoolId: $pool,
+            ClientId: "JudgeClient123",
+            ClientName: "archon-staging-spa",
+            PreventUserExistenceErrors: $preventUserExistenceErrors,
+            EnableTokenRevocation: true,
+            AccessTokenValidity: 15,
+            IdTokenValidity: 15,
+            RefreshTokenValidity: 1,
+            ExplicitAuthFlows: $authFlows,
+            AllowedOAuthFlows: $oauthFlows,
+            AllowedOAuthFlowsUserPoolClient: true,
+            AllowedOAuthScopes: $oauthScopes,
+            CallbackURLs: $callbackUrls,
+            LogoutURLs: $logoutUrls,
+            SupportedIdentityProviders: ["COGNITO"],
+            ReadAttributes: ["email"],
+            TokenValidityUnits: {
+              AccessToken: "minutes",
+              IdToken: "minutes",
+              RefreshToken: "days"
             }
-          )
-        }
+          }
+        } |
+        if $defaultRedirect == "" then
+          .
+        else
+          .UserPoolClient.DefaultRedirectURI = $defaultRedirect
+        end
       '
     printf 'response-rendered\n' >"${FAKE_STATE_DIR}/client-config-stage"
     ;;
