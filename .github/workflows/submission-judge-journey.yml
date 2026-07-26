@@ -1838,7 +1838,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up locked Node runtime
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.3.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -1853,10 +1853,11 @@ jobs:
 
       - name: Prepare fresh journey and evidence directories
         env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
           PREREQUISITE_BINDING: ${{ needs.prerequisites.outputs.prerequisite_binding }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ inputs.release_sha }}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
           git diff --quiet
           git diff --cached --quiet
           test -z "$(git ls-files --others --exclude-standard)"
@@ -2846,7 +2847,7 @@ jobs:
 
       - name: Upload immutable sanitized journey evidence
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.package.outputs.artifact_name }}
           path: ${{ runner.temp }}/submission-judge-journey-evidence
