@@ -348,9 +348,7 @@ def fail(message: str) -> NoReturn:
     raise ContractError(message)
 
 
-def load_json(path: Path, label: str) -> Any:
-    if not path.is_file() or path.is_symlink():
-        fail(f"{label} must be a regular file")
+def parse_json_text(raw: str, label: str) -> Any:
     def reject_duplicate_pairs(
         pairs: list[tuple[str, Any]],
     ) -> dict[str, Any]:
@@ -366,12 +364,154 @@ def load_json(path: Path, label: str) -> Any:
 
     try:
         return json.loads(
-            path.read_text(encoding="utf-8"),
+            raw,
             object_pairs_hook=reject_duplicate_pairs,
             parse_constant=reject_non_finite,
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except json.JSONDecodeError as error:
+        fail(f"{label} is not strict JSON: {error}")
+
+
+def load_json(path: Path, label: str) -> Any:
+    if not path.is_file() or path.is_symlink():
+        fail(f"{label} must be a regular file")
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
         fail(f"{label} is not strict UTF-8 JSON: {error}")
+    return parse_json_text(raw, label)
+
+
+def select_run_artifact(
+    value: Any,
+    *,
+    policy: str,
+    artifact_prefix: str,
+    run_id: int,
+    release_sha: str,
+    maximum_attempt: int,
+) -> dict[str, Any]:
+    """Select one immutable GitHub Actions artifact by reviewed retry policy."""
+
+    if not isinstance(policy, str) or policy not in {
+        "exact-current",
+        "single-retained",
+        "latest-retained",
+    }:
+        fail("artifact selection policy is not registered")
+    if not isinstance(artifact_prefix, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,170}", artifact_prefix
+    ):
+        fail("artifact prefix is not safe")
+    if type(run_id) is not int or run_id <= 0:
+        fail("artifact run ID must be a positive integer")
+    if not isinstance(release_sha, str) or not RELEASE_RE.fullmatch(release_sha):
+        fail("artifact release SHA must be exact")
+    if type(maximum_attempt) is not int or maximum_attempt <= 0:
+        fail("maximum run attempt must be a positive integer")
+
+    pages = value if isinstance(value, list) else [value]
+    if not pages:
+        fail("artifact response must contain at least one page")
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for page_index, page in enumerate(pages):
+        if not isinstance(page, dict) or not isinstance(page.get("artifacts"), list):
+            fail(f"artifact response page {page_index} is malformed")
+        for artifact_index, artifact in enumerate(page["artifacts"]):
+            if not isinstance(artifact, dict):
+                fail(
+                    f"artifact response page {page_index} item "
+                    f"{artifact_index} is malformed"
+                )
+            name = artifact.get("name")
+            if not isinstance(name, str) or not name.startswith(artifact_prefix):
+                continue
+            if len(name) > 181:
+                fail("registered artifact name exceeds the reviewed limit")
+            suffix = name.removeprefix(artifact_prefix)
+            if not re.fullmatch(r"[1-9][0-9]*", suffix):
+                fail("registered artifact prefix has a malformed attempt suffix")
+            attempt = int(suffix)
+            if attempt > maximum_attempt:
+                fail("registered artifact has a future producer attempt")
+            candidates.append((attempt, artifact))
+
+    if policy == "exact-current":
+        selected = [
+            (attempt, artifact)
+            for attempt, artifact in candidates
+            if attempt == maximum_attempt
+        ]
+        if len(selected) != 1:
+            fail("exact-current policy requires one current-attempt artifact")
+    elif policy == "single-retained":
+        selected = candidates
+        if len(selected) != 1:
+            fail("single-retained policy requires exactly one retained artifact")
+    else:
+        if not candidates:
+            fail("latest-retained policy found no eligible artifact")
+        latest_attempt = max(attempt for attempt, _artifact in candidates)
+        selected = [
+            (attempt, artifact)
+            for attempt, artifact in candidates
+            if attempt == latest_attempt
+        ]
+        if len(selected) != 1:
+            fail("latest-retained producer attempt is ambiguous")
+
+    producer_attempt, metadata = selected[0]
+    artifact_id = metadata.get("id")
+    artifact_digest = metadata.get("digest")
+    artifact_size = metadata.get("size_in_bytes")
+    workflow_run = metadata.get("workflow_run")
+    if type(artifact_id) is not int or artifact_id <= 0:
+        fail("selected artifact ID is invalid")
+    if metadata.get("expired") is not False:
+        fail("selected artifact is expired")
+    if not isinstance(artifact_digest, str) or not SHA256_RE.fullmatch(
+        artifact_digest
+    ):
+        fail("selected artifact digest is invalid")
+    if (
+        type(artifact_size) is not int
+        or artifact_size <= 0
+        or artifact_size > 52_428_800
+    ):
+        fail("selected artifact size is invalid")
+    if not isinstance(workflow_run, dict):
+        fail("selected artifact workflow ownership is missing")
+    if (
+        type(workflow_run.get("id")) is not int
+        or workflow_run.get("id") != run_id
+    ):
+        fail("selected artifact belongs to a different workflow run")
+    if (
+        not isinstance(workflow_run.get("head_sha"), str)
+        or workflow_run.get("head_sha") != release_sha
+    ):
+        fail("selected artifact belongs to a different release")
+
+    return {"metadata": metadata, "producerAttempt": producer_attempt}
+
+
+def select_run_artifact_command(args: argparse.Namespace) -> None:
+    raw = sys.stdin.buffer.read(16_777_217)
+    if len(raw) > 16_777_216:
+        fail("artifact response exceeds the 16 MiB input limit")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        fail(f"artifact response is not strict UTF-8 JSON: {error}")
+    selected = select_run_artifact(
+        parse_json_text(text, "artifact response"),
+        policy=args.policy,
+        artifact_prefix=args.artifact_prefix,
+        run_id=args.run_id,
+        release_sha=args.release_sha,
+        maximum_attempt=args.maximum_attempt,
+    )
+    print(json.dumps(selected, separators=(",", ":"), sort_keys=True))
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -4603,6 +4743,18 @@ def parser() -> argparse.ArgumentParser:
     validate_registry = commands.add_parser("validate-registry")
     validate_registry.add_argument("--registry", type=Path, required=True)
     validate_registry.set_defaults(handler=validate_registry_command)
+
+    select_artifact = commands.add_parser("select-run-artifact")
+    select_artifact.add_argument(
+        "--policy",
+        choices=("exact-current", "single-retained", "latest-retained"),
+        required=True,
+    )
+    select_artifact.add_argument("--artifact-prefix", required=True)
+    select_artifact.add_argument("--run-id", type=int, required=True)
+    select_artifact.add_argument("--release-sha", required=True)
+    select_artifact.add_argument("--maximum-attempt", type=int, required=True)
+    select_artifact.set_defaults(handler=select_run_artifact_command)
 
     assemble_standard = commands.add_parser("assemble-standard")
     assemble_standard.add_argument("--registry", type=Path, required=True)

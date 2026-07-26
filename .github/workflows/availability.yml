@@ -36,8 +36,9 @@ jobs:
     outputs:
       artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
       artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
-      artifact_name: production-availability-${{ steps.probe.outputs.release_sha }}-${{ github.run_attempt }}
+      artifact_name: production-availability-${{ steps.probe.outputs.release_sha }}-${{ steps.probe.outputs.producer_run_attempt }}
       predicate_digest: "sha256:${{ steps.probe.outputs.predicate_sha256 }}"
+      producer_run_attempt: ${{ steps.probe.outputs.producer_run_attempt }}
       release_sha: ${{ steps.probe.outputs.release_sha }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -1323,6 +1324,7 @@ jobs:
             echo "checksums=${subject_inventory}"
             echo "predicate=${predicate}"
             echo "predicate_sha256=${predicate_sha256}"
+            echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"
             echo "release_sha=${release_sha}"
           } >>"${GITHUB_OUTPUT}"
 
@@ -1352,11 +1354,19 @@ jobs:
           ARTIFACT_ID: ${{ needs.probe.outputs.artifact_id }}
           ARTIFACT_NAME: ${{ needs.probe.outputs.artifact_name }}
           GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.probe.outputs.producer_run_attempt }}
+          RELEASE_SHA: ${{ needs.probe.outputs.release_sha }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          (( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          expected_artifact_name="production-availability-${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}"
+          test "${ARTIFACT_NAME}" = "${expected_artifact_name}"
           artifact="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
@@ -1365,7 +1375,7 @@ jobs:
           )"
           jq -e \
             --arg digest "${ARTIFACT_DIGEST}" \
-            --arg name "${ARTIFACT_NAME}" \
+            --arg name "${expected_artifact_name}" \
             --arg sha "${GITHUB_SHA}" \
             --argjson artifactId "${ARTIFACT_ID}" \
             --argjson runId "${GITHUB_RUN_ID}" '
@@ -1395,10 +1405,14 @@ jobs:
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/availability-attestation
           EXPECTED_PREDICATE_DIGEST: ${{ needs.probe.outputs.predicate_digest }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.probe.outputs.producer_run_attempt }}
           RELEASE_SHA: ${{ needs.probe.outputs.release_sha }}
         shell: bash
         run: |
           set -euo pipefail
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
           expected_inventory="$(
             printf '%s\n' \
               SHA256SUMS \
@@ -1452,7 +1466,7 @@ jobs:
             --arg availabilitySha "${availability_sha}" \
             --arg manifestSha "${manifest_sha}" \
             --argjson runId "${GITHUB_RUN_ID}" \
-            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runAttempt "${PRODUCER_RUN_ATTEMPT}" \
             --slurpfile availability "${availability}" '
               .schemaVersion ==
                 "archon.production-availability-attestation/v1" and

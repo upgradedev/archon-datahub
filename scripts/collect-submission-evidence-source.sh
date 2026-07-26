@@ -111,44 +111,70 @@ jq -e \
   echo "::error::${SOURCE_KEY} is not the exact successful same-repository release run"
   exit 1
 }
-run_attempt="$(jq -er '.run_attempt' <<<"${run_json}")"
-artifact_name="${artifact_template//\{releaseSha\}/${RELEASE_SHA}}"
-artifact_name="${artifact_name//\{runAttempt\}/${run_attempt}}"
-[[ "${artifact_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]]
+attestation_run_attempt="$(jq -er '.run_attempt' <<<"${run_json}")"
+bound_artifact_template="$(
+  printf '%s' "${artifact_template//\{releaseSha\}/${RELEASE_SHA}}"
+)"
+case "${bound_artifact_template}" in
+  *'{runAttempt}') ;;
+  *)
+    echo "::error::source artifact template must end in runAttempt"
+    exit 1
+    ;;
+esac
+artifact_prefix="${bound_artifact_template%\{runAttempt\}}"
+test "${artifact_prefix}{runAttempt}" = "${bound_artifact_template}"
+[[ "${artifact_prefix}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,170}$ ]]
 
-artifacts_json="$(
-  api \
-    "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100&name=${artifact_name}"
+if test "${source_mode}" = "standard-v1"; then
+  selection_policy="latest-retained"
+  artifacts_json="$(
+    api \
+      --paginate \
+      --slurp \
+      "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100"
+  )"
+else
+  selection_policy="exact-current"
+  artifact_name="$(
+    printf '%s' \
+      "${bound_artifact_template//\{runAttempt\}/${attestation_run_attempt}}"
+  )"
+  [[ "${artifact_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]]
+  artifacts_json="$(
+    api \
+      "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100&name=${artifact_name}"
+  )"
+fi
+selected_artifact="$(
+  printf '%s' "${artifacts_json}" |
+    python3 "${validator}" select-run-artifact \
+      --policy "${selection_policy}" \
+      --artifact-prefix "${artifact_prefix}" \
+      --run-id "${SOURCE_RUN_ID}" \
+      --release-sha "${RELEASE_SHA}" \
+      --maximum-attempt "${attestation_run_attempt}"
 )"
-artifact_json="$(
-  jq -ce \
-    --arg name "${artifact_name}" \
-    --arg release "${RELEASE_SHA}" \
-    --argjson runId "${SOURCE_RUN_ID}" '
-      [
-        .artifacts[] |
-        select(
-          .name == $name and
-          .expired == false and
-          .workflow_run.id == $runId and
-          .workflow_run.head_sha == $release and
-          (.id | type) == "number" and
-          .id > 0 and
-          (.digest | test("^sha256:[0-9a-f]{64}$")) and
-          (.size_in_bytes | type) == "number" and
-          .size_in_bytes > 0 and
-          .size_in_bytes <= 52428800
-        )
-      ] |
-      if length == 1 then .[0]
-      else error("exactly one unexpired registered artifact is required")
-      end
-    ' <<<"${artifacts_json}"
+artifact_json="$(jq -ce '.metadata' <<<"${selected_artifact}")"
+producer_run_attempt="$(
+  jq -er '.producerAttempt' <<<"${selected_artifact}"
 )"
+[[ "${producer_run_attempt}" =~ ^[1-9][0-9]*$ ]]
+(( producer_run_attempt <= attestation_run_attempt ))
+artifact_name="$(jq -er '.name' <<<"${artifact_json}")"
+expected_artifact_name="$(
+  printf '%s' \
+    "${bound_artifact_template//\{runAttempt\}/${producer_run_attempt}}"
+)"
+test "${artifact_name}" = "${expected_artifact_name}"
+[[ "${artifact_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$ ]]
 artifact_id="$(jq -er '.id' <<<"${artifact_json}")"
 artifact_digest="$(jq -er '.digest' <<<"${artifact_json}")"
+artifact_size="$(jq -er '.size_in_bytes' <<<"${artifact_json}")"
+[[ "${artifact_size}" =~ ^[1-9][0-9]*$ ]]
+test "${artifact_size}" -le 52428800
 
-work_dir="${RUNNER_TEMP}/submission-upstream-${SOURCE_KEY}-${SOURCE_RUN_ID}-${run_attempt}"
+work_dir="${RUNNER_TEMP}/submission-upstream-${SOURCE_KEY}-${SOURCE_RUN_ID}-${producer_run_attempt}"
 test ! -e "${work_dir}"
 mkdir --mode=0700 "${work_dir}"
 archive="${work_dir}/source.zip"
@@ -160,6 +186,27 @@ api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
 actual_artifact_digest="sha256:$(sha256sum "${archive}" | awk '{print $1}')"
 test "${actual_artifact_digest}" = "${artifact_digest}" || {
   echo "::error::${SOURCE_KEY} downloaded bytes differ from GitHub artifact metadata"
+  exit 1
+}
+refetched_artifact="$(
+  api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+)"
+jq -e \
+  --arg digest "${artifact_digest}" \
+  --arg name "${artifact_name}" \
+  --arg release "${RELEASE_SHA}" \
+  --argjson artifactId "${artifact_id}" \
+  --argjson runId "${SOURCE_RUN_ID}" \
+  --argjson size "${artifact_size}" '
+    .id == $artifactId and
+    .name == $name and
+    .digest == $digest and
+    .expired == false and
+    .size_in_bytes == $size and
+    .workflow_run.id == $runId and
+    .workflow_run.head_sha == $release
+  ' <<<"${refetched_artifact}" >/dev/null || {
+  echo "::error::${SOURCE_KEY} artifact metadata changed after download"
   exit 1
 }
 
@@ -440,6 +487,7 @@ while IFS=$'\t' read -r proof_id role subject_name; do
           statement: .verificationResult.statement
         }
       ] |
+      unique_by(.statement) |
       if length == 1 then .[0]
       else error("exactly one upstream attestation must match")
       end
@@ -450,6 +498,58 @@ while IFS=$'\t' read -r proof_id role subject_name; do
   cp "${verification}" \
     "${verification_output}/${proof_id}--${role}.json"
 done <"${subject_rows}"
+
+final_run_json="$(
+  api "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}"
+)"
+jq -e \
+  --arg path "${workflow_path}" \
+  --arg repository "${GITHUB_REPOSITORY}" \
+  --arg release "${RELEASE_SHA}" \
+  --argjson runAttempt "${attestation_run_attempt}" \
+  --argjson runId "${SOURCE_RUN_ID}" '
+    .id == $runId and
+    .path == $path and
+    .head_sha == $release and
+    .head_branch == "master" and
+    .head_repository.full_name == $repository and
+    .repository.full_name == $repository and
+    (.event == "workflow_dispatch" or .event == "workflow_call") and
+    .run_attempt == $runAttempt and
+    .status == "completed" and
+    .conclusion == "success"
+  ' <<<"${final_run_json}" >/dev/null || {
+  echo "::error::${SOURCE_KEY} source run changed during evidence collection"
+  exit 1
+}
+final_default_sha="$(
+  api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha'
+)"
+test "${final_default_sha}" = "${RELEASE_SHA}" || {
+  echo "::error::master changed during ${SOURCE_KEY} evidence collection"
+  exit 1
+}
+final_artifact_json="$(
+  api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+)"
+jq -e \
+  --arg digest "${artifact_digest}" \
+  --arg name "${artifact_name}" \
+  --arg release "${RELEASE_SHA}" \
+  --argjson artifactId "${artifact_id}" \
+  --argjson runId "${SOURCE_RUN_ID}" \
+  --argjson size "${artifact_size}" '
+    .id == $artifactId and
+    .name == $name and
+    .digest == $digest and
+    .expired == false and
+    .size_in_bytes == $size and
+    .workflow_run.id == $runId and
+    .workflow_run.head_sha == $release
+  ' <<<"${final_artifact_json}" >/dev/null || {
+  echo "::error::${SOURCE_KEY} artifact changed during evidence collection"
+  exit 1
+}
 
 verification_set_digest="sha256:$(
   find "${verification_output}" \
@@ -476,7 +576,7 @@ python3 "${validator}" derive \
   --repository "${GITHUB_REPOSITORY}" \
   --release-sha "${RELEASE_SHA}" \
   --run-id "${SOURCE_RUN_ID}" \
-  --run-attempt "${run_attempt}" \
+  --run-attempt "${producer_run_attempt}" \
   --artifact-id "${artifact_id}" \
   --artifact-name "${artifact_name}" \
   --artifact-digest "${artifact_digest}" \
@@ -497,7 +597,7 @@ jq -cnS \
   --arg verificationSetDigest "${verification_set_digest}" \
   --arg subjectSetDigest "${subject_set_digest}" \
   --argjson runId "${SOURCE_RUN_ID}" \
-  --argjson runAttempt "${run_attempt}" \
+  --argjson runAttempt "${producer_run_attempt}" \
   --argjson artifactId "${artifact_id}" \
   --argjson proofIds "$(printf '%s\n' "${proof_ids[@]}" | jq -Rsc 'split("\n")[:-1]')" '
     {

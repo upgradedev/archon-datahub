@@ -1981,6 +1981,158 @@ with tempfile.TemporaryDirectory(prefix="submission-registry-contracts-") as raw
         "registry accepted a missing required proof-support role",
     )
 
+
+def artifact_fixture(
+    attempt: int,
+    *,
+    artifact_id: int | None = None,
+    expired: bool = False,
+    digest: str = DIGEST,
+    size: int = 1024,
+    run_id: int = 901,
+    release: str = RELEASE,
+) -> dict:
+    return {
+        "id": artifact_id if artifact_id is not None else 1000 + attempt,
+        "name": f"submission-project-access-{RELEASE}-{attempt}",
+        "expired": expired,
+        "digest": digest,
+        "size_in_bytes": size,
+        "workflow_run": {
+            "id": run_id,
+            "head_sha": release,
+        },
+    }
+
+
+def select_artifact(
+    artifacts: list[dict],
+    *,
+    policy: str,
+    maximum_attempt: int,
+) -> dict:
+    return validator.select_run_artifact(
+        [{"artifacts": artifacts}],
+        policy=policy,
+        artifact_prefix=f"submission-project-access-{RELEASE}-",
+        run_id=901,
+        release_sha=RELEASE,
+        maximum_attempt=maximum_attempt,
+    )
+
+
+exact_current = select_artifact(
+    [artifact_fixture(2)],
+    policy="exact-current",
+    maximum_attempt=2,
+)
+assert exact_current["producerAttempt"] == 2
+
+failed_attester_retry = select_artifact(
+    [artifact_fixture(2)],
+    policy="latest-retained",
+    maximum_attempt=3,
+)
+assert failed_attester_retry["producerAttempt"] == 2
+
+full_rerun = [artifact_fixture(1), artifact_fixture(2)]
+assert (
+    select_artifact(
+        full_rerun,
+        policy="latest-retained",
+        maximum_attempt=2,
+    )["producerAttempt"]
+    == 2
+)
+assert (
+    select_artifact(
+        full_rerun,
+        policy="exact-current",
+        maximum_attempt=2,
+    )["producerAttempt"]
+    == 2
+)
+expect_rejected(
+    lambda: select_artifact(
+        full_rerun,
+        policy="single-retained",
+        maximum_attempt=2,
+    ),
+    "single-retained policy accepted a producer rerun",
+)
+assert (
+    select_artifact(
+        [artifact_fixture(1)],
+        policy="single-retained",
+        maximum_attempt=2,
+    )["producerAttempt"]
+    == 1
+)
+
+artifact_rejections = (
+    (
+        [artifact_fixture(2), artifact_fixture(2, artifact_id=2002)],
+        "latest-retained",
+        3,
+        "duplicate selected producer attempt",
+    ),
+    (
+        [artifact_fixture(4)],
+        "latest-retained",
+        3,
+        "future producer attempt",
+    ),
+    (
+        [artifact_fixture(2, expired=True)],
+        "latest-retained",
+        3,
+        "expired artifact",
+    ),
+    (
+        [artifact_fixture(2, run_id=902)],
+        "latest-retained",
+        3,
+        "wrong workflow-run owner",
+    ),
+    (
+        [artifact_fixture(2, release="c" * 40)],
+        "latest-retained",
+        3,
+        "wrong release",
+    ),
+    (
+        [artifact_fixture(2, digest="sha256:not-a-digest")],
+        "latest-retained",
+        3,
+        "invalid digest",
+    ),
+    (
+        [artifact_fixture(2, size=0)],
+        "latest-retained",
+        3,
+        "zero-sized artifact",
+    ),
+    (
+        [artifact_fixture(2, size=52_428_801)],
+        "latest-retained",
+        3,
+        "oversized artifact",
+    ),
+)
+for rejected_artifacts, rejected_policy, rejected_maximum, rejected_label in (
+    artifact_rejections
+):
+    expect_rejected(
+        lambda artifacts=rejected_artifacts,
+        policy=rejected_policy,
+        maximum=rejected_maximum: select_artifact(
+            artifacts,
+            policy=policy,
+            maximum_attempt=maximum,
+        ),
+        f"artifact selection accepted {rejected_label}",
+    )
+
 producer = (ROOT / ".github/workflows/submission-evidence.yml").read_text(
     encoding="utf-8"
 )
@@ -1993,6 +2145,116 @@ consumer = (ROOT / "scripts/verify-submission-readiness-source.sh").read_text(
 availability = (ROOT / ".github/workflows/availability.yml").read_text(
     encoding="utf-8"
 )
+
+
+def assert_availability_retry_contract(workflow: str) -> None:
+    assert "\n  attest:\n" in workflow
+    probe_job, attest_job = workflow.split("\n  attest:\n", maxsplit=1)
+    assert (
+        "producer_run_attempt: "
+        "${{ steps.probe.outputs.producer_run_attempt }}" in probe_job
+    )
+    assert (
+        "artifact_name: production-availability-"
+        "${{ steps.probe.outputs.release_sha }}-"
+        "${{ steps.probe.outputs.producer_run_attempt }}" in probe_job
+    )
+    assert 'echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"' in probe_job
+    assert "attestations: write" not in probe_job
+    assert "id-token: write" not in probe_job
+
+    producer_attempt_binding = (
+        "PRODUCER_RUN_ATTEMPT: "
+        "${{ needs.probe.outputs.producer_run_attempt }}"
+    )
+    assert attest_job.count(producer_attempt_binding) == 2
+    assert attest_job.count(
+        "(( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))"
+    ) == 2
+    assert (
+        'expected_artifact_name="production-availability-'
+        '${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}"' in attest_job
+    )
+    assert (
+        'test "${ARTIFACT_NAME}" = "${expected_artifact_name}"'
+        in attest_job
+    )
+    assert '--arg name "${expected_artifact_name}"' in attest_job
+    assert (
+        '--argjson runAttempt "${PRODUCER_RUN_ATTEMPT}"' in attest_job
+    )
+    assert '--argjson runAttempt "${GITHUB_RUN_ATTEMPT}"' not in attest_job
+    assert (
+        "artifact-ids: ${{ needs.probe.outputs.artifact_id }}" in attest_job
+    )
+    assert ".workflow_run.id == $runId" in attest_job
+    assert ".workflow_run.head_sha == $sha" in attest_job
+    assert "attestations: write" in attest_job
+    assert "id-token: write" in attest_job
+    assert "GH_TOKEN: ${{ github.token }}" in attest_job
+    assert "\n    environment:" not in attest_job
+    assert "secrets." not in attest_job
+
+
+def expect_availability_contract_rejected(
+    tampered_workflow: str, message: str
+) -> None:
+    try:
+        assert_availability_retry_contract(tampered_workflow)
+    except AssertionError:
+        return
+    raise AssertionError(message)
+
+
+assert_availability_retry_contract(availability)
+availability_tamper_cases = (
+    (
+        availability.replace(
+            "producer_run_attempt: "
+            "${{ steps.probe.outputs.producer_run_attempt }}",
+            "producer_run_attempt: ${{ github.run_attempt }}",
+            1,
+        ),
+        "availability accepted a retry-time producer-attempt output",
+    ),
+    (
+        availability.replace(
+            "${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}\"",
+            "${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}\"",
+            1,
+        ),
+        "availability accepted an artifact name bound to the attester retry",
+    ),
+    (
+        availability.replace(
+            '--argjson runAttempt "${PRODUCER_RUN_ATTEMPT}"',
+            '--argjson runAttempt "${GITHUB_RUN_ATTEMPT}"',
+            1,
+        ),
+        "availability accepted a predicate bound to the attester retry",
+    ),
+    (
+        availability.replace(
+            "(( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))",
+            "(( PRODUCER_RUN_ATTEMPT == GITHUB_RUN_ATTEMPT ))",
+        ),
+        "availability accepted a retry contract that requires equal attempts",
+    ),
+    (
+        availability.replace(
+            "  attest:\n    name:",
+            "  attest:\n    environment: production-observer\n    name:",
+            1,
+        ),
+        "availability accepted an environment-bound attester",
+    ),
+)
+for tampered_availability, tamper_message in availability_tamper_cases:
+    expect_availability_contract_rejected(
+        tampered_availability,
+        tamper_message,
+    )
+
 
 for forbidden_input in (
     "claims_json:",
@@ -2022,10 +2284,23 @@ for required_binding in (
     "upstream-subjects",
     "--verification-set-digest",
     "subjectSetDigest",
+    "attestation_run_attempt",
+    'selection_policy="exact-current"',
+    'selection_policy="latest-retained"',
+    "select-run-artifact",
+    '--maximum-attempt "${attestation_run_attempt}"',
+    '--run-attempt "${producer_run_attempt}"',
+    '--argjson runAttempt "${producer_run_attempt}"',
+    ".run_attempt == $runAttempt",
+    "source run changed during evidence collection",
+    "master changed during",
+    "artifact changed during evidence collection",
+    "unique_by(.statement)",
 ):
     assert required_binding in collector, (
         f"collector lost exact binding {required_binding}"
     )
+assert '--run-attempt "${attestation_run_attempt}"' not in collector
 assert (
     'semantic_validator="scripts/validate-submission-proof-receipts.py"'
     in consumer
