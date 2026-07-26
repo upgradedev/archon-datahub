@@ -998,9 +998,12 @@ run_apply() {
   local operation="$1"
   local password="${2:-}"
   local username="${3:-${email}}"
+  local manager_reason=""
+  local reason=""
+  local status=0
   contract_case="run-apply-${operation}-caller-${BASH_LINENO[0]:-unknown}"
 
-  env \
+  if env \
     -u AWS_DEFAULT_PROFILE \
     -u AWS_ENDPOINT_URL \
     -u AWS_ENDPOINT_URL_CLOUDFORMATION \
@@ -1061,7 +1064,30 @@ run_apply() {
     AWS_REGION=eu-west-1 \
     AWS_DEFAULT_REGION=eu-west-1 \
     GITHUB_RUN_ID=123456 \
-    bash "${manager}" apply
+    bash "${manager}" apply; then
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "${FUNCNAME[1]:-}" != "expect_failure" ]]; then
+    manager_reason="$(
+      grep -E '^::error::[^[:cntrl:]]{1,200}$' "${result_log}" |
+        head -n 1 || true
+    )"
+    reason="${manager_reason#::error::}"
+    if [[ -n "${reason}" ]] &&
+      grep -Fq "fail \"${reason}\"" "${manager}"; then
+      printf \
+        "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Safe fixed manager reason: %s\n" \
+        "${BASH_LINENO[0]:-1}" "${reason}" >&9
+    else
+      printf \
+        "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Manager failure reason was not a fixed source literal and remains redacted\n" \
+        "${BASH_LINENO[0]:-1}" >&9
+    fi
+  fi
+  return "${status}"
 }
 
 expect_failure() {
