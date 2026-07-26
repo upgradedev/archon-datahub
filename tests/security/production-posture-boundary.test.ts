@@ -397,7 +397,7 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   );
   assert.equal(
     [...judgeUserWorkflow.matchAll(/secrets\.JUDGE_USERNAME/gu)].length,
-    2
+    3
   );
   assert.match(
     privileged,
@@ -816,15 +816,26 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
     );
     const finalGroupProof = operation.lastIndexOf(groupProof);
     const finalEnabledProof = operation.lastIndexOf("wait_for_enabled_status");
-    const completion = operation.lastIndexOf("operation_complete=true");
     assert.ok(finalGroupProof >= 0);
     assert.ok(finalEnabledProof > finalGroupProof);
-    assert.ok(completion > finalEnabledProof);
     assert.match(
-      operation.slice(finalEnabledProof, completion),
+      operation.slice(finalEnabledProof),
       /"CONFIRMED" "\$\{canonical\}"/u
     );
+    assert.doesNotMatch(operation, /operation_complete=true/u);
   }
+  const lifecycleReceipt = judgeUserManager.lastIndexOf(
+    "\nwrite_lifecycle_state_receipt"
+  );
+  const lifecycleCompletion = judgeUserManager.lastIndexOf(
+    "\noperation_complete=true"
+  );
+  assert.ok(lifecycleReceipt >= 0);
+  assert.ok(lifecycleCompletion > lifecycleReceipt);
+  assert.equal(
+    [...judgeUserManager.matchAll(/^operation_complete=true$/gmu)].length,
+    1
+  );
   assert.match(judgeUserManager, /\.Enabled == false/u);
   const provisionContainment = judgeUserManager.indexOf(
     'containment_mode="provision"'

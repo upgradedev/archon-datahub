@@ -573,6 +573,13 @@ def safe_relative_name(value: Any, label: str) -> str:
     return name
 
 
+def canonical_workflow_path(value: Any, label: str) -> str:
+    path = nonempty(value, label, 220)
+    if re.fullmatch(r"\.github/workflows/[a-z0-9][a-z0-9-]*\.yml", path) is None:
+        fail(f"{label} must be a canonical GitHub workflow path")
+    return path
+
+
 def strict_video_url(value: Any, label: str) -> str:
     text = public_https_url(value, label)
     parsed = urlsplit(text)
@@ -640,6 +647,10 @@ def load_registry(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]
         },
         "registry.aggregate",
     )
+    canonical_workflow_path(
+        registry["aggregate"]["workflowPath"],
+        "registry.aggregate.workflowPath",
+    )
     if not isinstance(registry["sources"], list) or not registry["sources"]:
         fail("registry.sources must be a non-empty array")
     sources: dict[str, dict[str, Any]] = {}
@@ -679,9 +690,7 @@ def load_registry(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]
             ),
             f"{label}.predicateSchemaVersion",
         )
-        safe_relative_name(source["workflowPath"], f"{label}.workflowPath")
-        if re.fullmatch(r"\.github/workflows/[a-z0-9-]+\.yml", source["workflowPath"]) is None:
-            fail(f"{label}.workflowPath must be a canonical workflow path")
+        canonical_workflow_path(source["workflowPath"], f"{label}.workflowPath")
         nonempty(source["artifactNameTemplate"], f"{label}.artifactNameTemplate", 180)
         nonempty(source["predicateType"], f"{label}.predicateType", 240)
         safe_relative_name(source["predicateFile"], f"{label}.predicateFile")

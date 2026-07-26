@@ -499,7 +499,7 @@ test("evidence is minimal, checksum-sealed, attested, retained, and honestly doc
   );
   assert.match(
     documentation,
-    /id-token: write[\s\S]*?attestations: write[\s\S]*only in a dependent attestation job[\s\S]*never available to the probe script/u
+    /id-token: write[\s\S]*?attestations: write[\s\S]*only in a dependent attestation job[\s\S]*never available to the\s+probe script/u
   );
   assert.match(
     documentation,
