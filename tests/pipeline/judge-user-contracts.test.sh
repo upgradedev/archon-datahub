@@ -185,29 +185,24 @@ JSON
           UserStatus: $status,
           UserMFASettingList: $userMfaSettings,
           MFAOptions: $legacyMfaOptions,
-          UserAttributes:
-            (
-              if $omitSubject == 1 then
-                []
-              else
-                [{Name: "sub", Value: $subject}]
-              end
-            ) +
-            [
+          UserAttributes: [
+            if $omitSubject != 1 then
+              {Name: "sub", Value: $subject}
+            else
+              empty
+            end,
               {Name: "email", Value: $email},
               {Name: "email_verified", Value: $emailVerified},
               {
                 Name: "custom:archon_judge_binding",
                 Value: $binding
-              }
-            ] +
-            (
-              if $duplicateSubject == 1 then
-                [{Name: "sub", Value: $subject}]
-              else
-                []
-              end
-            )
+              },
+            if $duplicateSubject == 1 then
+              {Name: "sub", Value: $subject}
+            else
+              empty
+            end
+          ]
         } +
         (
           if $preferredMfa == "" then
