@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -59,11 +60,24 @@ function resolveManifestPath(root, value, label) {
 }
 
 async function readRegularFile(path, label) {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    fail(`${label} must be a regular, non-symlink file.`);
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error?.code === "ELOOP") {
+      fail(`${label} must be a regular, non-symlink file.`);
+    }
+    throw error;
   }
-  return readFile(path);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      fail(`${label} must be a regular, non-symlink file.`);
+    }
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
 }
 
 function sha256(content) {
