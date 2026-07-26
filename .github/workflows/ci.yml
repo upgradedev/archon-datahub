@@ -59,6 +59,7 @@ jobs:
           for script in \
             scripts/manage-cognito-judge-user.sh \
             scripts/materialize-datahub-mcp-lock.sh \
+            scripts/npm-audit-retry.sh \
             scripts/patch-cdk-brace-expansion.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
@@ -156,7 +157,7 @@ jobs:
         working-directory: web
         run: >-
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
-          --audit-level=high
+          --audit-level=moderate
       - name: Build immutable SPA candidate
         working-directory: web
         env:
@@ -413,7 +414,7 @@ jobs:
           npm test
           npm run coverage
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
-            --audit-level=high
+            --audit-level=moderate
       - name: Validate the infrastructure candidate exactly
         run: |
           set -euo pipefail
@@ -437,7 +438,7 @@ jobs:
           npm run coverage:critical
           npm run build
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
-            --audit-level=high
+            --audit-level=moderate
       - name: Mark the exact candidates as remotely validated
         env:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
@@ -581,13 +582,13 @@ jobs:
         run: >-
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
           --omit=dev
-          --audit-level=high
+          --audit-level=moderate
       - name: Control Lambda SCA gate
         working-directory: infra/aws/lambda/control
         run: >-
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
           --omit=dev
-          --audit-level=high
+          --audit-level=moderate
       - name: Package deterministic Lambda release candidate
         shell: bash
         run: |
@@ -1228,7 +1229,7 @@ jobs:
       - name: SCA gate
         run: >-
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
-          --audit-level=high
+          --audit-level=moderate
 
   mcp-dependency:
     name: Locked DataHub MCP SCA and SBOM
@@ -1752,7 +1753,7 @@ jobs:
           persist-credentials: false
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
-          fail-on-severity: high
+          fail-on-severity: moderate
           # aws-cdk-lib@2.262.1 immutably bundles the sole affected path.
           # The infra job replaces it with integrity-pinned 5.0.8 and accepts
           # no other advisory/path through its exact compensating audit gate.

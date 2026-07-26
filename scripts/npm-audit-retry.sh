@@ -2,11 +2,27 @@
 set -euo pipefail
 
 # CI/CD-only wrapper for npm's advisory service. Registry transport failures are
-# retried, while a real high/critical result fails immediately. The final
+# retried, while a real moderate-or-higher result fails immediately. The final
 # attempt is always fail-closed, including for malformed or unavailable reports.
 
-if [[ " $* " != *" --audit-level=high "* ]] || [[ " $* " == *" --json "* ]]; then
-  echo "usage: npm-audit-retry.sh [npm audit options] --audit-level=high" >&2
+audit_level_count=0
+for argument in "$@"; do
+  case "${argument}" in
+    --audit-level=moderate)
+      audit_level_count=$((audit_level_count + 1))
+      ;;
+    --audit-level|--audit-level=*)
+      echo "::error::The normal npm audit gate requires --audit-level=moderate" >&2
+      exit 64
+      ;;
+    --json|--json=*)
+      echo "::error::The npm audit wrapper owns JSON report generation" >&2
+      exit 64
+      ;;
+  esac
+done
+if (( audit_level_count != 1 )); then
+  echo "usage: npm-audit-retry.sh [npm audit options] --audit-level=moderate" >&2
   exit 64
 fi
 
@@ -37,18 +53,21 @@ for (( attempt = 1; attempt <= attempts; attempt += 1 )); do
   fi
 
   # Do not mask or retry a genuine gate result. Retry only when npm failed
-  # without producing evidence of a high/critical advisory.
+  # without producing evidence of a moderate-or-higher advisory.
   if jq -e '
       (
+        (.metadata.vulnerabilities.moderate // 0) > 0 or
         (.metadata.vulnerabilities.high // 0) > 0 or
         (.metadata.vulnerabilities.critical // 0) > 0
       ) or
       any(
         .vulnerabilities[]?;
-        .severity == "high" or .severity == "critical"
+        .severity == "moderate" or
+        .severity == "high" or
+        .severity == "critical"
       )
     ' "${report}" >/dev/null 2>&1; then
-    echo "::error::npm audit reported a high or critical vulnerability"
+    echo "::error::npm audit reported a moderate or higher vulnerability"
     exit "${status}"
   fi
 

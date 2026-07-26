@@ -25,6 +25,10 @@ const cdkAuditCompensation = readFileSync(
   ),
   "utf8"
 );
+const npmAuditRetry = readFileSync(
+  new URL("../../scripts/npm-audit-retry.sh", import.meta.url),
+  "utf8"
+);
 const overrideVerifier = readFileSync(
   new URL("../../scripts/verify-exact-npm-overrides.mjs", import.meta.url),
   "utf8"
@@ -448,6 +452,104 @@ test("scheduled rescans bind exact live deployment, CI run, and subjects", () =>
   );
 });
 
+test("normal npm dependency gates reject every moderate-or-higher advisory", () => {
+  assert.match(npmAuditRetry, /--audit-level=moderate\)/u);
+  assert.match(npmAuditRetry, /--audit-level\|--audit-level=\*/u);
+  assert.match(npmAuditRetry, /--json\|--json=\*/u);
+  assert.match(npmAuditRetry, /audit_level_count != 1/u);
+  assert.match(
+    npmAuditRetry,
+    /\.metadata\.vulnerabilities\.moderate \/\/ 0/u
+  );
+  assert.match(npmAuditRetry, /\.severity == "moderate"/u);
+  assert.match(npmAuditRetry, /moderate or higher vulnerability/u);
+  assert.doesNotMatch(npmAuditRetry, /--audit-level=high/u);
+
+  assert.equal(
+    [
+      ...ciWorkflow.matchAll(
+        /bash "\$\{GITHUB_WORKSPACE\}\/scripts\/npm-audit-retry\.sh"/gu
+      )
+    ].length,
+    6
+  );
+  assert.equal(
+    [...ciWorkflow.matchAll(/--audit-level=moderate/gu)].length,
+    6
+  );
+  const web = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  web:"),
+    ciWorkflow.indexOf("\n  infra-lock-candidate:")
+  );
+  assert.match(web, /npm-audit-retry\.sh[\s\S]*--audit-level=moderate/u);
+
+  const candidate = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  infra-lock-candidate:"),
+    ciWorkflow.indexOf("\n  infra:")
+  );
+  assert.equal(
+    [...candidate.matchAll(/scripts\/npm-audit-retry\.sh/gu)].length,
+    2
+  );
+  assert.equal(
+    [...candidate.matchAll(/--audit-level=moderate/gu)].length,
+    2
+  );
+
+  const infra = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  infra:"),
+    ciWorkflow.indexOf("\n  publish-infra-sarif:")
+  );
+  assert.equal(
+    [...infra.matchAll(/scripts\/npm-audit-retry\.sh/gu)].length,
+    2
+  );
+  assert.equal(
+    [
+      ...infra.matchAll(
+        /npm-audit-retry\.sh"\s+--omit=dev\s+--audit-level=moderate/gu
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [...infra.matchAll(/--audit-level=moderate/gu)].length,
+    2
+  );
+  assert.match(
+    infra,
+    /bash scripts\/verify-cdk-npm-audit-compensation\.sh infra\/aws/u
+  );
+
+  const security = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  security:"),
+    ciWorkflow.indexOf("\n  mcp-dependency:")
+  );
+  assert.equal(
+    [...security.matchAll(/scripts\/npm-audit-retry\.sh/gu)].length,
+    1
+  );
+  assert.equal(
+    [...security.matchAll(/--audit-level=moderate/gu)].length,
+    1
+  );
+
+  const dependencyReview = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  dependency-review:"),
+    ciWorkflow.indexOf("\n  load:")
+  );
+  assert.match(dependencyReview, /fail-on-severity: moderate/u);
+  assert.equal(
+    [...dependencyReview.matchAll(/allow-ghsas:/gu)].length,
+    1
+  );
+  assert.match(
+    dependencyReview,
+    /allow-ghsas: GHSA-mh99-v99m-4gvg/u
+  );
+  assert.doesNotMatch(dependencyReview, /allow-dependencies:/u);
+});
+
 test("CDK bundled advisory is repaired and admitted only by an exact CI receipt", () => {
   const lockCandidateStart = ciWorkflow.indexOf("\n  infra-lock-candidate:");
   const lockCandidateEnd = ciWorkflow.indexOf(
@@ -542,7 +644,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
     ciWorkflow.indexOf("\n  dependency-review:"),
     ciWorkflow.indexOf("\n  load:")
   );
-  assert.match(dependencyReview, /fail-on-severity: high/u);
+  assert.match(dependencyReview, /fail-on-severity: moderate/u);
   assert.match(
     dependencyReview,
     /allow-ghsas: GHSA-mh99-v99m-4gvg/u
