@@ -611,7 +611,7 @@ test("posture evidence is checksum-sealed, signed, retained, and documented", ()
   assert.match(documentation, /four upper\/lower alarms/u);
   assert.match(
     documentation,
-    /`AlarmActions` exactly equal to the one-element/u
+    /`AlarmActions` exactly equal to\s+the one-element/u
   );
   assert.match(documentation, /`InsufficientDataActions` exactly empty/u);
   assert.match(documentation, /byte-for-byte identical in the late observation/u);

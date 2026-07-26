@@ -620,7 +620,7 @@ jobs:
                   )
                 )
               ' <<<"${response}" >/dev/null || {
-                echo "::error::Archon-production returned a malformed stack-resource page" >&2
+                echo "::error::Archon-production returned malformed stack-resource page ${page}" >&2
                 return 1
               }
               jq -cS '.' <<<"${response}" >>"${pages}"
