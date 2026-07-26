@@ -1012,8 +1012,9 @@ def validate_contrib_verifier(verifier: str) -> None:
 
 
 def validate_documentation(documentation: str) -> None:
+    normalized = re.sub(r"\s+", " ", documentation)
     require_tokens(
-        documentation,
+        normalized,
         "BONUS-OSS operational documentation",
         (
             "source-complete and intentionally blocked",
@@ -1518,8 +1519,8 @@ for tamper_label, tampered_verifier in verifier_tamper_cases.items():
 documentation_tamper_cases = {
     "claims PR exists": replace_all(
         documentation_text,
-        "No pull request has been opened or changed",
-        "A pull request has been opened",
+        "No pull\nrequest has been opened or changed",
+        "A pull\nrequest has been opened",
     ),
     "allows open PR": replace_all(
         documentation_text,
