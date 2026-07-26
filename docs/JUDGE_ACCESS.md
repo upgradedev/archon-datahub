@@ -139,12 +139,61 @@ provision/rotation/reactivation step; deactivation cannot read it. It maps
 lifecycle step. The script immediately copies both secrets to non-exported shell values
 and unsets their environment variables before starting any AWS process. It sends both
 password mutations to the AWS CLI over standard input, never prints either credential,
-and
-creates no workflow artifact. The control-plane job summary contains only the
+and never retains a credential-derived hash. The control-plane job summary contains only the
 opaque-identity approval phrase and never the judge username, password, or token
 material. GitHub run metadata retains stage, operation, and the opaque request digest;
 CloudTrail retains the privileged operation audit trail without credentials in workflow
 output.
+
+## Sanitized operation evidence
+
+Every successful operation creates one checksum-sealed artifact named
+`judge-user-operation-OPERATION-RELEASE_SHA-RUN_ATTEMPT`. The state receipt is written
+by `manage-cognito-judge-user.sh` only after its exact operation precondition and final
+AWS read-back succeed. It contains only the operation, stage, domain-separated opaque
+identity digest, approved application-origin digest, prior/final state enums,
+session-revocation outcome, timestamps, and result. It never contains the email,
+password, tokens, pool/client IDs, AWS account/role/region, raw service responses, or
+credential hashes. A failed operation does not produce a receipt.
+
+For an access-enabling operation, success is not committed inside the lifecycle script
+until the sanitized state receipt has been written and validated. If that write fails
+after a successful AWS read-back, the script's exit trap disables the exact bound
+identity, attempts global sign-out, removes its approver group, and requires the
+contained state before the red run exits. The workflow likewise makes one bounded second
+artifact-upload attempt when the first upload fails without creating an artifact. It
+then resolves exactly one canonical artifact through the Actions API. If receipt sealing
+or both durable-retention paths still fail after the script returned a verified enabled
+state, a final protected step performs the same exact deactivation and retains a separate
+sanitized incident receipt. That failed identity is not eligible for the final SQ4 chain;
+create a separately reviewed replacement identity instead of presenting a red run as
+evidence.
+
+The protected AWS job adds repository, release, workflow, run/attempt, exact environment
+approval-phrase digest, request/target digests, and control-plane gate bindings. The
+artifact inventory is exactly `judge-operation-state.json`, `operation-receipt.json`,
+`manifest.json`, `attestation-predicate.json`,
+`judge-user-operation-subject.sha256`, and `SHA256SUMS`. A dependent job has no
+environment, AWS credentials, or protected secrets. It uses only `actions: read`,
+`contents: read`, `attestations: write`, and `id-token: write`; it resolves the exact
+artifact ID through the Actions API, binds its name/digest/run/head SHA, downloads only
+that ID, revalidates the inventory, checksums, receipt, manifest, and custom predicate,
+then attests the three subjects with
+`https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1`.
+The artifact exports its immutable producer run attempt. If only the secretless
+attestation job fails transiently, **Re-run failed jobs** verifies and signs the original
+producer-attempt bytes; it does not reinterpret the new attester attempt as a new
+lifecycle mutation. Do not use **Re-run all jobs** to recover `provision`.
+
+For emergency deactivation, `sessionRevocation` is
+`response-confirmed` only when global sign-out returned success. An ambiguous response
+is recorded as `contained-by-disabled-state`; the run can still prove the disabled,
+group-free containment boundary without overclaiming session-revocation confirmation.
+The future project-access evidence pipeline must accept four distinct exact production
+run IDs and independently verify their artifacts and attestations. It is responsible for
+enforcing the strictly ordered
+`provision → rotate → deactivate → reactivate` chain, a common release, opaque identity,
+and application origin. An individual judge-user run never asserts that aggregate.
 
 The workflow deliberately does not set `email_verified=true`. A value supplied by an
 operator is not proof that the recipient controls that mailbox. The judge credential
@@ -260,8 +309,7 @@ Attach only the exact stack and user-pool permissions required by the workflow:
         "cognito-idp:DescribeRiskConfiguration",
         "cognito-idp:DescribeUserPool",
         "cognito-idp:DescribeUserPoolClient",
-        "cognito-idp:ListUserPoolClients",
-        "cognito-idp:GetWebACLForResource"
+        "cognito-idp:ListUserPoolClients"
       ],
       "Resource": "arn:aws:cognito-idp:REGION:ACCOUNT_ID:userpool/USER_POOL_ID"
     },
@@ -353,7 +401,13 @@ reviewed break-glass procedure instead of weakening the exact-identity check.
    and immediately after requesting AWS credentials.
 4. Require a green read-back result. A red run means the requested end state was not
    proved; inspect its generic error and CloudTrail rather than retrying a different
-   operation implicitly.
+   operation implicitly. For evidence-bearing production runs, also require the
+   dependent attestation job to be green and retain the exact run ID; an unattested
+   operation must not enter the four-step project-access chain. A transient failure
+   confined to the secretless attestation job may use **Re-run failed jobs**. If the
+   summary says `Lifecycle evidence failure contained`, keep that identity disabled and
+   establish a separately reviewed replacement identity before starting a new four-step
+   final chain.
 5. For provision/rotation/reactivation, send the stable judge password out of band only after the
    `CONFIRMED` read-back succeeds. For deactivation, confirm the successful run before
    treating access as revoked, then remove the unused protected password secret when the

@@ -110,7 +110,7 @@ case "${service}:${operation}" in
       },
       {
         "OutputKey": "ArchonApplicationUrl",
-        "OutputValue": "${FAKE_APPLICATION_URL:-https://staging.archon.example}"
+        "OutputValue": "${FAKE_APPLICATION_URL:-https://staging.archon.dev}"
       },
       {
         "OutputKey": "ArchonApproverGroupName",
@@ -217,6 +217,17 @@ JSON
         end
       )
     ' <"${FAKE_STATE_DIR}/groups"
+    if [[ (
+      "${FAKE_REENABLE_AFTER_GROUP_READ:-0}" == "1" ||
+      (
+        "${FAKE_REENABLE_AFTER_HISTORY_GROUP_READ:-0}" == "1" &&
+        -f "${FAKE_STATE_DIR}/history-violation"
+      )
+    ) &&
+      ! -s "${FAKE_STATE_DIR}/groups" &&
+      "$(<"${FAKE_STATE_DIR}/status")" == "disabled" ]]; then
+      printf 'confirmed\n' >"${FAKE_STATE_DIR}/status"
+    fi
     ;;
 
   cognito-idp:describe-user-pool)
@@ -344,8 +355,8 @@ JSON
     oauth_flows='["code"]'
     oauth_scopes='["openid","email","archon/approve"]'
     prevent_user_existence_errors="ENABLED"
-    callback_urls='["https://staging.archon.example/"]'
-    logout_urls='["https://staging.archon.example/"]'
+    callback_urls='["https://staging.archon.dev/"]'
+    logout_urls='["https://staging.archon.dev/"]'
     default_redirect=""
     if [[ "${FAKE_CLIENT_FLOW_DRIFT:-0}" == "1" ]]; then
       explicit_auth_flows='[
@@ -367,13 +378,13 @@ JSON
     fi
     if [[ "${FAKE_REDIRECT_DRIFT:-0}" == "1" ]]; then
       callback_urls='[
-        "https://staging.archon.example/",
+        "https://staging.archon.dev/",
         "https://attacker.example/callback"
       ]'
     fi
     if [[ "${FAKE_LOGOUT_REDIRECT_DRIFT:-0}" == "1" ]]; then
       logout_urls='[
-        "https://staging.archon.example/",
+        "https://staging.archon.dev/",
         "https://attacker.example/logout"
       ]'
     fi
@@ -628,6 +639,7 @@ JSON
     )"
     if grep -Fxq "${password_digest}" \
       "${FAKE_STATE_DIR}/password-history"; then
+      : >"${FAKE_STATE_DIR}/history-violation"
       echo "PasswordHistoryPolicyViolationException" >&2
       exit 3
     fi
@@ -956,6 +968,11 @@ judge_account_id="$(
   printf '%064d' 0 |
     tr '0' 'a'
 )"
+operation_state_receipt="$(
+  printf '%s/judge-user-operation-evidence/judge-operation-state.json' \
+    "${test_root}"
+)"
+lifecycle_started_at="2026-07-26T10:00:00Z"
 
 reset_state() {
   local status="$1"
@@ -969,8 +986,10 @@ reset_state() {
   : >"${state_dir}/gh-calls"
   : >"${state_dir}/password-history"
   rm -f -- \
+    "${operation_state_receipt}" \
     "${state_dir}/emergency-ref-reads" \
-    "${state_dir}/emergency-run-reads"
+    "${state_dir}/emergency-run-reads" \
+    "${state_dir}/history-violation"
   if [[ "${status}" != "absent" ]]; then
     printf '%s' "${judge_password}" |
       sha256sum |
@@ -1038,6 +1057,8 @@ run_apply() {
     FAKE_CLIENT_PAGINATION_DRIFT="${FAKE_CLIENT_PAGINATION_DRIFT:-0}" \
     FAKE_USER_EXISTENCE_DRIFT="${FAKE_USER_EXISTENCE_DRIFT:-0}" \
     FAKE_REDIRECT_DRIFT="${FAKE_REDIRECT_DRIFT:-0}" \
+    FAKE_REENABLE_AFTER_GROUP_READ="${FAKE_REENABLE_AFTER_GROUP_READ:-0}" \
+    FAKE_REENABLE_AFTER_HISTORY_GROUP_READ="${FAKE_REENABLE_AFTER_HISTORY_GROUP_READ:-0}" \
     FAKE_LOGOUT_REDIRECT_DRIFT="${FAKE_LOGOUT_REDIRECT_DRIFT:-0}" \
     FAKE_DEFAULT_REDIRECT_DRIFT="${FAKE_DEFAULT_REDIRECT_DRIFT:-0}" \
     FAKE_APPLICATION_URL="${FAKE_APPLICATION_URL:-}" \
@@ -1060,10 +1081,12 @@ run_apply() {
     JUDGE_USERNAME="${username}" \
     JUDGE_PASSWORD="${password}" \
     EXPECTED_ACCOUNT_ID=111111111111 \
-    EXPECTED_APPLICATION_URL="${EXPECTED_APPLICATION_URL_OVERRIDE:-https://staging.archon.example}" \
+    EXPECTED_APPLICATION_URL="${EXPECTED_APPLICATION_URL_OVERRIDE:-https://staging.archon.dev}" \
     AWS_REGION=eu-west-1 \
     AWS_DEFAULT_REGION=eu-west-1 \
     GITHUB_RUN_ID=123456 \
+    LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+    OUTPUT_PATH="${operation_state_receipt}" \
     bash "${manager}" apply; then
     return 0
   else
@@ -1097,6 +1120,102 @@ expect_failure() {
   fi
 }
 
+assert_operation_state_receipt() {
+  local operation="$1"
+  local prior_access="$2"
+  local prior_authentication="$3"
+  local prior_authorization="$4"
+  local final_authentication="$5"
+  local session_revocation="$6"
+  local expected_result="$7"
+  local identity_digest
+  local application_origin_sha256
+
+  identity_digest="$(
+    printf 'archon-judge-identity-v1\0%s' "${judge_account_id}" |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  application_origin_sha256="$(
+    printf '%s' 'https://staging.archon.dev' |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  test -f "${operation_state_receipt}"
+  test ! -L "${operation_state_receipt}"
+  jq -e \
+    --arg operation "${operation}" \
+    --arg identityDigest "${identity_digest}" \
+    --arg applicationOriginSha256 "${application_origin_sha256}" \
+    --arg startedAt "${lifecycle_started_at}" \
+    --arg priorAccess "${prior_access}" \
+    --arg priorAuthentication "${prior_authentication}" \
+    --arg priorAuthorization "${prior_authorization}" \
+    --arg finalAuthentication "${final_authentication}" \
+    --arg sessionRevocation "${session_revocation}" \
+    --arg result "${expected_result}" '
+      (keys | sort) == [
+        "applicationOriginSha256",
+        "completedAt",
+        "finalState",
+        "identityDigest",
+        "observation",
+        "operation",
+        "priorState",
+        "result",
+        "sanitized",
+        "schemaVersion",
+        "secretMaterialRetained",
+        "sessionRevocation",
+        "stage",
+        "startedAt"
+      ] and
+      .schemaVersion == "archon.judge-user-state-transition/v1" and
+      .stage == "staging" and
+      .operation == $operation and
+      .identityDigest == $identityDigest and
+      .applicationOriginSha256 == $applicationOriginSha256 and
+      .priorState.identity ==
+        (if $operation == "provision" then "absent" else "exact-bound" end) and
+      .priorState.access == $priorAccess and
+      .priorState.authentication == $priorAuthentication and
+      .priorState.authorization == $priorAuthorization and
+      .finalState.identity == "exact-bound" and
+      .finalState.access ==
+        (if $operation == "deactivate" then "disabled" else "enabled" end) and
+      .finalState.authentication == $finalAuthentication and
+      .finalState.authorization ==
+        (if $operation == "deactivate" then
+          "none"
+        else
+          "sole-approver-group"
+        end) and
+      .sessionRevocation == $sessionRevocation and
+      .startedAt == $startedAt and
+      (.completedAt | fromdateiso8601) >= ($startedAt | fromdateiso8601) and
+      .observation == {
+        priorState: "exact-operation-precondition",
+        finalState: "exact-aws-read-back"
+      } and
+      .result == $result and
+      .sanitized == true and
+      .secretMaterialRetained == false
+    ' "${operation_state_receipt}" >/dev/null
+  for forbidden in \
+    "${email}" \
+    "${judge_password}" \
+    "${rotated_password}" \
+    "${judge_account_id}" \
+    "111111111111" \
+    "JudgePool123" \
+    "JudgeClient123"; do
+    if grep -Fq "${forbidden}" "${operation_state_receipt}"; then
+      echo "::error::Sanitized operation receipt retained a forbidden value" >&2
+      exit 1
+    fi
+  done
+}
+
 gate_sha256="$(
   printf '%064d' 0 |
     tr '0' 'c'
@@ -1108,7 +1227,7 @@ release_sha="$(
 target_account_id=111111111111
 target_region=eu-west-1
 target_role_arn="arn:aws:iam::111111111111:role/archon-staging-judge-user"
-target_application_url="https://staging.archon.example"
+target_application_url="https://staging.archon.dev"
 target_sha256="$(
   env \
     ARCHON_STAGE=staging \
@@ -1368,7 +1487,7 @@ VERIFY_ACCOUNT_ID="$(
   printf '%064d' 0 |
     tr '0' 'b'
 )" expect_failure run_approval_verify
-VERIFY_TARGET_APPLICATION_URL=https://other.archon.example \
+VERIFY_TARGET_APPLICATION_URL=https://other.archon.dev \
   expect_failure run_approval_verify
 VERIFY_TARGET_REGION=us-east-1 \
   expect_failure run_approval_verify
@@ -1413,13 +1532,28 @@ if env \
   JUDGE_USERNAME="${email}" \
   JUDGE_PASSWORD=weak \
   EXPECTED_ACCOUNT_ID=111111111111 \
-  EXPECTED_APPLICATION_URL=https://staging.archon.example \
+  EXPECTED_APPLICATION_URL=https://staging.archon.dev \
   AWS_REGION=eu-west-1 \
   GITHUB_RUN_ID=123456 \
+  LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+  OUTPUT_PATH="${operation_state_receipt}" \
   bash "${manager}" apply >"${result_log}" 2>&1; then
   echo "::error::Weak judge password was accepted" >&2
   exit 1
 fi
+test ! -s "${state_dir}/calls"
+
+reset_state absent
+mkdir -p "$(dirname "${operation_state_receipt}")"
+printf 'stale\n' >"${operation_state_receipt}"
+expect_failure run_apply provision "${judge_password}"
+test "$(<"${operation_state_receipt}")" = "stale"
+test ! -s "${state_dir}/calls"
+
+reset_state absent
+EXPECTED_APPLICATION_URL_OVERRIDE=https://reserved.archon.example \
+  expect_failure run_apply provision "${judge_password}"
+test ! -e "${operation_state_receipt}"
 test ! -s "${state_dir}/calls"
 
 contract_stage="workflow-source-contract"
@@ -1497,6 +1631,82 @@ grep -Fq \
   'gate_mode="emergency-deactivate-current-master"' \
   "${workflow_source}"
 grep -Fq 'gate_mode="full-green"' "${workflow_source}"
+grep -Fq \
+  "artifact_name: \${{ steps.resolve_artifact.outputs.artifact_name }}" \
+  "${workflow_source}"
+grep -Fq \
+  "name: \${{ steps.operation_receipt.outputs.artifact_name }}" \
+  "${workflow_source}"
+grep -Fq \
+  "predicate-type: https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1" \
+  "${workflow_source}"
+grep -Fq \
+  "subject-checksums: \${{ runner.temp }}/judge-user-operation-attestation/judge-user-operation-subject.sha256" \
+  "${workflow_source}"
+grep -Fq \
+  "artifact-ids: \${{ needs.manage.outputs.artifact_id }}" \
+  "${workflow_source}"
+grep -Fq \
+  "workflow_run.head_sha == \$sha" \
+  "${workflow_source}"
+grep -Fq \
+  "workflow_run.id == \$runId" \
+  "${workflow_source}"
+grep -Fq \
+  "uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26" \
+  "${workflow_source}"
+test "$(
+  grep -Fc 'attestations: write' "${workflow_source}"
+)" = "1"
+test "$(
+  grep -Fc 'id-token: write' "${workflow_source}"
+)" = "2"
+grep -Fq \
+  "artifact_digest: \${{ steps.resolve_artifact.outputs.artifact_digest }}" \
+  "${workflow_source}"
+grep -Fq \
+  "artifact_id: \${{ steps.resolve_artifact.outputs.artifact_id }}" \
+  "${workflow_source}"
+grep -Fq \
+  "producer_run_attempt: \${{ steps.operation_receipt.outputs.producer_run_attempt }}" \
+  "${workflow_source}"
+grep -Fq \
+  "PRODUCER_RUN_ATTEMPT: \${{ needs.manage.outputs.producer_run_attempt }}" \
+  "${workflow_source}"
+grep -Fq \
+  'run_attempt=${PRODUCER_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}' \
+  "${workflow_source}"
+grep -Fq \
+  'Retry lifecycle artifact retention once when no artifact exists' \
+  "${workflow_source}"
+grep -Fq \
+  'Contain access when durable operation evidence was not retained' \
+  "${workflow_source}"
+grep -Fq \
+  'inputs.operation == '\''provision'\'' ||' \
+  "${workflow_source}"
+test "$(
+  grep -Fc \
+    'uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+    "${workflow_source}"
+)" = "3"
+attest_source="$(
+  sed -n '/^  attest:/,$p' "${workflow_source}"
+)"
+if grep -Fq '${GITHUB_RUN_ATTEMPT}' <<<"${attest_source}"; then
+  echo "::error::Attestation retry must use the retained producer attempt" >&2
+  exit 1
+fi
+test "$(
+  grep -n '^write_lifecycle_state_receipt$' "${manager}" |
+    cut -d: -f1
+)" -lt "$(
+  grep -n '^operation_complete=true$' "${manager}" |
+    cut -d: -f1
+)"
+test "$(
+  grep -Ec '^operation_complete=true$' "${manager}"
+)" = "1"
 
 contract_stage="manager-apply-contracts"
 reset_state absent
@@ -1515,18 +1725,42 @@ if env \
   JUDGE_PASSWORD="${judge_password}" \
   FAKE_JUDGE_PASSWORD="${judge_password}" \
   EXPECTED_ACCOUNT_ID=111111111111 \
-  EXPECTED_APPLICATION_URL=https://staging.archon.example \
+  EXPECTED_APPLICATION_URL=https://staging.archon.dev \
   AWS_REGION=eu-west-1 \
+  LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+  OUTPUT_PATH="${operation_state_receipt}" \
   bash "${manager}" apply >"${result_log}" 2>&1; then
   echo "::error::Cognito endpoint override was accepted" >&2
   exit 1
 fi
 test ! -s "${state_dir}/calls"
 
+contract_case="receipt-write-failure-contains-provision"
+reset_state absent
+operation_evidence_dir="$(dirname "${operation_state_receipt}")"
+mkdir -p "${operation_evidence_dir}"
+chmod 0500 "${operation_evidence_dir}"
+expect_failure run_apply provision "${judge_password}"
+chmod 0700 "${operation_evidence_dir}"
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
+test ! -e "${operation_state_receipt}"
+grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
+
 reset_state absent
 run_apply provision "${judge_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
 test "$(<"${state_dir}/groups")" = "archon-approvers"
+assert_operation_state_receipt \
+  provision \
+  absent \
+  absent \
+  none \
+  confirmed-permanent \
+  not-applicable-fresh-identity \
+  provisioned-and-readback-verified
 grep -Fxq "cognito-idp:describe-user-pool-client" "${state_dir}/calls"
 grep -Fxq "cognito-idp:list-user-pool-clients" "${state_dir}/calls"
 grep -Fxq "cognito-idp:describe-risk-configuration" "${state_dir}/calls"
@@ -1597,6 +1831,7 @@ test "$(
 
 reset_state confirmed archon-approvers
 expect_failure run_apply rotate "${judge_password}"
+test ! -e "${operation_state_receipt}"
 test "$(<"${state_dir}/status")" = "confirmed"
 test "$(<"${state_dir}/groups")" = "archon-approvers"
 grep -Fq "24-password history policy" "${result_log}"
@@ -1609,6 +1844,14 @@ reset_state confirmed archon-approvers
 run_apply rotate "${rotated_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
 test "$(<"${state_dir}/groups")" = "archon-approvers"
+assert_operation_state_receipt \
+  rotate \
+  enabled \
+  confirmed-permanent \
+  sole-approver-group \
+  confirmed-permanent-rotated \
+  response-confirmed \
+  rotated-and-readback-verified
 grep -Fxq "cognito-idp:admin-set-user-password" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 test "$(
@@ -1685,6 +1928,14 @@ reset_state disabled
 run_apply reactivate "${rotated_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
 test "$(<"${state_dir}/groups")" = "archon-approvers"
+assert_operation_state_receipt \
+  reactivate \
+  disabled \
+  confirmed-contained \
+  none \
+  confirmed-permanent-rotated \
+  response-confirmed \
+  reactivated-and-readback-verified
 test "$(
   grep -E \
     'cognito-idp:admin-(user-global-sign-out|set-user-password|enable-user|add-user-to-group)' \
@@ -1760,6 +2011,14 @@ test "$(
 )" = "0"
 
 reset_state disabled
+FAKE_REENABLE_AFTER_HISTORY_GROUP_READ=1 \
+  expect_failure run_apply reactivate "${judge_password}"
+test "$(<"${state_dir}/status")" = "confirmed"
+test ! -s "${state_dir}/groups"
+test ! -e "${operation_state_receipt}"
+grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
+
+reset_state disabled
 FAKE_PASSWORD_FAILURE=1 \
   expect_failure run_apply reactivate "${rotated_password}"
 test "$(<"${state_dir}/status")" = "disabled"
@@ -1809,6 +2068,14 @@ reset_state confirmed archon-approvers
 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
+assert_operation_state_receipt \
+  deactivate \
+  enabled \
+  not-relied-upon-for-containment \
+  not-relied-upon-for-containment \
+  disabled-containment-boundary \
+  response-confirmed \
+  deactivated-and-readback-verified
 grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
@@ -1839,6 +2106,14 @@ FAKE_SIGNOUT_FAILURE=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 grep -Fq "ambiguous error" "${result_log}"
+assert_operation_state_receipt \
+  deactivate \
+  enabled \
+  not-relied-upon-for-containment \
+  not-relied-upon-for-containment \
+  disabled-containment-boundary \
+  contained-by-disabled-state \
+  deactivated-and-readback-verified
 
 reset_state confirmed archon-approvers
 FAKE_DISABLE_APPLIED_ERROR=1 run_apply deactivate >"${result_log}" 2>&1
@@ -1851,6 +2126,12 @@ FAKE_REMOVE_APPLIED_ERROR=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 grep -Fq "ambiguous error" "${result_log}"
+
+reset_state confirmed archon-approvers
+FAKE_REENABLE_AFTER_GROUP_READ=1 expect_failure run_apply deactivate
+test "$(<"${state_dir}/status")" = "confirmed"
+test ! -s "${state_dir}/groups"
+test ! -e "${operation_state_receipt}"
 
 reset_state confirmed archon-approvers
 FAKE_DISABLE_FAILURE=1 expect_failure run_apply deactivate
@@ -1968,14 +2249,14 @@ test "$(
 )" = "0"
 
 reset_state absent
-FAKE_APPLICATION_URL="https://staging.archon.example@attacker.example" \
+FAKE_APPLICATION_URL="https://staging.archon.dev@attacker.example" \
   expect_failure run_apply provision "${judge_password}"
 test "$(
   grep -Ec "cognito-idp:(describe|admin-)" "${state_dir}/calls" || true
 )" = "0"
 
 reset_state absent
-EXPECTED_APPLICATION_URL_OVERRIDE=https://other.archon.example \
+EXPECTED_APPLICATION_URL_OVERRIDE=https://other.archon.dev \
   expect_failure run_apply provision "${judge_password}"
 test "$(
   grep -Ec "cognito-idp:admin-(get|create)-user" \
@@ -2050,9 +2331,11 @@ if env \
   JUDGE_PASSWORD="${judge_password}" \
   FAKE_JUDGE_PASSWORD="${judge_password}" \
   EXPECTED_ACCOUNT_ID=111111111111 \
-  EXPECTED_APPLICATION_URL=https://staging.archon.example \
+  EXPECTED_APPLICATION_URL=https://staging.archon.dev \
   AWS_REGION=eu-west-1 \
   GITHUB_RUN_ID=123456 \
+  LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+  OUTPUT_PATH="${operation_state_receipt}" \
   bash "${manager}" apply >"${result_log}" 2>&1; then
   echo "::error::Unaccepted stack state was accepted" >&2
   exit 1
@@ -2077,8 +2360,10 @@ if env \
   JUDGE_PASSWORD="${judge_password}" \
   FAKE_JUDGE_PASSWORD="${judge_password}" \
   EXPECTED_ACCOUNT_ID=111111111111 \
-  EXPECTED_APPLICATION_URL=https://staging.archon.example \
+  EXPECTED_APPLICATION_URL=https://staging.archon.dev \
   AWS_REGION=eu-west-1 \
+  LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+  OUTPUT_PATH="${operation_state_receipt}" \
   bash "${manager}" apply >"${result_log}" 2>&1; then
   echo "::error::AWS endpoint override was accepted" >&2
   exit 1
@@ -2101,8 +2386,10 @@ if env \
   JUDGE_PASSWORD="${judge_password}" \
   FAKE_JUDGE_PASSWORD="${judge_password}" \
   EXPECTED_ACCOUNT_ID=111111111111 \
-  EXPECTED_APPLICATION_URL=https://staging.archon.example \
+  EXPECTED_APPLICATION_URL=https://staging.archon.dev \
   AWS_REGION=eu-west-1 \
+  LIFECYCLE_STARTED_AT="${lifecycle_started_at}" \
+  OUTPUT_PATH="${operation_state_receipt}" \
   bash "${manager}" apply >"${result_log}" 2>&1; then
   echo "::error::WAFv2 endpoint override was accepted" >&2
   exit 1

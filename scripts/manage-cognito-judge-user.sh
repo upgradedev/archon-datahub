@@ -6,10 +6,46 @@ set -euo pipefail
 # bind an opaque immutable account ID, never the email or either credential.
 
 mode="${1:-}"
+lifecycle_output_path="${OUTPUT_PATH:-}"
+lifecycle_started_at="${LIFECYCLE_STARTED_AT:-}"
 
 fail() {
   printf '::error::%s\n' "$1" >&2
   exit 1
+}
+
+validate_application_origin() {
+  local origin="$1"
+  local host
+  local tld
+  local -a labels
+  local label
+
+  [[ "${origin}" == https://* ]] ||
+    fail "The approved application URL must be an exact HTTPS origin"
+  host="${origin#https://}"
+  (( ${#host} >= 4 && ${#host} <= 253 )) ||
+    fail "The approved application URL has an invalid host length"
+  [[ "${host}" =~ ^[a-z0-9.-]+$ &&
+    "${host}" == *.* &&
+    "${host}" != .* &&
+    "${host}" != *. &&
+    "${host}" != *..* ]] ||
+    fail "The approved application URL must contain only an exact lower-case DNS host"
+  IFS='.' read -r -a labels <<<"${host}"
+  for label in "${labels[@]}"; do
+    (( ${#label} >= 1 && ${#label} <= 63 )) &&
+      [[ "${label}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] ||
+      fail "The approved application URL contains an invalid DNS label"
+  done
+  tld="${labels[${#labels[@]} - 1]}"
+  [[ "${tld}" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]] ||
+    fail "The approved application URL contains an invalid DNS suffix"
+  case "${tld}" in
+    example|invalid|localhost|test)
+      fail "The approved application URL uses a reserved DNS suffix"
+      ;;
+  esac
 }
 
 validate_request() {
@@ -72,6 +108,27 @@ case "${mode}" in
     ;;
   apply)
     validate_judge_username
+    : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+    : "${lifecycle_output_path:?OUTPUT_PATH is required}"
+    : "${lifecycle_started_at:?LIFECYCLE_STARTED_AT is required}"
+    [[ "${RUNNER_TEMP}" == /* ]] ||
+      fail "RUNNER_TEMP must be absolute"
+    test "${lifecycle_output_path}" = \
+      "${RUNNER_TEMP}/judge-user-operation-evidence/judge-operation-state.json" ||
+      fail "OUTPUT_PATH must be the exact lifecycle state receipt path"
+    [[ "${lifecycle_started_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+      fail "LIFECYCLE_STARTED_AT must be a canonical UTC timestamp"
+    test "$(
+      date -u --date="${lifecycle_started_at}" '+%Y-%m-%dT%H:%M:%SZ'
+    )" = "${lifecycle_started_at}" ||
+      fail "LIFECYCLE_STARTED_AT is not a valid UTC timestamp"
+    mkdir -p "${RUNNER_TEMP}/judge-user-operation-evidence"
+    test ! -L "${RUNNER_TEMP}/judge-user-operation-evidence" ||
+      fail "The lifecycle evidence directory must not be a symbolic link"
+    test ! -L "${lifecycle_output_path}" ||
+      fail "OUTPUT_PATH must not be a symbolic link"
+    test ! -e "${lifecycle_output_path}" ||
+      fail "OUTPUT_PATH must be fresh"
     ;;
   *)
     fail "Usage: manage-cognito-judge-user.sh request|apply"
@@ -84,13 +141,12 @@ unset JUDGE_PASSWORD JUDGE_USERNAME
 
 : "${EXPECTED_ACCOUNT_ID:?EXPECTED_ACCOUNT_ID is required}"
 : "${AWS_REGION:?AWS_REGION is required}"
+: "${EXPECTED_APPLICATION_URL:?EXPECTED_APPLICATION_URL is required}"
 [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] ||
   fail "EXPECTED_ACCOUNT_ID must be an exact 12-digit account"
 [[ "${AWS_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]] ||
   fail "AWS_REGION is invalid"
-if [[ "${JUDGE_USER_OPERATION}" != "deactivate" ]]; then
-  : "${EXPECTED_APPLICATION_URL:?EXPECTED_APPLICATION_URL is required}"
-fi
+validate_application_origin "${EXPECTED_APPLICATION_URL}"
 if [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
   test "${AWS_DEFAULT_REGION}" = "${AWS_REGION}" ||
     fail "AWS region variables disagree"
@@ -144,6 +200,16 @@ containment_mode=""
 containment_canonical=""
 operation_binding=""
 operation_complete=false
+prior_identity_state=""
+prior_access_state=""
+prior_authentication_state=""
+prior_authorization_state=""
+final_identity_state=""
+final_access_state=""
+final_authentication_state=""
+final_authorization_state=""
+transition_result=""
+session_revocation_result=""
 
 cleanup() {
   local exit_status=$?
@@ -166,6 +232,172 @@ cleanup() {
   exit "${exit_status}"
 }
 trap cleanup EXIT
+
+write_lifecycle_state_receipt() {
+  local completed_at
+  local completed_epoch
+  local identity_digest
+  local application_origin_sha256
+  local temporary_output
+
+  completed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  completed_epoch="$(date -u --date="${completed_at}" +%s)"
+  test "$(
+    date -u --date="${lifecycle_started_at}" +%s
+  )" -le "${completed_epoch}" ||
+    fail "The lifecycle completion timestamp precedes its start"
+  identity_digest="$(
+    printf 'archon-judge-identity-v1\0%s' "${JUDGE_ACCOUNT_ID}" |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  application_origin_sha256="$(
+    printf '%s' "${EXPECTED_APPLICATION_URL}" |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  [[ "${identity_digest}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${application_origin_sha256}" =~ ^[0-9a-f]{64}$ ]]
+  for state_value in \
+    "${prior_identity_state}" \
+    "${prior_access_state}" \
+    "${prior_authentication_state}" \
+    "${prior_authorization_state}" \
+    "${final_identity_state}" \
+    "${final_access_state}" \
+    "${final_authentication_state}" \
+    "${final_authorization_state}" \
+    "${session_revocation_result}" \
+    "${transition_result}"; do
+    [[ "${state_value}" =~ ^[a-z][a-z0-9-]{1,63}$ ]] ||
+      fail "The sanitized lifecycle transition has an invalid state"
+  done
+
+  temporary_output="$(
+    mktemp \
+      "${RUNNER_TEMP}/judge-user-operation-evidence/.judge-operation-state.XXXXXX"
+  )"
+  jq -cnS \
+    --arg stage "${ARCHON_STAGE}" \
+    --arg operation "${JUDGE_USER_OPERATION}" \
+    --arg identityDigest "${identity_digest}" \
+    --arg applicationOriginSha256 "${application_origin_sha256}" \
+    --arg startedAt "${lifecycle_started_at}" \
+    --arg completedAt "${completed_at}" \
+    --arg priorIdentity "${prior_identity_state}" \
+    --arg priorAccess "${prior_access_state}" \
+    --arg priorAuthentication "${prior_authentication_state}" \
+    --arg priorAuthorization "${prior_authorization_state}" \
+    --arg finalIdentity "${final_identity_state}" \
+    --arg finalAccess "${final_access_state}" \
+    --arg finalAuthentication "${final_authentication_state}" \
+    --arg finalAuthorization "${final_authorization_state}" \
+    --arg sessionRevocation "${session_revocation_result}" \
+    --arg result "${transition_result}" '
+      {
+        schemaVersion: "archon.judge-user-state-transition/v1",
+        stage: $stage,
+        operation: $operation,
+        identityDigest: $identityDigest,
+        applicationOriginSha256: $applicationOriginSha256,
+        priorState: {
+          identity: $priorIdentity,
+          access: $priorAccess,
+          authentication: $priorAuthentication,
+          authorization: $priorAuthorization
+        },
+        finalState: {
+          identity: $finalIdentity,
+          access: $finalAccess,
+          authentication: $finalAuthentication,
+          authorization: $finalAuthorization
+        },
+        sessionRevocation: $sessionRevocation,
+        startedAt: $startedAt,
+        completedAt: $completedAt,
+        observation: {
+          priorState: "exact-operation-precondition",
+          finalState: "exact-aws-read-back"
+        },
+        result: $result,
+        sanitized: true,
+        secretMaterialRetained: false
+      }
+    ' >"${temporary_output}"
+  test -s "${temporary_output}"
+  test ! -L "${temporary_output}"
+  jq -e \
+    --arg stage "${ARCHON_STAGE}" \
+    --arg operation "${JUDGE_USER_OPERATION}" \
+    --arg identityDigest "${identity_digest}" \
+    --arg applicationOriginSha256 "${application_origin_sha256}" \
+    --arg startedAt "${lifecycle_started_at}" \
+    --arg completedAt "${completed_at}" \
+    --arg priorIdentity "${prior_identity_state}" \
+    --arg priorAccess "${prior_access_state}" \
+    --arg priorAuthentication "${prior_authentication_state}" \
+    --arg priorAuthorization "${prior_authorization_state}" \
+    --arg finalIdentity "${final_identity_state}" \
+    --arg finalAccess "${final_access_state}" \
+    --arg finalAuthentication "${final_authentication_state}" \
+    --arg finalAuthorization "${final_authorization_state}" \
+    --arg sessionRevocation "${session_revocation_result}" \
+    --arg result "${transition_result}" '
+      (keys | sort) == [
+        "applicationOriginSha256",
+        "completedAt",
+        "finalState",
+        "identityDigest",
+        "observation",
+        "operation",
+        "priorState",
+        "result",
+        "sanitized",
+        "schemaVersion",
+        "secretMaterialRetained",
+        "sessionRevocation",
+        "stage",
+        "startedAt"
+      ] and
+      .schemaVersion == "archon.judge-user-state-transition/v1" and
+      .stage == $stage and
+      .operation == $operation and
+      .identityDigest == $identityDigest and
+      .applicationOriginSha256 == $applicationOriginSha256 and
+      .priorState == {
+        identity: $priorIdentity,
+        access: $priorAccess,
+        authentication: $priorAuthentication,
+        authorization: $priorAuthorization
+      } and
+      .finalState == {
+        identity: $finalIdentity,
+        access: $finalAccess,
+        authentication: $finalAuthentication,
+        authorization: $finalAuthorization
+      } and
+      .sessionRevocation == $sessionRevocation and
+      .startedAt == $startedAt and
+      .completedAt == $completedAt and
+      .observation == {
+        priorState: "exact-operation-precondition",
+        finalState: "exact-aws-read-back"
+      } and
+      .result == $result and
+      .sanitized == true and
+      .secretMaterialRetained == false and
+      ([.. | strings] | all(
+        test(
+          "(?i)(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-)"
+        ) | not
+      ))
+    ' "${temporary_output}" >/dev/null ||
+    fail "The sanitized lifecycle state receipt failed validation"
+  chmod 0600 "${temporary_output}"
+  mv -- "${temporary_output}" "${lifecycle_output_path}"
+  test -f "${lifecycle_output_path}"
+  test ! -L "${lifecycle_output_path}"
+}
 
 [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]{0,19}$ ]] ||
   fail "GITHUB_RUN_ID is invalid"
@@ -796,23 +1028,6 @@ wait_for_only_approver_group() {
   return 1
 }
 
-wait_for_no_groups() {
-  local username="$1"
-  local attempt
-
-  for attempt in {1..5}; do
-    if read_groups_exact "${username}" &&
-      jq -e '((.Groups // []) | length) == 0' \
-      "${groups_document}" >/dev/null; then
-      return 0
-    fi
-    if (( attempt < 5 )); then
-      sleep 2
-    fi
-  done
-  return 1
-}
-
 add_approver_group() {
   local username="$1"
 
@@ -835,12 +1050,40 @@ global_sign_out() {
     --no-cli-pager >/dev/null 2>"${aws_error}"
 }
 
+exact_contained_state_proved() {
+  local username="$1"
+
+  # Cognito exposes user state and group membership through separate reads.
+  # Treat them as one proof cycle and finish with a second disabled-user read,
+  # so observations from different retries can never be combined.
+  read_user_exact "${username}" &&
+    user_identity_matches_canonical "${username}" &&
+    jq -e '.Enabled == false' "${user_document}" >/dev/null &&
+    read_groups_exact "${username}" &&
+    jq -e '((.Groups // []) | length) == 0' \
+      "${groups_document}" >/dev/null &&
+    read_user_exact "${username}" &&
+    user_identity_matches_canonical "${username}" &&
+    jq -e '.Enabled == false' "${user_document}" >/dev/null
+}
+
+wait_for_exact_contained_state() {
+  local username="$1"
+  local attempt
+
+  for attempt in {1..5}; do
+    if exact_contained_state_proved "${username}"; then
+      return 0
+    fi
+    (( attempt < 5 )) && sleep 2
+  done
+  return 1
+}
+
 automatic_containment() {
   local attempt
   local containment_username=""
   local identity_proved=false
-  local disabled_proved=false
-  local groups_removed_proved=false
 
   for attempt in {1..5}; do
     case "${containment_mode}" in
@@ -907,18 +1150,7 @@ automatic_containment() {
   fi
 
   for attempt in {1..5}; do
-    if read_user_exact "${containment_username}" &&
-      user_identity_matches_canonical "${containment_username}" &&
-      jq -e '.Enabled == false' "${user_document}" >/dev/null; then
-      disabled_proved=true
-    fi
-    if read_groups_exact "${containment_username}" &&
-      jq -e '((.Groups // []) | length) == 0' \
-        "${groups_document}" >/dev/null; then
-      groups_removed_proved=true
-    fi
-    if [[ "${disabled_proved}" == "true" &&
-      "${groups_removed_proved}" == "true" ]]; then
+    if exact_contained_state_proved "${containment_username}"; then
       return 0
     fi
     (( attempt < 5 )) && sleep 2
@@ -935,6 +1167,10 @@ case "${JUDGE_USER_OPERATION}" in
       (( get_status == 3 )) ||
         fail "Unable to prove that the judge identity is absent"
     fi
+    prior_identity_state="absent"
+    prior_access_state="absent"
+    prior_authentication_state="absent"
+    prior_authorization_state="none"
 
     operation_binding="${JUDGE_ACCOUNT_ID}"
     internal_temporary_password="Aa1!$(
@@ -1013,7 +1249,12 @@ case "${JUDGE_USER_OPERATION}" in
     wait_for_enabled_status \
       "CONFIRMED" "${canonical}" "${operation_binding}" ||
       fail "The final provisioned judge identity is not confirmed"
-    operation_complete=true
+    final_identity_state="exact-bound"
+    final_access_state="enabled"
+    final_authentication_state="confirmed-permanent"
+    final_authorization_state="sole-approver-group"
+    session_revocation_result="not-applicable-fresh-identity"
+    transition_result="provisioned-and-readback-verified"
     ;;
 
   rotate)
@@ -1025,6 +1266,10 @@ case "${JUDGE_USER_OPERATION}" in
     canonical="$(canonical_username)"
     read_groups "${canonical}"
     require_only_approver_group
+    prior_identity_state="exact-bound"
+    prior_access_state="enabled"
+    prior_authentication_state="confirmed-permanent"
+    prior_authorization_state="sole-approver-group"
 
     password_request="$(
       printf '%s' "${judge_password}" |
@@ -1063,7 +1308,12 @@ case "${JUDGE_USER_OPERATION}" in
     require_only_approver_group
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The final rotated judge identity is not confirmed"
-    operation_complete=true
+    final_identity_state="exact-bound"
+    final_access_state="enabled"
+    final_authentication_state="confirmed-permanent-rotated"
+    final_authorization_state="sole-approver-group"
+    session_revocation_result="response-confirmed"
+    transition_result="rotated-and-readback-verified"
     ;;
 
   reactivate)
@@ -1081,6 +1331,20 @@ case "${JUDGE_USER_OPERATION}" in
     canonical="$(canonical_username)"
     read_groups "${canonical}"
     require_no_groups
+    prior_identity_state="exact-bound"
+    prior_access_state="disabled"
+    prior_authentication_state="$(
+      jq -er '
+        if .UserStatus == "CONFIRMED" then
+          "confirmed-contained"
+        elif .UserStatus == "FORCE_CHANGE_PASSWORD" then
+          "bootstrap-contained"
+        else
+          empty
+        end
+      ' "${user_document}"
+    )" || fail "The contained identity has an invalid authentication state"
+    prior_authorization_state="none"
 
     containment_mode="existing"
     containment_canonical="${canonical}"
@@ -1107,10 +1371,7 @@ case "${JUDGE_USER_OPERATION}" in
         --cli-input-json file:///dev/stdin \
         --no-cli-pager >/dev/null 2>"${aws_error}"; then
       if grep -Fq "PasswordHistoryPolicyViolationException" "${aws_error}" &&
-        wait_for_disabled_user "${canonical}" &&
-        read_groups_exact "${canonical}" &&
-        jq -e '((.Groups // []) | length) == 0' \
-          "${groups_document}" >/dev/null; then
+        wait_for_exact_contained_state "${canonical}"; then
         contain_on_failure=false
         fail "The proposed judge credential violates the 24-password history policy"
       fi
@@ -1132,7 +1393,12 @@ case "${JUDGE_USER_OPERATION}" in
       fail "The reactivated judge group could not be read back"
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The final reactivated judge identity is not confirmed"
-    operation_complete=true
+    final_identity_state="exact-bound"
+    final_access_state="enabled"
+    final_authentication_state="confirmed-permanent-rotated"
+    final_authorization_state="sole-approver-group"
+    session_revocation_result="response-confirmed"
+    transition_result="reactivated-and-readback-verified"
     ;;
 
   deactivate)
@@ -1144,6 +1410,16 @@ case "${JUDGE_USER_OPERATION}" in
     user_identity_matches ||
       fail "Cognito did not resolve the exact requested judge identity"
     canonical="$(canonical_username)"
+    prior_identity_state="exact-bound"
+    if jq -e '.Enabled == true' "${user_document}" >/dev/null; then
+      prior_access_state="enabled"
+    elif jq -e '.Enabled == false' "${user_document}" >/dev/null; then
+      prior_access_state="disabled"
+    else
+      prior_access_state="unverified"
+    fi
+    prior_authentication_state="not-relied-upon-for-containment"
+    prior_authorization_state="not-relied-upon-for-containment"
 
     disable_response_proved=true
     if ! aws cognito-idp admin-disable-user \
@@ -1168,14 +1444,7 @@ case "${JUDGE_USER_OPERATION}" in
       group_removal_response_proved=false
     fi
 
-    deactivation_state_proved=true
-    if ! wait_for_disabled_user "${canonical}"; then
-      deactivation_state_proved=false
-    fi
-    if ! wait_for_no_groups "${canonical}"; then
-      deactivation_state_proved=false
-    fi
-    test "${deactivation_state_proved}" = "true" ||
+    wait_for_exact_contained_state "${canonical}" ||
       fail "The exact disabled and group-free judge state was not proved after all revocation attempts"
 
     test "${disable_response_proved}" = "true" ||
@@ -1190,9 +1459,21 @@ case "${JUDGE_USER_OPERATION}" in
       printf '%s\n' \
         "::warning::Group removal returned an ambiguous error, but exact empty membership was proved" \
         >&2
+    final_identity_state="exact-bound"
+    final_access_state="disabled"
+    final_authentication_state="disabled-containment-boundary"
+    final_authorization_state="none"
+    if [[ "${sign_out_response_proved}" == "true" ]]; then
+      session_revocation_result="response-confirmed"
+    else
+      session_revocation_result="contained-by-disabled-state"
+    fi
+    transition_result="deactivated-and-readback-verified"
     ;;
 esac
 
 unset judge_password internal_temporary_password
+write_lifecycle_state_receipt
+operation_complete=true
 printf 'Completed the explicit %s request for %s.\n' \
   "${JUDGE_USER_OPERATION}" "${ARCHON_STAGE}"
