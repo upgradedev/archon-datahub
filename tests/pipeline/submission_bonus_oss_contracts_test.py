@@ -952,10 +952,16 @@ def validate_contrib_verifier(verifier: str) -> None:
   "state",
   "url",
 ];"""
+    local_execution_absent_block = """const localExecutionAbsent =
+  status?.localBuildRun === false &&
+  status?.localTestsRun === false &&
+  status?.localSecurityScanRun === false;"""
     require(
         verifier.count(staged_status_block) == 1
-        and verifier.count(merged_status_key_block) == 1,
-        "staged and merged manifest phases must preserve their exact fields",
+        and verifier.count(merged_status_key_block) == 1
+        and verifier.count(local_execution_absent_block) == 1,
+        "staged and merged manifest phases must preserve their exact fields "
+        "and shared local-execution prohibition",
     )
     require_tokens(
         verifier,
