@@ -539,7 +539,6 @@ jobs:
           operation_receipt="${evidence_dir}/operation-receipt.json"
           manifest="${evidence_dir}/manifest.json"
           predicate="${evidence_dir}/attestation-predicate.json"
-          subject_inventory="${evidence_dir}/judge-user-operation-subject.sha256"
 
           test -f "${state_receipt}"
           test ! -L "${state_receipt}"
