@@ -751,7 +751,7 @@ function assertEvidenceBoundary(source: string): void {
   );
   assert.match(
     exercise,
-    /\)\" = "paging-delivery\.json manifest\.json"/u
+    /\)" = "paging-delivery\.json manifest\.json"/u
   );
   const retainedProjectionStart = exercise.indexOf("--slurpfile gates");
   const retainedProjectionEnd = exercise.indexOf(
@@ -931,7 +931,7 @@ function assertEvidenceBoundary(source: string): void {
   );
   assert.match(
     attest,
-    /\)\" = "paging-delivery\.json manifest\.json"/u
+    /\)" = "paging-delivery\.json manifest\.json"/u
   );
   assert.match(
     attest,
