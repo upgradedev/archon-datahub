@@ -981,10 +981,11 @@ jobs:
               ;;
           esac
           test -n "${EXPECTED_SOURCE_REPOSITORY}"
-          printf 'head_sha=%s\n' "${actual_source_sha}" >>"${GITHUB_OUTPUT}"
-          printf 'pull_request_head_sha=%s\n' "${PR_HEAD_SHA}" >>"${GITHUB_OUTPUT}"
-          printf 'source_repository=%s\n' \
-            "${EXPECTED_SOURCE_REPOSITORY}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'head_sha=%s\n' "${actual_source_sha}"
+            printf 'pull_request_head_sha=%s\n' "${PR_HEAD_SHA}"
+            printf 'source_repository=%s\n' "${EXPECTED_SOURCE_REPOSITORY}"
+          } >>"${GITHUB_OUTPUT}"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -1069,6 +1070,13 @@ jobs:
             echo "::group::${command_id}"
             if ! bash --noprofile --norc -e -u -o pipefail -c "${command}"; then
               echo "::endgroup::"
+              if [[ "${command_id}" == "repository-format-check" ]]; then
+                echo "::group::repository-format-diff"
+                uv run --frozen ruff format --diff \
+                  src/mcp_server_datahub/tools/aspect_history.py \
+                  tests/test_mcp/test_get_aspect_history.py
+                echo "::endgroup::"
+              fi
               echo "::error::OSS validation command ${command_id} failed"
               exit 1
             fi

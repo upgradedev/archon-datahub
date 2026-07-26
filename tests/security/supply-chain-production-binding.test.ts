@@ -449,6 +449,19 @@ test("scheduled rescans bind exact live deployment, CI run, and subjects", () =>
 });
 
 test("CDK bundled advisory is repaired and admitted only by an exact CI receipt", () => {
+  const lockCandidateStart = ciWorkflow.indexOf("\n  infra-lock-candidate:");
+  const lockCandidateEnd = ciWorkflow.indexOf(
+    "\n  secret-scan:",
+    lockCandidateStart
+  );
+  assert.ok(
+    lockCandidateStart >= 0 && lockCandidateEnd > lockCandidateStart,
+    "infra lock-candidate job must remain independently addressable"
+  );
+  const lockCandidateJob = ciWorkflow.slice(
+    lockCandidateStart,
+    lockCandidateEnd
+  );
   assert.match(ciWorkflow, /INFRA_NODE_VERSION: "22\.23\.1"/u);
   assert.match(
     ciWorkflow,
@@ -458,7 +471,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(ciWorkflow, /clean-lock-generation/u);
   assert.match(ciWorkflow, /NPM_CONFIG_USERCONFIG: \/dev\/null/u);
   assert.match(ciWorkflow, /NPM_CONFIG_REGISTRY: https:\/\/registry\.npmjs\.org\//u);
-  assert.equal(ciWorkflow.match(/cmp --silent/gu)?.length, 3);
+  assert.equal(lockCandidateJob.match(/cmp --silent/gu)?.length, 3);
   assert.match(
     ciWorkflow,
     /Committed root lock differs from clean npm 10\.9\.8 resolution/u
