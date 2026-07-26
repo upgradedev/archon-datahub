@@ -175,7 +175,7 @@ def permission_map(job: str, label: str) -> dict[str, str]:
     return dict(entries)
 
 
-def dispatch_inputs(workflow: str) -> tuple[str, ...]:
+def dispatch_inputs(workflow: str) -> dict[str, str]:
     start_marker = "\n  workflow_dispatch:\n"
     end_marker = "\npermissions: {}\n"
     require(
@@ -186,12 +186,18 @@ def dispatch_inputs(workflow: str) -> tuple[str, ...]:
     body = workflow.split(start_marker, maxsplit=1)[1].split(
         end_marker, maxsplit=1
     )[0]
-    return tuple(
-        match.group(1)
-        for match in re.finditer(
-            r"(?m)^      ([a-z][a-z0-9_]*):\n", body
-        )
+    matches = list(
+        re.finditer(r"(?m)^      ([a-z][a-z0-9_]*):\n", body)
     )
+    blocks: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(body)
+        )
+        blocks[match.group(1)] = body[match.start() : end]
+    return blocks
 
 
 def require_all(text: str, values: tuple[str, ...], label: str) -> None:
@@ -201,13 +207,50 @@ def require_all(text: str, values: tuple[str, ...], label: str) -> None:
 
 def validate_contract(workflow: str, documentation: str) -> None:
     normalized_documentation = re.sub(r"\s+", " ", documentation)
+    inputs = dispatch_inputs(workflow)
     require(
-        dispatch_inputs(workflow) == EXPECTED_INPUTS,
+        tuple(inputs) == EXPECTED_INPUTS,
         "workflow inputs must remain release_sha only",
+    )
+    for name, block in inputs.items():
+        require(
+            block.count("        required: true\n") == 1
+            and block.count("        type: string\n") == 1,
+            f"{name} must remain one required scalar string",
+        )
+    referenced_inputs = set(
+        re.findall(
+            r"\$\{\{\s*inputs\.([a-z][a-z0-9_]*)\s*\}\}",
+            workflow,
+        )
+    )
+    require(
+        referenced_inputs == set(EXPECTED_INPUTS),
+        "workflow references an undeclared or unused dispatch input",
+    )
+    require(
+        "fromJSON(inputs." not in workflow
+        and "fromJson(inputs." not in workflow
+        and "github.event.inputs" not in workflow,
+        "dispatch identifiers must never become structured payloads",
     )
     require(
         workflow.count("\npermissions: {}\n") == 1,
         "top-level permissions must remain deny-by-default",
+    )
+    require(
+        len(
+            re.findall(
+                rf"(?m)^  PREDICATE_TYPE: {re.escape(PREDICATE_TYPE)}$",
+                workflow,
+            )
+        )
+        == 1
+        and len(
+            re.findall(r"(?m)^\s*PREDICATE_TYPE:", workflow)
+        )
+        == 1,
+        "feedback predicate type must have one canonical top-level definition",
     )
     require(
         "cancel-in-progress: false" in workflow,
@@ -224,8 +267,12 @@ def validate_contract(workflow: str, documentation: str) -> None:
         f"unexpected job graph: {tuple(jobs)}",
     )
     require(
-        jobs["review"].count(
-            "    name: Independently approve and seal feedback evidence\n"
+        len(
+            re.findall(
+                r"(?m)^    name: "
+                r"Independently approve and seal feedback evidence$",
+                jobs["review"],
+            )
         )
         == 1,
         "review display name must match approval and attester job lookups",
@@ -257,13 +304,40 @@ def validate_contract(workflow: str, documentation: str) -> None:
         "candidate-review-attester dependency chain changed",
     )
 
-    for action, pin in ACTION_PINS.items():
-        require(
-            workflow.count(f"{action}@{pin}") == ACTION_COUNTS[action],
-            f"{action} pin or call count changed",
+    action_references: list[tuple[str, str]] = []
+    for raw_reference in re.findall(
+        r"(?m)^\s+uses:\s+(.+?)\s*$",
+        workflow,
+    ):
+        executable_reference = raw_reference.split("#", maxsplit=1)[0].strip()
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})",
+            executable_reference,
         )
         require(
-            not re.search(rf"{re.escape(action)}@v[0-9]", workflow),
+            match is not None,
+            f"local, Docker, unversioned, or mutable action: {raw_reference}",
+        )
+        action_references.append((match.group(1), match.group(2)))
+    expected_action_references = sorted(
+        (action, digest)
+        for action, digest in ACTION_PINS.items()
+        for _ in range(ACTION_COUNTS[action])
+    )
+    require(
+        sorted(action_references) == expected_action_references,
+        "executable action identities, pins, or cardinalities changed",
+    )
+    require(
+        len(action_references) == sum(ACTION_COUNTS.values()),
+        "unexpected executable action entered the workflow",
+    )
+    for action in ACTION_PINS:
+        require(
+            not re.search(
+                rf"(?m)^\s+uses:\s+{re.escape(action)}@v[0-9]",
+                workflow,
+            ),
             f"{action} became mutable",
         )
 
@@ -328,6 +402,42 @@ def validate_contract(workflow: str, documentation: str) -> None:
         workflow.count("--proto '=https'") == 4
         and workflow.count("--max-filesize 2097152") == 4,
         "public fetch transport/size boundary changed",
+    )
+    fetch_pair = (
+        'fetch_public \\\n'
+        '            "https://datahub.devpost.com/rules" \\\n',
+        'fetch_public \\\n'
+        '            "https://datahub.devpost.com/" \\\n',
+    )
+    for job, step_name in (
+        (
+            jobs["prepare"],
+            "Verify official rules and canonical confirmation projection",
+        ),
+        (
+            jobs["review"],
+            "Independently revalidate private-reference candidate and public rules",
+        ),
+        (
+            jobs["attest"],
+            "Independently rederive candidate rules approval and retained facts",
+        ),
+    ):
+        require_all(
+            named_step(job, step_name),
+            fetch_pair,
+            f"{step_name} authoritative public sources",
+        )
+    require_all(
+        named_step(
+            jobs["attest"],
+            "Recheck immutable evidence approval rules and master before signing",
+        ),
+        (
+            '"https://datahub.devpost.com/rules|${final_rules}" \\\n',
+            '"https://datahub.devpost.com/|${final_challenge}"',
+        ),
+        "final authoritative public sources",
     )
     require(
         workflow.count("scripts/verify-github-control-plane.sh") == 3,
@@ -584,6 +694,18 @@ def validate_contract(workflow: str, documentation: str) -> None:
         ),
         "persisted attestation verification",
     )
+    require(
+        persisted.count("gh attestation verify") == 2
+        and persisted.count('--bundle "${ATTESTATION_BUNDLE_PATH}"') == 1
+        and persisted.count("--signer-workflow") == 2
+        and persisted.count('--signer-digest "${RELEASE_SHA}"') == 2
+        and persisted.count('--source-digest "${RELEASE_SHA}"') == 2
+        and persisted.count("--source-ref refs/heads/master") == 2
+        and persisted.count("--deny-self-hosted-runners") == 2
+        and persisted.count("length == 1") == 2
+        and "length >= 1" not in persisted,
+        "offline-bundle and persisted feedback verification cardinalities changed",
+    )
 
     require_all(
         normalized_documentation,
@@ -632,6 +754,24 @@ mutations = {
         "      release_sha:\n",
         "extra workflow input",
     ),
+    "release input becomes optional": replace_first(
+        workflow_text,
+        "        required: true\n",
+        "        required: false\n",
+        "required release input",
+    ),
+    "release input becomes boolean": replace_first(
+        workflow_text,
+        "        type: string\n",
+        "        type: boolean\n",
+        "scalar release input",
+    ),
+    "structured release input": replace_first(
+        workflow_text,
+        "${{ inputs.release_sha }}",
+        "${{ fromJSON(inputs.release_sha) }}",
+        "structured release input",
+    ),
     "review environment removed": replace_first(
         workflow_text,
         "    environment: submission-bonus-feedback\n",
@@ -649,6 +789,24 @@ mutations = {
         "      contents: read\n    outputs:\n",
         "      contents: read\n      id-token: write\n    outputs:\n",
         "producer permission",
+    ),
+    "unknown SHA-pinned action": replace_first(
+        workflow_text,
+        "        uses: actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+        "        uses: attacker/action@"
+        "0000000000000000000000000000000000000000 "
+        "# actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+        "executable action identity",
+    ),
+    "attester shadows predicate type": replace_first(
+        workflow_text,
+        "  attest:\n",
+        "  attest:\n"
+        "    env:\n"
+        "      PREDICATE_TYPE: https://attacker.invalid/predicate/v1\n",
+        "attester predicate shadow",
     ),
     "self review enabled": replace_first(
         workflow_text,
@@ -721,6 +879,14 @@ mutations = {
         "--max-redirs 0",
         "--max-redirs 5",
         "redirect policy",
+    ),
+    "one authoritative fetch uses alternate origin": replace_first(
+        workflow_text,
+        'fetch_public \\\n'
+        '            "https://datahub.devpost.com/rules" \\\n',
+        'fetch_public \\\n'
+        '            "https://attacker.invalid/rules" \\\n',
+        "authoritative rules fetch",
     ),
     "one-entry rule removed": replace_first(
         workflow_text,

@@ -211,8 +211,7 @@ def validate_workflow(workflow: str) -> None:
         "dispatch identifiers must never become structured payloads",
     )
     require(
-        "${{ secrets." not in workflow
-        and "${{ vars." not in workflow
+        re.search(r"\$\{\{\s*(?:secrets|vars)\.", workflow) is None
         and re.search(r"(?m)^\s+environment:", workflow) is None,
         "BONUS-OSS workflow must not consume protected configuration",
     )
@@ -239,10 +238,17 @@ def validate_workflow(workflow: str) -> None:
         "self-hosted execution entered the workflow",
     )
     require(
-        workflow.count(
-            "  PREDICATE_TYPE: "
-            "https://archon.datahub.dev/attestations/"
-            "submission-bonus-oss/v1\n"
+        len(
+            re.findall(
+                r"(?m)^  PREDICATE_TYPE: "
+                r"https://archon\.datahub\.dev/attestations/"
+                r"submission-bonus-oss/v1$",
+                workflow,
+            )
+        )
+        == 1
+        and len(
+            re.findall(r"(?m)^\s*PREDICATE_TYPE:", workflow)
         )
         == 1,
         "custom BONUS-OSS predicate type changed",
@@ -256,8 +262,12 @@ def validate_workflow(workflow: str) -> None:
     produce = jobs["produce"]
     attest = jobs["attest"]
     require(
-        produce.count(
-            "    name: Produce exact merged upstream contribution evidence\n"
+        len(
+            re.findall(
+                r"(?m)^    name: "
+                r"Produce exact merged upstream contribution evidence$",
+                produce,
+            )
         )
         == 1,
         "producer display name must match the attester owner-job lookup",
@@ -581,26 +591,34 @@ def validate_workflow(workflow: str) -> None:
         "local-bundle and persisted verification cardinalities are not exact",
     )
 
-    action_references = re.findall(
-        r"(?m)^\s+uses: ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([^\s#]+)",
+    action_references: list[tuple[str, str]] = []
+    for raw_reference in re.findall(
+        r"(?m)^\s+uses:\s+(.+?)\s*$",
         workflow,
+    ):
+        executable_reference = raw_reference.split("#", maxsplit=1)[0].strip()
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})",
+            executable_reference,
+        )
+        require(
+            match is not None,
+            f"local, Docker, unversioned, or mutable action: {raw_reference}",
+        )
+        action_references.append((match.group(1), match.group(2)))
+    expected_action_references = sorted(
+        (action, digest)
+        for action, digest in ACTION_PINS.items()
+        for _ in range(EXPECTED_ACTION_COUNTS[action])
     )
-    all_uses = re.findall(r"(?m)^\s+uses: ([^\s#]+)", workflow)
     require(
-        bool(action_references) and len(action_references) == len(all_uses),
-        "workflow contains a local, Docker, or unversioned action",
+        sorted(action_references) == expected_action_references,
+        "executable action identities, pins, or cardinalities changed",
     )
-    for action, reference in action_references:
-        require(
-            re.fullmatch(r"[0-9a-f]{40}", reference) is not None,
-            f"{action} is not commit-SHA pinned",
-        )
-    for action, digest in ACTION_PINS.items():
-        require(
-            workflow.count(f"{action}@{digest}")
-            == EXPECTED_ACTION_COUNTS[action],
-            f"{action} pin or cardinality changed",
-        )
+    require(
+        len(action_references) == sum(EXPECTED_ACTION_COUNTS.values()),
+        "unexpected executable action entered the workflow",
+    )
 
 
 def validate_collector(collector: str) -> None:
@@ -1113,10 +1131,31 @@ workflow_tamper_cases = {
         "      contents: read\n",
         "      contents: write\n",
     ),
+    "unknown SHA-pinned action": replace_once(
+        workflow_text,
+        "        uses: actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+        "        uses: attacker/action@"
+        "0000000000000000000000000000000000000000 "
+        "# actions/checkout@"
+        "3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+    ),
+    "attester shadows predicate type": replace_once(
+        workflow_text,
+        "  attest:\n",
+        "  attest:\n"
+        "    env:\n"
+        "      PREDICATE_TYPE: https://attacker.invalid/predicate/v1\n",
+    ),
     "producer gains secret": replace_once(
         workflow_text,
         "name: Submission BONUS OSS\n",
         "name: Submission BONUS OSS\n# ${{ secrets.UPSTREAM_TOKEN }}\n",
+    ),
+    "compact secret expression": replace_once(
+        workflow_text,
+        "name: Submission BONUS OSS\n",
+        "name: Submission BONUS OSS\n# ${{secrets.UPSTREAM_TOKEN}}\n",
     ),
     "self-hosted runner": replace_once(
         workflow_text,
