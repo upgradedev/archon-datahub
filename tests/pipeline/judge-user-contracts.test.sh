@@ -1626,7 +1626,7 @@ grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
 reset_state absent
 FAKE_PASSWORD_FAILURE=1 \
   expect_failure run_apply provision "${judge_password}"
-test "$(<"${state_dir}/status")" = "disabled"
+test "$(<"${state_dir}/status")" = "disabled-force"
 test ! -s "${state_dir}/groups"
 
 reset_state confirmed archon-approvers
