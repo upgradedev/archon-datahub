@@ -313,8 +313,8 @@ def validate_workflow(workflow: str) -> None:
         "only the browser journey may use the protected environment",
     )
     require(
-        "    environment:" not in prerequisites
-        and "    environment:" not in attest,
+        re.search(r"(?m)^    environment:", prerequisites) is None
+        and re.search(r"(?m)^    environment:", attest) is None,
         "unprivileged prerequisite and attester jobs must not use environments",
     )
     require(
