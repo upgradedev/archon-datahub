@@ -13,6 +13,26 @@ on:
         description: Exact 40-character commit SHA used by that CI run
         required: true
         type: string
+      demo_state_run_id:
+        description: Successful DataHub demo state workflow run for this release
+        required: true
+        type: string
+      demo_state_run_attempt:
+        description: Exact successful DataHub demo state run attempt
+        required: true
+        type: string
+      demo_state_artifact_id:
+        description: Exact sealed datahub-demo-receipt artifact ID
+        required: true
+        type: string
+      demo_state_artifact_digest:
+        description: Exact GitHub sha256 digest of the sealed receipt artifact
+        required: true
+        type: string
+      demo_state_receipt_sha256:
+        description: Exact inner receipt.json SHA-256 from the sealed artifact
+        required: true
+        type: string
 
 # Selecting an older successful ci_run_id + its matching release_sha is the rollback
 # mechanism. The workflow always downloads those exact immutable CI artifacts and never
@@ -57,7 +77,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       actions: read
-      attestations: read
+      attestations: write
       contents: read
       deployments: write
       id-token: write
@@ -88,6 +108,14 @@ jobs:
       regional_waf_contract_sha: ${{ steps.deploy.outputs.regional_waf_contract_sha }}
       network_egress_contract_sha: ${{ steps.deploy.outputs.network_egress_contract_sha }}
       api_origin_contract_sha: ${{ steps.deploy.outputs.api_origin_contract_sha }}
+      demo_state_receipt_sha: ${{ steps.demo_state.outputs.receipt_sha }}
+      demo_state_artifact_digest: ${{ steps.demo_state.outputs.artifact_digest }}
+      demo_state_endpoint_fingerprint: ${{ steps.demo_state.outputs.endpoint_fingerprint }}
+      demo_state_contract_sha: ${{ steps.demo_state.outputs.state_contract_sha }}
+      demo_state_post_state_sha: ${{ steps.demo_state.outputs.post_state_sha }}
+      demo_state_query_binding_sha: ${{ steps.demo_state.outputs.query_binding_sha }}
+      demo_state_semantic_contract_sha: ${{ steps.demo_state.outputs.semantic_contract_sha }}
+      semantic_proof_sha: ${{ steps.smoke.outputs.semantic_proof_sha }}
     steps:
       - name: Validate immutable source run
         id: source
@@ -282,6 +310,189 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+
+      - name: Resolve exact sealed DataHub demo-state receipt
+        id: demo_state_source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEMO_STATE_RUN_ID: ${{ inputs.demo_state_run_id }}
+          DEMO_STATE_RUN_ATTEMPT: ${{ inputs.demo_state_run_attempt }}
+          DEMO_STATE_ARTIFACT_ID: ${{ inputs.demo_state_artifact_id }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ inputs.demo_state_artifact_digest }}
+          DEMO_STATE_RECEIPT_SHA256: ${{ inputs.demo_state_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${DEMO_STATE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${DEMO_STATE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          expected_name="datahub-demo-receipt-${DEMO_STATE_RUN_ID}-${DEMO_STATE_RUN_ATTEMPT}"
+          run_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEMO_STATE_RUN_ID}/attempts/${DEMO_STATE_RUN_ATTEMPT}")"
+          jq --exit-status \
+            --argjson runId "${DEMO_STATE_RUN_ID}" \
+            --argjson runAttempt "${DEMO_STATE_RUN_ATTEMPT}" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path == ".github/workflows/datahub-demo-state.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${run_json}" >/dev/null || {
+              echo "::error::demo-state receipt is not from the exact successful release attempt"
+              exit 1
+            }
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${DEMO_STATE_ARTIFACT_ID}")"
+          run_artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEMO_STATE_RUN_ID}/artifacts?per_page=100")"
+          jq --exit-status \
+            --argjson id "${DEMO_STATE_ARTIFACT_ID}" \
+            --argjson runId "${DEMO_STATE_RUN_ID}" \
+            --arg name "${expected_name}" \
+            --arg digest "${DEMO_STATE_ARTIFACT_DIGEST}" '
+              .id == $id and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${artifact_json}" >/dev/null
+          jq --exit-status \
+            --argjson id "${DEMO_STATE_ARTIFACT_ID}" \
+            --argjson runId "${DEMO_STATE_RUN_ID}" \
+            --arg name "${expected_name}" \
+            --arg digest "${DEMO_STATE_ARTIFACT_DIGEST}" '
+              [
+                .artifacts[] |
+                select(
+                  .id == $id and
+                  .name == $name and
+                  .digest == $digest and
+                  .expired == false and
+                  .workflow_run.id == $runId
+                )
+              ] |
+              length == 1
+            ' <<<"${run_artifacts}" >/dev/null
+          echo "artifact_name=${expected_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact sealed DataHub demo-state receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.demo_state_artifact_id }}
+          path: ${{ runner.temp }}/staging-datahub-demo-receipt
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.demo_state_run_id }}
+
+      - name: Verify sealed DataHub demo-state receipt and attestation
+        id: demo_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEMO_STATE_RUN_ID: ${{ inputs.demo_state_run_id }}
+          DEMO_STATE_RUN_ATTEMPT: ${{ inputs.demo_state_run_attempt }}
+          DEMO_STATE_ARTIFACT_ID: ${{ inputs.demo_state_artifact_id }}
+          DEMO_STATE_ARTIFACT_NAME: ${{ steps.demo_state_source.outputs.artifact_name }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ inputs.demo_state_artifact_digest }}
+          DEMO_STATE_RECEIPT_SHA256: ${{ inputs.demo_state_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP}/staging-datahub-demo-receipt"
+          binding="${RUNNER_TEMP}/staging-datahub-demo-state-binding.json"
+          python3 scripts/datahub-demo-state.py verify-receipt \
+            --contract contracts/datahub-demo-state-v1.json \
+            --receipt-dir "${receipt_dir}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --workflow-run-id "${DEMO_STATE_RUN_ID}" \
+            --workflow-run-attempt "${DEMO_STATE_RUN_ATTEMPT}" \
+            --artifact-id "${DEMO_STATE_ARTIFACT_ID}" \
+            --artifact-name "${DEMO_STATE_ARTIFACT_NAME}" \
+            --artifact-digest "${DEMO_STATE_ARTIFACT_DIGEST}" \
+            --expected-receipt-sha256 "${DEMO_STATE_RECEIPT_SHA256}" \
+            --output "${binding}" >/dev/null
+          signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-demo-state.yml"
+          predicate="https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1"
+          predicate_path="${receipt_dir}/plan.json"
+          predicate_sha256="$(sha256sum "${predicate_path}" | awk '{print $1}')"
+          test "${predicate_sha256}" = "$(
+            jq -er '.attestation.predicateSha256' "${binding}"
+          )"
+          verification_dir="${RUNNER_TEMP}/staging-datahub-demo-attestations"
+          mkdir --mode=0700 "${verification_dir}"
+          verify_demo_attestation() {
+            local subject="$1"
+            local verification="$2"
+            local subject_sha256
+            subject_sha256="$(sha256sum "${subject}" | awk '{print $1}')"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${signer}" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref refs/heads/master \
+              --predicate-type "${predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${verification}"
+            test -s "${verification}"
+            jq --exit-status \
+              --arg predicateType "${predicate}" \
+              --arg subjectSha256 "${subject_sha256}" \
+              --slurpfile expectedPredicate "${predicate_path}" '
+                [
+                  .[] |
+                  select(
+                    .verificationResult.statement.predicateType ==
+                      $predicateType and
+                    .verificationResult.statement.predicate ==
+                      $expectedPredicate[0] and
+                    any(
+                      .verificationResult.statement.subject[];
+                      .digest.sha256 == $subjectSha256
+                    )
+                  )
+                ] |
+                length == 1
+              ' "${verification}" >/dev/null || {
+                echo "::error::verified demo-state attestation does not bind the exact local plan and subject"
+                exit 1
+              }
+          }
+          verify_demo_attestation \
+            "${receipt_dir}/SHA256SUMS" \
+            "${verification_dir}/SHA256SUMS.json"
+          verify_demo_attestation \
+            "${receipt_dir}/receipt.json" \
+            "${verification_dir}/receipt.json"
+          rm -- \
+            "${verification_dir}/SHA256SUMS.json" \
+            "${verification_dir}/receipt.json"
+          rmdir -- "${verification_dir}"
+          {
+            echo "receipt_dir=${receipt_dir}"
+            echo "receipt=${receipt_dir}/receipt.json"
+            echo "binding=${binding}"
+            echo "receipt_sha=$(jq -er '.receiptSha256' "${binding}")"
+            echo "artifact_digest=$(jq -er '.artifact.digest' "${binding}")"
+            echo "endpoint_fingerprint=$(jq -er '.gmsEndpointFingerprint' "${binding}")"
+            echo "state_contract_sha=$(jq -er '.stateContractSha256' "${binding}")"
+            echo "post_state_sha=$(jq -er '.postStateSha256' "${binding}")"
+            echo "query_binding_sha=$(jq -er '.queryBindingSha256' "${binding}")"
+            echo "semantic_contract_sha=$(jq -er '.semanticContractSha256' "${binding}")"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Download and verify exact CI artifacts
         id: artifacts
@@ -2466,9 +2677,17 @@ jobs:
           RUNTIME_CONFIG_SHA: ${{ steps.spa.outputs.runtime_config_sha }}
           COGNITO_ORIGIN: ${{ steps.spa.outputs.cognito_origin }}
           DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DEMO_STATE_RECEIPT: ${{ steps.demo_state.outputs.receipt }}
+          DEMO_STATE_BINDING: ${{ steps.demo_state.outputs.binding }}
         run: |
           set -euo pipefail
           : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
+          : "${DATAHUB_GMS_URL:?staging DATAHUB_READ_GMS_URL is required}"
+          test -f "${DEMO_STATE_RECEIPT}"
+          test ! -L "${DEMO_STATE_RECEIPT}"
+          test -f "${DEMO_STATE_BINDING}"
+          test ! -L "${DEMO_STATE_BINDING}"
           jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
             ($query | length) >= 1 and
             ($query | length) <= 256 and
@@ -2479,6 +2698,118 @@ jobs:
           ' >/dev/null || {
             echo "::error::staging DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
             exit 1
+          }
+          target_urn="$(jq -er '.binding.targetUrn' contracts/datahub-demo-state-v1.json)"
+          dangling_urn="$(
+            jq -er '.binding.danglingUpstreamUrn' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          sensitive_field="$(
+            jq -er '.binding.sensitiveFieldPath' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          expected_history="$(
+            jq -cS '.state.ownershipHistory' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          test "${DATAHUB_DEMO_QUERY}" = "${target_urn}"
+          test "$(jq -er '.queryBinding.query' "${DEMO_STATE_RECEIPT}")" = \
+            "${target_urn}"
+          endpoint_fingerprint="$(
+            python3 scripts/datahub-demo-state.py fingerprint-endpoint |
+              jq -er '.gmsEndpointFingerprint'
+          )"
+          test "${endpoint_fingerprint}" = "$(
+            jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
+          )" || {
+            echo "::error::staging read endpoint differs from the sealed seed endpoint"
+            exit 1
+          }
+          demo_state_receipt_sha="$(
+            jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
+          )"
+          state_contract_sha="$(
+            jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
+          )"
+          post_state_sha="$(
+            jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
+          )"
+          semantic_contract_sha="$(
+            jq -er '.semanticContractSha256' "${DEMO_STATE_BINDING}"
+          )"
+          history_sha="$(
+            jq -er '.retainedOwnershipHistorySha256' "${DEMO_STATE_BINDING}"
+          )"
+          assert_demo_semantics() {
+            local document="$1"
+            jq --exit-status \
+              --arg target "${target_urn}" \
+              --arg dangling "${dangling_urn}" \
+              --arg field "${sensitive_field}" \
+              --argjson history "${expected_history}" '
+                .report as $report |
+                [
+                  $report.findings[] |
+                  select(
+                    .type == "governance_violation" and
+                    .detail.ruleId == "G6"
+                  )
+                ] as $g6 |
+                [
+                  $report.findings[] |
+                  select(.type == "lineage_gap")
+                ] as $gaps |
+                [
+                  $report.findings[] |
+                  select(.type == "contradiction")
+                ] as $retained |
+                $retained[0].detail.provenance as $provenance |
+                $report.classification.totalEntities == 1 and
+                $report.classification.withLineage == 1 and
+                $report.classification.sensitiveEntities == 1 and
+                ($report.findings | length) == 3 and
+                ($g6 | length) == 1 and
+                $g6[0].severity == "high" and
+                $g6[0].subject == $target and
+                $g6[0].detail.unclassifiedFields == [$field] and
+                $g6[0].detail.blastRadius.rootUrn == $target and
+                $g6[0].detail.blastRadius.maxHops == 3 and
+                $g6[0].detail.blastRadius.downstream == [] and
+                $g6[0].detail.blastRadius.truncated == false and
+                $g6[0].detail.blastRadius.impact == "none" and
+                ($gaps | length) == 1 and
+                $gaps[0].severity == "medium" and
+                $gaps[0].subject == $dangling and
+                $gaps[0].detail.blastRadius.rootUrn == $dangling and
+                $gaps[0].detail.blastRadius.maxHops == 3 and
+                $gaps[0].detail.blastRadius.downstream == [
+                  {urn: $target, minHops: 1}
+                ] and
+                $gaps[0].detail.blastRadius.truncated == false and
+                $gaps[0].detail.blastRadius.impact == "low" and
+                ($retained | length) == 1 and
+                $retained[0].severity == "medium" and
+                $retained[0].subject == $target and
+                $retained[0].detail.attribute == "owner" and
+                ($provenance | length) == 2 and
+                ([$provenance[].source] | sort) ==
+                  ([$history[].pipelineName] | sort) and
+                ([$provenance[].status] | sort) ==
+                  ["conflicting", "trusted"] and
+                ([
+                  $history[] as $expected |
+                  any(
+                    $provenance[];
+                    .source == $expected.pipelineName and
+                    (.runId | endswith(":" + $expected.runId)) and
+                    (.observedAt | sub("\\.000Z$"; "Z")) ==
+                      (($expected.lastObserved / 1000) | todateiso8601)
+                  )
+                ] | all)
+              ' "${document}" >/dev/null || {
+                echo "::error::deployed audit lost exact G6, dangling blast-radius, or retained-history semantics"
+                exit 1
+              }
           }
           demo_query_sha="$(
             printf '%s' "${DATAHUB_DEMO_QUERY}" | sha256sum | awk '{print $1}'
@@ -2598,14 +2929,110 @@ jobs:
              and .releaseSha == $release
              and .report.classification.totalEntities == 1' \
             "${audit_response}" >/dev/null
+          assert_demo_semantics "${audit_response}"
           audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
+          semantic_proof="${RUNNER_TEMP}/staging-deployed-semantic-proof.json"
+          jq -cS \
+            --arg receiptSha256 "${demo_state_receipt_sha}" \
+            --arg stateContractSha256 "${state_contract_sha}" \
+            --arg postStateSha256 "${post_state_sha}" \
+            --arg semanticContractSha256 "${semantic_contract_sha}" \
+            --arg endpointFingerprint "${endpoint_fingerprint}" \
+            --arg target "${target_urn}" \
+            --arg dangling "${dangling_urn}" \
+            --arg retainedHistorySha256 "${history_sha}" '
+              [
+                .report.findings[] |
+                select(
+                  .type == "governance_violation" and
+                  .detail.ruleId == "G6"
+                )
+              ][0] as $g6 |
+              [
+                .report.findings[] |
+                select(.type == "lineage_gap")
+              ][0] as $gap |
+              [
+                .report.findings[] |
+                select(.type == "contradiction")
+              ][0] as $retained |
+              {
+                schemaVersion: "archon.deployed-datahub-semantic-proof/v1",
+                demoState: {
+                  receiptSha256: $receiptSha256,
+                  stateContractSha256: $stateContractSha256,
+                  postStateSha256: $postStateSha256,
+                  semanticContractSha256: $semanticContractSha256,
+                  gmsEndpointFingerprint: $endpointFingerprint
+                },
+                classification: {
+                  totalEntities: .report.classification.totalEntities,
+                  withLineage: .report.classification.withLineage,
+                  sensitiveEntities:
+                    .report.classification.sensitiveEntities
+                },
+                findings: {
+                  totalCount: (.report.findings | length),
+                  g6: {
+                    exactTarget: ($g6.subject == $target),
+                    fieldPath: $g6.detail.unclassifiedFields[0],
+                    classificationAbsent: true,
+                    blastRootBound: (
+                      $g6.detail.blastRadius.rootUrn == $target
+                    ),
+                    downstreamCount:
+                      ($g6.detail.blastRadius.downstream | length),
+                    maxHops: $g6.detail.blastRadius.maxHops,
+                    truncated: $g6.detail.blastRadius.truncated,
+                    impact: $g6.detail.blastRadius.impact
+                  },
+                  danglingLineage: {
+                    exactUpstream: ($gap.subject == $dangling),
+                    upstreamAbsent: true,
+                    blastRootBound: (
+                      $gap.detail.blastRadius.rootUrn == $dangling
+                    ),
+                    targetConsumerMinHops: (
+                      [
+                        $gap.detail.blastRadius.downstream[] |
+                        select(.urn == $target)
+                      ][0].minHops
+                    ),
+                    downstreamCount:
+                      ($gap.detail.blastRadius.downstream | length),
+                    maxHops: $gap.detail.blastRadius.maxHops,
+                    truncated: $gap.detail.blastRadius.truncated,
+                    impact: $gap.detail.blastRadius.impact
+                  },
+                  retainedHistory: {
+                    exactTarget: ($retained.subject == $target),
+                    attribute: $retained.detail.attribute,
+                    provenanceCount:
+                      ($retained.detail.provenance | length),
+                    stableSourceCount: (
+                      [$retained.detail.provenance[].source] |
+                      unique |
+                      length
+                    ),
+                    statuses:
+                      ([$retained.detail.provenance[].status] | sort),
+                    retainedOwnershipHistorySha256:
+                      $retainedHistorySha256
+                  }
+                }
+              }
+            ' "${audit_response}" >"${semantic_proof}"
+          semantic_proof_sha="$(
+            sha256sum "${semantic_proof}" | awk '{print $1}'
+          )"
           audit_evidence="${RUNNER_TEMP}/staging-audit-smoke-evidence.json"
           jq -cS \
             --arg environment staging \
             --arg querySha256 "${demo_query_sha}" \
             --arg responseSha256 "${audit_response_sha}" \
+            --slurpfile semantic "${semantic_proof}" \
             '{
-              schemaVersion: "archon.audit-smoke-evidence/v2",
+              schemaVersion: "archon.audit-smoke-evidence/v3",
               environment: $environment,
               querySha256: $querySha256,
               responseSha256: $responseSha256,
@@ -2619,7 +3046,8 @@ jobs:
                 withLineage: .report.classification.withLineage,
                 sensitiveEntities: .report.classification.sensitiveEntities
               },
-              findingCount: (.report.findings | length)
+              findingCount: (.report.findings | length),
+              semanticProof: $semantic[0]
             }' "${audit_response}" >"${audit_evidence}"
           audit_evidence_sha="$(
             sha256sum "${audit_evidence}" | awk '{print $1}'
@@ -2628,6 +3056,8 @@ jobs:
             echo "audit_response_sha=${audit_response_sha}"
             echo "audit_evidence=${audit_evidence}"
             echo "audit_evidence_sha=${audit_evidence_sha}"
+            echo "semantic_proof=${semantic_proof}"
+            echo "semantic_proof_sha=${semantic_proof_sha}"
           } >>"${GITHUB_OUTPUT}"
 
           control_start_status="$(curl --silent --show-error \
@@ -2683,6 +3113,7 @@ jobs:
                 ' "${control_response}" >/dev/null
                 jq -ce '.report' "${control_response}" |
                   jq -e -f scripts/validate-audit-report.jq >/dev/null
+                assert_demo_semantics "${control_response}"
                 control_terminal="true"
                 break
                 ;;
@@ -2888,6 +3319,12 @@ jobs:
           API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
           NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
           NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
+          DEMO_STATE_BINDING: ${{ steps.demo_state.outputs.binding }}
+          DEMO_STATE_RECEIPT_DIR: ${{ steps.demo_state.outputs.receipt_dir }}
+          DEMO_STATE_RECEIPT_SHA: ${{ steps.demo_state.outputs.receipt_sha }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ steps.demo_state.outputs.artifact_digest }}
+          SEMANTIC_PROOF_PATH: ${{ steps.smoke.outputs.semantic_proof }}
+          SEMANTIC_PROOF_SHA: ${{ steps.smoke.outputs.semantic_proof_sha }}
           ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
         run: |
           set -euo pipefail
@@ -2926,10 +3363,12 @@ jobs:
             --arg regionalWafContractSha256 "${REGIONAL_WAF_CONTRACT_SHA}" \
             --arg apiOriginContractSha256 "${API_ORIGIN_CONTRACT_SHA}" \
             --arg networkEgressContractSha256 "${NETWORK_EGRESS_CONTRACT_SHA}" \
+            --arg deployedSemanticProofSha256 "${SEMANTIC_PROOF_SHA}" \
             --argjson edgeSecurity "${EDGE_SECURITY_CONTRACT}" \
             --argjson regionalWaf "${REGIONAL_WAF_CONTRACT}" \
             --argjson apiOrigin "${API_ORIGIN_CONTRACT}" \
             --argjson networkEgress "${NETWORK_EGRESS_CONTRACT}" \
+            --slurpfile demoState "${DEMO_STATE_BINDING}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
               schemaVersion: 1,
@@ -2971,6 +3410,7 @@ jobs:
                 lambdaArchiveSha256: $lambdaArchiveSha256,
                 ecrImageDigest: $imageDigest
               },
+              dataHubDemoState: $demoState[0],
               verification: {
                 pipelineSecurity: {
                   deploymentControlPlaneGatesSha256: $controlPlaneGateSha256,
@@ -2980,6 +3420,8 @@ jobs:
                 demoQuerySha256: $demoQuerySha256,
                 auditResponseSha256: $auditResponseSha256,
                 sanitizedAuditEvidenceSha256: $auditEvidenceSha256,
+                deployedSemanticProofSha256:
+                  $deployedSemanticProofSha256,
                 readOnlyControlLoopResponseSha256: $controlLoopResponseSha256,
                 runtimeConfigSha256: $runtimeConfigSha256,
                 dast: {
@@ -3001,6 +3443,13 @@ jobs:
             "${CONTROL_LOOP_RESPONSE_SHA}"
           test "$(sha256sum "${AUDIT_EVIDENCE_PATH}" | awk '{print $1}')" = \
             "${AUDIT_EVIDENCE_SHA}"
+          test "$(sha256sum "${SEMANTIC_PROOF_PATH}" | awk '{print $1}')" = \
+            "${SEMANTIC_PROOF_SHA}"
+          test "$(sha256sum \
+            "${DEMO_STATE_RECEIPT_DIR}/receipt.json" | awk '{print $1}')" = \
+            "${DEMO_STATE_RECEIPT_SHA}"
+          test "$(jq -er '.artifact.digest' "${DEMO_STATE_BINDING}")" = \
+            "${DEMO_STATE_ARTIFACT_DIGEST}"
           test "$(sha256sum "${EDGE_OUTPUTS_PATH}" | awk '{print $1}')" = \
             "$(jq -er '.cdkOutputsSha256' <<<"${EDGE_SECURITY_CONTRACT}")"
           test "$(printf '%s' "${EDGE_SECURITY_CONTRACT}" | sha256sum |
@@ -3027,6 +3476,26 @@ jobs:
             "${evidence_dir}/read-only-control-loop-status.json"
           cp "${AUDIT_EVIDENCE_PATH}" \
             "${evidence_dir}/audit-smoke-evidence.json"
+          cp "${SEMANTIC_PROOF_PATH}" \
+            "${evidence_dir}/deployed-datahub-semantic-proof.json"
+          cp "${DEMO_STATE_BINDING}" \
+            "${evidence_dir}/datahub-demo-state-binding.json"
+          sealed_receipt="${evidence_dir}/sealed-datahub-demo-receipt"
+          mkdir -p "${sealed_receipt}"
+          for subject in \
+            SHA256SUMS \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            cp "${DEMO_STATE_RECEIPT_DIR}/${subject}" \
+              "${sealed_receipt}/${subject}"
+          done
+          (
+            cd "${sealed_receipt}"
+            sha256sum --check --strict SHA256SUMS
+          )
           cp "${STACK_OUTPUTS_PATH}" \
             "${evidence_dir}/staging-cdk-outputs.json"
           cp "${EDGE_OUTPUTS_PATH}" \
@@ -3057,6 +3526,10 @@ jobs:
           (
             cd "${evidence_dir}"
             sha256sum --check staging-deploy-assembly.manifest.sha256
+            find . -type f ! -path './SHA256SUMS' -printf '%P\0' |
+              LC_ALL=C sort -z |
+              xargs -0 --no-run-if-empty sha256sum >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
           )
           echo "path=${evidence_dir}" >>"${GITHUB_OUTPUT}"
 
@@ -3079,7 +3552,15 @@ jobs:
             echo "AWS_SESSION_EXPIRATION="
           } >>"${GITHUB_ENV}"
 
+      - name: Attest checksum-sealed staging deployment evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.evidence.outputs.path }}/SHA256SUMS
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/staging-deployment/v1
+          predicate-path: ${{ steps.evidence.outputs.path }}/staging-deployment-evidence.json
+
       - name: Upload staging deployment evidence
+        id: staging_artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: staging-deployment-evidence-${{ inputs.release_sha }}-${{ github.run_attempt }}
@@ -3452,7 +3933,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       actions: read
-      attestations: read
+      attestations: write
       contents: read
       deployments: write
       id-token: write
@@ -3611,6 +4092,203 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Resolve production copy of exact sealed DataHub demo-state receipt
+        id: production_demo_state_source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEMO_STATE_RUN_ID: ${{ inputs.demo_state_run_id }}
+          DEMO_STATE_RUN_ATTEMPT: ${{ inputs.demo_state_run_attempt }}
+          DEMO_STATE_ARTIFACT_ID: ${{ inputs.demo_state_artifact_id }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ inputs.demo_state_artifact_digest }}
+          DEMO_STATE_RECEIPT_SHA256: ${{ inputs.demo_state_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${DEMO_STATE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEMO_STATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${DEMO_STATE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          expected_name="datahub-demo-receipt-${DEMO_STATE_RUN_ID}-${DEMO_STATE_RUN_ATTEMPT}"
+          run_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEMO_STATE_RUN_ID}/attempts/${DEMO_STATE_RUN_ATTEMPT}")"
+          jq --exit-status \
+            --argjson runId "${DEMO_STATE_RUN_ID}" \
+            --argjson runAttempt "${DEMO_STATE_RUN_ATTEMPT}" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path == ".github/workflows/datahub-demo-state.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${run_json}" >/dev/null
+          artifact_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${DEMO_STATE_ARTIFACT_ID}")"
+          run_artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEMO_STATE_RUN_ID}/artifacts?per_page=100")"
+          for source in "${artifact_json}" "${run_artifacts}"; do
+            jq --exit-status \
+              --argjson id "${DEMO_STATE_ARTIFACT_ID}" \
+              --argjson runId "${DEMO_STATE_RUN_ID}" \
+              --arg name "${expected_name}" \
+              --arg digest "${DEMO_STATE_ARTIFACT_DIGEST}" '
+                if has("artifacts") then
+                  [
+                    .artifacts[] |
+                    select(
+                      .id == $id and
+                      .name == $name and
+                      .digest == $digest and
+                      .expired == false and
+                      .workflow_run.id == $runId
+                    )
+                  ] |
+                  length == 1
+                else
+                  .id == $id and
+                  .name == $name and
+                  .digest == $digest and
+                  .expired == false and
+                  .workflow_run.id == $runId
+                end
+              ' <<<"${source}" >/dev/null
+          done
+          echo "artifact_name=${expected_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download production copy of exact sealed DataHub demo-state receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.demo_state_artifact_id }}
+          path: ${{ runner.temp }}/production-datahub-demo-receipt
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.demo_state_run_id }}
+
+      - name: Reverify sealed DataHub demo-state receipt for production
+        id: production_demo_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEMO_STATE_RUN_ID: ${{ inputs.demo_state_run_id }}
+          DEMO_STATE_RUN_ATTEMPT: ${{ inputs.demo_state_run_attempt }}
+          DEMO_STATE_ARTIFACT_ID: ${{ inputs.demo_state_artifact_id }}
+          DEMO_STATE_ARTIFACT_NAME: ${{ steps.production_demo_state_source.outputs.artifact_name }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ inputs.demo_state_artifact_digest }}
+          DEMO_STATE_RECEIPT_SHA256: ${{ inputs.demo_state_receipt_sha256 }}
+          STAGING_RECEIPT_SHA: ${{ needs.staging.outputs.demo_state_receipt_sha }}
+          STAGING_ENDPOINT_FINGERPRINT: ${{ needs.staging.outputs.demo_state_endpoint_fingerprint }}
+          STAGING_CONTRACT_SHA: ${{ needs.staging.outputs.demo_state_contract_sha }}
+          STAGING_POST_STATE_SHA: ${{ needs.staging.outputs.demo_state_post_state_sha }}
+          STAGING_QUERY_BINDING_SHA: ${{ needs.staging.outputs.demo_state_query_binding_sha }}
+          STAGING_SEMANTIC_CONTRACT_SHA: ${{ needs.staging.outputs.demo_state_semantic_contract_sha }}
+        run: |
+          set -euo pipefail
+          receipt_dir="${RUNNER_TEMP}/production-datahub-demo-receipt"
+          binding="${RUNNER_TEMP}/production-datahub-demo-state-binding.json"
+          python3 scripts/datahub-demo-state.py verify-receipt \
+            --contract contracts/datahub-demo-state-v1.json \
+            --receipt-dir "${receipt_dir}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --workflow-run-id "${DEMO_STATE_RUN_ID}" \
+            --workflow-run-attempt "${DEMO_STATE_RUN_ATTEMPT}" \
+            --artifact-id "${DEMO_STATE_ARTIFACT_ID}" \
+            --artifact-name "${DEMO_STATE_ARTIFACT_NAME}" \
+            --artifact-digest "${DEMO_STATE_ARTIFACT_DIGEST}" \
+            --expected-receipt-sha256 "${DEMO_STATE_RECEIPT_SHA256}" \
+            --output "${binding}" >/dev/null
+          test "$(jq -er '.receiptSha256' "${binding}")" = \
+            "${STAGING_RECEIPT_SHA}"
+          test "$(jq -er '.gmsEndpointFingerprint' "${binding}")" = \
+            "${STAGING_ENDPOINT_FINGERPRINT}"
+          test "$(jq -er '.stateContractSha256' "${binding}")" = \
+            "${STAGING_CONTRACT_SHA}"
+          test "$(jq -er '.postStateSha256' "${binding}")" = \
+            "${STAGING_POST_STATE_SHA}"
+          test "$(jq -er '.queryBindingSha256' "${binding}")" = \
+            "${STAGING_QUERY_BINDING_SHA}"
+          test "$(jq -er '.semanticContractSha256' "${binding}")" = \
+            "${STAGING_SEMANTIC_CONTRACT_SHA}"
+          signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-demo-state.yml"
+          predicate="https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1"
+          predicate_path="${receipt_dir}/plan.json"
+          predicate_sha256="$(sha256sum "${predicate_path}" | awk '{print $1}')"
+          test "${predicate_sha256}" = "$(
+            jq -er '.attestation.predicateSha256' "${binding}"
+          )"
+          verification_dir="${RUNNER_TEMP}/production-datahub-demo-attestations"
+          mkdir --mode=0700 "${verification_dir}"
+          verify_demo_attestation() {
+            local subject="$1"
+            local verification="$2"
+            local subject_sha256
+            subject_sha256="$(sha256sum "${subject}" | awk '{print $1}')"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${signer}" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref refs/heads/master \
+              --predicate-type "${predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${verification}"
+            test -s "${verification}"
+            jq --exit-status \
+              --arg predicateType "${predicate}" \
+              --arg subjectSha256 "${subject_sha256}" \
+              --slurpfile expectedPredicate "${predicate_path}" '
+                [
+                  .[] |
+                  select(
+                    .verificationResult.statement.predicateType ==
+                      $predicateType and
+                    .verificationResult.statement.predicate ==
+                      $expectedPredicate[0] and
+                    any(
+                      .verificationResult.statement.subject[];
+                      .digest.sha256 == $subjectSha256
+                    )
+                  )
+                ] |
+                length == 1
+              ' "${verification}" >/dev/null || {
+                echo "::error::verified demo-state attestation does not bind the exact local plan and subject"
+                exit 1
+              }
+          }
+          verify_demo_attestation \
+            "${receipt_dir}/SHA256SUMS" \
+            "${verification_dir}/SHA256SUMS.json"
+          verify_demo_attestation \
+            "${receipt_dir}/receipt.json" \
+            "${verification_dir}/receipt.json"
+          rm -- \
+            "${verification_dir}/SHA256SUMS.json" \
+            "${verification_dir}/receipt.json"
+          rmdir -- "${verification_dir}"
+          {
+            echo "receipt_dir=${receipt_dir}"
+            echo "receipt=${receipt_dir}/receipt.json"
+            echo "binding=${binding}"
+            echo "receipt_sha=$(jq -er '.receiptSha256' "${binding}")"
+            echo "artifact_digest=$(jq -er '.artifact.digest' "${binding}")"
+            echo "endpoint_fingerprint=$(jq -er '.gmsEndpointFingerprint' "${binding}")"
+            echo "state_contract_sha=$(jq -er '.stateContractSha256' "${binding}")"
+            echo "post_state_sha=$(jq -er '.postStateSha256' "${binding}")"
+            echo "query_binding_sha=$(jq -er '.queryBindingSha256' "${binding}")"
+            echo "semantic_contract_sha=$(jq -er '.semanticContractSha256' "${binding}")"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Revalidate exact control plane after production approval
         id: production_control_plane
@@ -5726,9 +6404,19 @@ jobs:
           COGNITO_ORIGIN: ${{ steps.spa.outputs.cognito_origin }}
           DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
           EXPECTED_DEMO_QUERY_SHA: ${{ steps.demo_scope.outputs.demo_query_sha }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_READ_GMS_URL }}
+          DEMO_STATE_RECEIPT: ${{ steps.production_demo_state.outputs.receipt }}
+          DEMO_STATE_BINDING: ${{ steps.production_demo_state.outputs.binding }}
+          STAGING_SEMANTIC_PROOF_SHA: ${{ needs.staging.outputs.semantic_proof_sha }}
         run: |
           set -euo pipefail
           : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
+          : "${DATAHUB_GMS_URL:?production DATAHUB_READ_GMS_URL is required}"
+          test -f "${DEMO_STATE_RECEIPT}"
+          test ! -L "${DEMO_STATE_RECEIPT}"
+          test -f "${DEMO_STATE_BINDING}"
+          test ! -L "${DEMO_STATE_BINDING}"
+          [[ "${STAGING_SEMANTIC_PROOF_SHA}" =~ ^[0-9a-f]{64}$ ]]
           jq -en --arg query "${DATAHUB_DEMO_QUERY}" '
             ($query | length) >= 1 and
             ($query | length) <= 256 and
@@ -5739,6 +6427,118 @@ jobs:
           ' >/dev/null || {
             echo "::error::production DATAHUB_DEMO_QUERY must be a narrow, trimmed, non-wildcard query"
             exit 1
+          }
+          target_urn="$(jq -er '.binding.targetUrn' contracts/datahub-demo-state-v1.json)"
+          dangling_urn="$(
+            jq -er '.binding.danglingUpstreamUrn' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          sensitive_field="$(
+            jq -er '.binding.sensitiveFieldPath' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          expected_history="$(
+            jq -cS '.state.ownershipHistory' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          test "${DATAHUB_DEMO_QUERY}" = "${target_urn}"
+          test "$(jq -er '.queryBinding.query' "${DEMO_STATE_RECEIPT}")" = \
+            "${target_urn}"
+          endpoint_fingerprint="$(
+            python3 scripts/datahub-demo-state.py fingerprint-endpoint |
+              jq -er '.gmsEndpointFingerprint'
+          )"
+          test "${endpoint_fingerprint}" = "$(
+            jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
+          )" || {
+            echo "::error::production read endpoint differs from the sealed seed endpoint"
+            exit 1
+          }
+          demo_state_receipt_sha="$(
+            jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
+          )"
+          state_contract_sha="$(
+            jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
+          )"
+          post_state_sha="$(
+            jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
+          )"
+          semantic_contract_sha="$(
+            jq -er '.semanticContractSha256' "${DEMO_STATE_BINDING}"
+          )"
+          history_sha="$(
+            jq -er '.retainedOwnershipHistorySha256' "${DEMO_STATE_BINDING}"
+          )"
+          assert_demo_semantics() {
+            local document="$1"
+            jq --exit-status \
+              --arg target "${target_urn}" \
+              --arg dangling "${dangling_urn}" \
+              --arg field "${sensitive_field}" \
+              --argjson history "${expected_history}" '
+                .report as $report |
+                [
+                  $report.findings[] |
+                  select(
+                    .type == "governance_violation" and
+                    .detail.ruleId == "G6"
+                  )
+                ] as $g6 |
+                [
+                  $report.findings[] |
+                  select(.type == "lineage_gap")
+                ] as $gaps |
+                [
+                  $report.findings[] |
+                  select(.type == "contradiction")
+                ] as $retained |
+                $retained[0].detail.provenance as $provenance |
+                $report.classification.totalEntities == 1 and
+                $report.classification.withLineage == 1 and
+                $report.classification.sensitiveEntities == 1 and
+                ($report.findings | length) == 3 and
+                ($g6 | length) == 1 and
+                $g6[0].severity == "high" and
+                $g6[0].subject == $target and
+                $g6[0].detail.unclassifiedFields == [$field] and
+                $g6[0].detail.blastRadius.rootUrn == $target and
+                $g6[0].detail.blastRadius.maxHops == 3 and
+                $g6[0].detail.blastRadius.downstream == [] and
+                $g6[0].detail.blastRadius.truncated == false and
+                $g6[0].detail.blastRadius.impact == "none" and
+                ($gaps | length) == 1 and
+                $gaps[0].severity == "medium" and
+                $gaps[0].subject == $dangling and
+                $gaps[0].detail.blastRadius.rootUrn == $dangling and
+                $gaps[0].detail.blastRadius.maxHops == 3 and
+                $gaps[0].detail.blastRadius.downstream == [
+                  {urn: $target, minHops: 1}
+                ] and
+                $gaps[0].detail.blastRadius.truncated == false and
+                $gaps[0].detail.blastRadius.impact == "low" and
+                ($retained | length) == 1 and
+                $retained[0].severity == "medium" and
+                $retained[0].subject == $target and
+                $retained[0].detail.attribute == "owner" and
+                ($provenance | length) == 2 and
+                ([$provenance[].source] | sort) ==
+                  ([$history[].pipelineName] | sort) and
+                ([$provenance[].status] | sort) ==
+                  ["conflicting", "trusted"] and
+                ([
+                  $history[] as $expected |
+                  any(
+                    $provenance[];
+                    .source == $expected.pipelineName and
+                    (.runId | endswith(":" + $expected.runId)) and
+                    (.observedAt | sub("\\.000Z$"; "Z")) ==
+                      (($expected.lastObserved / 1000) | todateiso8601)
+                  )
+                ] | all)
+              ' "${document}" >/dev/null || {
+                echo "::error::deployed audit lost exact G6, dangling blast-radius, or retained-history semantics"
+                exit 1
+              }
           }
           demo_query_sha="$(
             printf '%s' "${DATAHUB_DEMO_QUERY}" | sha256sum | awk '{print $1}'
@@ -5849,14 +6649,114 @@ jobs:
              and .releaseSha == $release
              and .report.classification.totalEntities == 1' \
             "${audit_response}" >/dev/null
+          assert_demo_semantics "${audit_response}"
           audit_response_sha="$(sha256sum "${audit_response}" | awk '{print $1}')"
+          semantic_proof="${RUNNER_TEMP}/production-deployed-semantic-proof.json"
+          jq -cS \
+            --arg receiptSha256 "${demo_state_receipt_sha}" \
+            --arg stateContractSha256 "${state_contract_sha}" \
+            --arg postStateSha256 "${post_state_sha}" \
+            --arg semanticContractSha256 "${semantic_contract_sha}" \
+            --arg endpointFingerprint "${endpoint_fingerprint}" \
+            --arg target "${target_urn}" \
+            --arg dangling "${dangling_urn}" \
+            --arg retainedHistorySha256 "${history_sha}" '
+              [
+                .report.findings[] |
+                select(
+                  .type == "governance_violation" and
+                  .detail.ruleId == "G6"
+                )
+              ][0] as $g6 |
+              [
+                .report.findings[] |
+                select(.type == "lineage_gap")
+              ][0] as $gap |
+              [
+                .report.findings[] |
+                select(.type == "contradiction")
+              ][0] as $retained |
+              {
+                schemaVersion: "archon.deployed-datahub-semantic-proof/v1",
+                demoState: {
+                  receiptSha256: $receiptSha256,
+                  stateContractSha256: $stateContractSha256,
+                  postStateSha256: $postStateSha256,
+                  semanticContractSha256: $semanticContractSha256,
+                  gmsEndpointFingerprint: $endpointFingerprint
+                },
+                classification: {
+                  totalEntities: .report.classification.totalEntities,
+                  withLineage: .report.classification.withLineage,
+                  sensitiveEntities:
+                    .report.classification.sensitiveEntities
+                },
+                findings: {
+                  totalCount: (.report.findings | length),
+                  g6: {
+                    exactTarget: ($g6.subject == $target),
+                    fieldPath: $g6.detail.unclassifiedFields[0],
+                    classificationAbsent: true,
+                    blastRootBound: (
+                      $g6.detail.blastRadius.rootUrn == $target
+                    ),
+                    downstreamCount:
+                      ($g6.detail.blastRadius.downstream | length),
+                    maxHops: $g6.detail.blastRadius.maxHops,
+                    truncated: $g6.detail.blastRadius.truncated,
+                    impact: $g6.detail.blastRadius.impact
+                  },
+                  danglingLineage: {
+                    exactUpstream: ($gap.subject == $dangling),
+                    upstreamAbsent: true,
+                    blastRootBound: (
+                      $gap.detail.blastRadius.rootUrn == $dangling
+                    ),
+                    targetConsumerMinHops: (
+                      [
+                        $gap.detail.blastRadius.downstream[] |
+                        select(.urn == $target)
+                      ][0].minHops
+                    ),
+                    downstreamCount:
+                      ($gap.detail.blastRadius.downstream | length),
+                    maxHops: $gap.detail.blastRadius.maxHops,
+                    truncated: $gap.detail.blastRadius.truncated,
+                    impact: $gap.detail.blastRadius.impact
+                  },
+                  retainedHistory: {
+                    exactTarget: ($retained.subject == $target),
+                    attribute: $retained.detail.attribute,
+                    provenanceCount:
+                      ($retained.detail.provenance | length),
+                    stableSourceCount: (
+                      [$retained.detail.provenance[].source] |
+                      unique |
+                      length
+                    ),
+                    statuses:
+                      ([$retained.detail.provenance[].status] | sort),
+                    retainedOwnershipHistorySha256:
+                      $retainedHistorySha256
+                  }
+                }
+              }
+            ' "${audit_response}" >"${semantic_proof}"
+          semantic_proof_sha="$(
+            sha256sum "${semantic_proof}" | awk '{print $1}'
+          )"
+          test "${semantic_proof_sha}" = "${STAGING_SEMANTIC_PROOF_SHA}" || {
+            echo "::error::production semantic proof differs from verified staging"
+            exit 1
+          }
           audit_evidence="${RUNNER_TEMP}/production-audit-smoke-evidence.json"
           jq -cS \
             --arg environment production \
             --arg querySha256 "${demo_query_sha}" \
             --arg responseSha256 "${audit_response_sha}" \
+            --slurpfile semantic "${semantic_proof}" \
             '{
-              schemaVersion: "archon.audit-smoke-evidence/v2",
+              schemaVersion: "archon.audit-smoke-evidence/v3",
               environment: $environment,
               querySha256: $querySha256,
               responseSha256: $responseSha256,
@@ -5870,7 +6770,8 @@ jobs:
                 withLineage: .report.classification.withLineage,
                 sensitiveEntities: .report.classification.sensitiveEntities
               },
-              findingCount: (.report.findings | length)
+              findingCount: (.report.findings | length),
+              semanticProof: $semantic[0]
             }' "${audit_response}" >"${audit_evidence}"
           audit_evidence_sha="$(
             sha256sum "${audit_evidence}" | awk '{print $1}'
@@ -5879,6 +6780,8 @@ jobs:
             echo "audit_response_sha=${audit_response_sha}"
             echo "audit_evidence=${audit_evidence}"
             echo "audit_evidence_sha=${audit_evidence_sha}"
+            echo "semantic_proof=${semantic_proof}"
+            echo "semantic_proof_sha=${semantic_proof_sha}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Bind exact live production runtime bytes
@@ -5997,10 +6900,26 @@ jobs:
           PRODUCTION_API_ORIGIN_CONTRACT_SHA: ${{ steps.deploy.outputs.api_origin_contract_sha }}
           PRODUCTION_NETWORK_EGRESS_CONTRACT: ${{ steps.deploy.outputs.network_egress_contract }}
           PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA: ${{ steps.deploy.outputs.network_egress_contract_sha }}
+          DEMO_STATE_BINDING: ${{ steps.production_demo_state.outputs.binding }}
+          DEMO_STATE_RECEIPT_DIR: ${{ steps.production_demo_state.outputs.receipt_dir }}
+          DEMO_STATE_RECEIPT_SHA: ${{ steps.production_demo_state.outputs.receipt_sha }}
+          DEMO_STATE_ARTIFACT_DIGEST: ${{ steps.production_demo_state.outputs.artifact_digest }}
+          STAGING_SEMANTIC_PROOF_SHA: ${{ needs.staging.outputs.semantic_proof_sha }}
+          PRODUCTION_SEMANTIC_PROOF_PATH: ${{ steps.smoke.outputs.semantic_proof }}
+          PRODUCTION_SEMANTIC_PROOF_SHA: ${{ steps.smoke.outputs.semantic_proof_sha }}
         run: |
           set -euo pipefail
           test "${STAGING_IMAGE_DIGEST}" = "${PRODUCTION_IMAGE_DIGEST}"
           test "${STAGING_DEMO_QUERY_SHA}" = "${PRODUCTION_DEMO_QUERY_SHA}"
+          test "${STAGING_SEMANTIC_PROOF_SHA}" = \
+            "${PRODUCTION_SEMANTIC_PROOF_SHA}"
+          test "$(sha256sum "${PRODUCTION_SEMANTIC_PROOF_PATH}" |
+            awk '{print $1}')" = "${PRODUCTION_SEMANTIC_PROOF_SHA}"
+          test "$(sha256sum \
+            "${DEMO_STATE_RECEIPT_DIR}/receipt.json" | awk '{print $1}')" = \
+            "${DEMO_STATE_RECEIPT_SHA}"
+          test "$(jq -er '.artifact.digest' "${DEMO_STATE_BINDING}")" = \
+            "${DEMO_STATE_ARTIFACT_DIGEST}"
           [[ "${LIVE_RUNTIME_MANIFEST_SHA}" =~ ^[a-f0-9]{64}$ ]]
           test -f "${LIVE_RUNTIME_MANIFEST_PATH}"
           test ! -L "${LIVE_RUNTIME_MANIFEST_PATH}"
@@ -6125,10 +7044,15 @@ jobs:
               "${PRODUCTION_API_ORIGIN_CONTRACT_SHA}" \
             --arg productionNetworkEgressSha256 \
               "${PRODUCTION_NETWORK_EGRESS_CONTRACT_SHA}" \
+            --arg stagingSemanticProofSha256 \
+              "${STAGING_SEMANTIC_PROOF_SHA}" \
+            --arg productionSemanticProofSha256 \
+              "${PRODUCTION_SEMANTIC_PROOF_SHA}" \
             --argjson productionEdgeSecurity "${PRODUCTION_EDGE_SECURITY_CONTRACT}" \
             --argjson productionRegionalWaf "${PRODUCTION_REGIONAL_WAF_CONTRACT}" \
             --argjson productionApiOrigin "${PRODUCTION_API_ORIGIN_CONTRACT}" \
             --argjson productionNetworkEgress "${PRODUCTION_NETWORK_EGRESS_CONTRACT}" \
+            --slurpfile demoState "${DEMO_STATE_BINDING}" \
             --arg deployedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             '{
               schemaVersion: 1,
@@ -6155,6 +7079,7 @@ jobs:
                 productionEcrImageDigest: $productionImageDigest,
                 identicalImageDigest: ($stagingImageDigest == $productionImageDigest)
               },
+              dataHubDemoState: $demoState[0],
               pipelineSecurity: {
                 deploymentControlPlaneGatesSha256: $controlPlaneGateSha256,
                 stagingAttestationVerificationSha256:
@@ -6186,6 +7111,8 @@ jobs:
                 smokeResponseSha256: $stagingSmokeSha256,
                 sanitizedSmokeEvidenceSha256:
                   $stagingSmokeEvidenceSha256,
+                deployedSemanticProofSha256:
+                  $stagingSemanticProofSha256,
                 readOnlyControlLoopResponseSha256:
                   $stagingControlLoopSmokeSha256,
                 runtimeConfigSha256: $stagingRuntimeConfigSha256,
@@ -6215,6 +7142,8 @@ jobs:
                 smokeResponseSha256: $productionSmokeSha256,
                 sanitizedSmokeEvidenceSha256:
                   $productionSmokeEvidenceSha256,
+                deployedSemanticProofSha256:
+                  $productionSemanticProofSha256,
                 runtimeConfigSha256: $productionRuntimeConfigSha256,
                 liveRuntimeManifestSha256:
                   $liveRuntimeManifestSha256,
@@ -6292,6 +7221,26 @@ jobs:
             "${evidence_dir}/production-runtime-config.json"
           cp "${PRODUCTION_SMOKE_EVIDENCE_PATH}" \
             "${evidence_dir}/production-audit-smoke-evidence.json"
+          cp "${PRODUCTION_SEMANTIC_PROOF_PATH}" \
+            "${evidence_dir}/production-deployed-datahub-semantic-proof.json"
+          cp "${DEMO_STATE_BINDING}" \
+            "${evidence_dir}/datahub-demo-state-binding.json"
+          sealed_receipt="${evidence_dir}/sealed-datahub-demo-receipt"
+          mkdir -p "${sealed_receipt}"
+          for subject in \
+            SHA256SUMS \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            cp "${DEMO_STATE_RECEIPT_DIR}/${subject}" \
+              "${sealed_receipt}/${subject}"
+          done
+          (
+            cd "${sealed_receipt}"
+            sha256sum --check --strict SHA256SUMS
+          )
           cp "${RUNNER_TEMP}/control-plane-security-gates.json" \
             "${evidence_dir}/control-plane-security-gates.json"
           cp "${LIVE_RUNTIME_MANIFEST_PATH}" \
@@ -6299,6 +7248,13 @@ jobs:
           test "$(sha256sum \
             "${evidence_dir}/live-runtime-manifest.json" |
             awk '{print $1}')" = "${LIVE_RUNTIME_MANIFEST_SHA}"
+          (
+            cd "${evidence_dir}"
+            find . -type f ! -path './SHA256SUMS' -printf '%P\0' |
+              LC_ALL=C sort -z |
+              xargs -0 --no-run-if-empty sha256sum >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
           echo "path=${evidence_dir}" >>"${GITHUB_OUTPUT}"
 
       - name: Clear production credentials before artifact handling
@@ -6320,7 +7276,15 @@ jobs:
             echo "AWS_SESSION_EXPIRATION="
           } >>"${GITHUB_ENV}"
 
+      - name: Attest checksum-sealed production deployment evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.evidence.outputs.path }}/SHA256SUMS
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1
+          predicate-path: ${{ steps.evidence.outputs.path }}/deployment-evidence.json
+
       - name: Upload immutable deployment evidence
+        id: deployment_artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deployment-evidence-${{ inputs.release_sha }}-${{ github.run_attempt }}
@@ -6340,6 +7304,10 @@ jobs:
           LAMBDA_ARCHIVE_SHA: ${{ steps.artifacts.outputs.lambda_archive_sha }}
           CANARY_RUN_URL: ${{ needs.preproduction_canary.outputs.run_url }}
           CANARY_ROLLBACK_SUBJECT_SHA: ${{ needs.preproduction_canary.outputs.rollback_subject_sha256 }}
+          DEPLOYMENT_ARTIFACT_ID: ${{ steps.deployment_artifact.outputs.artifact-id }}
+          DEPLOYMENT_ARTIFACT_DIGEST: ${{ steps.deployment_artifact.outputs.artifact-digest }}
+          DEMO_STATE_RECEIPT_SHA: ${{ steps.production_demo_state.outputs.receipt_sha }}
+          SEMANTIC_PROOF_SHA: ${{ steps.smoke.outputs.semantic_proof_sha }}
         run: |
           {
             echo "## Archon immutable promotion complete"
@@ -6350,6 +7318,11 @@ jobs:
             echo "- Exact inner SPA archive SHA-256: \`${WEB_ARCHIVE_SHA}\`"
             echo "- Exact Lambda artifact SHA-256: \`${LAMBDA_ARTIFACT_SHA}\`"
             echo "- Exact inner Lambda archive SHA-256: \`${LAMBDA_ARCHIVE_SHA}\`"
+            echo "- Deployment evidence artifact ID: \`${DEPLOYMENT_ARTIFACT_ID}\`"
+            echo "- Deployment evidence artifact digest: \`sha256:${DEPLOYMENT_ARTIFACT_DIGEST}\`"
+            echo "- Demo-state receipt SHA-256: \`${DEMO_STATE_RECEIPT_SHA}\`"
+            echo "- Deployed semantic proof SHA-256: \`${SEMANTIC_PROOF_SHA}\`"
+            echo "- Evidence predicate: \`https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1\`"
             echo "- Governed pre-production canary: ${CANARY_RUN_URL}"
             echo "- Canary rollback subject SHA-256: \`${CANARY_ROLLBACK_SUBJECT_SHA}\`"
             echo "- Staging: ${STAGING_URL}"

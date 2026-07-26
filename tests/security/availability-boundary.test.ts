@@ -166,7 +166,7 @@ test("hosted observers share one strict report and model-provenance contract", (
   assert.match(workflow, /modelProvenance: \$modelProvenance/u);
   assert.equal(
     deploymentWorkflow.match(
-      /schemaVersion: "archon\.audit-smoke-evidence\/v2"/gu
+      /schemaVersion: "archon\.audit-smoke-evidence\/v3"/gu
     )?.length,
     2
   );
@@ -180,6 +180,10 @@ test("hosted observers share one strict report and model-provenance contract", (
     deploymentWorkflow.match(
       /modelProvenance: \.report\.modelProvenance/gu
     )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(/semanticProof: \$semantic\[0\]/gu)?.length,
     2
   );
 });

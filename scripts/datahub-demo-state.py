@@ -28,7 +28,17 @@ MAX_CONTRACT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+POSITIVE_INTEGER = re.compile(r"^[1-9][0-9]{0,19}$")
+ARTIFACT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 DATASET_PREFIX = "urn:li:dataset:(urn:li:dataPlatform:"
+SEALED_RECEIPT_SUBJECTS = (
+    "approval-receipt.json",
+    "baseline-manifest.json",
+    "control-plane.json",
+    "plan.json",
+    "receipt.json",
+)
+SEALED_RECEIPT_INVENTORY = ("SHA256SUMS", *SEALED_RECEIPT_SUBJECTS)
 DATAHUB_CLI_ENVIRONMENT_KEYS = frozenset(
     {
         "DATAHUB_GMS_TOKEN",
@@ -1869,6 +1879,465 @@ def command_validate_config(args: argparse.Namespace) -> None:
     )
 
 
+def command_fingerprint_endpoint(_: argparse.Namespace) -> None:
+    """Emit only a normalized endpoint fingerprint; no token is needed or accepted."""
+
+    gms = validate_endpoint(os.environ.get("DATAHUB_GMS_URL", ""))
+    print(
+        json.dumps(
+            {
+                "gmsEndpointFingerprint": gms_endpoint_fingerprint(gms),
+                "schemaVersion": "archon.datahub-demo-endpoint-fingerprint/v1",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
+def positive_integer(value: Any, context: str) -> int:
+    if not isinstance(value, str) or not POSITIVE_INTEGER.fullmatch(value):
+        fail(f"{context} must be a positive decimal integer")
+    return int(value)
+
+
+def validate_canonical_json(path: pathlib.Path) -> dict[str, Any]:
+    value = read_json(path)
+    if not isinstance(value, dict) or path.read_bytes() != canonical_bytes(value):
+        fail(f"{path.name} is not one canonical JSON object")
+    return value
+
+
+def validate_sealed_receipt_inventory(directory: pathlib.Path) -> dict[str, str]:
+    if not directory.is_dir() or directory.is_symlink():
+        fail("sealed receipt path must be one regular directory")
+    actual = tuple(sorted(path.name for path in directory.iterdir()))
+    if actual != tuple(sorted(SEALED_RECEIPT_INVENTORY)):
+        fail("sealed receipt directory inventory differs from the reviewed contract")
+    for name in SEALED_RECEIPT_INVENTORY:
+        regular_file(directory / name, MAX_CONTRACT_BYTES)
+
+    manifest_path = directory / "SHA256SUMS"
+    try:
+        lines = manifest_path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeError) as exc:
+        fail(f"invalid sealed receipt checksum inventory: {type(exc).__name__}")
+    if len(lines) != len(SEALED_RECEIPT_SUBJECTS):
+        fail("sealed receipt checksum subject count changed")
+    checksums: dict[str, str] = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9.-]+)", line)
+        if match is None:
+            fail("sealed receipt checksum inventory is malformed")
+        digest, name = match.groups()
+        if name in checksums:
+            fail("sealed receipt checksum inventory contains a duplicate subject")
+        checksums[name] = digest
+    if tuple(checksums) != SEALED_RECEIPT_SUBJECTS:
+        fail("sealed receipt checksum subjects or order changed")
+    for name, expected in checksums.items():
+        actual_digest = digest_bytes((directory / name).read_bytes())
+        if actual_digest != expected:
+            fail(f"sealed receipt checksum mismatch: {name}")
+    return checksums
+
+
+def command_verify_receipt(args: argparse.Namespace) -> None:
+    """Verify and project one downloaded, GitHub-metadata-bound demo-state receipt."""
+
+    release_sha = str(args.release_sha)
+    repository = str(args.repository)
+    run_id = positive_integer(args.workflow_run_id, "workflow run id")
+    run_attempt = positive_integer(args.workflow_run_attempt, "workflow run attempt")
+    artifact_id = positive_integer(args.artifact_id, "artifact id")
+    expected_receipt_sha256 = str(args.expected_receipt_sha256)
+    artifact_digest = str(args.artifact_digest)
+    artifact_name = str(args.artifact_name)
+    if not HEX_40.fullmatch(release_sha):
+        fail("release SHA must be a full lowercase commit SHA")
+    if repository != "upgradedev/archon-datahub":
+        fail("sealed receipt repository differs from the reviewed repository")
+    if not HEX_64.fullmatch(expected_receipt_sha256):
+        fail("expected receipt SHA-256 is invalid")
+    if not ARTIFACT_DIGEST.fullmatch(artifact_digest):
+        fail("GitHub artifact digest is invalid")
+    if artifact_name != f"datahub-demo-receipt-{run_id}-{run_attempt}":
+        fail("GitHub artifact name is not bound to the exact run attempt")
+
+    directory = pathlib.Path(args.receipt_dir).resolve()
+    checksums = validate_sealed_receipt_inventory(directory)
+    values = {
+        name: validate_canonical_json(directory / name)
+        for name in SEALED_RECEIPT_SUBJECTS
+    }
+    approval = values["approval-receipt.json"]
+    baseline = values["baseline-manifest.json"]
+    control = values["control-plane.json"]
+    plan = values["plan.json"]
+    receipt = values["receipt.json"]
+    receipt_sha256 = checksums["receipt.json"]
+    if receipt_sha256 != expected_receipt_sha256:
+        fail("receipt SHA-256 differs from the explicit dispatch binding")
+
+    contract, contract_digest = load_contract(pathlib.Path(args.contract).resolve())
+    target = contract["binding"]["targetUrn"]
+    domain = contract["binding"]["domainUrn"]
+    dangling = contract["binding"]["danglingUpstreamUrn"]
+    query_binding = {"query": target, "targetUrn": target}
+    empty_list_digest = digest_obj([])
+
+    exact_keys(
+        approval,
+        {
+            "action",
+            "approval",
+            "configuredReviewerIds",
+            "environment",
+            "initiators",
+            "planSha256",
+            "releaseSha",
+            "repository",
+            "schemaVersion",
+            "workflowRunAttempt",
+            "workflowRunId",
+        },
+        "approval receipt",
+    )
+    if (
+        approval.get("schemaVersion") != "archon.datahub-demo-approval/v1"
+        or approval.get("repository") != repository
+        or approval.get("releaseSha") != release_sha
+        or approval.get("workflowRunId") != str(run_id)
+        or approval.get("workflowRunAttempt") != str(run_attempt)
+        or approval.get("action") not in {"seed", "reset"}
+        or approval.get("environment", {}).get("name") != "datahub-demo-seed"
+        or approval.get("approval", {}).get("state") != "approved"
+    ):
+        fail("approval receipt is not bound to the exact approved run")
+    action = approval["action"]
+    plan_sha256 = checksums["plan.json"]
+    expected_approval_comment = approval_comment(
+        str(run_id),
+        str(run_attempt),
+        action,
+        release_sha,
+        plan_sha256,
+    )
+    reviewer_ids = approval.get("configuredReviewerIds")
+    approval_user = approval.get("approval", {}).get("user")
+    initiators = approval.get("initiators")
+    if (
+        not isinstance(reviewer_ids, list)
+        or not reviewer_ids
+        or len(set(reviewer_ids)) != len(reviewer_ids)
+        or not all(isinstance(item, int) and not isinstance(item, bool) for item in reviewer_ids)
+        or not isinstance(approval_user, dict)
+        or set(approval_user) != {"id", "login"}
+        or approval_user.get("id") not in reviewer_ids
+        or not isinstance(approval_user.get("login"), str)
+        or not approval_user["login"]
+        or approval.get("approval", {}).get("comment") != expected_approval_comment
+        or not isinstance(initiators, dict)
+        or set(initiators) != {"actor", "triggeringActor"}
+        or any(
+            not isinstance(initiators.get(key), str) or not initiators[key]
+            for key in ("actor", "triggeringActor")
+        )
+        or approval_user["login"].lower()
+        in {initiators["actor"].lower(), initiators["triggeringActor"].lower()}
+    ):
+        fail("approval receipt reviewer or exact comment binding is invalid")
+
+    exact_keys(
+        plan,
+        {
+            "action",
+            "baselineBefore",
+            "baselineContentDigest",
+            "baselineManifestSha256",
+            "before",
+            "gmsEndpointFingerprint",
+            "mutationRequired",
+            "operation",
+            "ownedUrns",
+            "queryBinding",
+            "releaseSha",
+            "repository",
+            "resetConfirmationSha256",
+            "schemaVersion",
+            "stateContractSha256",
+        },
+        "demo-state plan",
+    )
+    if (
+        plan.get("schemaVersion") != "archon.datahub-demo-plan/v1"
+        or plan.get("repository") != repository
+        or plan.get("releaseSha") != release_sha
+        or plan.get("action") != action
+        or plan.get("stateContractSha256") != contract_digest
+        or plan.get("baselineManifestSha256")
+        != checksums["baseline-manifest.json"]
+        or plan.get("queryBinding") != query_binding
+        or plan.get("ownedUrns") != [target, domain]
+        or not HEX_64.fullmatch(str(plan.get("gmsEndpointFingerprint", "")))
+        or not isinstance(plan.get("mutationRequired"), bool)
+        or approval.get("planSha256") != plan_sha256
+    ):
+        fail("demo-state plan lost an exact release, query, or contract binding")
+    operation = plan.get("operation")
+    if (
+        (action == "seed" and operation not in {"seed", "noop"})
+        or (action == "reset" and operation != "reset")
+        or (operation == "noop" and plan["mutationRequired"] is not False)
+        or (operation != "noop" and plan["mutationRequired"] is not True)
+    ):
+        fail("demo-state plan action and mutation semantics are inconsistent")
+
+    exact_keys(
+        baseline,
+        {
+            "commit",
+            "commitSignatureVerified",
+            "contentDigest",
+            "files",
+            "indexVersion",
+            "mcpCount",
+            "name",
+            "repository",
+            "schemaVersion",
+            "stateContractSha256",
+            "tree",
+            "uniqueEntityUrnCount",
+        },
+        "baseline manifest",
+    )
+    baseline_without_digest = dict(baseline)
+    baseline_content_digest = baseline_without_digest.pop("contentDigest", None)
+    if (
+        baseline.get("schemaVersion") != "archon.datahub-demo-baseline/v1"
+        or baseline.get("stateContractSha256") != contract_digest
+        or baseline_content_digest != digest_obj(baseline_without_digest)
+        or plan.get("baselineContentDigest") != baseline_content_digest
+        or baseline.get("commit") != contract["officialBaseline"]["commit"]
+        or baseline.get("tree") != contract["officialBaseline"]["tree"]
+        or baseline.get("commitSignatureVerified") is not True
+        or baseline.get("mcpCount")
+        != contract["officialBaseline"]["expectedMcpCount"]
+        or baseline.get("uniqueEntityUrnCount")
+        != contract["officialBaseline"]["expectedUniqueEntityUrnCount"]
+    ):
+        fail("baseline manifest lost its immutable contract binding")
+
+    if (
+        control.get("schemaVersion") != "archon.datahub-demo-control-plane/v1"
+        or control.get("repository") != repository
+        or control.get("releaseSha") != release_sha
+        or control.get("defaultBranch") != "master"
+        or control.get("officialBaseline", {}).get("commit")
+        != contract["officialBaseline"]["commit"]
+        or control.get("officialBaseline", {}).get("signatureVerified") is not True
+        or sorted(
+            item.get("path")
+            for item in control.get("successfulRuns", [])
+            if isinstance(item, dict)
+        )
+        != [
+            ".github/workflows/ci.yml",
+            ".github/workflows/codeql.yml",
+            ".github/workflows/workflow-security.yml",
+        ]
+    ):
+        fail("demo-state control-plane receipt is not exact-SHA green")
+
+    exact_keys(
+        receipt,
+        {
+            "action",
+            "approval",
+            "approvalReceiptSha256",
+            "baselineAnchors",
+            "baselineAnchorsAfterLoad",
+            "baselineCommit",
+            "baselineContentDigest",
+            "baselineManifestSha256",
+            "baselineReloaded",
+            "danglingLineage",
+            "g6Gap",
+            "gmsEndpointFingerprint",
+            "observedAt",
+            "outcome",
+            "ownedUrns",
+            "planSha256",
+            "postStateSha256",
+            "queryBinding",
+            "releaseSha",
+            "repository",
+            "resetDeletes",
+            "retainedOwnershipHistory",
+            "schemaVersion",
+            "stateContractSha256",
+            "workflowRunAttempt",
+            "workflowRunId",
+        },
+        "demo-state receipt",
+    )
+    exact_anchor_state = {
+        "complete": True,
+        "expected": len(contract["officialBaseline"]["anchors"]),
+        "missingDigest": empty_list_digest,
+        "present": len(contract["officialBaseline"]["anchors"]),
+    }
+    expected_g6 = {
+        "classificationAbsent": True,
+        "fieldPath": contract["binding"]["sensitiveFieldPath"],
+    }
+    expected_dangling = {
+        "upstreamAbsent": True,
+        "upstreamUrn": dangling,
+    }
+    expected_outcome = (
+        "unchanged"
+        if operation == "noop"
+        else "reset"
+        if operation == "reset"
+        else "seeded"
+    )
+    if (
+        receipt.get("schemaVersion") != "archon.datahub-demo-receipt/v1"
+        or receipt.get("repository") != repository
+        or receipt.get("releaseSha") != release_sha
+        or receipt.get("workflowRunId") != str(run_id)
+        or receipt.get("workflowRunAttempt") != str(run_attempt)
+        or receipt.get("action") != action
+        or receipt.get("outcome") != expected_outcome
+        or receipt.get("planSha256") != plan_sha256
+        or receipt.get("approvalReceiptSha256")
+        != checksums["approval-receipt.json"]
+        or receipt.get("baselineManifestSha256")
+        != checksums["baseline-manifest.json"]
+        or receipt.get("stateContractSha256") != contract_digest
+        or receipt.get("baselineContentDigest") != baseline_content_digest
+        or receipt.get("baselineCommit") != contract["officialBaseline"]["commit"]
+        or receipt.get("gmsEndpointFingerprint")
+        != plan["gmsEndpointFingerprint"]
+        or receipt.get("queryBinding") != query_binding
+        or receipt.get("ownedUrns") != [target, domain]
+        or receipt.get("retainedOwnershipHistory")
+        != contract["state"]["ownershipHistory"]
+        or receipt.get("g6Gap") != expected_g6
+        or receipt.get("danglingLineage") != expected_dangling
+        or receipt.get("baselineAnchors") != exact_anchor_state
+        or receipt.get("baselineAnchorsAfterLoad") != exact_anchor_state
+        or receipt.get("baselineReloaded") is not plan["mutationRequired"]
+        or not HEX_64.fullmatch(str(receipt.get("postStateSha256", "")))
+        or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            str(receipt.get("observedAt", "")),
+        )
+    ):
+        fail("sealed receipt lost its exact post-state semantic binding")
+    if receipt.get("approval") != {
+        "environment": approval["environment"],
+        "state": "approved",
+        "user": approval_user,
+    }:
+        fail("sealed receipt is not bound to its exact approval")
+    reset_deletes = receipt.get("resetDeletes")
+    if (
+        not isinstance(reset_deletes, list)
+        or (
+            action == "seed"
+            and reset_deletes != []
+        )
+        or (
+            action == "reset"
+            and (
+                len(reset_deletes) != 2
+                or [item.get("urn") for item in reset_deletes if isinstance(item, dict)]
+                != [target, domain]
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != {"outcome", "urn"}
+                    or item["outcome"]
+                    not in {
+                        "deleted",
+                        "absence-proved-after-cli-error",
+                        "already-absent",
+                    }
+                    for item in reset_deletes
+                )
+            )
+        )
+    ):
+        fail("sealed receipt reset deletion boundary is invalid")
+
+    semantic_contract = {
+        "danglingLineage": expected_dangling,
+        "g6Gap": expected_g6,
+        "postStateSha256": receipt["postStateSha256"],
+        "queryBinding": query_binding,
+        "retainedOwnershipHistory": contract["state"]["ownershipHistory"],
+    }
+    binding = {
+        "schemaVersion": "archon.datahub-demo-receipt-binding/v1",
+        "repository": repository,
+        "releaseSha": release_sha,
+        "workflow": {
+            "path": ".github/workflows/datahub-demo-state.yml",
+            "runId": run_id,
+            "runAttempt": run_attempt,
+        },
+        "artifact": {
+            "id": artifact_id,
+            "name": artifact_name,
+            "digest": artifact_digest,
+        },
+        "attestation": {
+            "predicateType": (
+                "https://github.com/upgradedev/archon-datahub/attestations/"
+                "datahub-demo-state/v1"
+            ),
+            "predicateSha256": plan_sha256,
+            "signerWorkflow": (
+                "github.com/upgradedev/archon-datahub/.github/workflows/"
+                "datahub-demo-state.yml"
+            ),
+        },
+        "receiptSha256": receipt_sha256,
+        "stateContractSha256": contract_digest,
+        "gmsEndpointFingerprint": receipt["gmsEndpointFingerprint"],
+        "postStateSha256": receipt["postStateSha256"],
+        "querySha256": digest_bytes(target.encode("utf-8")),
+        "queryBindingSha256": digest_obj(query_binding),
+        "targetUrnSha256": digest_bytes(target.encode("utf-8")),
+        "danglingUpstreamUrnSha256": digest_bytes(dangling.encode("utf-8")),
+        "retainedOwnershipHistorySha256": digest_obj(
+            contract["state"]["ownershipHistory"]
+        ),
+        "semanticContractSha256": digest_obj(semantic_contract),
+        "semantics": {
+            "danglingUpstreamAbsent": True,
+            "g6ClassificationAbsent": True,
+            "sensitiveFieldPath": contract["binding"]["sensitiveFieldPath"],
+            "stableSourceCount": len(contract["state"]["ownershipHistory"]),
+        },
+    }
+    write_exclusive(pathlib.Path(args.output).resolve(), binding)
+    print(
+        json.dumps(
+            {
+                "gmsEndpointFingerprint": binding["gmsEndpointFingerprint"],
+                "queryBindingSha256": binding["queryBindingSha256"],
+                "receiptSha256": binding["receiptSha256"],
+                "schemaVersion": binding["schemaVersion"],
+                "semanticContractSha256": binding["semanticContractSha256"],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+
 def command_validate_runtime(args: argparse.Namespace) -> None:
     contract, contract_digest = load_contract(pathlib.Path(args.contract).resolve())
     proposals, _, _ = build_demo_proposals(contract, contract_digest)
@@ -1930,6 +2399,23 @@ def parser() -> argparse.ArgumentParser:
     validate_config = commands.add_parser("validate-config")
     validate_config.add_argument("--expected-fingerprint")
     validate_config.set_defaults(handler=command_validate_config)
+
+    fingerprint_endpoint = commands.add_parser("fingerprint-endpoint")
+    fingerprint_endpoint.set_defaults(handler=command_fingerprint_endpoint)
+
+    verify_receipt = commands.add_parser("verify-receipt")
+    verify_receipt.add_argument("--contract", required=True)
+    verify_receipt.add_argument("--receipt-dir", required=True)
+    verify_receipt.add_argument("--repository", required=True)
+    verify_receipt.add_argument("--release-sha", required=True)
+    verify_receipt.add_argument("--workflow-run-id", required=True)
+    verify_receipt.add_argument("--workflow-run-attempt", required=True)
+    verify_receipt.add_argument("--artifact-id", required=True)
+    verify_receipt.add_argument("--artifact-name", required=True)
+    verify_receipt.add_argument("--artifact-digest", required=True)
+    verify_receipt.add_argument("--expected-receipt-sha256", required=True)
+    verify_receipt.add_argument("--output", required=True)
+    verify_receipt.set_defaults(handler=command_verify_receipt)
 
     validate_runtime = commands.add_parser("validate-runtime")
     validate_runtime.add_argument("--contract", required=True)

@@ -7,8 +7,9 @@ connectivity check and it does not accept workstation evidence.
 
 - `release_sha`: the full lowercase SHA that is currently deployed.
 - `deployment_run_id`: a successful `Deploy immutable AWS release` run for that SHA.
-- `query`: a trimmed 1–256 character dataset query. Control characters and wildcard
-  operators are rejected.
+- `query`: the exact target URN from `contracts/datahub-demo-state-v1.json`. The ordinary
+  narrow-query safety checks also reject whitespace aliases, control characters, and
+  wildcard operators.
 
 The workflow runs only from the current `master` head. The dispatch SHA and release SHA
 must be identical. Before credentials are used, the workflow requires the latest
@@ -26,6 +27,30 @@ exact receipt with the attestation subject immediately before signing.
 The protected `datahub-demo` environment supplies a read-only `DATAHUB_GMS_URL` and
 `DATAHUB_GMS_TOKEN`. The proof deliberately starts the hash-locked official MCP server
 over stdio; it does not fall back to an unverified hosted or `uvx` transport.
+
+## Sealed demo-state and deployed semantics
+
+The selected production deployment must contain the exact
+`archon.datahub-demo-receipt-binding/v1` projection and the complete six-file
+`sealed-datahub-demo-receipt` directory. The live workflow re-fetches the original
+`.github/workflows/datahub-demo-state.yml` run at its exact attempt, re-fetches the
+artifact by ID, compares its exact name/digest, runs the shared canonical receipt
+verifier, byte-compares the regenerated sanitized binding, and verifies the original
+`datahub-demo-state/v1` attestation. It also verifies the production deployment evidence
+attestation (`production-deployment/v1`) and its strict root checksum inventory.
+
+Before a credentialed read, `validate-config` normalizes the protected
+`DATAHUB_GMS_URL`, emits only its SHA-256 fingerprint, and requires equality with the
+seed receipt. The direct proof must then return the exact target-URN digest, one retained
+history, two stable sources, one recovered contradiction, and one contradiction
+attribute. Counts greater than the planted contract are drift and fail.
+
+Separately, the workflow calls the deployed production `/api/audits` endpoint again and
+requires exactly the promoted semantic projection: one G6 `email` gap, one dangling
+upstream whose blast radius reaches the target consumer at one hop, and one retained
+`owner` contradiction with the two expected source/run identities. The projection stores
+booleans, counts, field path, statuses, and digests—not raw DataHub URLs, tokens, dataset
+URNs, or provider responses.
 
 ## Immutable MCP runtime
 
@@ -118,27 +143,35 @@ provenance, raw and actionable SARIF, OpenVEX statement, VEX application receipt
 sanitized runtime-smoke receipt, and inventory for 90 days.
 The signed CI release predicate includes both the gate result and exact evidence-artifact
 digest. The credentialed live proof defaults to sealed mode and includes those exact
-upstream and derived runtime subjects in its checksum manifest. Its v3 predicate binds the
+upstream and derived runtime subjects in its checksum manifest. Its v4 predicate binds the
 resolved lock SHA-256 plus the contract, lock-binding receipt, wheel graph, project overlay,
-PyPI provenance, OpenVEX, and runtime-smoke digests. The live workflow rechecks the VEX
+PyPI provenance, OpenVEX, runtime-smoke, sealed demo receipt, endpoint fingerprint,
+deployment evidence, and deployed semantic-proof digests. The live workflow rechecks the VEX
 expiry during materialization and again immediately before signing, so an old green CI run
 cannot authorize a proof after the exception expires.
 
 ## Proof and retention
 
-Search must resolve exactly one dataset. The proof additionally requires retained aspect
-history, at least two stable source identities, and a recovered cross-source
-contradiction. Raw query text, credentials, entity metadata, and the dataset URN are not
-written to the proof bundle or job summary; the query and URN are represented there only
-by SHA-256 digests. GitHub still retains the query as protected workflow-dispatch metadata
-under the repository's normal Actions retention policy.
+Search must resolve the exact contract dataset. The proof additionally requires exactly
+one retained history, two stable source identities, one recovered cross-source
+contradiction, and the matching deployed G6/dangling-lineage projection. The sanitized
+proof and semantic projections represent the query and target URN only by SHA-256
+digests. The checksum-bound source receipt intentionally retains the reviewed public
+contract URNs needed to reproduce the state binding. No DataHub endpoint, token, raw
+provider response, or arbitrary entity metadata is retained in the proof bundle or job
+summary. GitHub also retains the dispatch query under the repository's normal Actions
+retention policy.
 
 The workflow emits a canonical JSON proof, both the exact enforced
 `control-plane-security-gates.json` receipt and its enriched MCP-evidence receipt, an exact
-deployment binding, the MCP lock contract, exact upstream and resolved locks, virtual
-project overlay, resolved-lock binding, wheel-only graph, trusted-publisher provenance,
-OpenVEX statement, runtime-smoke receipt, and a SHA-256 manifest. Both control-plane
-receipts and all MCP runtime evidence are
+deployment binding and deployment evidence, the sanitized demo-state and endpoint
+bindings, the complete sealed receipt, the current deployed semantic proof, the MCP lock
+contract, exact upstream and resolved locks, virtual project overlay, resolved-lock
+binding, wheel-only graph, trusted-publisher provenance, OpenVEX statement, runtime-smoke
+receipt, and a strict SHA-256 manifest. Both control-plane receipts and all MCP runtime evidence are
 independent attestation subjects and their digests are recorded in the predicate. It signs
 the proof manifest with a GitHub artifact attestation and retains the sanitized bundle for
-90 days.
+90 days. The artifact is
+`live-datahub-proof-<release-sha>-<live-run-attempt>` and its predicate type is
+`https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4`; these
+are the exact source selectors for a protected submission-readiness aggregator.

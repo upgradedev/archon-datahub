@@ -14,6 +14,14 @@ const ciWorkflow = readFileSync(
   new URL("../../.github/workflows/ci.yml", import.meta.url),
   "utf8"
 );
+const deploymentWorkflow = readFileSync(
+  new URL("../../.github/workflows/deploy.yml", import.meta.url),
+  "utf8"
+);
+const liveProofWorkflow = readFileSync(
+  new URL("../../.github/workflows/live-datahub-proof.yml", import.meta.url),
+  "utf8"
+);
 const contractText = readFileSync(
   new URL("../../contracts/datahub-demo-state-v1.json", import.meta.url),
   "utf8"
@@ -49,6 +57,14 @@ const environmentExample = readFileSync(
   new URL("../../.env.example", import.meta.url),
   "utf8"
 );
+
+function section(source: string, start: string, end: string): string {
+  const first = source.indexOf(start);
+  const last = source.indexOf(end, first + start.length);
+  assert.ok(first >= 0, `missing section start: ${start}`);
+  assert.ok(last > first, `missing section end: ${end}`);
+  return source.slice(first, last);
+}
 
 test("demo data mutation is manual, serialized, and isolated behind protected environments", () => {
   assert.match(workflow, /^on:\n  workflow_dispatch:/mu);
@@ -439,5 +455,228 @@ test("credentials stay out of dispatch, argv, plans, and retained receipts", () 
   assert.doesNotMatch(
     environmentExample,
     /Remote endpoints MUST[\s\S]{0,120}stay private behind/u
+  );
+});
+
+test("deploy and live proof bind the exact sealed receipt and semantic state", () => {
+  for (const input of [
+    "demo_state_run_id",
+    "demo_state_run_attempt",
+    "demo_state_artifact_id",
+    "demo_state_artifact_digest",
+    "demo_state_receipt_sha256",
+  ]) {
+    assert.match(
+      deploymentWorkflow,
+      new RegExp(`${input}:\\n\\s+description:[^\\n]+\\n\\s+required: true`, "u")
+    );
+  }
+  assert.equal(
+    deploymentWorkflow.match(
+      /actions\/runs\/\$\{DEMO_STATE_RUN_ID\}\/attempts\/\$\{DEMO_STATE_RUN_ATTEMPT\}/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /actions\/artifacts\/\$\{DEMO_STATE_ARTIFACT_ID\}/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /datahub-demo-receipt-\$\{DEMO_STATE_RUN_ID\}-\$\{DEMO_STATE_RUN_ATTEMPT\}/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /scripts\/datahub-demo-state\.py verify-receipt/gu
+    )?.length,
+    2
+  );
+  assert.match(
+    deploymentWorkflow,
+    /--expected-receipt-sha256 "\$\{DEMO_STATE_RECEIPT_SHA256\}"/u
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /attestations\/datahub-demo-state\/v1/gu
+    )?.length,
+    2
+  );
+  assert.match(
+    driver,
+    /"schemaVersion": "archon\.datahub-demo-receipt-binding\/v1"/u
+  );
+  for (const field of [
+    '"runId": run_id',
+    '"runAttempt": run_attempt',
+    '"id": artifact_id',
+    '"digest": artifact_digest',
+    '"predicateType":',
+    '"predicateSha256": plan_sha256',
+    '"gmsEndpointFingerprint": receipt["gmsEndpointFingerprint"]',
+    '"postStateSha256": receipt["postStateSha256"]',
+    '"queryBindingSha256": digest_obj(query_binding)',
+    '"semanticContractSha256": digest_obj(semantic_contract)',
+  ]) {
+    assert.ok(driver.includes(field), `missing sealed binding field: ${field}`);
+  }
+  assert.match(
+    driver,
+    /SEALED_RECEIPT_INVENTORY = \("SHA256SUMS", \*SEALED_RECEIPT_SUBJECTS\)/u
+  );
+  assert.match(driver, /sealed receipt checksum mismatch/u);
+  assert.match(driver, /sealed receipt directory inventory differs/u);
+
+  assert.equal(
+    deploymentWorkflow.match(
+      /datahub-demo-state\.py fingerprint-endpoint/gu
+    )?.length,
+    2
+  );
+  assert.match(
+    liveProofWorkflow,
+    /datahub-demo-state\.py validate-config \\\n\s+--expected-fingerprint/u
+  );
+  assert.match(
+    liveProofWorkflow,
+    /\.datasetUrnSha256 == \$datasetUrnSha/u
+  );
+  assert.match(liveProofWorkflow, /\.retainedHistories == 1/u);
+  assert.match(liveProofWorkflow, /\.stableSourceCount == 2/u);
+  assert.match(liveProofWorkflow, /\.recoveredContradictions == 1/u);
+  assert.match(liveProofWorkflow, /\.contradictionAttributeCount == 1/u);
+
+  for (const source of [deploymentWorkflow, liveProofWorkflow]) {
+    assert.match(source, /\$g6\[0\]\.detail\.unclassifiedFields == \[\$field\]/u);
+    assert.match(source, /\$gaps\[0\]\.subject == \$dangling/u);
+    assert.match(
+      source,
+      /\$g6\[0\]\.detail\.blastRadius\.downstream == \[\]/u
+    );
+    assert.match(
+      source,
+      /\$g6\[0\]\.detail\.blastRadius\.truncated == false/u
+    );
+    assert.match(
+      source,
+      /\$g6\[0\]\.detail\.blastRadius\.impact == "none"/u
+    );
+    assert.match(
+      source,
+      /\$gaps\[0\]\.detail\.blastRadius\.downstream == \[\s+\{urn: \$target, minHops: 1\}\s+\]/u
+    );
+    assert.match(
+      source,
+      /\$gaps\[0\]\.detail\.blastRadius\.truncated == false/u
+    );
+    assert.match(
+      source,
+      /\$gaps\[0\]\.detail\.blastRadius\.impact == "low"/u
+    );
+    assert.match(source, /\$retained\[0\]\.detail\.attribute == "owner"/u);
+    assert.match(
+      source,
+      /\(\[\$provenance\[\]\.status\] \| sort\) ==\s+\["conflicting", "trusted"\]/u
+    );
+  }
+  assert.match(
+    deploymentWorkflow,
+    /schemaVersion: "archon\.deployed-datahub-semantic-proof\/v1"/u
+  );
+  assert.match(
+    liveProofWorkflow,
+    /current production semantics differ from the promoted proof/u
+  );
+  const preSecretGate = section(
+    liveProofWorkflow,
+    "- name: Revalidate exact control plane immediately before DataHub secrets",
+    "- name: Prove one-dataset MCP, retention, provenance, and contradiction path"
+  );
+  assert.match(
+    preSecretGate,
+    /EXPECTED_GATE_SHA256: \$\{\{ steps\.gate\.outputs\.control_plane_gate_sha \}\}/u
+  );
+  assert.match(
+    preSecretGate,
+    /test "\$\(sha256sum "\$\{exact_gates\}" \| awk '\{print \$1\}'\)" = \\\n\s+"\$\{EXPECTED_GATE_SHA256\}"/u
+  );
+  assert.match(
+    preSecretGate,
+    /The pre-secret control-plane receipt changed/u
+  );
+  assert.doesNotMatch(
+    preSecretGate,
+    /DATAHUB_GMS_URL|DATAHUB_GMS_TOKEN/u
+  );
+
+  const stagingEvidence = section(
+    deploymentWorkflow,
+    "- name: Create staging deployment evidence",
+    "- name: Clear staging credentials"
+  );
+  const productionEvidence = section(
+    deploymentWorkflow,
+    "- name: Emit promotion evidence",
+    "- name: Clear production credentials"
+  );
+  const liveEvidence = section(
+    liveProofWorkflow,
+    "- name: Prepare digest-bound proof evidence",
+    "- name: Revalidate exact control plane immediately before proof attestation"
+  );
+  for (const evidence of [stagingEvidence, productionEvidence, liveEvidence]) {
+    assert.doesNotMatch(evidence, /DATAHUB_GMS_URL|DATAHUB_GMS_TOKEN/u);
+    assert.match(evidence, /sha256sum --check --strict/u);
+  }
+  assert.match(
+    deploymentWorkflow,
+    /attestations\/staging-deployment\/v1/u
+  );
+  assert.match(
+    deploymentWorkflow,
+    /attestations\/production-deployment\/v1/u
+  );
+  assert.match(
+    liveProofWorkflow,
+    /attestations\/live-datahub-proof\/v4/u
+  );
+  assert.equal(
+    deploymentWorkflow.match(
+      /\.verificationResult\.statement\.predicate ==\s+\$expectedPredicate\[0\]/gu
+    )?.length,
+    2
+  );
+  assert.equal(
+    liveProofWorkflow.match(
+      /\.verificationResult\.statement\.predicate ==\s+\$expectedPredicate\[0\]/gu
+    )?.length,
+    2
+  );
+  for (const source of [deploymentWorkflow, liveProofWorkflow]) {
+    assert.match(source, /--format json >"\$\{verification\}"/u);
+    assert.match(
+      source,
+      /\.digest\.sha256 == \$subjectSha256/u
+    );
+  }
+  assert.match(
+    liveProofWorkflow,
+    /datahub-demo-state-binding\.json/u
+  );
+  assert.match(
+    liveProofWorkflow,
+    /sealed-datahub-demo-receipt\/receipt\.json/u
+  );
+  const bindingProjection = section(
+    driver,
+    "    binding = {",
+    "    write_exclusive("
+  );
+  assert.doesNotMatch(
+    bindingProjection,
+    /"gms(?:Url|URL)"|"token":|"DATAHUB_GMS_TOKEN":/u
   );
 });

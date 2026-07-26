@@ -80,6 +80,13 @@ jobs:
             echo "::error::query must be trimmed, 1-256 characters, and non-wildcard"
             exit 1
           }
+          contract_query="$(
+            jq -er '.binding.query' contracts/datahub-demo-state-v1.json
+          )"
+          test "${ARCHON_DEMO_QUERY}" = "${contract_query}" || {
+            echo "::error::query must equal the exact reviewed demo-state target"
+            exit 1
+          }
           test "${GITHUB_SHA}" = "${RELEASE_SHA}" || {
             echo "::error::the deployed release must equal this workflow's exact dispatch SHA"
             exit 1
@@ -281,9 +288,21 @@ jobs:
               ) end
             ' <<<"${artifacts}")"
           query_sha="$(
+            printf '%s' "${ARCHON_DEMO_QUERY}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          proof_query_sha="$(
             printf '%s' "$(
               jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query: $query}'
             )" | sha256sum | awk '{print $1}'
+          )"
+          query_binding_sha="$(
+            jq -cnS \
+              --arg query "${ARCHON_DEMO_QUERY}" \
+              '{query: $query, targetUrn: $query}' |
+              sha256sum |
+              awk '{print $1}'
           )"
 
           {
@@ -292,6 +311,8 @@ jobs:
             echo "artifact_digest=$(jq -er '.digest' <<<"${artifact}")"
             echo "deployment_attempt=${deployment_attempt}"
             echo "query_sha=${query_sha}"
+            echo "proof_query_sha=${proof_query_sha}"
+            echo "query_binding_sha=${query_binding_sha}"
             echo "control_plane_gates=${control_plane_gates}"
           } >>"${GITHUB_OUTPUT}"
 
@@ -314,9 +335,21 @@ jobs:
           DEPLOYMENT_ARTIFACT_NAME: ${{ steps.gate.outputs.artifact_name }}
           DEPLOYMENT_ARTIFACT_DIGEST: ${{ steps.gate.outputs.artifact_digest }}
           QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
         shell: bash
         run: |
           set -euo pipefail
+          root_inventory="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -mindepth 1 -maxdepth 1 -type f -name SHA256SUMS -print
+          )"
+          test -n "${root_inventory}"
+          test "$(wc -l <<<"${root_inventory}")" = "1"
+          test ! -L "${root_inventory}"
+          (
+            cd "$(dirname "${root_inventory}")"
+            sha256sum --check --strict SHA256SUMS
+          )
           deployment_evidence="$(
             find "${RUNNER_TEMP}/selected-deployment-evidence" \
               -type f -name deployment-evidence.json -print
@@ -376,6 +409,7 @@ jobs:
             --arg release "${RELEASE_SHA}" \
             --arg controlPlane "${GITHUB_SHA}" \
             --arg querySha "${QUERY_SHA}" \
+            --arg queryBindingSha "${QUERY_BINDING_SHA}" \
             --arg deploymentUrl "${expected_deployment_url}" '
               .schemaVersion == 1 and
               .promotionPolicy == "build-once-promote-same-artifacts" and
@@ -389,6 +423,35 @@ jobs:
               .production.result == "passed" and
               .staging.demoQuerySha256 == $querySha and
               .production.demoQuerySha256 == $querySha and
+              .dataHubDemoState.querySha256 == $querySha and
+              .dataHubDemoState.queryBindingSha256 ==
+                $queryBindingSha and
+              .dataHubDemoState.workflow.path ==
+                ".github/workflows/datahub-demo-state.yml" and
+              (.dataHubDemoState.workflow.runId |
+                type == "number" and . > 0) and
+              (.dataHubDemoState.workflow.runAttempt |
+                type == "number" and . > 0) and
+              (.dataHubDemoState.artifact.id |
+                type == "number" and . > 0) and
+              (.dataHubDemoState.artifact.name |
+                test("^datahub-demo-receipt-[1-9][0-9]*-[1-9][0-9]*$")) and
+              (.dataHubDemoState.artifact.digest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              (.dataHubDemoState.receiptSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.dataHubDemoState.gmsEndpointFingerprint |
+                test("^[0-9a-f]{64}$")) and
+              (.dataHubDemoState.semanticContractSha256 |
+                test("^[0-9a-f]{64}$")) and
+              .dataHubDemoState.semantics == {
+                danglingUpstreamAbsent: true,
+                g6ClassificationAbsent: true,
+                sensitiveFieldPath: "email",
+                stableSourceCount: 2
+              } and
+              .staging.deployedSemanticProofSha256 ==
+                .production.deployedSemanticProofSha256 and
               (.pipelineSecurity.deploymentControlPlaneGatesSha256 |
                 test("^[0-9a-f]{64}$")) and
               (.pipelineSecurity.stagingAttestationVerificationSha256 |
@@ -399,6 +462,197 @@ jobs:
               echo "::error::deployment evidence is not bound to this release and query"
               exit 1
             }
+          demo_binding="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -type f -name datahub-demo-state-binding.json -print
+          )"
+          test -n "${demo_binding}"
+          test "$(wc -l <<<"${demo_binding}")" = "1"
+          test -f "${demo_binding}"
+          test ! -L "${demo_binding}"
+          sealed_receipt_dir="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -type d -name sealed-datahub-demo-receipt -print
+          )"
+          test -n "${sealed_receipt_dir}"
+          test "$(wc -l <<<"${sealed_receipt_dir}")" = "1"
+          test ! -L "${sealed_receipt_dir}"
+          demo_run_id="$(jq -er '.workflow.runId' "${demo_binding}")"
+          demo_run_attempt="$(jq -er '.workflow.runAttempt' "${demo_binding}")"
+          demo_artifact_id="$(jq -er '.artifact.id' "${demo_binding}")"
+          demo_artifact_name="$(jq -er '.artifact.name' "${demo_binding}")"
+          demo_artifact_digest="$(jq -er '.artifact.digest' "${demo_binding}")"
+          demo_receipt_sha="$(jq -er '.receiptSha256' "${demo_binding}")"
+          demo_run="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${demo_run_id}/attempts/${demo_run_attempt}")"
+          jq --exit-status \
+            --argjson runId "${demo_run_id}" \
+            --argjson runAttempt "${demo_run_attempt}" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path == ".github/workflows/datahub-demo-state.yml" and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${demo_run}" >/dev/null
+          demo_artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${demo_artifact_id}")"
+          jq --exit-status \
+            --argjson id "${demo_artifact_id}" \
+            --argjson runId "${demo_run_id}" \
+            --arg name "${demo_artifact_name}" \
+            --arg digest "${demo_artifact_digest}" '
+              .id == $id and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${demo_artifact}" >/dev/null
+          verified_demo_binding="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/live-datahub-proof/verified-demo-state-binding.json"
+          )"
+          python3 scripts/datahub-demo-state.py verify-receipt \
+            --contract contracts/datahub-demo-state-v1.json \
+            --receipt-dir "${sealed_receipt_dir}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --workflow-run-id "${demo_run_id}" \
+            --workflow-run-attempt "${demo_run_attempt}" \
+            --artifact-id "${demo_artifact_id}" \
+            --artifact-name "${demo_artifact_name}" \
+            --artifact-digest "${demo_artifact_digest}" \
+            --expected-receipt-sha256 "${demo_receipt_sha}" \
+            --output "${verified_demo_binding}" >/dev/null
+          cmp --silent "${verified_demo_binding}" "${demo_binding}" || {
+            echo "::error::deployment evidence altered the sealed demo-state binding"
+            exit 1
+          }
+          test "$(jq -er '.attestation.predicateType' "${demo_binding}")" = \
+            "https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1"
+          demo_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-demo-state.yml"
+          demo_predicate="$(
+            jq -er '.attestation.predicateType' "${demo_binding}"
+          )"
+          demo_predicate_path="${sealed_receipt_dir}/plan.json"
+          test "$(sha256sum "${demo_predicate_path}" | awk '{print $1}')" = "$(
+            jq -er '.attestation.predicateSha256' "${demo_binding}"
+          )"
+          verification_dir="${RUNNER_TEMP}/live-proof-attestation-verifications"
+          mkdir --mode=0700 "${verification_dir}"
+          verify_demo_attestation() {
+            local subject="$1"
+            local verification="$2"
+            local subject_sha256
+            subject_sha256="$(sha256sum "${subject}" | awk '{print $1}')"
+            gh attestation verify "${subject}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${demo_signer}" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref refs/heads/master \
+              --predicate-type "${demo_predicate}" \
+              --deny-self-hosted-runners \
+              --format json >"${verification}"
+            test -s "${verification}"
+            jq --exit-status \
+              --arg predicateType "${demo_predicate}" \
+              --arg subjectSha256 "${subject_sha256}" \
+              --slurpfile expectedPredicate "${demo_predicate_path}" '
+                [
+                  .[] |
+                  select(
+                    .verificationResult.statement.predicateType ==
+                      $predicateType and
+                    .verificationResult.statement.predicate ==
+                      $expectedPredicate[0] and
+                    any(
+                      .verificationResult.statement.subject[];
+                      .digest.sha256 == $subjectSha256
+                    )
+                  )
+                ] |
+                length == 1
+              ' "${verification}" >/dev/null || {
+                echo "::error::verified demo-state attestation does not bind the exact local plan and subject"
+                exit 1
+              }
+          }
+          verify_demo_attestation \
+            "${sealed_receipt_dir}/SHA256SUMS" \
+            "${verification_dir}/demo-SHA256SUMS.json"
+          verify_demo_attestation \
+            "${sealed_receipt_dir}/receipt.json" \
+            "${verification_dir}/demo-receipt.json"
+          deploy_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml"
+          deployment_verification="${verification_dir}/production-deployment.json"
+          gh attestation verify "${deployment_evidence}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${deploy_signer}" \
+            --signer-digest "${GITHUB_SHA}" \
+            --source-digest "${GITHUB_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type \
+              "https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1" \
+            --deny-self-hosted-runners \
+            --format json >"${deployment_verification}"
+          test -s "${deployment_verification}"
+          deployment_evidence_sha="$(
+            sha256sum "${deployment_evidence}" | awk '{print $1}'
+          )"
+          jq --exit-status \
+            --arg predicateType \
+              "https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1" \
+            --arg subjectSha256 "${deployment_evidence_sha}" \
+            --slurpfile expectedPredicate "${deployment_evidence}" '
+              [
+                .[] |
+                select(
+                  .verificationResult.statement.predicateType ==
+                    $predicateType and
+                  .verificationResult.statement.predicate ==
+                    $expectedPredicate[0] and
+                  any(
+                    .verificationResult.statement.subject[];
+                    .digest.sha256 == $subjectSha256
+                  )
+                )
+              ] |
+              length == 1
+            ' "${deployment_verification}" >/dev/null || {
+              echo "::error::verified production attestation does not bind the exact deployment evidence"
+              exit 1
+            }
+          rm -- \
+            "${verification_dir}/demo-SHA256SUMS.json" \
+            "${verification_dir}/demo-receipt.json" \
+            "${verification_dir}/production-deployment.json"
+          rmdir -- "${verification_dir}"
+          deployed_semantic_proof="$(
+            find "${RUNNER_TEMP}/selected-deployment-evidence" \
+              -type f \
+              -name production-deployed-datahub-semantic-proof.json \
+              -print
+          )"
+          test -n "${deployed_semantic_proof}"
+          test "$(wc -l <<<"${deployed_semantic_proof}")" = "1"
+          test -f "${deployed_semantic_proof}"
+          test ! -L "${deployed_semantic_proof}"
+          expected_semantic_proof_sha="$(
+            jq -er '.production.deployedSemanticProofSha256' \
+              "${deployment_evidence}"
+          )"
+          test "$(sha256sum "${deployed_semantic_proof}" | awk '{print $1}')" = \
+            "${expected_semantic_proof_sha}"
           production_attestation="$(
             find "${RUNNER_TEMP}/selected-deployment-evidence" \
               -type f -name production-attestation-verification.json -print
@@ -445,9 +699,6 @@ jobs:
               exit 1
             }
 
-          deployment_evidence_sha="$(
-            sha256sum "${deployment_evidence}" | awk '{print $1}'
-          )"
           binding="${RUNNER_TEMP}/live-datahub-proof/deployment-binding.json"
           jq -cnS \
             --arg releaseSha "${RELEASE_SHA}" \
@@ -462,9 +713,13 @@ jobs:
             --arg artifactName "${DEPLOYMENT_ARTIFACT_NAME}" \
             --arg artifactDigest "${DEPLOYMENT_ARTIFACT_DIGEST}" \
             --arg evidenceSha256 "${deployment_evidence_sha}" \
-            --arg querySha256 "${QUERY_SHA}" '
+            --arg querySha256 "${QUERY_SHA}" \
+            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" \
+            --arg deployedSemanticProofSha256 \
+              "${expected_semantic_proof_sha}" \
+            --slurpfile demoState "${demo_binding}" '
               {
-                schemaVersion: "archon.live-proof-deployment-binding/v1",
+                schemaVersion: "archon.live-proof-deployment-binding/v2",
                 releaseSha: $releaseSha,
                 releaseCiRunId: $releaseCiRunId,
                 releaseMcpDependencyEvidence: {
@@ -483,10 +738,21 @@ jobs:
                   digest: $artifactDigest,
                   deploymentEvidenceSha256: $evidenceSha256
                 },
-                querySha256: $querySha256
+                querySha256: $querySha256,
+                queryBindingSha256: $queryBindingSha256,
+                deployedSemanticProofSha256:
+                  $deployedSemanticProofSha256,
+                dataHubDemoState: $demoState[0]
               }
             ' >"${binding}"
-          echo "binding=${binding}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "binding=${binding}"
+            echo "deployment_evidence=${deployment_evidence}"
+            echo "production_application_url=$(jq -er '.production.applicationUrl' "${deployment_evidence}")"
+            echo "demo_binding=${demo_binding}"
+            echo "demo_receipt_dir=${sealed_receipt_dir}"
+            echo "deployed_semantic_proof_sha=${expected_semantic_proof_sha}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Install locked application dependencies
         run: npm ci --ignore-scripts
@@ -552,8 +818,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          OUTPUT_PATH="${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" \
+          exact_gates="${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
+          OUTPUT_PATH="${exact_gates}" \
             bash scripts/verify-github-control-plane.sh
+          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
+            "${EXPECTED_GATE_SHA256}" || {
+            echo "::error::The pre-secret control-plane receipt changed"
+            exit 1
+          }
 
       - name: Prove one-dataset MCP, retention, provenance, and contradiction path
         env:
@@ -570,7 +842,9 @@ jobs:
           DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED: "true"
           SAVE_DOCUMENT_TOOL_ENABLED: "false"
           SEMANTIC_SEARCH_ENABLED: "false"
-          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+          PROOF_QUERY_SHA: ${{ steps.gate.outputs.proof_query_sha }}
+          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
+          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
         shell: bash
         run: |
           set -euo pipefail
@@ -582,25 +856,289 @@ jobs:
             echo "::error::DATAHUB_GMS_TOKEN is required"
             exit 1
           }
+          expected_endpoint_fingerprint="$(
+            jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
+          )"
+          endpoint_binding="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/live-datahub-proof/endpoint-binding.json"
+          )"
+          python3 scripts/datahub-demo-state.py validate-config \
+            --expected-fingerprint "${expected_endpoint_fingerprint}" \
+            >"${endpoint_binding}"
+          jq --exit-status \
+            --arg fingerprint "${expected_endpoint_fingerprint}" '
+              .schemaVersion == "archon.datahub-demo-config/v1" and
+              .gmsEndpointFingerprint == $fingerprint and
+              (keys | sort) ==
+                ["gmsEndpointFingerprint", "schemaVersion"]
+            ' "${endpoint_binding}" >/dev/null
           raw="${RUNNER_TEMP}/live-datahub-proof/proof.raw.json"
           npm run --silent verify:live >"${raw}"
           jq --exit-status \
-            --arg querySha "${QUERY_SHA}" '
+            --arg querySha "${PROOF_QUERY_SHA}" \
+            --arg datasetUrnSha "$(
+              jq -er '.targetUrnSha256' "${DEMO_STATE_BINDING}"
+            )" '
               .schemaVersion == "archon.live-datahub-proof/v1" and
               .ok == true and
               .result == "retained-history-contradiction-proven" and
               .querySha256 == $querySha and
-              (.datasetUrnSha256 | test("^[0-9a-f]{64}$")) and
+              .datasetUrnSha256 == $datasetUrnSha and
               .datasetsDiscovered == 1 and
               .aspectHistories > 0 and
-              .retainedHistories > 0 and
-              .stableSourceCount >= 2 and
-              .recoveredContradictions > 0 and
-              .contradictionAttributeCount > 0
+              .retainedHistories == 1 and
+              .stableSourceCount == 2 and
+              .recoveredContradictions == 1 and
+              .contradictionAttributeCount == 1
             ' "${raw}" >/dev/null
-          jq -cS . "${raw}" \
+          jq -cS \
+            --arg receiptSha256 "$(
+              jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg stateContractSha256 "$(
+              jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg postStateSha256 "$(
+              jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg endpointFingerprint "${expected_endpoint_fingerprint}" \
+            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" '
+              .schemaVersion = "archon.live-datahub-proof/v2" |
+              .demoState = {
+                receiptSha256: $receiptSha256,
+                stateContractSha256: $stateContractSha256,
+                postStateSha256: $postStateSha256,
+                gmsEndpointFingerprint: $endpointFingerprint,
+                queryBindingSha256: $queryBindingSha256
+              }
+            ' "${raw}" \
             >"${RUNNER_TEMP}/live-datahub-proof/proof.json"
           rm "${raw}"
+
+      - name: Reprove deployed G6, dangling blast radius, and retained history
+        id: deployed_semantics
+        env:
+          APPLICATION_URL: ${{ steps.deployment.outputs.production_application_url }}
+          ARCHON_DEMO_QUERY: ${{ inputs.query }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
+          EXPECTED_SEMANTIC_PROOF_SHA: ${{ steps.deployment.outputs.deployed_semantic_proof_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_SEMANTIC_PROOF_SHA}" =~ ^[0-9a-f]{64}$ ]]
+          target_urn="$(jq -er '.binding.targetUrn' contracts/datahub-demo-state-v1.json)"
+          dangling_urn="$(
+            jq -er '.binding.danglingUpstreamUrn' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          sensitive_field="$(
+            jq -er '.binding.sensitiveFieldPath' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          expected_history="$(
+            jq -cS '.state.ownershipHistory' \
+              contracts/datahub-demo-state-v1.json
+          )"
+          test "${ARCHON_DEMO_QUERY}" = "${target_urn}"
+          response="${RUNNER_TEMP}/live-datahub-proof/deployed-audit-response.json"
+          payload="$(jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query: $query}')"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.3 \
+            --connect-timeout 10 --max-time 35 \
+            --request POST \
+            --header 'content-type: application/json' \
+            --data "${payload}" \
+            --output "${response}" \
+            "${APPLICATION_URL}/api/audits"
+          jq -ce '.report' "${response}" |
+            jq -e -f scripts/validate-audit-report.jq >/dev/null
+          jq --exit-status \
+            --arg release "${RELEASE_SHA}" \
+            --arg target "${target_urn}" \
+            --arg dangling "${dangling_urn}" \
+            --arg field "${sensitive_field}" \
+            --argjson history "${expected_history}" '
+              .releaseSha == $release and
+              (
+              .report as $report |
+              [
+                $report.findings[] |
+                select(
+                  .type == "governance_violation" and
+                  .detail.ruleId == "G6"
+                )
+              ] as $g6 |
+              [
+                $report.findings[] |
+                select(.type == "lineage_gap")
+              ] as $gaps |
+              [
+                $report.findings[] |
+                select(.type == "contradiction")
+              ] as $retained |
+              $retained[0].detail.provenance as $provenance |
+              $report.classification.totalEntities == 1 and
+              $report.classification.withLineage == 1 and
+              $report.classification.sensitiveEntities == 1 and
+              ($report.findings | length) == 3 and
+              ($g6 | length) == 1 and
+              $g6[0].severity == "high" and
+              $g6[0].subject == $target and
+              $g6[0].detail.unclassifiedFields == [$field] and
+              $g6[0].detail.blastRadius.rootUrn == $target and
+              $g6[0].detail.blastRadius.maxHops == 3 and
+              $g6[0].detail.blastRadius.downstream == [] and
+              $g6[0].detail.blastRadius.truncated == false and
+              $g6[0].detail.blastRadius.impact == "none" and
+              ($gaps | length) == 1 and
+              $gaps[0].severity == "medium" and
+              $gaps[0].subject == $dangling and
+              $gaps[0].detail.blastRadius.rootUrn == $dangling and
+              $gaps[0].detail.blastRadius.maxHops == 3 and
+              $gaps[0].detail.blastRadius.downstream == [
+                {urn: $target, minHops: 1}
+              ] and
+              $gaps[0].detail.blastRadius.truncated == false and
+              $gaps[0].detail.blastRadius.impact == "low" and
+              ($retained | length) == 1 and
+              $retained[0].severity == "medium" and
+              $retained[0].subject == $target and
+              $retained[0].detail.attribute == "owner" and
+              ($provenance | length) == 2 and
+              ([$provenance[].source] | sort) ==
+                ([$history[].pipelineName] | sort) and
+              ([$provenance[].status] | sort) ==
+                ["conflicting", "trusted"] and
+              ([
+                $history[] as $expected |
+                any(
+                  $provenance[];
+                  .source == $expected.pipelineName and
+                  (.runId | endswith(":" + $expected.runId)) and
+                  (.observedAt | sub("\\.000Z$"; "Z")) ==
+                    (($expected.lastObserved / 1000) | todateiso8601)
+                )
+              ] | all)
+              )
+            ' "${response}" >/dev/null || {
+              echo "::error::current production API lost exact demo-state semantics"
+              exit 1
+            }
+          proof="${RUNNER_TEMP}/live-datahub-proof/current-deployed-semantic-proof.json"
+          jq -cS \
+            --arg receiptSha256 "$(
+              jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg stateContractSha256 "$(
+              jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg postStateSha256 "$(
+              jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg semanticContractSha256 "$(
+              jq -er '.semanticContractSha256' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg endpointFingerprint "$(
+              jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
+            )" \
+            --arg target "${target_urn}" \
+            --arg dangling "${dangling_urn}" \
+            --arg retainedHistorySha256 "$(
+              jq -er '.retainedOwnershipHistorySha256' "${DEMO_STATE_BINDING}"
+            )" '
+              [
+                .report.findings[] |
+                select(
+                  .type == "governance_violation" and
+                  .detail.ruleId == "G6"
+                )
+              ][0] as $g6 |
+              [
+                .report.findings[] |
+                select(.type == "lineage_gap")
+              ][0] as $gap |
+              [
+                .report.findings[] |
+                select(.type == "contradiction")
+              ][0] as $retained |
+              {
+                schemaVersion: "archon.deployed-datahub-semantic-proof/v1",
+                demoState: {
+                  receiptSha256: $receiptSha256,
+                  stateContractSha256: $stateContractSha256,
+                  postStateSha256: $postStateSha256,
+                  semanticContractSha256: $semanticContractSha256,
+                  gmsEndpointFingerprint: $endpointFingerprint
+                },
+                classification: {
+                  totalEntities: .report.classification.totalEntities,
+                  withLineage: .report.classification.withLineage,
+                  sensitiveEntities:
+                    .report.classification.sensitiveEntities
+                },
+                findings: {
+                  totalCount: (.report.findings | length),
+                  g6: {
+                    exactTarget: ($g6.subject == $target),
+                    fieldPath: $g6.detail.unclassifiedFields[0],
+                    classificationAbsent: true,
+                    blastRootBound: (
+                      $g6.detail.blastRadius.rootUrn == $target
+                    ),
+                    downstreamCount:
+                      ($g6.detail.blastRadius.downstream | length),
+                    maxHops: $g6.detail.blastRadius.maxHops,
+                    truncated: $g6.detail.blastRadius.truncated,
+                    impact: $g6.detail.blastRadius.impact
+                  },
+                  danglingLineage: {
+                    exactUpstream: ($gap.subject == $dangling),
+                    upstreamAbsent: true,
+                    blastRootBound: (
+                      $gap.detail.blastRadius.rootUrn == $dangling
+                    ),
+                    targetConsumerMinHops: (
+                      [
+                        $gap.detail.blastRadius.downstream[] |
+                        select(.urn == $target)
+                      ][0].minHops
+                    ),
+                    downstreamCount:
+                      ($gap.detail.blastRadius.downstream | length),
+                    maxHops: $gap.detail.blastRadius.maxHops,
+                    truncated: $gap.detail.blastRadius.truncated,
+                    impact: $gap.detail.blastRadius.impact
+                  },
+                  retainedHistory: {
+                    exactTarget: ($retained.subject == $target),
+                    attribute: $retained.detail.attribute,
+                    provenanceCount:
+                      ($retained.detail.provenance | length),
+                    stableSourceCount: (
+                      [$retained.detail.provenance[].source] |
+                      unique |
+                      length
+                    ),
+                    statuses:
+                      ([$retained.detail.provenance[].status] | sort),
+                    retainedOwnershipHistorySha256:
+                      $retainedHistorySha256
+                  }
+                }
+              }
+            ' "${response}" >"${proof}"
+          rm "${response}"
+          proof_sha="$(sha256sum "${proof}" | awk '{print $1}')"
+          test "${proof_sha}" = "${EXPECTED_SEMANTIC_PROOF_SHA}" || {
+            echo "::error::current production semantics differ from the promoted proof"
+            exit 1
+          }
+          {
+            echo "proof=${proof}"
+            echo "proof_sha=${proof_sha}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Revalidate and bind the exact control plane after live proof
         env:
@@ -658,8 +1196,13 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
           QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
+          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
           CONTROL_PLANE_GATES: ${{ steps.gate.outputs.control_plane_gates }}
           DEPLOYMENT_BINDING: ${{ steps.deployment.outputs.binding }}
+          DEPLOYMENT_EVIDENCE: ${{ steps.deployment.outputs.deployment_evidence }}
+          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
+          DEMO_RECEIPT_DIR: ${{ steps.deployment.outputs.demo_receipt_dir }}
+          DEPLOYED_SEMANTIC_PROOF: ${{ steps.deployed_semantics.outputs.proof }}
           MCP_PROJECT: ${{ steps.mcp.outputs.project }}
         shell: bash
         run: |
@@ -675,6 +1218,30 @@ jobs:
             "${evidence_dir}/control-plane-security-gates.json"
           cp "${DEPLOYMENT_BINDING}" \
             "${evidence_dir}/deployment-binding.json"
+          cp "${DEPLOYMENT_EVIDENCE}" \
+            "${evidence_dir}/deployment-evidence.json"
+          cp "${DEMO_STATE_BINDING}" \
+            "${evidence_dir}/datahub-demo-state-binding.json"
+          cp "${RUNNER_TEMP}/live-datahub-proof/endpoint-binding.json" \
+            "${evidence_dir}/datahub-endpoint-binding.json"
+          cp "${DEPLOYED_SEMANTIC_PROOF}" \
+            "${evidence_dir}/deployed-datahub-semantic-proof.json"
+          sealed_receipt="${evidence_dir}/sealed-datahub-demo-receipt"
+          mkdir -p "${sealed_receipt}"
+          for subject in \
+            SHA256SUMS \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            cp "${DEMO_RECEIPT_DIR}/${subject}" \
+              "${sealed_receipt}/${subject}"
+          done
+          (
+            cd "${sealed_receipt}"
+            sha256sum --check --strict SHA256SUMS
+          )
           cp .github/locks/datahub-mcp-v0.6.0.json \
             "${evidence_dir}/mcp-lock-contract.json"
           cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
@@ -700,7 +1267,11 @@ jobs:
           for artifact in \
             control-plane-gates.json \
             control-plane-security-gates.json \
+            datahub-demo-state-binding.json \
+            datahub-endpoint-binding.json \
+            deployed-datahub-semantic-proof.json \
             deployment-binding.json \
+            deployment-evidence.json \
             mcp-lock-contract.json \
             mcp-openvex.json \
             mcp-pypi-provenance.json \
@@ -721,7 +1292,11 @@ jobs:
             sha256sum \
               control-plane-gates.json \
               control-plane-security-gates.json \
+              datahub-demo-state-binding.json \
+              datahub-endpoint-binding.json \
+              deployed-datahub-semantic-proof.json \
               deployment-binding.json \
+              deployment-evidence.json \
               mcp-lock-contract.json \
               mcp-openvex.json \
               mcp-pypi-provenance.json \
@@ -733,8 +1308,14 @@ jobs:
               mcp-upstream-pyproject.toml \
               mcp-upstream-uv.lock \
               mcp-wheel-only-graph.json \
+              sealed-datahub-demo-receipt/SHA256SUMS \
+              sealed-datahub-demo-receipt/approval-receipt.json \
+              sealed-datahub-demo-receipt/baseline-manifest.json \
+              sealed-datahub-demo-receipt/control-plane.json \
+              sealed-datahub-demo-receipt/plan.json \
+              sealed-datahub-demo-receipt/receipt.json \
               proof.json >proof-subject.sha256
-            sha256sum --check proof-subject.sha256
+            sha256sum --check --strict proof-subject.sha256
           )
           proof_sha="$(
             sha256sum "${evidence_dir}/proof.json" | awk '{print $1}'
@@ -742,6 +1323,35 @@ jobs:
           binding_sha="$(
             sha256sum "${evidence_dir}/deployment-binding.json" |
               awk '{print $1}'
+          )"
+          deployment_evidence_sha="$(
+            sha256sum "${evidence_dir}/deployment-evidence.json" |
+              awk '{print $1}'
+          )"
+          demo_state_binding_sha="$(
+            sha256sum "${evidence_dir}/datahub-demo-state-binding.json" |
+              awk '{print $1}'
+          )"
+          endpoint_binding_sha="$(
+            sha256sum "${evidence_dir}/datahub-endpoint-binding.json" |
+              awk '{print $1}'
+          )"
+          deployed_semantic_proof_sha="$(
+            sha256sum "${evidence_dir}/deployed-datahub-semantic-proof.json" |
+              awk '{print $1}'
+          )"
+          demo_receipt_sha="$(
+            sha256sum \
+              "${evidence_dir}/sealed-datahub-demo-receipt/receipt.json" |
+              awk '{print $1}'
+          )"
+          test "${deployed_semantic_proof_sha}" = "$(
+            jq -er '.deployedSemanticProofSha256' \
+              "${evidence_dir}/deployment-binding.json"
+          )"
+          test "${demo_receipt_sha}" = "$(
+            jq -er '.receiptSha256' \
+              "${evidence_dir}/datahub-demo-state-binding.json"
           )"
           gates_sha="$(
             sha256sum "${evidence_dir}/control-plane-gates.json" |
@@ -931,8 +1541,15 @@ jobs:
             --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
             --arg provenAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             --arg querySha256 "${QUERY_SHA}" \
+            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" \
             --arg proofSha256 "${proof_sha}" \
             --arg deploymentBindingSha256 "${binding_sha}" \
+            --arg deploymentEvidenceSha256 "${deployment_evidence_sha}" \
+            --arg demoStateBindingSha256 "${demo_state_binding_sha}" \
+            --arg endpointBindingSha256 "${endpoint_binding_sha}" \
+            --arg deployedSemanticProofSha256 \
+              "${deployed_semantic_proof_sha}" \
+            --arg demoReceiptSha256 "${demo_receipt_sha}" \
             --arg controlPlaneGatesSha256 "${gates_sha}" \
             --arg controlPlaneSecurityGatesSha256 "${exact_gates_sha}" \
             --arg mcpLockContractSha256 "${lock_sha}" \
@@ -944,9 +1561,11 @@ jobs:
             --arg mcpPypiProvenanceSha256 "${pypi_provenance_sha}" \
             --arg mcpOpenVexSha256 "${openvex_sha}" \
             --arg mcpRuntimeSmokeSha256 "${runtime_smoke_sha}" \
-            --slurpfile proof "${evidence_dir}/proof.json" '
+            --slurpfile proof "${evidence_dir}/proof.json" \
+            --slurpfile demoState \
+              "${evidence_dir}/datahub-demo-state-binding.json" '
               {
-                schemaVersion: "archon.live-datahub-proof-attestation/v3",
+                schemaVersion: "archon.live-datahub-proof-attestation/v4",
                 repository: $repository,
                 workflow: {
                   runId: $workflowRunId,
@@ -956,9 +1575,33 @@ jobs:
                 deploymentRunId: $deploymentRunId,
                 provenAt: $provenAt,
                 querySha256: $querySha256,
+                queryBindingSha256: $queryBindingSha256,
+                dataHubDemoState: {
+                  workflow: $demoState[0].workflow,
+                  artifact: $demoState[0].artifact,
+                  attestation: $demoState[0].attestation,
+                  receiptSha256: $demoState[0].receiptSha256,
+                  gmsEndpointFingerprint:
+                    $demoState[0].gmsEndpointFingerprint,
+                  stateContractSha256:
+                    $demoState[0].stateContractSha256,
+                  postStateSha256: $demoState[0].postStateSha256,
+                  semanticContractSha256:
+                    $demoState[0].semanticContractSha256
+                },
                 evidence: {
                   proofSha256: $proofSha256,
                   deploymentBindingSha256: $deploymentBindingSha256,
+                  deploymentEvidenceSha256:
+                    $deploymentEvidenceSha256,
+                  dataHubDemoStateBindingSha256:
+                    $demoStateBindingSha256,
+                  dataHubEndpointBindingSha256:
+                    $endpointBindingSha256,
+                  deployedDataHubSemanticProofSha256:
+                    $deployedSemanticProofSha256,
+                  dataHubDemoReceiptSha256:
+                    $demoReceiptSha256,
                   controlPlaneGatesSha256: $controlPlaneGatesSha256,
                   controlPlaneSecurityGatesSha256:
                     $controlPlaneSecurityGatesSha256,
@@ -982,6 +1625,10 @@ jobs:
             echo "checksums=${evidence_dir}/proof-subject.sha256"
             echo "predicate=${evidence_dir}/attestation-predicate.json"
             echo "proof_sha=${proof_sha}"
+            echo "demo_receipt_sha=${demo_receipt_sha}"
+            echo "semantic_proof_sha=${deployed_semantic_proof_sha}"
+            echo "endpoint_fingerprint=$(jq -er '.gmsEndpointFingerprint' \
+              "${evidence_dir}/datahub-demo-state-binding.json")"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Revalidate exact control plane immediately before proof attestation
@@ -1038,7 +1685,7 @@ jobs:
           )"
           (
             cd "${EVIDENCE_DIR}"
-            sha256sum --check proof-subject.sha256
+            sha256sum --check --strict proof-subject.sha256
           )
           mcp_contract_sha="$(
             sha256sum "${EVIDENCE_DIR}/mcp-lock-contract.json" |
@@ -1076,6 +1723,36 @@ jobs:
           mcp_runtime_smoke_sha="$(
             sha256sum "${EVIDENCE_DIR}/mcp-runtime-smoke.json" |
               awk '{print $1}'
+          )"
+          deployment_binding_sha="$(
+            sha256sum "${EVIDENCE_DIR}/deployment-binding.json" |
+              awk '{print $1}'
+          )"
+          deployment_evidence_sha="$(
+            sha256sum "${EVIDENCE_DIR}/deployment-evidence.json" |
+              awk '{print $1}'
+          )"
+          demo_state_binding_sha="$(
+            sha256sum "${EVIDENCE_DIR}/datahub-demo-state-binding.json" |
+              awk '{print $1}'
+          )"
+          endpoint_binding_sha="$(
+            sha256sum "${EVIDENCE_DIR}/datahub-endpoint-binding.json" |
+              awk '{print $1}'
+          )"
+          deployed_semantic_proof_sha="$(
+            sha256sum "${EVIDENCE_DIR}/deployed-datahub-semantic-proof.json" |
+              awk '{print $1}'
+          )"
+          demo_receipt_sha="$(
+            sha256sum \
+              "${EVIDENCE_DIR}/sealed-datahub-demo-receipt/receipt.json" |
+              awk '{print $1}'
+          )"
+          test "$(jq -er '.gmsEndpointFingerprint' \
+            "${EVIDENCE_DIR}/datahub-endpoint-binding.json")" = "$(
+            jq -er '.gmsEndpointFingerprint' \
+              "${EVIDENCE_DIR}/datahub-demo-state-binding.json"
           )"
           test "${mcp_upstream_lock_sha}" = "$(
             jq -er '.files["uv.lock"].sha256' \
@@ -1116,11 +1793,30 @@ jobs:
             --arg mcpOverlay "${mcp_overlay_sha}" \
             --arg mcpProvenance "${mcp_provenance_sha}" \
             --arg mcpOpenVex "${mcp_openvex_sha}" \
-            --arg mcpRuntimeSmoke "${mcp_runtime_smoke_sha}" '
+            --arg mcpRuntimeSmoke "${mcp_runtime_smoke_sha}" \
+            --arg deploymentBinding "${deployment_binding_sha}" \
+            --arg deploymentEvidence "${deployment_evidence_sha}" \
+            --arg demoStateBinding "${demo_state_binding_sha}" \
+            --arg endpointBinding "${endpoint_binding_sha}" \
+            --arg deployedSemanticProof \
+              "${deployed_semantic_proof_sha}" \
+            --arg demoReceipt "${demo_receipt_sha}" '
               .schemaVersion ==
-                "archon.live-datahub-proof-attestation/v3" and
+                "archon.live-datahub-proof-attestation/v4" and
               .evidence.controlPlaneSecurityGatesSha256 == $exact and
               .evidence.controlPlaneGatesSha256 == $enriched and
+              .evidence.deploymentBindingSha256 ==
+                $deploymentBinding and
+              .evidence.deploymentEvidenceSha256 ==
+                $deploymentEvidence and
+              .evidence.dataHubDemoStateBindingSha256 ==
+                $demoStateBinding and
+              .evidence.dataHubEndpointBindingSha256 ==
+                $endpointBinding and
+              .evidence.deployedDataHubSemanticProofSha256 ==
+                $deployedSemanticProof and
+              .evidence.dataHubDemoReceiptSha256 ==
+                $demoReceipt and
               .evidence.mcpLockContractSha256 == $mcpContract and
               .evidence.mcpUpstreamLockSha256 == $mcpUpstreamLock and
               .evidence.mcpResolvedLockSha256 == $mcpResolvedLock and
@@ -1139,7 +1835,7 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-checksums: ${{ steps.evidence.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v3
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4
           predicate-path: ${{ steps.evidence.outputs.predicate }}
 
       - name: Retain sanitized live proof evidence
@@ -1157,7 +1853,11 @@ jobs:
           DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
           QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
           PROOF_SHA: ${{ steps.evidence.outputs.proof_sha }}
+          PROOF_ARTIFACT_ID: ${{ steps.artifact.outputs['artifact-id'] }}
           PROOF_ARTIFACT_DIGEST: ${{ steps.artifact.outputs['artifact-digest'] }}
+          DEMO_RECEIPT_SHA: ${{ steps.evidence.outputs.demo_receipt_sha }}
+          SEMANTIC_PROOF_SHA: ${{ steps.evidence.outputs.semantic_proof_sha }}
+          ENDPOINT_FINGERPRINT: ${{ steps.evidence.outputs.endpoint_fingerprint }}
         shell: bash
         run: |
           {
@@ -1167,7 +1867,12 @@ jobs:
             echo "- Deployment run: \`${DEPLOYMENT_RUN_ID}\`"
             echo "- Sanitized query SHA-256: \`${QUERY_SHA}\`"
             echo "- Canonical proof SHA-256: \`${PROOF_SHA}\`"
-            echo "- Proof artifact digest: \`${PROOF_ARTIFACT_DIGEST}\`"
-            echo "- Scope: exactly one dataset"
-            echo "- Result: retained history contradiction proven"
+            echo "- Proof artifact ID: \`${PROOF_ARTIFACT_ID}\`"
+            echo "- Proof artifact digest: \`sha256:${PROOF_ARTIFACT_DIGEST}\`"
+            echo "- Demo-state receipt SHA-256: \`${DEMO_RECEIPT_SHA}\`"
+            echo "- DataHub endpoint fingerprint: \`${ENDPOINT_FINGERPRINT}\`"
+            echo "- Deployed semantic proof SHA-256: \`${SEMANTIC_PROOF_SHA}\`"
+            echo "- Evidence predicate: \`https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4\`"
+            echo "- Scope: exact dataset, G6 gap, dangling blast radius, and retained owner contradiction"
+            echo "- Result: direct and deployed semantics proven"
           } >>"${GITHUB_STEP_SUMMARY}"

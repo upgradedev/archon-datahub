@@ -173,6 +173,50 @@ the exact query above. The pipeline:
     cross-file/run/release/user/endpoint binding, and the fixed checksum closure, then
     attests all five JSON subjects plus `SHA256SUMS`.
 
+## Deployment handoff
+
+A successful seed/reset is a required deployment input, not an informal prerequisite.
+`Deploy immutable AWS release` requires all five values copied from the successful
+demo-state run:
+
+- `demo_state_run_id`;
+- `demo_state_run_attempt`;
+- `demo_state_artifact_id`;
+- `demo_state_artifact_digest` in `sha256:<64 lowercase hex>` form;
+- `demo_state_receipt_sha256`, the exact inner `receipt.json` SHA-256.
+
+The selected artifact name must be
+`datahub-demo-receipt-<run-id>-<run-attempt>`. Both staging and production independently
+fetch the exact GitHub run-attempt and artifact records, download by artifact ID, require
+the fixed six-file inventory, check its strict `SHA256SUMS`, validate canonical JSON and
+every cross-file release/approval/post-state binding, and verify the receipt attestation.
+The signer is `.github/workflows/datahub-demo-state.yml`; the predicate type is
+`https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1`.
+
+The sanitized `archon.datahub-demo-receipt-binding/v1` projection retains the repository,
+release, source workflow path/run/attempt, artifact name/ID/digest, signer and predicate
+type/digest, receipt/state-contract/post-state/query/semantic digests, and only the
+normalized GMS endpoint fingerprint. It never contains the DataHub URL or token.
+Staging and production each fingerprint their configured read GMS endpoint without a
+token and require equality with the seed receipt before smoke traffic.
+
+The deployed smoke is semantic, not a connectivity/count check. It requires exactly one
+dataset, one exact G6 `email` gap, one exact dangling-upstream finding whose bounded blast
+radius contains the target consumer at one hop, and one retained `owner` contradiction
+whose two stable sources and runs match the state contract. The same deterministic,
+URN-redacted semantic projection must be byte-identical in staging and production.
+
+The checksum-sealed artifacts are:
+
+- `staging-deployment-evidence-<release-sha>-<deployment-attempt>`, attested with
+  `https://github.com/upgradedev/archon-datahub/attestations/staging-deployment/v1`;
+- `deployment-evidence-<release-sha>-<deployment-attempt>`, attested with
+  `https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1`.
+
+Each retains the sanitized binding and an independently rechecked copy of the original
+sealed receipt. These exact names and predicates are the source contract for downstream
+submission-readiness aggregation.
+
 `seed` is idempotent: an already exact state produces an `unchanged` receipt without a
 DataHub write. A partial or modified state fails closed and instructs the operator to use
 reset.

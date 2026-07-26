@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -217,6 +218,135 @@ def make_approval_receipt(
     }
     write_canonical(path, receipt)
     return receipt
+
+
+def make_sealed_receipt_bundle(
+    directory: pathlib.Path,
+    *,
+    release_sha: str = "d" * 40,
+    run_id: str = "4242",
+    run_attempt: str = "1",
+) -> tuple[pathlib.Path, str]:
+    contract = copy.deepcopy(REVIEWED_CONTRACT)
+    contract_digest = DRIVER.digest_obj(contract)
+    source = directory / "source"
+    source.mkdir()
+    bundle = directory / "receipt"
+    bundle.mkdir()
+    baseline_path, baseline, baseline_digest = make_baseline_manifest(
+        source,
+        contract,
+        contract_digest,
+    )
+    exact = state_projection(
+        contract,
+        classification="exact",
+        digest="4" * 64,
+        target_present=True,
+        domain_present=True,
+    )
+    plan_path = source / "plan.json"
+    plan, plan_digest = make_plan(
+        plan_path,
+        contract,
+        contract_digest,
+        baseline,
+        baseline_digest,
+        exact,
+        exact_anchors(contract),
+        action="seed",
+        operation="noop",
+        mutation_required=False,
+        release_sha=release_sha,
+    )
+    approval_path = source / "approval-receipt.json"
+    approval = make_approval_receipt(
+        approval_path,
+        action="seed",
+        release_sha=release_sha,
+        plan_sha256=plan_digest,
+        run_id=run_id,
+        run_attempt=run_attempt,
+    )
+    control = {
+        "schemaVersion": "archon.datahub-demo-control-plane/v1",
+        "repository": "upgradedev/archon-datahub",
+        "releaseSha": release_sha,
+        "defaultBranch": "master",
+        "mutationEnvironment": {
+            "exactApprovalReceiptRequiredAtApply": True,
+            "individualUserReviewersOnly": True,
+            "name": "datahub-demo-seed",
+            "onlyDefaultBranch": True,
+            "preventSelfReview": True,
+            "requiredReviewers": True,
+        },
+        "officialBaseline": {
+            "repository": "datahub-project/static-assets",
+            "commit": contract["officialBaseline"]["commit"],
+            "tree": contract["officialBaseline"]["tree"],
+            "packTree": contract["officialBaseline"]["tree"],
+            "signatureVerified": True,
+        },
+        "successfulRuns": [
+            {"path": ".github/workflows/ci.yml"},
+            {"path": ".github/workflows/codeql.yml"},
+            {"path": ".github/workflows/workflow-security.yml"},
+        ],
+    }
+    receipt = {
+        "schemaVersion": "archon.datahub-demo-receipt/v1",
+        "repository": "upgradedev/archon-datahub",
+        "releaseSha": release_sha,
+        "gmsEndpointFingerprint": plan["gmsEndpointFingerprint"],
+        "workflowRunId": run_id,
+        "workflowRunAttempt": run_attempt,
+        "action": "seed",
+        "outcome": "unchanged",
+        "planSha256": plan_digest,
+        "approvalReceiptSha256": DRIVER.digest_obj(approval),
+        "approval": {
+            "environment": approval["environment"],
+            "state": "approved",
+            "user": approval["approval"]["user"],
+        },
+        "stateContractSha256": contract_digest,
+        "baselineManifestSha256": baseline_digest,
+        "baselineContentDigest": baseline["contentDigest"],
+        "baselineCommit": contract["officialBaseline"]["commit"],
+        "baselineAnchors": exact_anchors(contract),
+        "queryBinding": plan["queryBinding"],
+        "ownedUrns": contract["binding"]["ownedUrns"],
+        "resetDeletes": [],
+        "postStateSha256": exact["digest"],
+        "retainedOwnershipHistory": contract["state"]["ownershipHistory"],
+        "g6Gap": {
+            "fieldPath": contract["binding"]["sensitiveFieldPath"],
+            "classificationAbsent": True,
+        },
+        "danglingLineage": {
+            "upstreamUrn": contract["binding"]["danglingUpstreamUrn"],
+            "upstreamAbsent": True,
+        },
+        "baselineReloaded": False,
+        "baselineAnchorsAfterLoad": exact_anchors(contract),
+        "observedAt": "2026-07-26T12:00:00Z",
+    }
+    subjects = {
+        "approval-receipt.json": approval,
+        "baseline-manifest.json": json.loads(
+            baseline_path.read_text(encoding="utf-8")
+        ),
+        "control-plane.json": control,
+        "plan.json": plan,
+        "receipt.json": receipt,
+    }
+    lines: list[str] = []
+    for name in DRIVER.SEALED_RECEIPT_SUBJECTS:
+        write_canonical(bundle / name, subjects[name])
+        lines.append(f"{DRIVER.digest_obj(subjects[name])}  {name}\n")
+    (bundle / "SHA256SUMS").write_text("".join(lines), encoding="ascii")
+    return bundle, DRIVER.digest_obj(receipt)
 
 
 def make_executable(path: pathlib.Path) -> None:
@@ -504,6 +634,137 @@ class DemoStateDriverContracts(TestCase):
             DRIVER.command_validate_config(
                 SimpleNamespace(expected_fingerprint="0" * 64)
             )
+
+    def test_endpoint_fingerprint_command_needs_no_token_and_emits_no_url(
+        self,
+    ) -> None:
+        endpoint = "https://DATAHUB.EXAMPLE.TEST:443/api/gms/"
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"DATAHUB_GMS_URL": endpoint},
+                clear=True,
+            ),
+            mock.patch("builtins.print") as output,
+        ):
+            DRIVER.command_fingerprint_endpoint(SimpleNamespace())
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(
+            payload,
+            {
+                "gmsEndpointFingerprint": DRIVER.gms_endpoint_fingerprint(
+                    endpoint
+                ),
+                "schemaVersion": "archon.datahub-demo-endpoint-fingerprint/v1",
+            },
+        )
+        self.assertNotIn("DATAHUB_GMS_TOKEN", os.environ)
+        self.assertNotIn("datahub.example.test", output.call_args.args[0].lower())
+
+    def test_sealed_receipt_verifier_binds_exact_artifact_and_semantics(
+        self,
+    ) -> None:
+        release_sha = "d" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            bundle, receipt_sha = make_sealed_receipt_bundle(
+                directory,
+                release_sha=release_sha,
+            )
+            output = directory / "binding.json"
+            arguments = SimpleNamespace(
+                contract=str(CONTRACT_PATH),
+                receipt_dir=str(bundle),
+                repository="upgradedev/archon-datahub",
+                release_sha=release_sha,
+                workflow_run_id="4242",
+                workflow_run_attempt="1",
+                artifact_id="8181",
+                artifact_name="datahub-demo-receipt-4242-1",
+                artifact_digest=f"sha256:{'a' * 64}",
+                expected_receipt_sha256=receipt_sha,
+                output=str(output),
+            )
+            with mock.patch("builtins.print"):
+                DRIVER.command_verify_receipt(arguments)
+
+            binding = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                binding["schemaVersion"],
+                "archon.datahub-demo-receipt-binding/v1",
+            )
+            self.assertEqual(binding["receiptSha256"], receipt_sha)
+            self.assertEqual(binding["workflow"]["runId"], 4242)
+            self.assertEqual(binding["workflow"]["runAttempt"], 1)
+            self.assertEqual(binding["artifact"]["id"], 8181)
+            expected_predicate_type = (
+                "https://github.com/upgradedev/archon-datahub/attestations/"
+                "datahub-demo-state/v1"
+            )
+            expected_signer = (
+                "github.com/upgradedev/archon-datahub/.github/workflows/"
+                "datahub-demo-state.yml"
+            )
+            self.assertEqual(
+                binding["attestation"],
+                {
+                    "predicateType": expected_predicate_type,
+                    "predicateSha256": DRIVER.digest_obj(
+                        json.loads(
+                            (bundle / "plan.json").read_text(encoding="utf-8")
+                        )
+                    ),
+                    "signerWorkflow": expected_signer,
+                },
+            )
+            self.assertEqual(binding["semantics"]["stableSourceCount"], 2)
+            self.assertTrue(binding["semantics"]["g6ClassificationAbsent"])
+            self.assertTrue(binding["semantics"]["danglingUpstreamAbsent"])
+            self.assertNotIn(
+                REVIEWED_CONTRACT["binding"]["targetUrn"],
+                output.read_text(encoding="utf-8"),
+            )
+            self.assertNotIn("datahub.example.test", output.read_text(encoding="utf-8"))
+
+            (bundle / "receipt.json").write_bytes(
+                (bundle / "receipt.json").read_bytes() + b" "
+            )
+            with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
+                DRIVER.command_verify_receipt(
+                    SimpleNamespace(
+                        **{
+                            **vars(arguments),
+                            "output": str(directory / "rejected-binding.json"),
+                        }
+                    )
+                )
+
+    def test_sealed_receipt_verifier_rejects_attempt_or_inventory_aliasing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            bundle, receipt_sha = make_sealed_receipt_bundle(directory)
+            arguments = SimpleNamespace(
+                contract=str(CONTRACT_PATH),
+                receipt_dir=str(bundle),
+                repository="upgradedev/archon-datahub",
+                release_sha="d" * 40,
+                workflow_run_id="4242",
+                workflow_run_attempt="1",
+                artifact_id="8181",
+                artifact_name="datahub-demo-receipt-4242-2",
+                artifact_digest=f"sha256:{'a' * 64}",
+                expected_receipt_sha256=receipt_sha,
+                output=str(directory / "binding.json"),
+            )
+            with self.assertRaisesRegex(SystemExit, "exact run attempt"):
+                DRIVER.command_verify_receipt(arguments)
+
+            arguments.artifact_name = "datahub-demo-receipt-4242-1"
+            (bundle / "unexpected.json").write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "inventory differs"):
+                DRIVER.command_verify_receipt(arguments)
 
     def test_authenticated_reads_reject_redirects_and_ignore_proxy_environment(
         self,

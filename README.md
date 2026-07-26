@@ -301,8 +301,10 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
   of callback tokens or raw orchestration data;
 - alarms, dashboards, retained encrypted logs, VPC flow logs, and private AWS endpoints.
 
-The deployment workflow accepts only a **successful default-branch CI run ID** and its
-matching full commit SHA. It verifies GitHub's artifact envelope digests plus the inner
+The deployment workflow requires a **successful default-branch CI run ID**, its matching
+full commit SHA, and the exact run ID, run attempt, artifact ID, artifact digest, and inner
+receipt SHA-256 of a successful protected DataHub demo-state run for that release. It
+verifies GitHub's artifact envelope digests plus the inner
 container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
 the `us-east-1` edge stack before the regional platform stack, passes the edge certificate
 and CloudFront WAF outputs into that platform deployment, deploys staging via GitHub OIDC,
@@ -318,6 +320,10 @@ bytes, it reproduces the original receipt digest once more immediately before se
 promotion evidence; the canonical receipt is retained in that evidence. An application
 rollback therefore cannot silently roll back newer IaC security controls, and a mid-promotion
 branch or gate change cannot produce a trusted successful deployment record.
+Staging and production independently re-download, checksum, canonically validate, and
+attestation-verify the exact `datahub-demo-receipt-<run>-<attempt>` artifact. Each
+environment fingerprints its configured DataHub read endpoint without retaining the URL
+or token and requires equality with the sealed seed endpoint.
 
 AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
 DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
@@ -328,7 +334,10 @@ The target AWS account must be CDK-bootstrapped in both the workload region and
 `us-east-1` before the edge-first deployment can run.
 The deployment pipeline resolves the regional AWS-managed S3 and DynamoDB prefix-list IDs
 itself and keeps them distinct from those three external allowlists. Staging and production
-smoke evidence bind the query digest and reject `{}` / wildcard catalog sweeps. Each
+smoke evidence bind the exact query and state digests and reject `{}` / wildcard catalog
+sweeps. Smoke must reproduce exactly the G6 email gap, the dangling upstream plus
+one-hop target blast-radius edge, and the two-source retained owner contradiction; the
+sanitized semantic projection must be identical in staging and production. Each
 SPA reads that same exact query from runtime config and pre-fills the audit scope, so the
 judge path is one click while remaining bounded to the proven single dataset. Each
 deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
@@ -389,11 +398,15 @@ Workflows:
 - [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
   a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then an
   exact-run governed write/rollback canary whose signed evidence is required before the
-  protected same-artifact production promotion.
+  protected same-artifact production promotion. Its checksum-sealed staging and production
+  evidence use the `staging-deployment/v1` and `production-deployment/v1` predicates and
+  retain the exact sanitized demo-state source binding.
 - [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
-  flagship retained-history path, with matching pre-secret, post-proof, and immediate
-  pre-attestation exact control-plane gates and both the enforced and enriched receipts
-  included in the signed subject set.
+  flagship retained-history path plus a fresh deployed G6/dangling-blast-radius proof,
+  with matching pre-secret, post-proof, and immediate pre-attestation exact control-plane
+  gates. Its `live-datahub-proof/v4` predicate binds the original seed run/artifact/
+  attestation, endpoint fingerprint, deployment evidence, semantic projection, and both
+  enforced and enriched control-plane receipts.
 - [DataHub demo state](.github/workflows/datahub-demo-state.yml) — idempotent protected
   seed/reset of the commit- and SHA-256-bound official showcase baseline plus the exact
   retained-history contradiction, G6 email gap, and dangling lineage target. Its
