@@ -568,7 +568,9 @@ def validate_workflow(workflow: str) -> None:
         and persisted.count('--signer-digest "${RELEASE_SHA}"') == 2
         and persisted.count('--source-digest "${RELEASE_SHA}"') == 2
         and persisted.count("--source-ref refs/heads/master") == 2
-        and persisted.count("--deny-self-hosted-runners") == 2,
+        and persisted.count("--deny-self-hosted-runners") == 2
+        and persisted.count("length == 1") == 2
+        and "length >= 1" not in persisted,
         "local-bundle and persisted verification cardinalities are not exact",
     )
 
