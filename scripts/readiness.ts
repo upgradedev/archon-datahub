@@ -1,21 +1,19 @@
-// READINESS GATE — a machine-checkable, weighted scorecard of how ready this entry is
-// against the "Build with DataHub: The Agent Hackathon" criteria, computed from REAL
-// evidence (it runs the pipeline, the ReAct loop, the MCP round-trip, and the live
-// contradiction-recovery path; it statically verifies the read-only tool surface and the
-// docs/NOTICE consistency). Nothing here asserts `true` — every check exercises the thing
-// it claims.
+// READINESS PROJECTION — machine-checkable evidence coverage for "Build with DataHub:
+// The Agent Hackathon". The five official judging criteria are represented exactly once
+// and are equally weighted at 20%. This is evidence coverage, never a predicted judge
+// score.
 //
-// TWO NUMBERS, kept side by side so the gate never reads as an overclaim:
-//   • automatablePercent — over the checks a machine CAN prove offline. THE CI GATE
-//     (fails below the threshold). A real regression (a mutation tool leaking into the live
-//     client, a NOTICE-listed file going missing, the version-history path ceasing to fire)
-//     drops this below 95% and reddens CI.
-//   • completenessPercent — over ALL checks, INCLUDING the honestly user-gated ones (a
-//     recorded live-DataHub run, a real captured cassette, the demo video). This is < 100
-//     until the user does the live proof — that is the truth, not a defect to hide.
+// TWO DIFFERENT DECISIONS, deliberately kept separate:
+//   • judgingEvidencePercent — equal-weight coverage of the five official criteria,
+//     including outstanding external proof as zero until it exists.
+//   • capabilityEvidence — the offline engineering/security regression gate used by CI.
+//     Passing it means the repository's machine-checkable evidence is healthy; it can
+//     never make the entry submission-ready.
 //
-// Weights are set by JUDGE IMPORTANCE (the differentiator/innovation axis is heaviest) and
-// documented below; they are NOT tuned to reach any number.
+// Final submission readiness is fail-closed. Public deployment/access, public Apache-2.0
+// source detection, English submission material/video, retained remote samples, judging-
+// period availability, completed Devpost fields/URLs, final cross-medium disclosure review,
+// and live DataHub proof remain explicit blockers until externally verified.
 //
 //   npm run readiness        # prints the report + writes readiness.json + sets exit code
 
@@ -48,12 +46,12 @@ const read = (rel: string): string => (existsSync(p(rel)) ? readFileSync(p(rel),
 
 export type CheckStatus = "pass" | "fail" | "user-gated";
 export type CriterionId =
-  | "technical"
-  | "innovation"
-  | "datahub-depth"
-  | "usefulness"
-  | "presentation"
-  | "security";
+  | "use-of-datahub"
+  | "technical-execution"
+  | "originality"
+  | "real-world-usefulness"
+  | "submission-quality";
+export type CapabilityAxisId = "engineering" | "security";
 
 export interface Check {
   id: string;
@@ -66,33 +64,113 @@ export interface Check {
 
 export interface CriterionSummary {
   id: CriterionId;
+  title:
+    | "Use of DataHub"
+    | "Technical Execution"
+    | "Originality"
+    | "Real-World Usefulness"
+    | "Submission Quality";
   weight: number;
-  automatablePercent: number;
+  offlineEvidencePercent: number;
+  evidenceCompletenessPercent: number;
   passed: number;
   failed: number;
   userGated: number;
 }
 
+export interface CapabilityCheck {
+  id: string;
+  axis: CapabilityAxisId;
+  weight: number;
+  status: Exclude<CheckStatus, "user-gated">;
+  title: string;
+  evidence: string;
+}
+
+export interface CapabilitySummary {
+  id: CapabilityAxisId;
+  offlineEvidencePercent: number;
+  passed: number;
+  failed: number;
+}
+
+export interface ReadinessBlocker {
+  id: string;
+  title: string;
+  evidence: string;
+}
+
 export interface ReadinessReport {
   generatedAt: string;
-  gate: { threshold: number; metric: "automatablePercent"; passed: boolean };
-  automatablePercent: number;
-  completenessPercent: number;
-  criteria: CriterionSummary[];
+  projectionKind: "evidence-coverage-not-judge-score";
+  officialCriteria: CriterionSummary[];
+  judgingEvidencePercent: number;
+  capabilityEvidence: {
+    gate: { threshold: number; metric: "offlineCapabilityPercent"; passed: boolean };
+    offlineCapabilityPercent: number;
+    axes: CapabilitySummary[];
+    checks: CapabilityCheck[];
+  };
+  submission: {
+    status: "ready" | "blocked";
+    ready: boolean;
+    internalBlockers: ReadinessBlocker[];
+    externalBlockers: ReadinessBlocker[];
+  };
   checks: Check[];
   userGated: Array<{ id: string; title: string; evidence: string }>;
 }
 
-// The five judged criteria and their judge-importance weights (sum = 100). Innovation is
-// heaviest — the self-auditing contradiction engine is the entry's differentiator.
+// The official judging criteria are equally weighted (sum = 100). Individual check weights
+// only express relative evidence importance WITHIN one criterion.
 const CRITERION_WEIGHT: Record<CriterionId, number> = {
-  technical: 15,
-  innovation: 25,
-  "datahub-depth": 20,
-  usefulness: 18,
-  presentation: 10,
-  security: 12,
+  "use-of-datahub": 20,
+  "technical-execution": 20,
+  originality: 20,
+  "real-world-usefulness": 20,
+  "submission-quality": 20,
 };
+
+const CRITERION_TITLE: Record<CriterionId, CriterionSummary["title"]> = {
+  "use-of-datahub": "Use of DataHub",
+  "technical-execution": "Technical Execution",
+  originality: "Originality",
+  "real-world-usefulness": "Real-World Usefulness",
+  "submission-quality": "Submission Quality",
+};
+
+export const REQUIRED_CRITERION_IDS = [
+  "use-of-datahub",
+  "technical-execution",
+  "originality",
+  "real-world-usefulness",
+  "submission-quality",
+] as const satisfies readonly CriterionId[];
+
+export const REQUIRED_CAPABILITY_AXIS_IDS = [
+  "engineering",
+  "security",
+] as const satisfies readonly CapabilityAxisId[];
+
+// These proofs must remain represented even after an individual check changes from
+// user-gated to pass. Omitting a check is a schema failure, never a way to become ready.
+export const REQUIRED_EXTERNAL_PROOFS = [
+  { id: "D4", criterion: "use-of-datahub" },
+  { id: "U3", criterion: "real-world-usefulness" },
+  { id: "SQ3", criterion: "submission-quality" },
+  { id: "SQ4", criterion: "submission-quality" },
+  { id: "SQ5", criterion: "submission-quality" },
+  { id: "SQ6", criterion: "submission-quality" },
+  { id: "SQ7", criterion: "submission-quality" },
+  { id: "SQ8", criterion: "submission-quality" },
+  { id: "SQ9", criterion: "submission-quality" },
+  { id: "SQ10", criterion: "submission-quality" },
+  { id: "SQ11", criterion: "submission-quality" },
+] as const satisfies ReadonlyArray<{ id: string; criterion: CriterionId }>;
+
+export const REQUIRED_EXTERNAL_PROOF_IDS = REQUIRED_EXTERNAL_PROOFS.map(
+  (proof) => proof.id
+);
 
 const GATE_THRESHOLD = 95;
 
@@ -114,6 +192,28 @@ function check(
   }
 }
 
+function capabilityCheck(
+  id: string,
+  axis: CapabilityAxisId,
+  weight: number,
+  title: string,
+  fn: () => { ok: boolean; evidence: string }
+): CapabilityCheck {
+  try {
+    const r = fn();
+    return { id, axis, weight, status: r.ok ? "pass" : "fail", title, evidence: r.evidence };
+  } catch (err) {
+    return {
+      id,
+      axis,
+      weight,
+      status: "fail",
+      title,
+      evidence: `threw: ${(err as Error).message}`,
+    };
+  }
+}
+
 // Mutation tool names the public read client and Archon MCP surface must NEVER call.
 // The optional write worker is a different capability, credential, and trust boundary.
 const MUTATION_TOOLS = [
@@ -131,11 +231,12 @@ const MUTATION_TOOLS = [
 
 export async function computeReadiness(): Promise<ReadinessReport> {
   const checks: Check[] = [];
+  const capabilityChecks: CapabilityCheck[] = [];
 
-  // ── Technical Implementation (20) ─────────────────────────────────────────────
+  // ── Official criterion: Technical Execution (20) ──────────────────────────────
   const pipelineReport = await new AuditPipeline().run(new FakeDataHubMcpClient());
   checks.push(
-    check("T1", "technical", 8, "4-agent pipeline runs end-to-end", () => ({
+    check("T1", "technical-execution", 8, "4-agent pipeline runs end-to-end", () => ({
       ok: pipelineReport.trace.length === 4 && pipelineReport.findings.length > 0,
       evidence: `trace=[${pipelineReport.trace.map((t) => t.agent).join(", ")}], findings=${pipelineReport.findings.length}`,
     }))
@@ -143,7 +244,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
 
   const loop = await defaultAuditLoop().run(new FakeDataHubMcpClient());
   checks.push(
-    check("T2", "technical", 6, "ReAct loop terminates human-gated (pending)", () => ({
+    check("T2", "technical-execution", 6, "ReAct loop terminates human-gated (pending)", () => ({
       ok: loop.disposition === "pending" && loop.trace.length > 0,
       evidence: `disposition=${loop.disposition}, stopReason=${loop.stopReason}, steps=${loop.trace.length}`,
     }))
@@ -157,7 +258,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     query: "sales",
   });
   checks.push(
-    check("T3", "technical", 6, "Dual-face MCP round-trip (our server serves audit_catalog)", () => ({
+    check("T3", "technical-execution", 6, "Dual-face MCP round-trip (our server serves audit_catalog)", () => ({
       ok: toolResult.isError !== true && JSON.parse(textOf(toolResult)).findings.length > 0,
       evidence: `audit_catalog → ${toolResult.isError ? "ERROR" : "ok"}, findings=${
         toolResult.isError ? 0 : JSON.parse(textOf(toolResult)).findings.length
@@ -173,7 +274,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   )?.urn;
   const blast = blastRoot ? computeBlastRadius(snapshot, blastRoot) : undefined;
   checks.push(
-    check("T4", "technical", 6, "Bounded lineage blast-radius executes deterministically", () => ({
+    check("T4", "technical-execution", 6, "Bounded lineage blast-radius executes deterministically", () => ({
       ok:
         blast !== undefined &&
         blast.rootUrn === blastRoot &&
@@ -227,7 +328,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
       })
     : undefined;
   checks.push(
-    check("T5", "technical", 8, "Versioned G6 policy produces an exact approval-bound plan", () => ({
+    check("T5", "technical-execution", 8, "Versioned G6 policy produces an exact approval-bound plan", () => ({
       ok:
         remediation?.disposition === "ACTIONABLE" &&
         remediation.plan.action.tool === "add_tags" &&
@@ -254,7 +355,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "docs/JUDGE_EVIDENCE.md",
   ];
   checks.push(
-    check("T6", "technical", 5, "Judge evidence is replayed, verified, and attestation-bound", () => ({
+    check("T6", "technical-execution", 5, "Judge evidence is replayed, verified, and attestation-bound", () => ({
       ok:
         judgeEvidenceFiles.every((rel) => existsSync(p(rel))) &&
         packageDocument.includes("evidence:judge:generate") &&
@@ -266,11 +367,11 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
-  // ── Innovation / Originality (25) — the differentiator, LIVE ──────────────────
+  // ── Official criterion: Originality (20) ──────────────────────────────────────
   const vhFindings = new LineageAnalyzerAgent().analyzeVersionHistory(FIXTURE_VERSION_HISTORY);
   const vhContradictions = vhFindings.filter((f) => f.type === "contradiction");
   checks.push(
-    check("I1", "innovation", 13, "Self-audit FIRES on aspect version-history-shaped data", () => ({
+    check("I1", "originality", 13, "Self-audit FIRES on aspect version-history-shaped data", () => ({
       ok: vhContradictions.length >= 1,
       evidence: `${vhContradictions.length} cross-source contradiction(s) recovered from version history (attrs: ${vhContradictions
         .map((f) => (f.detail as { attribute?: string }).attribute)
@@ -291,7 +392,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     },
   ]);
   checks.push(
-    check("I2", "innovation", 6, "Same-pipeline drift does NOT fire (honest provenance gate)", () => ({
+    check("I2", "originality", 6, "Same-pipeline drift does NOT fire (honest provenance gate)", () => ({
       ok: samePipeline.contradictions.length === 0,
       evidence: `two runIds, one pipelineName → ${samePipeline.contradictions.length} contradictions (must be 0)`,
     }))
@@ -305,7 +406,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   ];
   const benchmarkDocument = read("docs/BENCHMARK.md");
   checks.push(
-    check("I3", "innovation", 5, "Frozen DataHub benchmark has positive and false-positive controls", () => ({
+    check("I3", "originality", 5, "Frozen DataHub benchmark has positive and false-positive controls", () => ({
       ok:
         benchmarkFiles.every((rel) => existsSync(p(rel))) &&
         packageDocument.includes("benchmark:datahub") &&
@@ -320,7 +421,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   checks.push(
-    check("I4", "innovation", 6, "Version-history recovery has a dedicated test suite", () => ({
+    check("I4", "originality", 6, "Version-history recovery has a dedicated test suite", () => ({
       ok:
         existsSync(p("tests/unit/version-history.test.ts")) &&
         existsSync(p("tests/unit/version-history-reader.test.ts")) &&
@@ -358,7 +459,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/security/governed-canary-boundary.test.ts",
   ];
   checks.push(
-    check("I5", "innovation", 8, "Closed-loop remediation is approval-, state-, and receipt-bound", () => ({
+    check("I5", "originality", 8, "Closed-loop remediation is approval-, state-, and receipt-bound", () => ({
       ok:
         remediationFiles.every((rel) => existsSync(p(rel))) &&
         read("src/remediation/contracts.ts").includes("APPROVAL_ALREADY_USED") &&
@@ -382,12 +483,12 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
-  // ── Use of DataHub (depth) (20) ───────────────────────────────────────────────
+  // ── Official criterion: Use of DataHub (20) ───────────────────────────────────
   const liveSrc = read("src/datahub/mcp-client-live.ts");
   const consumesReadTools = ['"search"', '"get_entities"', '"get_lineage"'].every((t) => liveSrc.includes(t));
   const leakedMutation = MUTATION_TOOLS.filter((t) => liveSrc.includes(`"${t}"`));
   checks.push(
-    check("D1", "datahub-depth", 8, "Live client consumes ONLY the official MCP read tools", () => ({
+    check("D1", "use-of-datahub", 8, "Live client consumes ONLY the official MCP read tools", () => ({
       ok: consumesReadTools && leakedMutation.length === 0,
       evidence: `read tools present=${consumesReadTools}; mutation tools leaked=[${leakedMutation.join(", ") || "none"}]`,
     }))
@@ -395,7 +496,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
 
   const toolNames = MCP_TOOLS.map((t) => t.name);
   checks.push(
-    check("D2", "datahub-depth", 5, "Own audit RE-EXPOSED as MCP tools (dual-face)", () => ({
+    check("D2", "use-of-datahub", 5, "Own audit RE-EXPOSED as MCP tools (dual-face)", () => ({
       ok: toolNames.includes("audit_catalog") && toolNames.includes("run_audit_loop"),
       evidence: `our MCP tools: [${toolNames.join(", ")}]`,
     }))
@@ -409,7 +510,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   const mapsIsolatedTokenForOfficialStdioServer =
     /DATAHUB_GMS_TOKEN:\s*writeToken\b/.test(writeClient);
   checks.push(
-    check("D3", "datahub-depth", 7, "Optional writeback uses isolated official mutation tools", () => ({
+    check("D3", "use-of-datahub", 7, "Optional writeback uses isolated official mutation tools", () => ({
       ok:
         writeClient.includes('"add_tags"') &&
         writeClient.includes('"remove_tags"') &&
@@ -424,18 +525,18 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   );
 
   checks.push(
-    check("D4", "datahub-depth", 7, "Recorded live-DataHub read + governed-write proof", () => ({
+    check("D4", "use-of-datahub", 7, "Recorded live-DataHub read + governed-write proof", () => ({
       gated: true,
       evidence:
         "USER-GATED: connect the protected workflow to a real DataHub with aspect retention; prove current v0 + retained history, two stable pipelineName identities, one recovered contradiction, and one approved G6 canary that reaches VERIFIED with a redacted receipt.",
     }))
   );
 
-  // ── Real-World Usefulness (20) ────────────────────────────────────────────────
+  // ── Official criterion: Real-World Usefulness (20) ────────────────────────────
   const gov = validateSnapshot(await new FakeDataHubMcpClient().harvestSnapshot());
   const ruleIds = new Set(gov.map((g) => g.ruleId));
   checks.push(
-    check("U1", "usefulness", 8, "Governance gate evaluates all of G1–G6", () => ({
+    check("U1", "real-world-usefulness", 8, "Governance gate evaluates all of G1–G6", () => ({
       ok: ["G1", "G2", "G3", "G4", "G5", "G6"].every((r) => ruleIds.has(r as never)),
       evidence: `rules evaluated: [${[...ruleIds].sort().join(", ")}]`,
     }))
@@ -443,14 +544,14 @@ export async function computeReadiness(): Promise<ReadinessReport> {
 
   const byType = (t: string) => pipelineReport.findings.filter((f) => f.type === t).length;
   checks.push(
-    check("U2", "usefulness", 7, "Produces a quantified, multi-class finding set", () => ({
+    check("U2", "real-world-usefulness", 7, "Produces a quantified, multi-class finding set", () => ({
       ok: byType("contradiction") > 0 && byType("governance_violation") > 0 && byType("lineage_gap") > 0,
       evidence: `contradictions=${byType("contradiction")}, governance=${byType("governance_violation")}, lineage_gaps=${byType("lineage_gap")}`,
     }))
   );
 
   checks.push(
-    check("U3", "usefulness", 5, "Quantified finding on a REAL catalog", () => ({
+    check("U3", "real-world-usefulness", 5, "Quantified finding on a REAL catalog", () => ({
       gated: true,
       evidence: "USER-GATED: the numbers above are on fixtures; the protected real-catalog proof (D4) converts asserted usefulness into shown usefulness.",
     }))
@@ -458,7 +559,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
 
   const exporters = read("src/reporting/exporters.ts");
   checks.push(
-    check("U4", "usefulness", 6, "Findings export as JSON, Markdown, and SARIF evidence", () => ({
+    check("U4", "real-world-usefulness", 6, "Findings export as JSON, Markdown, and SARIF evidence", () => ({
       ok:
         exporters.includes("sarif") &&
         exporters.includes("markdown") &&
@@ -468,7 +569,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     }))
   );
 
-  // ── Presentation / Submission Quality (15) ────────────────────────────────────
+  // ── Official criterion: Submission Quality (20) ───────────────────────────────
   // Normalize whitespace so a hedge phrase that wraps across lines still matches.
   const flat = (s: string): string => s.replace(/\s+/g, " ");
   const readme = read("README.md");
@@ -478,7 +579,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     /version[- ]history/i.test(readme) &&
     /version[- ]history/i.test(design);
   checks.push(
-    check("P1", "presentation", 5, "Docs stay hedged AND document the version-history recovery", () => ({
+    check("SQ1", "submission-quality", 2, "Docs stay hedged AND document the version-history recovery", () => ({
       ok: hedged,
       evidence: `README keeps the read-surface hedge + names version-history recovery; DESIGN references it = ${hedged}`,
     }))
@@ -493,27 +594,92 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   const missing = noticePaths.filter((rel) => !existsSync(p(rel)));
   const disclosesNew = notice.includes("version-history.ts") && notice.includes("readiness.ts");
   checks.push(
-    check("P2", "presentation", 5, "NOTICE ported-vs-new disclosure is accurate", () => ({
+    check("SQ2", "submission-quality", 2, "NOTICE ported-vs-new disclosure is accurate", () => ({
       ok: noticePaths.length > 0 && missing.length === 0 && disclosesNew,
       evidence: `${noticePaths.length} this-repo src files disclosed, missing=[${missing.join(", ") || "none"}], discloses version-history.ts + readiness.ts=${disclosesNew}`,
     }))
   );
 
   checks.push(
-    check("P3", "presentation", 5, "Demo video + write-up in the submission package", () => ({
+    check("SQ3", "submission-quality", 4, "Public working-project URL", () => ({
       gated: true,
-      evidence: "USER-GATED: record the 3-min demo + publish the write-up; ensure both hedge the differentiator exactly as the README does (no 'detects contradictions in your live catalog' overclaim).",
+      evidence:
+        "USER-GATED: deploy the exact CI-approved release at a free, stable public URL and verify it from an unauthenticated browser.",
     }))
   );
 
-  // ── Security / App-security pen-test (12) — the hardening axis ─────────────────
+  checks.push(
+    check("SQ4", "submission-quality", 4, "Functioning judge access", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: prove the public journey works for a fresh judge; if authentication is required, supply the pipeline-managed CONFIRMED credential, concise testing instructions, and a tested rotation path for the full judging period.",
+    }))
+  );
+
+  checks.push(
+    check("SQ5", "submission-quality", 4, "Public source with detected Apache-2.0 license", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: publish the accepted commit and verify that a logged-out visitor can access the complete repository and that the hosting UI detects the Apache-2.0 license.",
+    }))
+  );
+
+  checks.push(
+    check("SQ6", "submission-quality", 4, "English written submission materials and testing instructions", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: complete every written Devpost field and the judge instructions in English (or with a complete English translation) after the live claims and URLs are fixed.",
+    }))
+  );
+
+  checks.push(
+    check("SQ7", "submission-quality", 4, "English public demonstration video shorter than three minutes", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: publish a public <3-minute video showing the functioning deployed project, with English narration/subtitles or a complete English translation, and keep every claim consistent with retained live evidence.",
+    }))
+  );
+
+  checks.push(
+    check("SQ8", "submission-quality", 2, "Final reused-work and third-party disclosure review", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: review NOTICE.md, repository history, every final Devpost field, and the video together; disclose reused patterns and authorized third-party services consistently before submission.",
+    }))
+  );
+
+  checks.push(
+    check("SQ9", "submission-quality", 2, "Retained remote sample-output artifact", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: retain the exact successful remote judge-evidence artifact and expose its sanitized JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback samples without presenting fixture output as live proof.",
+    }))
+  );
+
+  checks.push(
+    check("SQ10", "submission-quality", 4, "Free testing access throughout judging", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: prove the deployed application and pipeline-managed judge access remain free, reachable, monitored, and recoverable through 2026-08-31 17:00 Eastern Time.",
+    }))
+  );
+
+  checks.push(
+    check("SQ11", "submission-quality", 2, "Completed and verified Devpost entry", () => ({
+      gated: true,
+      evidence:
+        "USER-GATED: complete every required Devpost field before the deadline and verify every submitted project, source, video, and testing-access URL as a logged-out visitor.",
+    }))
+  );
+
+  // ── Offline capability evidence: Security ─────────────────────────────────────
   // SEC1 — tool-boundary: a mutation-named call is REFUSED end-to-end (no write path), and
   // our re-exposed MCP surface exposes zero mutation tools. Driven, not asserted.
   const { deps: secDeps } = await buildMcpServer({ datahub: new FakeDataHubMcpClient() });
   const mutationRefused = await callAuditTool(secDeps, "add_tags", { urn: "x", tag: "PII" });
   const exposedMutation = MUTATION_TOOLS.filter((m) => MCP_TOOLS.some((t) => t.name === m));
-  checks.push(
-    check("SEC1", "security", 5, "Tool-boundary holds — no mutation tool exposed or callable", () => ({
+  capabilityChecks.push(
+    capabilityCheck("SEC1", "security", 5, "Tool-boundary holds — no mutation tool exposed or callable", () => ({
       ok: mutationRefused.isError === true && exposedMutation.length === 0,
       evidence: `add_tags refused=${mutationRefused.isError === true}; mutation tools exposed=[${exposedMutation.join(", ") || "none"}]`,
     }))
@@ -549,8 +715,8 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   const loopStayedReadOnly =
     poisonedLoop.disposition === "pending" &&
     poisonedLoop.trace.every((s) => (ALL_LOOP_TOOLS as readonly string[]).includes(s.tool));
-  checks.push(
-    check("SEC2", "security", 4, "Prompt-injection does NOT flip the verdict; loop stays read-only", () => ({
+  capabilityChecks.push(
+    capabilityCheck("SEC2", "security", 4, "Prompt-injection does NOT flip the verdict; loop stays read-only", () => ({
       ok: poisonedGov.includes("G1") && poisonedGov.includes("G6") && loopStayedReadOnly,
       evidence: `poisoned verdict rules=[${poisonedGov.join(", ")}]; loop disposition=${poisonedLoop.disposition}, read-only=${loopStayedReadOnly}`,
     }))
@@ -566,6 +732,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     "tests/security/remediation-boundary.test.ts",
     "tests/security/worker-boundary.test.ts",
     "tests/security/governed-canary-boundary.test.ts",
+    "tests/security/demo-data-state-boundary.test.ts",
     "tests/security/production-posture-boundary.test.ts",
     "tests/security/supply-chain-production-binding.test.ts",
     "tests/security/availability-boundary.test.ts",
@@ -575,8 +742,8 @@ export async function computeReadiness(): Promise<ReadinessReport> {
     ci.includes("test:security") &&
     /npm-audit-retry/.test(ci) &&
     existsSync(p(".github/workflows/availability.yml"));
-  checks.push(
-    check("SEC3", "security", 3, "Security suite + dedicated CI job (with SCA/CVE gate) present", () => ({
+  capabilityChecks.push(
+    capabilityCheck("SEC3", "security", 3, "Security suite + dedicated CI job (with SCA/CVE gate) present", () => ({
       ok: secSuitePresent && ciHasPenTest,
       evidence: `security suite present=${secSuitePresent}; CI security job (+fail-closed npm audit SCA)=${ciHasPenTest}`,
     }))
@@ -588,7 +755,7 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   const ciHasLoad = /\bload:/.test(ci) && ci.includes("npm run load");
   const readmeSlo = /SLO/.test(read("README.md")) && /p95/i.test(read("README.md"));
   checks.push(
-    check("L1", "technical", 3, "Load test harness present, CI-gated, SLO documented", () => ({
+    check("L1", "technical-execution", 3, "Load test harness present, CI-gated, SLO documented", () => ({
       ok: loadPresent && ciHasLoad && readmeSlo,
       evidence: `load/audit.js=${loadPresent}; CI load job=${ciHasLoad}; README SLO(p95)=${readmeSlo}`,
     }))
@@ -599,50 +766,256 @@ export async function computeReadiness(): Promise<ReadinessReport> {
   const journeysSrc = read("tests/e2e/journeys.e2e.test.ts");
   const journeyCount = (journeysSrc.match(/\btest\(/g) ?? []).length;
   checks.push(
-    check("E1", "technical", 3, "Extensive e2e journey suite (8+ journeys) present + CI-wired", () => ({
+    check("E1", "technical-execution", 3, "Extensive e2e journey suite (8+ journeys) present + CI-wired", () => ({
       ok: journeyCount >= 8 && read(".github/workflows/ci.yml").includes("build-test"),
       evidence: `${journeyCount} e2e journeys in tests/e2e/journeys.e2e.test.ts`,
     }))
   );
 
-  return summarize(checks);
+  return summarize(checks, capabilityChecks);
 }
 
 function textOf(r: { content?: Array<{ type: string; text?: string }> }): string {
   return r.content?.find((c) => c.type === "text")?.text ?? "{}";
 }
 
-function summarize(checks: Check[]): ReadinessReport {
-  const automatable = checks.filter((c) => c.status !== "user-gated");
-  const autoTotal = automatable.reduce((s, c) => s + c.weight, 0);
-  const autoPassed = automatable.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
-  const allTotal = checks.reduce((s, c) => s + c.weight, 0);
-  const allPassed = checks.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
+export function evaluateSubmission(
+  checks: Check[],
+  capabilityChecks: CapabilityCheck[]
+): ReadinessReport["submission"] {
+  const externalBlockers = checks
+    .filter((check) => check.status === "user-gated")
+    .map((check) => ({
+      id: check.id,
+      title: check.title,
+      evidence: check.evidence,
+    }));
+  const internalById = new Map<string, ReadinessBlocker>();
+  for (const check of checks.filter((candidate) => candidate.status === "fail")) {
+    internalById.set(check.id, {
+      id: check.id,
+      title: check.title,
+      evidence: check.evidence,
+    });
+  }
+  for (const check of capabilityChecks.filter(
+    (candidate) => candidate.status === "fail"
+  )) {
+    if (!internalById.has(check.id)) {
+      internalById.set(check.id, {
+        id: check.id,
+        title: check.title,
+        evidence: check.evidence,
+      });
+    }
+  }
+  const addStructureBlocker = (
+    id: string,
+    title: string,
+    evidence: string
+  ): void => {
+    internalById.set(id, { id, title, evidence });
+  };
+  const duplicateIds = (ids: string[]): string[] => {
+    const counts = new Map<string, number>();
+    for (const id of ids) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([id]) => id)
+      .sort();
+  };
+  for (const id of duplicateIds(checks.map((check) => check.id))) {
+    addStructureBlocker(
+      `STRUCTURE:duplicate-check-id:${id}`,
+      `Duplicate official check ID: ${id}`,
+      "Every official evidence check ID must occur exactly once."
+    );
+  }
+  for (const id of duplicateIds(capabilityChecks.map((check) => check.id))) {
+    addStructureBlocker(
+      `STRUCTURE:duplicate-capability-id:${id}`,
+      `Duplicate capability check ID: ${id}`,
+      "Every capability evidence check ID must occur exactly once."
+    );
+  }
+  for (const id of duplicateIds(REQUIRED_EXTERNAL_PROOF_IDS)) {
+    addStructureBlocker(
+      `STRUCTURE:duplicate-external-proof-id:${id}`,
+      `Duplicate external-proof registry ID: ${id}`,
+      "Every required external-proof ID must occur exactly once in the registry."
+    );
+  }
+  const officialIds = new Set(checks.map((check) => check.id));
+  for (const id of [
+    ...new Set(
+      capabilityChecks
+        .map((check) => check.id)
+        .filter((id) => officialIds.has(id))
+    ),
+  ].sort()) {
+    addStructureBlocker(
+      `STRUCTURE:cross-registry-id:${id}`,
+      `Check ID appears in both registries: ${id}`,
+      "Official and capability evidence IDs must be globally unambiguous."
+    );
+  }
+  for (const check of checks) {
+    if (!Number.isFinite(check.weight) || check.weight <= 0) {
+      addStructureBlocker(
+        `STRUCTURE:check-weight:${check.id}`,
+        `Invalid official check weight: ${check.id}`,
+        "Official evidence weights must be finite positive numbers."
+      );
+    }
+  }
+  for (const check of capabilityChecks) {
+    if (!Number.isFinite(check.weight) || check.weight <= 0) {
+      addStructureBlocker(
+        `STRUCTURE:capability-weight:${check.id}`,
+        `Invalid capability check weight: ${check.id}`,
+        "Capability evidence weights must be finite positive numbers."
+      );
+    }
+  }
+  const presentCriteria = new Set(checks.map((check) => check.criterion));
+  for (const criterion of REQUIRED_CRITERION_IDS) {
+    if (!presentCriteria.has(criterion)) {
+      internalById.set(`STRUCTURE:criterion:${criterion}`, {
+        id: `STRUCTURE:criterion:${criterion}`,
+        title: `Missing required official criterion: ${CRITERION_TITLE[criterion]}`,
+        evidence:
+          "Fail-closed readiness requires at least one check for every official criterion.",
+      });
+    }
+  }
+  const presentAxes = new Set(capabilityChecks.map((check) => check.axis));
+  for (const axis of REQUIRED_CAPABILITY_AXIS_IDS) {
+    if (!presentAxes.has(axis)) {
+      internalById.set(`STRUCTURE:capability-axis:${axis}`, {
+        id: `STRUCTURE:capability-axis:${axis}`,
+        title: `Missing required capability axis: ${axis}`,
+        evidence:
+          "Fail-closed readiness requires both engineering and security capability evidence.",
+      });
+    }
+  }
+  for (const proof of REQUIRED_EXTERNAL_PROOFS) {
+    const matching = checks.filter((check) => check.id === proof.id);
+    if (matching.length === 0) {
+      addStructureBlocker(
+        `STRUCTURE:external-proof:${proof.id}`,
+        `Missing required external-proof check: ${proof.id}`,
+        "Required public/live/submission proof must stay explicitly represented until it passes."
+      );
+    } else if (
+      matching.length === 1 &&
+      matching[0]!.criterion !== proof.criterion
+    ) {
+      addStructureBlocker(
+        `STRUCTURE:external-proof-mapping:${proof.id}`,
+        `External-proof criterion mapping changed: ${proof.id}`,
+        `${proof.id} must remain mapped to ${proof.criterion}.`
+      );
+    }
+  }
+  const internalBlockers = [...internalById.values()];
+  const ready =
+    internalBlockers.length === 0 &&
+    checks.every((check) => check.status === "pass") &&
+    capabilityChecks.every((check) => check.status === "pass");
+  return {
+    status: ready ? "ready" : "blocked",
+    ready,
+    internalBlockers,
+    externalBlockers,
+  };
+}
 
-  const automatablePercent = round1((autoPassed / autoTotal) * 100);
-  const completenessPercent = round1((allPassed / allTotal) * 100);
-
-  const criteria: CriterionSummary[] = (Object.keys(CRITERION_WEIGHT) as CriterionId[]).map((id) => {
+function summarize(
+  checks: Check[],
+  securityCapabilityChecks: CapabilityCheck[]
+): ReadinessReport {
+  const officialCriteria: CriterionSummary[] = (Object.keys(CRITERION_WEIGHT) as CriterionId[]).map((id) => {
     const cs = checks.filter((c) => c.criterion === id);
     const auto = cs.filter((c) => c.status !== "user-gated");
     const at = auto.reduce((s, c) => s + c.weight, 0);
     const ap = auto.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
+    const total = cs.reduce((s, c) => s + c.weight, 0);
+    const passed = cs.filter((c) => c.status === "pass").reduce((s, c) => s + c.weight, 0);
     return {
       id,
+      title: CRITERION_TITLE[id],
       weight: CRITERION_WEIGHT[id],
-      automatablePercent: at > 0 ? round1((ap / at) * 100) : 100,
+      offlineEvidencePercent: at > 0 ? round1((ap / at) * 100) : 100,
+      evidenceCompletenessPercent: total > 0 ? round1((passed / total) * 100) : 0,
       passed: cs.filter((c) => c.status === "pass").length,
       failed: cs.filter((c) => c.status === "fail").length,
       userGated: cs.filter((c) => c.status === "user-gated").length,
     };
   });
 
+  const judgingEvidencePercent = round1(
+    officialCriteria.reduce(
+      (sum, criterion) =>
+        sum + (criterion.evidenceCompletenessPercent * criterion.weight) / 100,
+      0
+    )
+  );
+
+  const engineeringCapabilityChecks: CapabilityCheck[] = checks
+    .filter((c) => c.status !== "user-gated")
+    .map((c) => ({
+      id: c.id,
+      axis: "engineering",
+      weight: c.weight,
+      status: c.status === "pass" ? "pass" : "fail",
+      title: c.title,
+      evidence: c.evidence,
+    }));
+  const capabilityChecks = [...engineeringCapabilityChecks, ...securityCapabilityChecks];
+  const capabilityTotal = capabilityChecks.reduce((sum, c) => sum + c.weight, 0);
+  const capabilityPassed = capabilityChecks
+    .filter((c) => c.status === "pass")
+    .reduce((sum, c) => sum + c.weight, 0);
+  const offlineCapabilityPercent =
+    capabilityTotal > 0 ? round1((capabilityPassed / capabilityTotal) * 100) : 0;
+  const capabilityGatePassed = offlineCapabilityPercent >= GATE_THRESHOLD;
+  const axes: CapabilitySummary[] = (["engineering", "security"] as const).map((id) => {
+    const axisChecks = capabilityChecks.filter((c) => c.axis === id);
+    const total = axisChecks.reduce((sum, c) => sum + c.weight, 0);
+    const passed = axisChecks
+      .filter((c) => c.status === "pass")
+      .reduce((sum, c) => sum + c.weight, 0);
+    return {
+      id,
+      offlineEvidencePercent: total > 0 ? round1((passed / total) * 100) : 0,
+      passed: axisChecks.filter((c) => c.status === "pass").length,
+      failed: axisChecks.filter((c) => c.status === "fail").length,
+    };
+  });
+
+  // Fail closed as the scorecard evolves. The 95% capability threshold is only the CI
+  // regression gate; final readiness requires every official and capability check to pass.
+  const submission = evaluateSubmission(checks, capabilityChecks);
+
   return {
     generatedAt: new Date().toISOString(),
-    gate: { threshold: GATE_THRESHOLD, metric: "automatablePercent", passed: automatablePercent >= GATE_THRESHOLD },
-    automatablePercent,
-    completenessPercent,
-    criteria,
+    projectionKind: "evidence-coverage-not-judge-score",
+    officialCriteria,
+    judgingEvidencePercent,
+    capabilityEvidence: {
+      gate: {
+        threshold: GATE_THRESHOLD,
+        metric: "offlineCapabilityPercent",
+        passed: capabilityGatePassed,
+      },
+      offlineCapabilityPercent,
+      axes,
+      checks: capabilityChecks,
+    },
+    submission,
     checks,
     userGated: checks
       .filter((c) => c.status === "user-gated")
@@ -661,10 +1034,11 @@ if (isMain) {
   computeReadiness()
     .then((report) => {
       const bar = "─".repeat(72);
-      console.log(`\nArchon-DataHub — READINESS GATE\n${bar}`);
-      for (const cr of report.criteria) {
+      console.log(`\nArchon-DataHub — OFFICIAL READINESS PROJECTION\n${bar}`);
+      console.log("Evidence coverage only — not a predicted judge score.");
+      for (const cr of report.officialCriteria) {
         console.log(
-          `${cr.id.padEnd(14)} weight ${String(cr.weight).padStart(3)}  automatable ${String(cr.automatablePercent).padStart(5)}%  ` +
+          `${cr.title.padEnd(23)} weight ${String(cr.weight).padStart(2)}  evidence ${String(cr.evidenceCompletenessPercent).padStart(5)}%  ` +
             `(pass ${cr.passed} / fail ${cr.failed} / user-gated ${cr.userGated})`
         );
       }
@@ -674,14 +1048,39 @@ if (isMain) {
         console.log(`  [${mark}] ${c.id} (${c.criterion}, w${c.weight}) — ${c.title}\n           ${c.evidence}`);
       }
       console.log(bar);
-      console.log(`AUTOMATABLE: ${report.automatablePercent}%  (CI gate ≥ ${report.gate.threshold}% → ${report.gate.passed ? "PASS" : "FAIL"})`);
-      console.log(`COMPLETENESS (incl. user-gated): ${report.completenessPercent}%  — remaining is user-gated:`);
-      for (const u of report.userGated) console.log(`   • ${u.id}: ${u.title}`);
+      console.log(
+        `OFFICIAL EVIDENCE COVERAGE (5 × 20%): ${report.judgingEvidencePercent}%`
+      );
+      console.log(
+        `OFFLINE CAPABILITY: ${report.capabilityEvidence.offlineCapabilityPercent}%  ` +
+          `(CI regression gate ≥ ${report.capabilityEvidence.gate.threshold}% → ${
+            report.capabilityEvidence.gate.passed ? "PASS" : "FAIL"
+          })`
+      );
+      for (const axis of report.capabilityEvidence.axes) {
+        console.log(
+          `   ${axis.id}: ${axis.offlineEvidencePercent}% ` +
+            `(pass ${axis.passed} / fail ${axis.failed})`
+        );
+      }
+      console.log(
+        `FINAL SUBMISSION: ${report.submission.status.toUpperCase()} ` +
+          `(${report.submission.internalBlockers.length} internal failure(s), ` +
+          `${report.submission.externalBlockers.length} required external proof(s) outstanding)`
+      );
+      for (const blocker of report.submission.internalBlockers) {
+        console.log(`   • ${blocker.id}: ${blocker.title}`);
+      }
+      for (const blocker of report.submission.externalBlockers) {
+        console.log(`   • ${blocker.id}: ${blocker.title}`);
+      }
       console.log(bar);
 
       writeFileSync(p("readiness.json"), JSON.stringify(report, null, 2) + "\n");
       console.log("wrote readiness.json\n");
-      process.exit(report.gate.passed ? 0 : 1);
+      // CI enforces the offline regression gate. External submission blockers remain
+      // visible in the report but require real URLs/credentials/media/live proof.
+      process.exit(report.capabilityEvidence.gate.passed ? 0 : 1);
     })
     .catch((err) => {
       console.error(`readiness gate crashed: ${(err as Error).message}`);

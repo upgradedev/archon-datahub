@@ -1,0 +1,501 @@
+name: Manage Cognito judge user
+
+run-name: ${{ inputs.operation }} judge access in ${{ inputs.stage }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Exact protected Archon environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      operation:
+        description: Explicit judge-user lifecycle operation
+        required: true
+        type: choice
+        options:
+          - provision
+          - rotate
+          - reactivate
+          - deactivate
+
+# Dedicated judge-access environments isolate this workflow from deployment roles
+# and secrets. JUDGE_USERNAME/JUDGE_PASSWORD are protected secrets, never inputs.
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: archon-judge-user-${{ inputs.stage }}
+  cancel-in-progress: false
+
+env:
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_PAGER: ""
+  BASH_ENV: /dev/null
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  control-plane:
+    name: Validate request and exact operation control plane
+    if: github.repository == 'upgradedev/archon-datahub'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      gate_sha256: ${{ steps.gate.outputs.gate_sha256 }}
+      gate_mode: ${{ steps.gate.outputs.gate_mode }}
+      emergency_workflow_file_sha256: ${{ steps.gate.outputs.emergency_workflow_file_sha256 }}
+      judge_account_id: ${{ steps.request.outputs.judge_account_id }}
+      target_account_id: ${{ steps.request.outputs.target_account_id }}
+      target_region: ${{ steps.request.outputs.target_region }}
+      target_role_arn: ${{ steps.request.outputs.target_role_arn }}
+      target_application_url: ${{ steps.request.outputs.target_application_url }}
+      target_sha256: ${{ steps.request.outputs.target_sha256 }}
+      request_sha256: ${{ steps.approval_receipt.outputs.request_sha256 }}
+    steps:
+      - name: Check out the exact unprivileged control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the explicit request without protected values
+        id: request
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_PRODUCTION_ACCOUNT_ID: ${{ vars.JUDGE_PRODUCTION_ACCOUNT_ID }}
+          JUDGE_STAGING_ACCOUNT_ID: ${{ vars.JUDGE_STAGING_ACCOUNT_ID }}
+          JUDGE_PRODUCTION_AWS_ACCOUNT_ID: ${{ vars.JUDGE_PRODUCTION_AWS_ACCOUNT_ID }}
+          JUDGE_STAGING_AWS_ACCOUNT_ID: ${{ vars.JUDGE_STAGING_AWS_ACCOUNT_ID }}
+          JUDGE_PRODUCTION_AWS_REGION: ${{ vars.JUDGE_PRODUCTION_AWS_REGION }}
+          JUDGE_STAGING_AWS_REGION: ${{ vars.JUDGE_STAGING_AWS_REGION }}
+          JUDGE_PRODUCTION_APPLICATION_URL: ${{ vars.JUDGE_PRODUCTION_APPLICATION_URL }}
+          JUDGE_STAGING_APPLICATION_URL: ${{ vars.JUDGE_STAGING_APPLICATION_URL }}
+        run: |
+          set -euo pipefail
+          case "${ARCHON_STAGE}" in
+            staging)
+              judge_account_id="${JUDGE_STAGING_ACCOUNT_ID}"
+              target_account_id="${JUDGE_STAGING_AWS_ACCOUNT_ID}"
+              target_region="${JUDGE_STAGING_AWS_REGION}"
+              target_application_url="${JUDGE_STAGING_APPLICATION_URL}"
+              ;;
+            production)
+              judge_account_id="${JUDGE_PRODUCTION_ACCOUNT_ID}"
+              target_account_id="${JUDGE_PRODUCTION_AWS_ACCOUNT_ID}"
+              target_region="${JUDGE_PRODUCTION_AWS_REGION}"
+              target_application_url="${JUDGE_PRODUCTION_APPLICATION_URL}"
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "${judge_account_id}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${target_account_id}" =~ ^[0-9]{12}$ ]]
+          [[ "${target_region}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]]
+          case "${target_region}" in
+            cn-*) aws_partition="aws-cn" ;;
+            us-gov-*) aws_partition="aws-us-gov" ;;
+            *) aws_partition="aws" ;;
+          esac
+          target_role_arn="arn:${aws_partition}:iam::${target_account_id}:role/archon-${ARCHON_STAGE}-judge-user"
+          JUDGE_ACCOUNT_ID="${judge_account_id}" \
+            bash scripts/manage-cognito-judge-user.sh request
+          target_sha256="$(
+            JUDGE_TARGET_ACCOUNT_ID="${target_account_id}" \
+            JUDGE_TARGET_REGION="${target_region}" \
+            JUDGE_TARGET_ROLE_ARN="${target_role_arn}" \
+            JUDGE_TARGET_APPLICATION_URL="${target_application_url}" \
+              bash scripts/verify-judge-environment-approval.sh target-digest
+          )"
+          [[ "${target_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "judge_account_id=${judge_account_id}"
+            echo "target_account_id=${target_account_id}"
+            echo "target_region=${target_region}"
+            echo "target_role_arn=${target_role_arn}"
+            echo "target_application_url=${target_application_url}"
+            echo "target_sha256=${target_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Seal the exact operation-specific default-branch control plane
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
+          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+            gate_mode="emergency-deactivate-current-master"
+            emergency_workflow_file_sha256="$(
+              jq -er '
+                select(
+                  .schemaVersion == "archon.judge-emergency-control-plane/v1" and
+                  .mode == "emergency-deactivate-current-master" and
+                  .operation == "deactivate" and
+                  .ciStatus == "not-asserted"
+                ) |
+                .workflow.fileSha256 |
+                select(type == "string" and test("^[0-9a-f]{64}$"))
+              ' "${OUTPUT_PATH}"
+            )"
+            [[ "${emergency_workflow_file_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+            gate_mode="full-green"
+          fi
+          gate_sha256="$(
+            sha256sum "${OUTPUT_PATH}" |
+              awk '{print $1}'
+          )"
+          [[ "${gate_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "gate_sha256=${gate_sha256}"
+            echo "gate_mode=${gate_mode}"
+            if [[ "${gate_mode}" == "emergency-deactivate-current-master" ]]; then
+              echo "emergency_workflow_file_sha256=${emergency_workflow_file_sha256}"
+            fi
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Publish the opaque-identity approval receipt phrase
+        id: approval_receipt
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ steps.request.outputs.judge_account_id }}
+          JUDGE_TARGET_ACCOUNT_ID: ${{ steps.request.outputs.target_account_id }}
+          JUDGE_TARGET_REGION: ${{ steps.request.outputs.target_region }}
+          JUDGE_TARGET_ROLE_ARN: ${{ steps.request.outputs.target_role_arn }}
+          JUDGE_TARGET_APPLICATION_URL: ${{ steps.request.outputs.target_application_url }}
+          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.gate_sha256 }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          CONTROL_PLANE_MODE: ${{ steps.gate.outputs.gate_mode }}
+          EMERGENCY_WORKFLOW_FILE_SHA256: ${{ steps.gate.outputs.emergency_workflow_file_sha256 }}
+        run: |
+          set -euo pipefail
+          request_sha256="$(
+            bash scripts/verify-judge-environment-approval.sh request-digest
+          )"
+          approval_comment="$(
+            JUDGE_REQUEST_SHA256="${request_sha256}" \
+              bash scripts/verify-judge-environment-approval.sh approval-comment
+          )"
+          echo "request_sha256=${request_sha256}" >>"${GITHUB_OUTPUT}"
+          echo "::notice title=Required independent judge approval comment::${approval_comment}"
+          {
+            echo "### Required independent judge approval comment"
+            echo
+            if [[ "${CONTROL_PLANE_MODE}" == "emergency-deactivate-current-master" ]]; then
+              [[ "${EMERGENCY_WORKFLOW_FILE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+              echo "> [!WARNING]"
+              echo "> Emergency deactivation binds the exact current master workflow and run, but deliberately does not assert green CI status."
+              echo
+              echo "Workflow SHA: \`${CONTROL_PLANE_SHA}\`"
+              echo
+              echo "Workflow file SHA-256: \`${EMERGENCY_WORKFLOW_FILE_SHA256}\`"
+              echo
+            fi
+            echo "Target fingerprint: \`${{ steps.request.outputs.target_sha256 }}\`"
+            echo
+            echo '```text'
+            printf '%s\n' "${approval_comment}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  manage:
+    name: Apply exact protected Cognito operation
+    needs: control-plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: judge-access-${{ inputs.stage }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Require exact independent approval receipt before any privileged setup
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          JUDGE_REVIEWER_USER_ID: ${{ vars.JUDGE_REVIEWER_USER_ID }}
+          REVIEW_ACTOR: ${{ github.actor }}
+          REVIEW_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${ARCHON_STAGE}" in
+            staging|production) ;;
+            *) exit 1 ;;
+          esac
+          [[ "${EXPECTED_REQUEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${JUDGE_REVIEWER_USER_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${REVIEW_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          [[ "${REVIEW_TRIGGERING_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+
+          environment_name="judge-access-${ARCHON_STAGE}"
+          expected_comment="ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${GITHUB_RUN_ID}|run_attempt=${GITHUB_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}"
+          repository_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          default_branch="$(
+            jq -er '.default_branch | select(type == "string")' \
+              <<<"${repository_json}"
+          )"
+          test "${default_branch}" = "master"
+
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}"
+          )"
+          jq -e \
+            --arg name "${environment_name}" \
+            --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+              (.protection_rules // []) as $rules |
+              (
+                [$rules[] | select(.type == "required_reviewers")]
+              ) as $review_rules |
+              .name == $name and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true and
+              ($review_rules | length) == 1 and
+              $review_rules[0].prevent_self_review == true and
+              (($review_rules[0].reviewers // []) | length) >= 1 and
+              all(
+                ($review_rules[0].reviewers // [])[];
+                .type == "User" and
+                (.reviewer.id | type == "number") and
+                (.reviewer.login | type == "string")
+              ) and
+              (
+                [
+                  ($review_rules[0].reviewers // [])[] |
+                  select(.reviewer.id == $reviewer_id)
+                ] |
+                length
+              ) == 1
+            ' <<<"${environment_json}" >/dev/null
+          configured_reviewer_login="$(
+            jq -er \
+              --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+                [
+                  (.protection_rules // [])[] |
+                  select(.type == "required_reviewers") |
+                  (.reviewers // [])[] |
+                  select(
+                    .type == "User" and
+                    .reviewer.id == $reviewer_id
+                  ) |
+                  .reviewer.login
+                ] |
+                select(length == 1) |
+                .[0]
+              ' <<<"${environment_json}"
+          )"
+
+          branch_policies="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}/deployment-branch-policies?per_page=100"
+          )"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == $branch and
+            (
+              (.branch_policies[0] | has("type") | not) or
+              .branch_policies[0].type == "branch"
+            )
+          ' <<<"${branch_policies}" >/dev/null
+
+          approvals_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          jq -e \
+            --arg environment "${environment_name}" \
+            --arg comment "${expected_comment}" \
+            --arg reviewer_login "${configured_reviewer_login}" \
+            --arg actor "${REVIEW_ACTOR}" \
+            --arg triggering_actor "${REVIEW_TRIGGERING_ACTOR}" \
+            --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+              type == "array" and
+              (
+                [
+                  .[] |
+                  select(
+                    .state == "approved" and
+                    .comment == $comment and
+                    .user.type == "User" and
+                    .user.id == $reviewer_id and
+                    (.user.login | ascii_downcase) ==
+                      ($reviewer_login | ascii_downcase) and
+                    (.user.login | ascii_downcase) !=
+                      ($actor | ascii_downcase) and
+                    (.user.login | ascii_downcase) !=
+                      ($triggering_actor | ascii_downcase) and
+                    ((.environments // []) | length) == 1 and
+                    .environments[0].name == $environment
+                  )
+                ] |
+                length
+              ) == 1
+            ' <<<"${approvals_json}" >/dev/null
+
+      - name: Validate protected role configuration
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          AWS_JUDGE_USER_ROLE_ARN: ${{ vars.AWS_JUDGE_USER_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          SEALED_TARGET_ACCOUNT_ID: ${{ needs.control-plane.outputs.target_account_id }}
+          SEALED_TARGET_REGION: ${{ needs.control-plane.outputs.target_region }}
+          SEALED_TARGET_ROLE_ARN: ${{ needs.control-plane.outputs.target_role_arn }}
+          SEALED_TARGET_SHA256: ${{ needs.control-plane.outputs.target_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]]
+          [[ "${EXPECTED_GATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SEALED_TARGET_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test "${EXPECTED_ACCOUNT_ID}" = "${SEALED_TARGET_ACCOUNT_ID}"
+          test "${AWS_REGION}" = "${SEALED_TARGET_REGION}"
+          case "${AWS_REGION}" in
+            cn-*) aws_partition="aws-cn" ;;
+            us-gov-*) aws_partition="aws-us-gov" ;;
+            *) aws_partition="aws" ;;
+          esac
+          expected_role_arn="arn:${aws_partition}:iam::${EXPECTED_ACCOUNT_ID}:role/archon-${ARCHON_STAGE}-judge-user"
+          test "${AWS_JUDGE_USER_ROLE_ARN}" = "${expected_role_arn}" || {
+            echo "::error::AWS_JUDGE_USER_ROLE_ARN is not the exact stage-specific judge role"
+            exit 1
+          }
+          test "${AWS_JUDGE_USER_ROLE_ARN}" = "${SEALED_TARGET_ROLE_ARN}"
+
+      - name: Check out the exact protected control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Revalidate request and unchanged operation control plane before AWS trust
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_TARGET_ACCOUNT_ID: ${{ needs.control-plane.outputs.target_account_id }}
+          JUDGE_TARGET_REGION: ${{ needs.control-plane.outputs.target_region }}
+          JUDGE_TARGET_ROLE_ARN: ${{ needs.control-plane.outputs.target_role_arn }}
+          JUDGE_TARGET_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
+          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh request
+          test "$(
+            bash scripts/verify-judge-environment-approval.sh request-digest
+          )" = "${EXPECTED_REQUEST_SHA256}"
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+          fi
+
+      - name: Configure dedicated judge-user AWS credentials through OIDC
+        id: oidc
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_JUDGE_USER_ROLE_ARN }}
+          role-session-name: archon-judge-${{ github.run_id }}-${{ inputs.stage }}
+          role-duration-seconds: 900
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Revalidate unchanged control plane after AWS trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
+          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
+          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+          fi
+
+      - name: Provision, rotate, or reactivate and read back the exact Cognito state
+        if: inputs.operation == 'provision' || inputs.operation == 'rotate' || inputs.operation == 'reactivate'
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+          JUDGE_PASSWORD: ${{ secrets.JUDGE_PASSWORD }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh apply
+
+      - name: Deactivate and read back the exact Cognito state
+        if: inputs.operation == 'deactivate'
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: deactivate
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh apply

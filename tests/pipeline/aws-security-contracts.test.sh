@@ -24,6 +24,8 @@ cat >"${stack_outputs}" <<'JSON'
     "ArchonRegionalWafLogGroupName": "aws-waf-logs-archon-staging-api",
     "ArchonRegionalWafLogKeyArn": "arn:aws:kms:eu-west-1:111111111111:key/87654321-4321-0321-1321-ba0987654321",
     "ArchonApiStageArn": "arn:aws:apigateway:eu-west-1::/restapis/abc123def4/stages/staging",
+    "ArchonUserPoolId": "eu-west-1_ArchonStaging",
+    "ArchonUserPoolArn": "arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_ArchonStaging",
     "ArchonApiInvokeUrl": "https://abc123def4.execute-api.eu-west-1.amazonaws.com/staging/",
     "ArchonApiUrl": "https://staging.archon.example/api",
     "ArchonApplicationUrl": "https://staging.archon.example",
@@ -44,6 +46,8 @@ remediation_group="sg-44444444444444444"
 endpoint_group="sg-55555555555555555"
 vpc_id="vpc-66666666666666666"
 web_acl_arn="arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon-staging-api/12345678-1234-0123-0123-1234567890ab"
+api_stage_arn="arn:aws:apigateway:eu-west-1::/restapis/abc123def4/stages/staging"
+user_pool_arn="arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_ArchonStaging"
 rest_api_id="abc123def4"
 api_key_id="key1234567890abcdef"
 usage_plan_id="plan123456"
@@ -890,9 +894,33 @@ JSON
     fi
     ;;
   wafv2:get-web-acl-for-resource)
+    arguments=("$@")
+    resource_arn=""
+    for ((index = 0; index < ${#arguments[@]}; index++)); do
+      if [[ "${arguments[index]}" == "--resource-arn" ]]; then
+        resource_arn="${arguments[index + 1]}"
+      fi
+    done
+    test -n "${resource_arn}"
     associated_web_acl_arn="${web_acl_arn}"
-    if [[ "${FAKE_WAF_ASSOCIATION_DRIFT:-0}" == "1" ]]; then
-      associated_web_acl_arn="arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/unassociated/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    case "${resource_arn}" in
+      "${api_stage_arn}")
+        if [[ "${FAKE_API_WAF_ASSOCIATION_DRIFT:-0}" == "1" ]]; then
+          associated_web_acl_arn="arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/unassociated/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        fi
+        ;;
+      "${user_pool_arn}")
+        if [[ "${FAKE_COGNITO_WAF_ASSOCIATION_DRIFT:-0}" == "1" ]]; then
+          associated_web_acl_arn="arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/unassociated/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        fi
+        ;;
+      *)
+        echo "unexpected WAF association resource: ${resource_arn}" >&2
+        exit 2
+        ;;
+    esac
+    if [[ -n "${FAKE_WAF_ASSOCIATION_LOG:-}" ]]; then
+      printf '%s\n' "${resource_arn}" >>"${FAKE_WAF_ASSOCIATION_LOG}"
     fi
     printf '{"WebACL":{"ARN":"%s"}}\n' "${associated_web_acl_arn}"
     ;;
@@ -1193,7 +1221,9 @@ for drift_variable in \
   fi
 done
 
+waf_association_log="${work_root}/waf-associations.log"
 waf_contract="$(
+  FAKE_WAF_ASSOCIATION_LOG="${waf_association_log}" \
   ARCHON_STACK_NAME="Archon-staging" \
   ARCHON_STACK_OUTPUTS="${stack_outputs}" \
   EXPECTED_ACCOUNT_ID="111111111111" \
@@ -1202,7 +1232,27 @@ waf_contract="$(
     bash "${repository_root}/scripts/validate-aws-waf-contract.sh"
 )"
 jq --exit-status \
-  '.schemaVersion == "archon.regional-waf-contract/v2" and
+  '.webAcl.arn as $webAclArn |
+   .schemaVersion == "archon.regional-waf-contract/v3" and
+   (. | keys) ==
+     ["associations", "cdkOutputsSha256", "logging", "schemaVersion",
+      "stackName", "validation", "webAcl"] and
+   (.associations | keys) == ["apiGatewayStage", "cognitoUserPool"] and
+   (.associations.apiGatewayStage | keys) ==
+     ["resourceArn", "resourceType", "validation", "webAclArn"] and
+   .associations.apiGatewayStage.resourceArn ==
+     "arn:aws:apigateway:eu-west-1::/restapis/abc123def4/stages/staging" and
+   .associations.apiGatewayStage.resourceType == "AWS::ApiGateway::Stage" and
+   .associations.apiGatewayStage.validation == "passed" and
+   .associations.apiGatewayStage.webAclArn == $webAclArn and
+   (.associations.cognitoUserPool | keys) ==
+     ["resourceArn", "resourceId", "resourceType", "validation", "webAclArn"] and
+   .associations.cognitoUserPool.resourceId == "eu-west-1_ArchonStaging" and
+   .associations.cognitoUserPool.resourceArn ==
+     "arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_ArchonStaging" and
+   .associations.cognitoUserPool.resourceType == "AWS::Cognito::UserPool" and
+   .associations.cognitoUserPool.validation == "passed" and
+   .associations.cognitoUserPool.webAclArn == $webAclArn and
    .webAcl.sampledDataProtection == "validated" and
    .webAcl.rateEvaluationWindowSeconds == 300 and
    .logging.kmsKey.rotationEnabled == true and
@@ -1210,6 +1260,12 @@ jq --exit-status \
    .logging.sensitiveFields == ["authorization", "cookie", "x-api-key"] and
    .validation == "passed"' \
   <<<"${waf_contract}" >/dev/null
+mapfile -t waf_association_resources <"${waf_association_log}"
+test "${#waf_association_resources[@]}" -eq 2
+test "${waf_association_resources[0]}" = \
+  "arn:aws:apigateway:eu-west-1::/restapis/abc123def4/stages/staging"
+test "${waf_association_resources[1]}" = \
+  "arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_ArchonStaging"
 
 for drift_variable in \
   FAKE_WAF_RULE_DRIFT \
@@ -1217,7 +1273,8 @@ for drift_variable in \
   FAKE_WAF_MANAGED_CONFIG_DRIFT \
   FAKE_WAF_RATE_WINDOW_DRIFT \
   FAKE_WAF_LOGGING_DRIFT \
-  FAKE_WAF_ASSOCIATION_DRIFT \
+  FAKE_API_WAF_ASSOCIATION_DRIFT \
+  FAKE_COGNITO_WAF_ASSOCIATION_DRIFT \
   FAKE_WAF_LOG_KMS_DRIFT \
   FAKE_WAF_LOG_RETENTION_DRIFT \
   FAKE_WAF_LOG_KEY_STATE_DRIFT \
@@ -1235,3 +1292,49 @@ for drift_variable in \
     exit 1
   fi
 done
+
+for output_mutation in missing-id missing-arn mismatched-arn; do
+  mutated_outputs="${work_root}/stack-outputs-${output_mutation}.json"
+  case "${output_mutation}" in
+    missing-id)
+      jq 'del(.["Archon-staging"].ArchonUserPoolId)' \
+        "${stack_outputs}" >"${mutated_outputs}"
+      ;;
+    missing-arn)
+      jq 'del(.["Archon-staging"].ArchonUserPoolArn)' \
+        "${stack_outputs}" >"${mutated_outputs}"
+      ;;
+    mismatched-arn)
+      jq \
+        '.["Archon-staging"].ArchonUserPoolArn =
+          "arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_OtherPool"' \
+        "${stack_outputs}" >"${mutated_outputs}"
+      ;;
+  esac
+  if ARCHON_STACK_NAME="Archon-staging" \
+    ARCHON_STACK_OUTPUTS="${mutated_outputs}" \
+    EXPECTED_ACCOUNT_ID="111111111111" \
+    EXPECTED_RATE_LIMIT=300 \
+    AWS_REGION="eu-west-1" \
+      bash "${repository_root}/scripts/validate-aws-waf-contract.sh" \
+        >/dev/null 2>&1; then
+    echo "::error::Regional WAF contract accepted ${output_mutation} Cognito outputs" >&2
+    exit 1
+  fi
+done
+
+test "$(
+  grep -Fc 'bash scripts/validate-aws-waf-contract.sh' \
+    "${repository_root}/.github/workflows/deploy.yml"
+)" -eq 4
+test "$(
+  grep -Fc \
+    '.schemaVersion == "archon.regional-waf-contract/v3"' \
+    "${repository_root}/.github/workflows/deploy.yml"
+)" -eq 2
+test "$(
+  grep -Fc '"AWS::Cognito::UserPool"' \
+    "${repository_root}/.github/workflows/deploy.yml"
+)" -eq 2
+grep -Fq '`cognito-idp:GetWebACLForResource` on the exact' \
+  "${repository_root}/infra/aws/README.md"

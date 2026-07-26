@@ -1841,6 +1841,20 @@ jobs:
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-waf-contract.sh
           )"
+          jq --exit-status '
+            .webAcl.arn as $webAclArn |
+            .schemaVersion == "archon.regional-waf-contract/v3" and
+            (.associations | keys) ==
+              ["apiGatewayStage", "cognitoUserPool"] and
+            .associations.apiGatewayStage.resourceType ==
+              "AWS::ApiGateway::Stage" and
+            .associations.apiGatewayStage.validation == "passed" and
+            .associations.apiGatewayStage.webAclArn == $webAclArn and
+            .associations.cognitoUserPool.resourceType ==
+              "AWS::Cognito::UserPool" and
+            .associations.cognitoUserPool.validation == "passed" and
+            .associations.cognitoUserPool.webAclArn == $webAclArn
+          ' <<<"${regional_waf_contract}" >/dev/null
           regional_waf_contract_sha="$(
             printf '%s' "${regional_waf_contract}" |
               sha256sum |
@@ -5089,6 +5103,20 @@ jobs:
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-waf-contract.sh
           )"
+          jq --exit-status '
+            .webAcl.arn as $webAclArn |
+            .schemaVersion == "archon.regional-waf-contract/v3" and
+            (.associations | keys) ==
+              ["apiGatewayStage", "cognitoUserPool"] and
+            .associations.apiGatewayStage.resourceType ==
+              "AWS::ApiGateway::Stage" and
+            .associations.apiGatewayStage.validation == "passed" and
+            .associations.apiGatewayStage.webAclArn == $webAclArn and
+            .associations.cognitoUserPool.resourceType ==
+              "AWS::Cognito::UserPool" and
+            .associations.cognitoUserPool.validation == "passed" and
+            .associations.cognitoUserPool.webAclArn == $webAclArn
+          ' <<<"${regional_waf_contract}" >/dev/null
           regional_waf_contract_sha="$(
             printf '%s' "${regional_waf_contract}" |
               sha256sum |

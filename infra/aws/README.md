@@ -12,7 +12,9 @@ artifacts to an environment:
 - a public, bounded durable audit start/status API plus an explicitly read-only synchronous
   preview route and a scope-protected approval route;
 - a Cognito Plus classic Hosted UI with enforced standard threat protection and a
-  public authorization-code client for browser PKCE S256;
+  public authorization-code client for browser PKCE S256, an exact narrow OAuth scope
+  set with no Cognito self-administration scope, and a client-specific shared-judge risk
+  policy;
 - a dedicated approval Lambda with strict schemas, approver-group authorization,
   DynamoDB conditional writes, and a server-held callback token;
 - a separate no-secret control Lambda that starts only the Archon state machine and
@@ -136,6 +138,18 @@ pre-fill the read-only audit. It is created after the stack deploy,
 is never baked into the build-once SPA archive, and is served by an explicit
 CloudFront caching-disabled behavior with `Cache-Control:
 no-cache,no-store,must-revalidate`. Access tokens remain in browser memory.
+The client exposes only authorization code and refresh-token authentication and omits
+`aws.cognito.signin.user.admin`, so its access token cannot authorize Cognito
+`ChangePassword`. It enables user-existence-error suppression and accepts exactly the
+CloudFront application root as its callback and logout URI, with no independent default
+redirect. The protected lifecycle also rejects any second client in the pool, verified
+recovery attribute, MFA factor, or paginated group inventory before activating access.
+Its exact client-scoped threat policy keeps account-takeover
+low/medium/high actions at `NO_ACTION` with notifications disabled to avoid locking out
+legitimate shared judges on new networks, while compromised credentials are `BLOCK` for
+exactly `SIGN_IN` and `PASSWORD_CHANGE`. WAF/rate controls, the protected strong stable
+password, short tokens, monitoring, and independently approved rotation/deactivation
+provide the surrounding compromise controls.
 
 The request schema and Lambda both reject every field except `decision` and
 `comment`. A narrow API Gateway mapping projects only `sub`, `iss`, and
@@ -470,9 +484,22 @@ Do not pipe an unpinned installer from the default branch into a shell.
    browser's code + PKCE flow, decide through the `archon/approve` boundary, and
    retain the terminal `VERIFIED` or `REJECTED` projection with receipt digest,
    execution-evidence digest, completion timestamp, and check/event/rollback summary.
-   Create an operator in the output Cognito pool and add it to
-   `ArchonApproverGroupName`. The direct `ArchonApiInvokeUrl` must reject calls without
-   the non-exported origin key; all clients use `ArchonApiUrl`.
+   Provision, rotate, reactivate, and deactivate the exact judge/operator identity only through the
+   protected [`judge-user.yml`](../../.github/workflows/judge-user.yml) workflow and its
+   [least-privilege runbook](../../docs/JUDGE_ACCESS.md). Self-sign-up stays disabled,
+   and the workflow must bind the protected email to its fixed opaque account ID and avoid
+   printing or retaining bootstrap or permanent password material. Provision, rotation,
+   and reactivation additionally prove exact `ArchonApproverGroupName` membership, the
+   24-entry password-history policy, user-existence-error suppression, and the single
+   stack-derived OAuth redirect. Their final judge identity must be enabled and
+   `CONFIRMED`, with no temporary-password TTL or first-login challenge. The same exact
+   regional Web ACL must be associated with both API Gateway and the Cognito user pool;
+   those access-enabling operations prove that live association and its fixed compatible
+   rule set before any admin-user read or mutation. Emergency deactivation retains the
+   exact target/identity/revocation checks but deliberately skips those
+   availability-sensitive posture gates. The direct
+   `ArchonApiInvokeUrl` must
+   reject calls without the non-exported origin key; all clients use `ArchonApiUrl`.
 
 7. Run the protected manual canary in
    [`../../.github/workflows/governed-canary.yml`](../../.github/workflows/governed-canary.yml)
@@ -487,10 +514,19 @@ sanitized evidence.
 The GitHub OIDC deployment roles must also allow the pipeline's read-only live-contract
 calls: `ec2:DescribeVpcs`, `ec2:DescribeSecurityGroups`,
 `ec2:DescribeSecurityGroupRules`, `elasticloadbalancing:DescribeLoadBalancers`, the
-required WAFv2 getters, `logs:DescribeLogGroups`, `kms:DescribeKey`, and
-`kms:GetKeyRotationStatus`. These permissions are used to observe the deployed state;
-the pipeline does not infer VPC, NLB, security-group, WAF, KMS, or log-retention claims
-from CloudFormation outputs alone.
+exact-ACL `wafv2:GetWebACL`, `wafv2:GetLoggingConfiguration`, and
+`wafv2:GetWebACLForResource` calls, `cognito-idp:GetWebACLForResource` on the exact
+`ArchonUserPoolArn`, `logs:DescribeLogGroups`, `kms:DescribeKey`, and
+`kms:GetKeyRotationStatus`. The Cognito-dependent read is mandatory: promotion fails
+unless the stack's exact user-pool ID and ARN resolve to the same regional Web ACL as the
+API stage. These permissions are used to observe the deployed state; the pipeline does not
+infer VPC, NLB, security-group, WAF, KMS, or log-retention claims from CloudFormation
+outputs alone.
+The compact, sorted-key `archon.regional-waf-contract/v3` receipt records
+`associations.apiGatewayStage` and `associations.cognitoUserPool`, including the exact
+resource ID/ARN where applicable and the identical observed Web ACL ARN. Its digest is
+rechecked after the final desired-count reconciliation and retained in deployment
+evidence.
 Production repeats steps 3–6 only after its protected-environment approval and must match
 staging's exact `IMAGE_DIGEST`, SPA archive, Lambda archive, `SPA_ARTIFACT_SHA256`, and
 `RELEASE_SHA`. Selecting an older retained CI run and SHA applies the same mechanism as
@@ -527,8 +563,9 @@ This stack keeps environment-dependent claims explicit:
   environment prerequisites; the pipeline validates their ownership, state, entries, and
   scope tags, while resolving the AWS-owned regional S3/DynamoDB lists itself;
 - CloudFront protects the static and same-origin API behaviors with its global WAF; the
-  separate regional WAF remains attached to API Gateway so it also protects callers that
-  bypass CloudFront.
+  separate regional WAF remains attached to both API Gateway and the Cognito user pool,
+  protecting direct API callers plus managed-login/public Cognito endpoints. Its fixed
+  rules deliberately exclude Cognito-incompatible ATP/ACFP groups and CAPTCHA actions.
 
 ## Stable CloudFormation outputs
 
@@ -551,7 +588,8 @@ Every environment stack exports:
 - `ArchonApplicationUrl`, `ArchonApiUrl`, `ArchonApiInvokeUrl`, `ArchonApiStageArn`
 - `ArchonRegionalWebAclArn`, `ArchonRegionalWafLogGroupName`,
   `ArchonRegionalWafLogKeyArn`
-- `ArchonUserPoolId`, `ArchonUserPoolClientId`, `ArchonApproverGroupName`
+- `ArchonUserPoolId`, `ArchonUserPoolArn`, `ArchonUserPoolClientId`,
+  `ArchonApproverGroupName`
 - `ArchonCognitoHostedUiOrigin`, `ArchonCognitoAuthorizationEndpoint`
 - `ArchonCognitoTokenEndpoint`, `ArchonCognitoLogoutEndpoint`
 - `ArchonApprovalOAuthScope`, `ArchonAuthRedirectUri`, `ArchonAuthLogoutUri`

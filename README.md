@@ -137,7 +137,8 @@ Important trust boundaries:
 More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
 [temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
 pack](docs/JUDGE_EVIDENCE.md), [production availability](docs/AVAILABILITY.md), and
-[evidence-based readiness](docs/READINESS.md).
+[protected judge access](docs/JUDGE_ACCESS.md), plus [evidence-based
+readiness](docs/READINESS.md).
 
 ## Run locally without external services
 
@@ -280,9 +281,9 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
   encrypted retained logs, and hands both ARNs to the regional platform deployment;
 - private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC and Route 53 dual-stack
   aliases, with `TLSv1.3_2025`, CloudFront access logging, and S3 server-access logging;
-- same-origin API Gateway with its own regional WAF, throttling, strict schemas, access
-  logs, active X-Ray, and a two-second encrypted cache limited to the capability-scoped
-  status GET;
+- same-origin API Gateway and the exact Cognito user pool bound to one regional WAF,
+  with throttling, strict schemas, access logs, active X-Ray, and a two-second encrypted
+  cache limited to the capability-scoped status GET;
 - private ECS Fargate API/worker services behind an internal NLB and VPC Link;
 - separate read/write/LLM secrets, KMS keys, IAM roles, and default-deny security groups;
   Fargate never receives a public IP, public subnets disable automatic public-IP
@@ -355,7 +356,7 @@ output is not accepted as release evidence:
 | Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, exact-run rescans, and a daily read-only-OIDC rescan transitively bound to current ECS image digests, Lambda ZIP/config/content digests, every versioned KMS-encrypted SPA object, exact deployment/CI artifacts, and a second post-scan live-byte TOCTOU observation |
 | Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
-| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/regional-WAF/network contracts |
+| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/network plus dual API-stage/Cognito regional-WAF contracts |
 | Production availability | Six-hour read-only public-path probe with strict TLS/header/schema checks, exact CI/deployment/runtime-byte provenance, TOCTOU revalidation, and checksum-sealed 90-day evidence |
 
 Workflows:
@@ -393,6 +394,18 @@ Workflows:
   flagship retained-history path, with matching pre-secret, post-proof, and immediate
   pre-attestation exact control-plane gates and both the enforced and enriched receipts
   included in the signed subject set.
+- [DataHub demo state](.github/workflows/datahub-demo-state.yml) — idempotent protected
+  seed/reset of the commit- and SHA-256-bound official showcase baseline plus the exact
+  retained-history contradiction, G6 email gap, and dangling lineage target. Its
+  plan-before-mutation protocol and two-URN delete allowlist are documented in
+  [docs/DEMO_DATA_STATE.md](docs/DEMO_DATA_STATE.md).
+- [Cognito judge access](.github/workflows/judge-user.yml) — independently approved,
+  stage- and target-bound provision, rotation, reactivation, and emergency deactivation
+  of the single immutable judge identity, with no exported credential artifact. Only
+  emergency deactivation can bypass red CI status; it still binds the exact current
+  master workflow/run and recomputes its V3-sealed receipt before and after OIDC. The
+  least-privilege operating contract is documented in
+  [docs/JUDGE_ACCESS.md](docs/JUDGE_ACCESS.md).
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
   digests, then `APPROVE → VERIFIED`, followed by a separately approved exact rollback
@@ -418,11 +431,12 @@ reference infrastructure, and CI/CD definitions. The authoritative remaining pro
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
-- GitHub `staging`, `production`, `production-observer`, `datahub-demo`, `governed-canary`,
-  `governed-canary-rollback`, and `governed-canary-recovery` environments and `master`
-  protection must be configured;
-- production and the three governed-canary approval environments require a trusted second
-  collaborator so self-review can remain disabled;
+- GitHub `staging`, `production`, `production-observer`, `datahub-demo`,
+  `datahub-demo-seed`, `judge-access-staging`, `judge-access-production`,
+  `governed-canary`, `governed-canary-rollback`, and `governed-canary-recovery`
+  environments and `master` protection must be configured;
+- production, demo-seed, judge-access, and the three governed-canary approval
+  environments require a trusted second collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
   user-gated;
 - a real retained-history contradiction and governed canary write/rollback need sanitized

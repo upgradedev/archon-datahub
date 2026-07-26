@@ -252,10 +252,10 @@ stack, and an environment-specific regional platform stack:
 - `Archon-<stage>` in the selected platform region: private versioned KMS S3 SPA with
   CloudFront OAC, Route 53 A/AAAA aliases, the certificate/WAF handoff from the edge stack,
   access logging, and `TLSv1.3_2025`;
-- same-origin API Gateway with its own regional WAF, strict request models, throttling,
-  access logs, active X-Ray, a CloudFront-only origin gate whose credential never reaches
-  a backend, and an encrypted two-second cache limited to the capability-scoped status
-  GET;
+- same-origin API Gateway and the exact Cognito user pool with one shared regional WAF,
+  strict request models, throttling, access logs, active X-Ray, a CloudFront-only origin
+  gate whose credential never reaches a backend, and an encrypted two-second cache
+  limited to the capability-scoped status GET;
 - private Fargate services with public IP assignment disabled through an internal
   NLB/VPC Link;
 - Cognito Hosted UI, public PKCE code client, scoped approval boundary, and Node.js 24
@@ -292,7 +292,9 @@ the selected workload region. CDK then creates both IPv4 and IPv6 aliases. Every
 behavior also runs the same viewer-request function, which returns `421` for a
 non-canonical Host before CloudFront can expose an origin response through its generated
 distribution hostname. The CloudFront WAF protects every cache behavior, while the
-separate regional WAF remains bound to API Gateway for direct callers.
+separate regional WAF remains bound to both API Gateway for direct callers and the exact
+Cognito user pool for managed-login and unauthenticated Cognito endpoints. The live
+deployment contract rejects promotion unless both resources resolve to that same ACL.
 
 Network egress is capability-specific. Public subnets disable automatic public-IP
 assignment and all three Fargate services explicitly disable public IPs. Workload security

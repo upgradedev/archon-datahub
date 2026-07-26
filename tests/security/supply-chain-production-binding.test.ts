@@ -29,10 +29,170 @@ const overrideVerifier = readFileSync(
   new URL("../../scripts/verify-exact-npm-overrides.mjs", import.meta.url),
   "utf8"
 );
+const mcpMaterializer = readFileSync(
+  new URL("../../scripts/materialize-datahub-mcp-lock.sh", import.meta.url),
+  "utf8"
+);
+const openVexMaintenanceContracts = readFileSync(
+  new URL(
+    "../pipeline/openvex-maintenance-contracts.test.sh",
+    import.meta.url
+  ),
+  "utf8"
+);
 const infraDocumentation = readFileSync(
   new URL("../../infra/aws/README.md", import.meta.url),
   "utf8"
 );
+const liveDataHubDocumentation = readFileSync(
+  new URL("../../docs/LIVE_DATAHUB_PROOF.md", import.meta.url),
+  "utf8"
+);
+
+test("OpenVEX renewal is bounded and enforced before dependency tooling", () => {
+  assert.match(mcpMaterializer, /--openvex-maintenance-only/u);
+  assert.match(mcpMaterializer, /--minimum-remaining-days DAYS/u);
+  assert.match(
+    mcpMaterializer,
+    /minimum_remaining_days\}" =~ \^\[1-9\]\[0-9\]\?\$/u
+  );
+  assert.match(mcpMaterializer, /minimum_remaining_days > 30/u);
+  assert.match(
+    mcpMaterializer,
+    /test "\$\{vex_max_validity_days\}" = "30"/u
+  );
+  assert.match(
+    mcpMaterializer,
+    /vex_expires_epoch - vex_issued_epoch\)\)" -le[\s\S]+vex_max_validity_days \* 24 \* 60 \* 60/u
+  );
+
+  const maintenanceBranch = mcpMaterializer.indexOf(
+    'if [[ "${maintenance_only}" == "true" ]]'
+  );
+  const repositoryRead = mcpMaterializer.indexOf(
+    'readonly repository="$(jq -er'
+  );
+  const destinationCreation = mcpMaterializer.indexOf(
+    'mkdir -p "${destination}"'
+  );
+  const sourceFetch = mcpMaterializer.indexOf('git -C "${destination}" init');
+  const resolver = mcpMaterializer.indexOf("uv lock \\");
+  const provenanceDownload = mcpMaterializer.indexOf(
+    "curl --fail --silent --show-error --location"
+  );
+  assert.ok(maintenanceBranch >= 0);
+  for (const laterOperation of [
+    repositoryRead,
+    destinationCreation,
+    sourceFetch,
+    resolver,
+    provenanceDownload,
+  ]) {
+    assert.ok(laterOperation > maintenanceBranch);
+  }
+  const maintenanceMode = mcpMaterializer.slice(
+    maintenanceBranch,
+    repositoryRead
+  );
+  assert.match(
+    maintenanceMode,
+    /vex_remaining_seconds < minimum_remaining_days \* 86400/u
+  );
+  assert.match(
+    maintenanceMode,
+    /schemaVersion: "archon\.openvex-maintenance\/v1"/u
+  );
+  assert.match(maintenanceMode, /\n  exit 0\n/u);
+
+  const mcpJobStart = ciWorkflow.indexOf("\n  mcp-dependency:");
+  const mcpJobEnd = ciWorkflow.indexOf("\n  dependency-review:", mcpJobStart);
+  assert.ok(mcpJobStart >= 0);
+  assert.ok(mcpJobEnd > mcpJobStart);
+  const mcpJob = ciWorkflow.slice(mcpJobStart, mcpJobEnd);
+  const normalGate = mcpJob.indexOf("Enforce the OpenVEX renewal horizon");
+  const setupUv = mcpJob.indexOf("astral-sh/setup-uv");
+  const materialization = mcpJob.indexOf(
+    "Verify upstream and derive the wheel-only runtime lock"
+  );
+  assert.ok(normalGate >= 0);
+  assert.ok(setupUv > normalGate);
+  assert.ok(materialization > setupUv);
+  assert.match(
+    mcpJob.slice(normalGate, setupUv),
+    /--openvex-maintenance-only[\s\S]+--minimum-remaining-days 14/u
+  );
+
+  const independentJobStart = workflow.indexOf("\n  openvex-maintenance:");
+  const resolverJobStart = workflow.indexOf("\n  resolve-production:");
+  assert.ok(independentJobStart >= 0);
+  assert.ok(resolverJobStart > independentJobStart);
+  const independentJob = workflow.slice(independentJobStart, resolverJobStart);
+  assert.match(independentJob, /if: github\.event_name == 'schedule'/u);
+  assert.match(independentJob, /ref: master/u);
+  assert.match(independentJob, /permissions:\r?\n      contents: read/u);
+  assert.doesNotMatch(independentJob, /\n    needs:/u);
+  assert.doesNotMatch(independentJob, /\n    environment:/u);
+  assert.doesNotMatch(independentJob, /id-token: write/u);
+  assert.match(
+    independentJob,
+    /--openvex-maintenance-only[\s\S]+--minimum-remaining-days 14/u
+  );
+
+  const scanStart = workflow.indexOf("\n  scan:");
+  const scanEnd = workflow.indexOf("\n  revalidate-production:", scanStart);
+  assert.ok(scanStart >= 0);
+  assert.ok(scanEnd > scanStart);
+  const scan = workflow.slice(scanStart, scanEnd);
+  const sourceCheckout = scan.indexOf(
+    "Check out the exact successful CI source"
+  );
+  const dailyGate = scan.indexOf(
+    "Enforce the scanned source OpenVEX renewal horizon"
+  );
+  const scanPreparation = scan.indexOf("Prepare ephemeral directories");
+  assert.ok(sourceCheckout >= 0);
+  assert.ok(dailyGate > sourceCheckout);
+  assert.ok(scanPreparation > dailyGate);
+  assert.match(
+    scan.slice(dailyGate, scanPreparation),
+    /--openvex-maintenance-only[\s\S]+--minimum-remaining-days 14/u
+  );
+  assert.match(workflow, /schedule:\r?\n    - cron: "23 3 \* \* \*"/u);
+
+  assert.match(
+    ciWorkflow,
+    /bash tests\/pipeline\/openvex-maintenance-contracts\.test\.sh/u
+  );
+  assert.match(
+    openVexMaintenanceContracts,
+    /for command in cp curl git mkdir python3 uv/u
+  );
+  assert.match(
+    openVexMaintenanceContracts,
+    /ln -s forbidden "\$\{temporary\}\/bin\/\$\{command\}"/u
+  );
+  assert.match(openVexMaintenanceContracts, /fifteen_days_before/u);
+  assert.match(openVexMaintenanceContracts, /fourteen_days_before/u);
+  assert.match(openVexMaintenanceContracts, /thirteen_days_before/u);
+  assert.match(
+    openVexMaintenanceContracts,
+    /for invalid_days in 0 00 014 08 31 invalid/u
+  );
+
+  assert.match(liveDataHubDocumentation, /OpenVEX renewal runbook/u);
+  assert.match(
+    liveDataHubDocumentation,
+    /fail when fewer than 14 days remain/u
+  );
+  assert.match(
+    liveDataHubDocumentation,
+    /validity is at most 30 days/u
+  );
+  assert.match(
+    liveDataHubDocumentation,
+    /If the runtime is affected or the disposition is\s+uncertain, upgrade the dependency or remove the disposition; do not renew it/u
+  );
+});
 
 test("scheduled rescans bind exact live deployment, CI run, and subjects", () => {
   const resolverStart = workflow.indexOf("\n  resolve-production:");

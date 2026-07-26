@@ -1180,11 +1180,22 @@ export class ArchonPlatformStack extends Stack {
       userPoolName: `archon-${stage}`,
       selfSignUpEnabled: false,
       signInAliases: { email: true },
+      signInCaseSensitive: false,
       standardAttributes: {
         email: { required: true, mutable: false }
       },
+      customAttributes: {
+        // A random, immutable value written only by the protected judge-user
+        // workflow lets compensation distinguish its create from a raced user.
+        archon_judge_binding: new cognito.StringAttribute({
+          minLen: 64,
+          maxLen: 64,
+          mutable: false
+        })
+      },
       passwordPolicy: {
         minLength: 14,
+        passwordHistorySize: 24,
         requireDigits: true,
         requireLowercase: true,
         requireSymbols: true,
@@ -1965,6 +1976,9 @@ export class ArchonPlatformStack extends Stack {
       generateSecret: false,
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
+      readAttributes: new cognito.ClientAttributes().withStandardAttributes({
+        email: true
+      }),
       accessTokenValidity: Duration.minutes(15),
       idTokenValidity: Duration.minutes(15),
       refreshTokenValidity: Duration.days(1),
@@ -1982,10 +1996,51 @@ export class ArchonPlatformStack extends Stack {
         scopes: [
           cognito.OAuthScope.OPENID,
           cognito.OAuthScope.EMAIL,
+          // Deliberately omit aws.cognito.signin.user.admin. The shared judge
+          // credential can approve through its narrow API scope but cannot use
+          // an access token to invoke Cognito ChangePassword.
           cognito.OAuthScope.resourceServer(resourceServer, approvalScope)
         ]
       }
     });
+    new cognito.CfnUserPoolRiskConfigurationAttachment(
+      this,
+      "SpaRiskConfiguration",
+      {
+        userPoolId: userPool.userPoolId,
+        clientId: userPoolClient.userPoolClientId,
+        // A shared judge account legitimately moves between reviewers,
+        // networks, and geographies. Avoid adaptive lockout or email/MFA
+        // challenges that this identity has no per-reviewer recovery path for.
+        accountTakeoverRiskConfiguration: {
+          actions: {
+            lowAction: { eventAction: "NO_ACTION", notify: false },
+            mediumAction: { eventAction: "NO_ACTION", notify: false },
+            highAction: { eventAction: "NO_ACTION", notify: false }
+          }
+        },
+        // Known-compromised credentials remain a hard stop for every event in
+        // which this client can submit an existing password.
+        compromisedCredentialsRiskConfiguration: {
+          actions: { eventAction: "BLOCK" },
+          eventFilter: ["SIGN_IN", "PASSWORD_CHANGE"]
+        }
+      }
+    );
+    const cognitoWebAclAssociation = new wafv2.CfnWebACLAssociation(
+      this,
+      "CognitoWebAclAssociation",
+      {
+        resourceArn: userPool.userPoolArn,
+        webAclArn: webAcl.attrArn
+      }
+    );
+    // The same regional ACL protects both the API stage and the Cognito
+    // hosted-UI/public API surface. Its rules deliberately exclude Cognito
+    // ATP/ACFP managed groups and CAPTCHA actions, which are incompatible with
+    // or unsafe for a shared managed-login judge path.
+    cognitoWebAclAssociation.node.addDependency(userPool);
+    cognitoWebAclAssociation.node.addDependency(webAcl);
     // Keep the CloudFront grant on a key dedicated to SPA objects. An exact
     // distribution reference here would create SpaBucket -> SpaKey ->
     // Distribution -> SpaBucket; the OAC bucket policy still binds reads to
@@ -2187,6 +2242,7 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonRegionalWafLogGroupName", apiWafLogGroup.logGroupName);
     output(this, "ArchonRegionalWafLogKeyArn", logsKey.keyArn);
     output(this, "ArchonUserPoolId", userPool.userPoolId);
+    output(this, "ArchonUserPoolArn", userPool.userPoolArn);
     output(this, "ArchonUserPoolClientId", userPoolClient.userPoolClientId);
     output(this, "ArchonCognitoHostedUiOrigin", userPoolDomain.baseUrl());
     output(

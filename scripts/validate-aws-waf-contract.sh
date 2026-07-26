@@ -24,6 +24,8 @@ web_acl_arn="$(stack_output ArchonRegionalWebAclArn)"
 log_group_name="$(stack_output ArchonRegionalWafLogGroupName)"
 log_key_arn="$(stack_output ArchonRegionalWafLogKeyArn)"
 api_stage_arn="$(stack_output ArchonApiStageArn)"
+user_pool_id="$(stack_output ArchonUserPoolId)"
+user_pool_arn="$(stack_output ArchonUserPoolArn)"
 
 [[ "${web_acl_arn}" =~ ^arn:aws:wafv2:${AWS_REGION}:${EXPECTED_ACCOUNT_ID}:regional/webacl/([A-Za-z0-9_-]{1,128})/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$ ]] || {
   echo "::error::Regional WAF output is not an account-owned Web ACL ARN" >&2
@@ -44,6 +46,15 @@ test "${log_group_name}" = \
 }
 [[ "${api_stage_arn}" =~ ^arn:aws:apigateway:${AWS_REGION}::/restapis/[a-z0-9]{10}/stages/[a-z][a-z0-9-]{1,15}$ ]] || {
   echo "::error::API stage output is not a regional API Gateway stage ARN" >&2
+  exit 1
+}
+[[ "${user_pool_id}" =~ ^${AWS_REGION}_[A-Za-z0-9]+$ ]] || {
+  echo "::error::Cognito user-pool ID output does not belong to the deployment region" >&2
+  exit 1
+}
+expected_user_pool_arn="arn:aws:cognito-idp:${AWS_REGION}:${EXPECTED_ACCOUNT_ID}:userpool/${user_pool_id}"
+test "${user_pool_arn}" = "${expected_user_pool_arn}" || {
+  echo "::error::Cognito user-pool ARN output does not exactly bind the stack ID, account, and region" >&2
   exit 1
 }
 
@@ -207,19 +218,27 @@ jq --exit-status \
   exit 1
 }
 
-association_json="$(
-  aws wafv2 get-web-acl-for-resource \
-    --region "${AWS_REGION}" \
-    --resource-arn "${api_stage_arn}" \
-    --output json
-)"
-jq --exit-status \
-  --arg arn "${web_acl_arn}" \
-  '.WebACL.ARN == $arn' \
-  <<<"${association_json}" >/dev/null || {
-  echo "::error::Regional WAF is not associated with the deployed API stage" >&2
-  exit 1
+validate_association() {
+  local resource_label="$1"
+  local resource_arn="$2"
+  local association_json
+
+  association_json="$(
+    aws wafv2 get-web-acl-for-resource \
+      --region "${AWS_REGION}" \
+      --resource-arn "${resource_arn}" \
+      --output json
+  )"
+  jq --exit-status \
+    --arg arn "${web_acl_arn}" \
+    '.WebACL.ARN == $arn' \
+    <<<"${association_json}" >/dev/null || {
+    echo "::error::Regional WAF is not associated with ${resource_label}" >&2
+    exit 1
+  }
 }
+validate_association "the deployed API stage" "${api_stage_arn}"
+validate_association "the exact Cognito user pool" "${user_pool_arn}"
 
 log_group_json="$(
   aws logs describe-log-groups \
@@ -296,16 +315,32 @@ jq --null-input --compact-output --sort-keys \
   --arg stackName "${ARCHON_STACK_NAME}" \
   --arg cdkOutputsSha256 "${stack_outputs_sha}" \
   --arg apiStageArn "${api_stage_arn}" \
+  --arg userPoolId "${user_pool_id}" \
+  --arg userPoolArn "${user_pool_arn}" \
   --arg webAclArn "${web_acl_arn}" \
   --arg webAclName "${web_acl_name}" \
   --arg webAclId "${web_acl_id}" \
   --argjson rateLimit "${EXPECTED_RATE_LIMIT}" \
   --argjson logGroup "${log_group_contract}" \
   '{
-    schemaVersion: "archon.regional-waf-contract/v2",
+    schemaVersion: "archon.regional-waf-contract/v3",
     stackName: $stackName,
     cdkOutputsSha256: $cdkOutputsSha256,
-    apiStageArn: $apiStageArn,
+    associations: {
+      apiGatewayStage: {
+        resourceArn: $apiStageArn,
+        resourceType: "AWS::ApiGateway::Stage",
+        validation: "passed",
+        webAclArn: $webAclArn
+      },
+      cognitoUserPool: {
+        resourceArn: $userPoolArn,
+        resourceId: $userPoolId,
+        resourceType: "AWS::Cognito::UserPool",
+        validation: "passed",
+        webAclArn: $webAclArn
+      }
+    },
     webAcl: {
       arn: $webAclArn,
       name: $webAclName,
@@ -322,6 +357,5 @@ jq --null-input --compact-output --sort-keys \
         sensitiveFields: ["authorization", "cookie", "x-api-key"]
       }
     ),
-    association: "validated",
     validation: "passed"
   }'

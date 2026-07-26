@@ -6,14 +6,44 @@ set -euo pipefail
 # Runtime installation is wheel-only; package-controlled source never executes.
 
 readonly contract="${ARCHON_DATAHUB_MCP_LOCK_CONTRACT:-.github/locks/datahub-mcp-v0.6.0.json}"
-readonly destination="${1:-}"
 readonly allow_unsealed="${ARCHON_ALLOW_UNSEALED_RESOLVED_LOCK:-false}"
 readonly zero_sha256="$(
   printf '0%.0s' {1..64}
 )"
 
-if [[ -z "${destination}" || "${destination}" != /* ]]; then
+usage() {
   echo "usage: $0 ABSOLUTE_DESTINATION" >&2
+  echo "       $0 --openvex-maintenance-only --minimum-remaining-days DAYS" >&2
+}
+
+maintenance_only=false
+minimum_remaining_days=""
+destination=""
+if [[ "${1:-}" == "--openvex-maintenance-only" ]]; then
+  if [[ "$#" -ne 3 || "${2:-}" != "--minimum-remaining-days" ]]; then
+    usage
+    exit 64
+  fi
+  maintenance_only=true
+  minimum_remaining_days="${3}"
+  if [[ ! "${minimum_remaining_days}" =~ ^[1-9][0-9]?$ ]] ||
+    ((minimum_remaining_days > 30)); then
+    echo "minimum OpenVEX remaining days must be an integer from 1 through 30" >&2
+    exit 64
+  fi
+elif [[ "$#" -eq 1 ]]; then
+  destination="${1}"
+else
+  usage
+  exit 64
+fi
+readonly maintenance_only
+readonly minimum_remaining_days
+readonly destination
+
+if [[ "${maintenance_only}" == "false" &&
+  ( -z "${destination}" || "${destination}" != /* ) ]]; then
+  usage
   exit 64
 fi
 test -f "${contract}"
@@ -258,6 +288,34 @@ test "${now_epoch}" -lt "${vex_expires_epoch}"
 test "${vex_expires_epoch}" -gt "${vex_issued_epoch}"
 test "$((vex_expires_epoch - vex_issued_epoch))" -le \
   "$((vex_max_validity_days * 24 * 60 * 60))"
+
+readonly vex_remaining_seconds="$((vex_expires_epoch - now_epoch))"
+readonly vex_remaining_days="$((vex_remaining_seconds / 86400))"
+if [[ "${maintenance_only}" == "true" ]]; then
+  if ((vex_remaining_seconds < minimum_remaining_days * 86400)); then
+    echo "OpenVEX renewal required: ${vex_remaining_days} whole days remain; minimum is ${minimum_remaining_days}" >&2
+    exit 67
+  fi
+  jq -cnS \
+    --arg expiresAt "${vex_expires_at}" \
+    --arg issuedAt "${vex_issued_at}" \
+    --argjson maxValidityDays "${vex_max_validity_days}" \
+    --argjson minimumRemainingDays "${minimum_remaining_days}" \
+    --argjson remainingDays "${vex_remaining_days}" \
+    --argjson remainingSeconds "${vex_remaining_seconds}" '
+      {
+        schemaVersion: "archon.openvex-maintenance/v1",
+        status: "ready",
+        issuedAt: $issuedAt,
+        expiresAt: $expiresAt,
+        maxValidityDays: $maxValidityDays,
+        minimumRemainingDays: $minimumRemainingDays,
+        remainingDays: $remainingDays,
+        remainingSeconds: $remainingSeconds
+      }
+    '
+  exit 0
+fi
 
 readonly repository="$(jq -er '.source.repository' "${contract}")"
 readonly commit="$(jq -er '.source.commit' "${contract}")"

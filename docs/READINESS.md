@@ -1,11 +1,12 @@
 # Submission Readiness — Archon DataHub
 
-Current source review: **2026-07-25**. Submission deadline: **2026-08-10,
+Current source review: **2026-07-26**. Submission deadline: **2026-08-10,
 17:00 EDT**.
 
-This document is deliberately evidence-based. It does not assign a score, percentage,
-test count, green-CI state, live-DataHub state, or deployment state until a corresponding
-remote run or public endpoint exists.
+This document is deliberately evidence-based. It does not assign a predicted judge score,
+green-CI state, live-DataHub state, or deployment state without the corresponding remote
+run or public endpoint. The machine report's percentage is only equal-weight evidence
+coverage, as defined below.
 
 ## Status vocabulary
 
@@ -16,6 +17,48 @@ remote run or public endpoint exists.
 - **User-gated:** completion requires credentials, a cloud account, an external service,
   an approval, or evidence that cannot be manufactured offline.
 - **Deferred-to-end:** intentionally postponed until the product and live proof are stable.
+
+## Machine-readable readiness semantics
+
+`npm run readiness` reports two deliberately different views:
+
+1. **Official judging-evidence projection.** It uses the five official criteria exactly as
+   named below, each at **20%**. The percentage is evidence coverage, not a predicted judge
+   score. Check weights only prioritize evidence within one criterion; they cannot make one
+   official criterion count more than another.
+2. **Offline capability evidence.** It groups machine-checkable repository evidence into
+   separate `engineering` and `security` axes. Its 95% gate is a CI regression gate only.
+   A pass means the offline evidence remains healthy; it does **not** mean the entry is
+   ready to submit.
+
+Final readiness is fail-closed. The 95% offline threshold is never reused as a submission
+threshold: `submission.ready = true` requires every official check and every engineering
+and security capability check to pass. It also requires all five official criterion IDs,
+both capability axes, and every registered external-proof check to remain present with its
+exact criterion mapping. Check IDs must be globally unambiguous and every evidence weight
+must be positive; a missing, duplicate, mis-mapped, or invalidly weighted check is itself
+an internal blocker. The report exposes internal failures
+separately from external proof blockers and remains `submission.status = "blocked"` while
+any of these external proofs is absent:
+
+- a stable public working-project URL;
+- functioning fresh-judge access, including credentials and testing instructions if auth
+  is required;
+- a public complete source repository whose hosting UI detects the Apache-2.0 license;
+- every final written submission field and testing instruction in English (or with a
+  complete English translation);
+- a public demonstration video shorter than three minutes, with English
+  narration/subtitles or a complete English translation;
+- a retained successful remote judge-evidence artifact with sanitized sample outputs;
+- free, monitored application and judge access throughout the full judging period;
+- a completed Devpost entry whose project, source, video, and access URLs have been
+  verified while logged out;
+- a final cross-review of `NOTICE.md`, repository history, Devpost text, and video for
+  consistent reused-work and third-party disclosures; and
+- retained live DataHub/deployed-application proof for the behavior and usefulness claimed.
+
+These blockers cannot be cleared by fixture output, source inspection, or a green offline
+CI gate. **Current final submission status: BLOCKED / NOT READY.**
 
 ## Project submitted to the challenge
 
@@ -64,21 +107,27 @@ The five official Stage Two criteria are equally weighted.
 | **4. Real-World Usefulness** | Governance checks, current-view drift, version-history conflict detection, blast radius, JSON/Markdown/SARIF exporters, browser and CI judge packs, safe remediation contracts, dashboard, scheduled public-path availability proof, and production-oriented AWS topology. | **Implemented / source-complete; operational value user-gated.** | Complete one realistic catalog incident end-to-end on live infrastructure; show a practitioner-readable report and verified remediation receipt; prove authentication, least-privilege read/write separation, failure behavior, audit retention, rollback, and sustained availability. |
 | **5. Submission Quality** | Public-facing README and design/research documents; guided UI; deterministic sample-output generator/verifier; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Source-complete except final/live media; CI-unverified.** | Retain the verified judge pack, then add the public working-project URL, final screenshots, concise English testing instructions, sub-three-minute public demo video, required Devpost text, and claim consistency review. |
 | **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, and a CI job that applies it to that revision and runs upstream lint/type/focused tests. The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source-complete; CI-unverified; no bonus claimed yet.** | Obtain green remote candidate CI, recheck upstream overlap immediately before submission, open a focused public upstream PR with maintainer-ready context, and link it. A local folder or CI result alone does not earn the bonus. |
+| **Most Valuable Feedback prize (separate)** | The [official rules](https://datahub.devpost.com/rules) define an optional entrant feedback form, not a Project feature or Submission deliverable. | **User-gated; completion unverified.** | While registered for the hackathon, submit at most one complete, actionable feedback form per entrant before **2026-08-10, 17:00 EDT**. Keep it separate from the Devpost Project submission and do not treat it as a substitute for the OSS contribution. |
 
 ## Required deliverables
 
 | Official requirement | State | Exact remaining action |
 |---|---|---|
-| Working application using open-source DataHub plus MCP Server, Agent Context Kit, DataHub Skills, or Analytics Agent | Implementation is present; **CI and live behavior are unverified**. | Complete CI and the live DataHub proof. Ensure behavior shown in the submission exactly matches the deployed build. |
-| Easy-access project URL for judges | **User-gated; absent.** | Deploy the exact CI-approved artifacts and provide a free, stable URL. If authentication is required, include judge credentials and testing instructions. |
-| Public source repository with all source, assets, instructions, and visible Apache 2.0 license | Repository and license material exist; current branch changes are **CI-unverified**. | Merge/publish the accepted commit, verify the repository About panel detects Apache 2.0, and verify a clean judge can follow setup instructions. |
+| Working application using open-source DataHub plus MCP Server, Agent Context Kit, DataHub Skills, or Analytics Agent | Implementation is present; **CI and live behavior are unverified; submission-blocking.** | Complete CI and retain live DataHub plus deployed-application proof. Ensure behavior shown in the submission exactly matches the deployed build. |
+| Easy-access public project URL for judges | **User-gated; absent; submission-blocking.** | Deploy the exact CI-approved artifacts and verify a free, stable URL from an unauthenticated browser. |
+| Functioning judge access | **User-gated; unproven; submission-blocking.** | Exercise the complete journey as a fresh judge. If authentication is required, provide the pipeline-managed `CONFIRMED` credential, concise testing instructions, and a tested rotation path for the full judging period. |
+| Public source repository with all source, assets, instructions, and visible Apache 2.0 license | Local repository and license material exist; **public completeness and license detection are unverified and submission-blocking.** | Merge/publish the accepted commit, verify logged-out access to the complete repository, verify the repository About panel detects Apache 2.0, and verify a clean judge can follow setup instructions. |
 | Text description | **Deferred-to-end; required.** | Write the final English Devpost description only after the live claims and URLs are fixed. A separate blog post is not listed as a required deliverable. |
-| Demonstration video | **Deferred-to-end; required.** | Publish a video shorter than three minutes on YouTube, Vimeo, or Youku; show the functioning deployed project; use only authorized marks/music; provide the public URL. |
+| Demonstration video | **Deferred-to-end; required; submission-blocking.** | Publish a public video shorter than three minutes on YouTube, Vimeo, or Youku; show the functioning deployed project; provide English narration/subtitles or a complete English translation; use only authorized marks/music; provide the public URL. |
 | Sample outputs | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified**. | Retain the exact remote `judge-evidence-<sha>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
-| Testing access through the judging period | **User-gated.** | Keep the application free and available through **2026-08-31, 17:00 Eastern Time**, monitor it, and retain a rollback path and non-expiring judge access. |
-| English submission materials | **Deferred-to-end.** | Deliver the description, video narration/subtitles, and testing instructions in English or include an English translation. |
-| New-project and third-party disclosure compliance | Disclosure files exist; final narrative review remains. | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
+| Testing access through the judging period | **User-gated.** | Keep the application free and available through **2026-08-31, 17:00 Eastern Time**, monitor it, and retain rollback plus protected credential-rotation paths throughout that window. |
+| English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
+| New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
 | Completed Devpost entry | **Deferred-to-end.** | Enter every required field and submit before the deadline; verify every URL in an unauthenticated browser. |
+
+A separate blog post is not listed as a required deliverable. The optional Most Valuable
+Feedback form above is likewise separate from the Project submission, but it must be
+completed during the Feedback Period to be eligible for that prize.
 
 ## Remaining proof gates
 
@@ -115,6 +164,16 @@ The five official Stage Two criteria are equally weighted.
   audits fail closed rather than treating MCP-only current state as complete history.
 - Seed version history where repeated runs of one pipeline remain one source and two stable
   pipelines create the intended contradiction.
+- Configure `datahub-demo` and reviewer-protected `datahub-demo-seed`, then run the
+  plan-before-mutation seed/reset protocol in
+  [`docs/DEMO_DATA_STATE.md`](DEMO_DATA_STATE.md). Its exact official-pack commit/file
+  digests, query/URN, two retained source identities, G6 email gap, dangling upstream, and
+  two-URN hard-delete allowlist must all appear in the retained pipeline receipt.
+- Renew the current reviewed OpenVEX disposition before its 14-day CI horizon fails at
+  `2026-08-08T11:30:00Z`; the committed statement expires during judging at
+  `2026-08-22T11:30:00Z`. Re-evaluate the exact runtime first and retain the 30-day maximum
+  validity and pipeline-only review described in
+  [`docs/LIVE_DATAHUB_PROOF.md`](LIVE_DATAHUB_PROOF.md).
 - Prove the instance actually retains the aspect versions Archon needs.
 - Run `.github/workflows/live-datahub-proof.yml` and retain the sanitized result.
 - Configure the three protected canary environments in
@@ -130,16 +189,23 @@ The five official Stage Two criteria are equally weighted.
 
 - Configure an AWS account, GitHub OIDC trust, protected environments, budgets, and
   deployment secrets.
+- Configure the dedicated `judge-access-staging` and `judge-access-production`
+  environments, narrow Cognito lifecycle roles, and protected password delivery described
+  in [`docs/JUDGE_ACCESS.md`](JUDGE_ACCESS.md). Provision, rotate, reactivate, and deactivate judge
+  identities only through the manual pipeline, require a permanent-password
+  `CONFIRMED` read-back with no first-login challenge, and retain no credential artifact.
 - Configure `production-observer` with the exact production application origin and bounded
   demo query. It carries no AWS role or provider token and must run the scheduled
   credentialless availability workflow without an approval wait.
 - Ensure each environment's OIDC deployment role can perform the live, read-only
   evidence calls used by the fail-closed gates, including `ec2:DescribeVpcs`,
   `ec2:DescribeSecurityGroups`, `ec2:DescribeSecurityGroupRules`,
-  `elasticloadbalancing:DescribeLoadBalancers`, the required WAFv2 getters, and
-  `logs:DescribeLogGroups`, `kms:DescribeKey`, and
-  `kms:GetKeyRotationStatus`. A successful CloudFormation deployment without
-  these independently observed contracts is not promotable.
+  `elasticloadbalancing:DescribeLoadBalancers`, `wafv2:GetWebACL`,
+  `wafv2:GetLoggingConfiguration`, `wafv2:GetWebACLForResource`, the dependent
+  `cognito-idp:GetWebACLForResource` scoped to the exact `ArchonUserPoolArn`,
+  `logs:DescribeLogGroups`, `kms:DescribeKey`, and `kms:GetKeyRotationStatus`.
+  A successful CloudFormation deployment without the independently observed API-stage
+  and exact Cognito user-pool associations is not promotable.
 - CDK-bootstrap that account in both the selected workload region and `us-east-1`; the
   edge-first deployment cannot create its global certificate/WAF resources otherwise.
 - Configure `ARCHON_CLOUDFRONT_DOMAIN_NAME` and its owning public
@@ -171,7 +237,8 @@ The five official Stage Two criteria are equally weighted.
 - Verify CloudFront/S3, Cognito code + PKCE, the exact no-store
   `/runtime-config.json`, scoped API Gateway authorization, Fargate,
   queues/state machine, 90-day decided-approval retention, evidence retention, terminal
-  receipt/evidence projection, both WAF associations, sampled-data protection, filtered
+  receipt/evidence projection, the exact `ArchonUserPoolId`/`ArchonUserPoolArn` binding,
+  both live WAF associations to one regional ACL, sampled-data protection, filtered
   logging configurations and encrypted retained log groups, least-privilege
   security-group egress, disabled public-IP assignment, versioning/server-access logging,
   the CloudFront origin key/usage-plan binding and backend credential non-propagation,

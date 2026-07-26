@@ -74,6 +74,25 @@ step replaces the upload candidate with the raw SARIF. Therefore only a complete
 gate can publish the zero-result projection and close the corresponding code-scanning
 alerts.
 
+### OpenVEX renewal runbook
+
+Normal CI and an independent daily supply-chain maintenance job run the materializer's
+local, read-only maintenance mode and fail when fewer than 14 days remain. The exact
+release rescan repeats that gate against its checked-out source. Maintenance mode performs
+no network access or runtime materialization; the existing expiry checks still cap every
+statement at 30 days.
+
+On failure, first re-evaluate every advisory alias against the exact wheel-only runtime,
+platform, and execution-path conditions. If the runtime is affected or the disposition is
+uncertain, upgrade the dependency or remove the disposition; do not renew it. Only when
+`not_affected` remains demonstrably true, issue a new canonical statement whose
+`issuedAt <= now < expiresAt` and whose validity is at most 30 days. Recompute its SHA-256
+and update the OpenVEX document, `.github/locks/datahub-mcp-v0.6.0.json`, and the reviewed
+constants or fixtures in `scripts/materialize-datahub-mcp-lock.sh`,
+`scripts/validate-datahub-mcp-audit.py`, and their contract tests. Submit those changes as
+one pull request and rely on CI to validate them; after merge, the daily rescan and live
+proof consume the renewed evidence.
+
 The contract binds the derived `uv.lock` by SHA-256. Default materialization is sealed and
 fails immediately on a placeholder or digest mismatch, before provenance downloads, sync,
 or installation. Only the uncredentialed exploratory CI job may temporarily continue to

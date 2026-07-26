@@ -57,18 +57,28 @@ jobs:
         run: |
           set -euo pipefail
           for script in \
+            scripts/manage-cognito-judge-user.sh \
+            scripts/materialize-datahub-mcp-lock.sh \
             scripts/patch-cdk-brace-expansion.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
+            scripts/verify-judge-emergency-control-plane.sh \
+            scripts/verify-judge-environment-approval.sh \
             scripts/validate-model-provenance-corpus.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
             scripts/validate-aws-waf-contract.sh \
+            tests/pipeline/judge-user-contracts.test.sh \
+            tests/pipeline/openvex-maintenance-contracts.test.sh \
             tests/pipeline/aws-security-contracts.test.sh; do
             bash -n "${script}"
           done
           bash tests/pipeline/aws-security-contracts.test.sh
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/datahub_demo_state_contracts_test.py
+          bash tests/pipeline/judge-user-contracts.test.sh
+          bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -1041,6 +1051,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Enforce the OpenVEX renewal horizon
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/materialize-datahub-mcp-lock.sh \
+            --openvex-maintenance-only \
+            --minimum-remaining-days 14
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: "0.11.31"
@@ -1056,6 +1073,10 @@ jobs:
           ARCHON_ALLOW_UNSEALED_RESOLVED_LOCK=true \
             bash scripts/materialize-datahub-mcp-lock.sh "${project}"
           test -x "${project}/.venv/bin/mcp-server-datahub"
+          PYTHONDONTWRITEBYTECODE=1 \
+            "${project}/.venv/bin/python" scripts/datahub-demo-state.py \
+              validate-runtime \
+              --contract contracts/datahub-demo-state-v1.json
           binding="${project}/.archon-evidence/resolved-lock-binding.json"
           observed="$(jq -er '.observedResolvedLockSha256' "${binding}")"
           expected="$(jq -er '.expectedResolvedLockSha256' "${binding}")"

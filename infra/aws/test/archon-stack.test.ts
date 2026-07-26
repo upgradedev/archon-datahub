@@ -503,11 +503,52 @@ describe("Archon AWS reference architecture", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::Cognito::UserPool", 1);
     platform.hasResourceProperties("AWS::Cognito::UserPool", {
+      AdminCreateUserConfig: {
+        AllowAdminCreateUserOnly: true
+      },
+      AccountRecoverySetting: {
+        RecoveryMechanisms: [
+          {
+            Name: "verified_email",
+            Priority: 1
+          }
+        ]
+      },
+      UsernameAttributes: ["email"],
+      UsernameConfiguration: {
+        CaseSensitive: false
+      },
+      Schema: Match.arrayWith([
+        Match.objectLike({
+          Name: "archon_judge_binding",
+          AttributeDataType: "String",
+          Mutable: false,
+          StringAttributeConstraints: {
+            MinLength: "64",
+            MaxLength: "64"
+          }
+        })
+      ]),
+      Policies: {
+        PasswordPolicy: {
+          MinimumLength: 14,
+          PasswordHistorySize: 24,
+          RequireLowercase: true,
+          RequireNumbers: true,
+          RequireSymbols: true,
+          RequireUppercase: true,
+          TemporaryPasswordValidityDays: 3
+        }
+      },
       UserPoolTier: "PLUS",
       UserPoolAddOns: {
         AdvancedSecurityMode: "ENFORCED"
       }
     });
+    platform.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      ReadAttributes: ["email"]
+    });
+    platform.resourceCountIs("AWS::Cognito::UserPoolClient", 1);
     platform.hasResourceProperties("AWS::ApiGateway::Model", {
       Schema: Match.objectLike({
         additionalProperties: false,
@@ -984,6 +1025,16 @@ describe("Archon AWS reference architecture", () => {
     });
     platform.hasResourceProperties("AWS::Cognito::UserPoolClient", {
       GenerateSecret: false,
+      PreventUserExistenceErrors: "ENABLED",
+      EnableTokenRevocation: true,
+      AccessTokenValidity: 15,
+      IdTokenValidity: 15,
+      RefreshTokenValidity: 1,
+      TokenValidityUnits: {
+        AccessToken: "minutes",
+        IdToken: "minutes",
+        RefreshToken: "days"
+      },
       ExplicitAuthFlows: ["ALLOW_REFRESH_TOKEN_AUTH"],
       AllowedOAuthFlows: ["code"],
       AllowedOAuthFlowsUserPoolClient: true,
@@ -992,9 +1043,9 @@ describe("Archon AWS reference architecture", () => {
       SupportedIdentityProviders: ["COGNITO"]
     });
 
-    const client = Object.values(
+    const [clientLogicalId, client] = Object.entries(
       platform.findResources("AWS::Cognito::UserPoolClient")
-    )[0] as any;
+    )[0] as [string, any];
     const resourceServerLogicalId = Object.keys(
       platform.findResources("AWS::Cognito::UserPoolResourceServer")
     )[0]!;
@@ -1005,6 +1056,9 @@ describe("Archon AWS reference architecture", () => {
         "Fn::Join": ["", [{ Ref: resourceServerLogicalId }, "/approve"]]
       }
     ]);
+    expect(JSON.stringify(client.Properties.AllowedOAuthScopes)).not.toContain(
+      "aws.cognito.signin.user.admin"
+    );
     expect(client.Properties.CallbackURLs).toEqual([
       {
         "Fn::Join": [
@@ -1016,6 +1070,48 @@ describe("Archon AWS reference architecture", () => {
     expect(client.Properties.CallbackURLs).toEqual(
       client.Properties.LogoutURLs
     );
+    expect(client.Properties).not.toHaveProperty("DefaultRedirectURI");
+
+    platform.resourceCountIs(
+      "AWS::Cognito::UserPoolRiskConfigurationAttachment",
+      1
+    );
+    platform.hasResourceProperties(
+      "AWS::Cognito::UserPoolRiskConfigurationAttachment",
+      {
+        AccountTakeoverRiskConfiguration: {
+          Actions: {
+            LowAction: { EventAction: "NO_ACTION", Notify: false },
+            MediumAction: { EventAction: "NO_ACTION", Notify: false },
+            HighAction: { EventAction: "NO_ACTION", Notify: false }
+          }
+        },
+        CompromisedCredentialsRiskConfiguration: {
+          Actions: { EventAction: "BLOCK" },
+          EventFilter: ["SIGN_IN", "PASSWORD_CHANGE"]
+        }
+      }
+    );
+    const riskConfiguration = Object.values(
+      platform.findResources(
+        "AWS::Cognito::UserPoolRiskConfigurationAttachment"
+      )
+    )[0] as any;
+    const userPoolLogicalId = Object.keys(
+      platform.findResources("AWS::Cognito::UserPool")
+    )[0]!;
+    expect(riskConfiguration.Properties.ClientId).toEqual({
+      Ref: clientLogicalId
+    });
+    expect(riskConfiguration.Properties.UserPoolId).toEqual({
+      Ref: userPoolLogicalId
+    });
+    expect(riskConfiguration.Properties).not.toHaveProperty(
+      "RiskExceptionConfiguration"
+    );
+    expect(
+      riskConfiguration.Properties.AccountTakeoverRiskConfiguration
+    ).not.toHaveProperty("NotifyConfiguration");
 
     const headersPolicy = Object.values(
       platform.findResources("AWS::CloudFront::ResponseHeadersPolicy")
@@ -1356,6 +1452,36 @@ describe("Archon AWS reference architecture", () => {
     const regionalWebAcl = Object.values(
       platform.findResources("AWS::WAFv2::WebACL")
     )[0] as any;
+    const regionalWebAclLogicalId = Object.keys(
+      platform.findResources("AWS::WAFv2::WebACL")
+    )[0]!;
+    const userPoolLogicalId = Object.keys(
+      platform.findResources("AWS::Cognito::UserPool")
+    )[0]!;
+    const webAclAssociations = Object.values(
+      platform.findResources("AWS::WAFv2::WebACLAssociation")
+    ) as any[];
+    expect(webAclAssociations).toHaveLength(2);
+    for (const association of webAclAssociations) {
+      expect(association.Properties.WebACLArn).toEqual({
+        "Fn::GetAtt": [regionalWebAclLogicalId, "Arn"]
+      });
+    }
+    const cognitoWebAclAssociations = webAclAssociations.filter(
+      (association) =>
+        JSON.stringify(association.Properties.ResourceArn) ===
+        JSON.stringify({
+          "Fn::GetAtt": [userPoolLogicalId, "Arn"]
+        })
+    );
+    expect(cognitoWebAclAssociations).toHaveLength(1);
+    const apiWebAclAssociations = webAclAssociations.filter(
+      (association) =>
+        JSON.stringify(association.Properties.ResourceArn).includes(
+          "/restapis/"
+        )
+    );
+    expect(apiWebAclAssociations).toHaveLength(1);
     for (const name of [
       "AWSManagedRulesAmazonIpReputationList",
       "AWSManagedRulesCommonRuleSet",
@@ -1464,6 +1590,7 @@ describe("Archon AWS reference architecture", () => {
       "ArchonRegionalWafLogGroupName",
       "ArchonRegionalWafLogKeyArn",
       "ArchonUserPoolId",
+      "ArchonUserPoolArn",
       "ArchonUserPoolClientId",
       "ArchonCognitoHostedUiOrigin",
       "ArchonCognitoAuthorizationEndpoint",
@@ -1504,6 +1631,17 @@ describe("Archon AWS reference architecture", () => {
     ]) {
       platform.hasOutput(outputName, {});
     }
+    const userPoolLogicalIds = Object.keys(
+      platform.findResources("AWS::Cognito::UserPool")
+    );
+    expect(userPoolLogicalIds).toHaveLength(1);
+    const outputs = platform.toJSON().Outputs;
+    expect(outputs.ArchonUserPoolId.Value).toEqual({
+      Ref: userPoolLogicalIds[0]
+    });
+    expect(outputs.ArchonUserPoolArn.Value).toEqual({
+      "Fn::GetAtt": [userPoolLogicalIds[0], "Arn"]
+    });
     for (const [outputName, parameterName] of [
       ["ArchonContainerArchiveSha256", "ContainerArchiveSha256"],
       ["ArchonLambdaArchiveSha256", "LambdaArchiveSha256"],
