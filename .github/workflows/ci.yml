@@ -1070,13 +1070,6 @@ jobs:
             echo "::group::${command_id}"
             if ! bash --noprofile --norc -e -u -o pipefail -c "${command}"; then
               echo "::endgroup::"
-              if [[ "${command_id}" == "repository-format-check" ]]; then
-                echo "::group::repository-format-diff"
-                uv run --frozen ruff format --diff \
-                  src/mcp_server_datahub/tools/aspect_history.py \
-                  tests/test_mcp/test_get_aspect_history.py
-                echo "::endgroup::"
-              fi
               echo "::error::OSS validation command ${command_id} failed"
               exit 1
             fi

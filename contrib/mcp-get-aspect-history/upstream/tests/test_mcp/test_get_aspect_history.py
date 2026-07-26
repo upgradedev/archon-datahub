@@ -11,8 +11,7 @@ from datahub_integrations.mcp.mcp_server import get_aspect_history
 aspect_history_module = sys.modules[get_aspect_history.__module__]
 
 DATASET_URN = (
-    "urn:li:dataset:"
-    "(urn:li:dataPlatform:snowflake,analytics.customer_orders,PROD)"
+    "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.customer_orders,PROD)"
 )
 ASPECT_NAME = "datasetProperties"
 
@@ -153,9 +152,7 @@ def test_returns_current_history_pagination_and_bounded_provenance(mock_client):
         }
     ]
     requested_versions = [
-        json.loads(call.kwargs["data"])[0][ASPECT_NAME]["headers"][
-            "If-Version-Match"
-        ]
+        json.loads(call.kwargs["data"])[0][ASPECT_NAME]["headers"]["If-Version-Match"]
         for call in mock_client._graph._session.post.call_args_list
     ]
     assert requested_versions == ["0", "1", "2", "3"]

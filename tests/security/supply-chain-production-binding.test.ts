@@ -451,7 +451,7 @@ test("scheduled rescans bind exact live deployment, CI run, and subjects", () =>
 test("CDK bundled advisory is repaired and admitted only by an exact CI receipt", () => {
   const lockCandidateStart = ciWorkflow.indexOf("\n  infra-lock-candidate:");
   const lockCandidateEnd = ciWorkflow.indexOf(
-    "\n  secret-scan:",
+    "\n  infra:",
     lockCandidateStart
   );
   assert.ok(
