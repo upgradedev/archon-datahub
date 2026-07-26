@@ -632,15 +632,18 @@ def validate_workflow(workflow: str) -> None:
             f"{name} least-privilege permissions changed",
         )
     require(
-        jobs["review"].count(
-            "    environment: submission-content-review\n"
+        len(
+            re.findall(
+                r"(?m)^    environment: submission-content-review$",
+                jobs["review"],
+            )
         )
         == 1,
         "review must use the exact protected environment",
     )
     require(
-        "    environment:" not in jobs["prepare"]
-        and "    environment:" not in jobs["attest"],
+        re.search(r"(?m)^    environment:", jobs["prepare"]) is None
+        and re.search(r"(?m)^    environment:", jobs["attest"]) is None,
         "prepare or attester must not inherit an approval environment",
     )
     require(
