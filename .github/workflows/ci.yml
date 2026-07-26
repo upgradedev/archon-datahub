@@ -944,11 +944,47 @@ jobs:
     name: DataHub ecosystem contribution
     needs: secret-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 40
+    outputs:
+      validation_receipt_digest: ${{ steps.evidence.outputs['artifact-digest'] }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Bind validation to the exact source head
+        id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          actual_source_sha="$(git rev-parse HEAD)"
+          test "${actual_source_sha}" = "${EXPECTED_SOURCE_SHA}"
+          test "${actual_source_sha}" = "$(
+            git rev-parse "${actual_source_sha}^{commit}"
+          )"
+          case "${EVENT_NAME}" in
+            pull_request)
+              test -n "${PR_HEAD_SHA}"
+              test "${actual_source_sha}" = "${PR_HEAD_SHA}"
+              ;;
+            push)
+              test -z "${PR_HEAD_SHA}"
+              ;;
+            *)
+              echo "::error::Unsupported contribution validation event ${EVENT_NAME}"
+              exit 1
+              ;;
+          esac
+          test -n "${EXPECTED_SOURCE_REPOSITORY}"
+          printf 'head_sha=%s\n' "${actual_source_sha}" >>"${GITHUB_OUTPUT}"
+          printf 'pull_request_head_sha=%s\n' "${PR_HEAD_SHA}" >>"${GITHUB_OUTPUT}"
+          printf 'source_repository=%s\n' \
+            "${EXPECTED_SOURCE_REPOSITORY}" >>"${GITHUB_OUTPUT}"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -957,7 +993,10 @@ jobs:
           version: "0.11.31"
           enable-cache: false
       - name: Validate staged contribution contracts
-        run: npm run verify:contrib
+        run: |
+          set -euo pipefail
+          npm run verify:contrib
+          node --test contrib/mcp-get-aspect-history/tests/validation-receipt.test.mjs
       - name: Apply the candidate to its exact upstream revision
         id: upstream
         shell: bash
@@ -981,6 +1020,12 @@ jobs:
           install -D -m 0644 \
             contrib/mcp-get-aspect-history/upstream/tests/test_mcp/test_get_aspect_history.py \
             "${upstream}/tests/test_mcp/test_get_aspect_history.py"
+          cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
+            "${upstream}/src/mcp_server_datahub/tools/aspect_history.py"
+          cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/tests/test_mcp/test_get_aspect_history.py \
+            "${upstream}/tests/test_mcp/test_get_aspect_history.py"
           git -C "${upstream}" apply --check \
             "${GITHUB_WORKSPACE}/contrib/mcp-get-aspect-history/integration.patch"
           git -C "${upstream}" apply \
@@ -993,26 +1038,169 @@ jobs:
             git -C "${upstream}" status --short | wc -l
           )" = "4"
           echo "directory=${upstream}" >>"${GITHUB_OUTPUT}"
-      - name: Run the exact upstream lint, type, and focused test contracts
+      - name: Install the exact pinned upstream environment
         shell: bash
         env:
+          MANIFEST: ${{ github.workspace }}/contrib/mcp-get-aspect-history/manifest.json
           UPSTREAM_DIRECTORY: ${{ steps.upstream.outputs.directory }}
         run: |
           set -euo pipefail
+          setup_command="$(jq -er '.ciEnvironment.setupCommand' "${MANIFEST}")"
+          test "${setup_command}" = \
+            "uv sync --frozen --all-groups --no-cache"
           cd "${UPSTREAM_DIRECTORY}"
-          uv sync \
-            --frozen \
-            --all-groups \
-            --no-cache
-          uv run ruff check \
+          bash --noprofile --norc -e -u -o pipefail -c "${setup_command}"
+      - name: Run every manifest-declared upstream command
+        shell: bash
+        env:
+          MANIFEST: ${{ github.workspace }}/contrib/mcp-get-aspect-history/manifest.json
+          UPSTREAM_DIRECTORY: ${{ steps.upstream.outputs.directory }}
+        run: |
+          set -euo pipefail
+          mapfile -t command_rows < <(
+            jq -er '.requiredCi[] | [.id, .command] | @tsv' "${MANIFEST}"
+          )
+          test "${#command_rows[@]}" -gt 0
+          cd "${UPSTREAM_DIRECTORY}"
+          for command_row in "${command_rows[@]}"; do
+            IFS=$'\t' read -r command_id command <<<"${command_row}"
+            test -n "${command_id}"
+            test -n "${command}"
+            echo "::group::${command_id}"
+            if ! bash --noprofile --norc -e -u -o pipefail -c "${command}"; then
+              echo "::endgroup::"
+              echo "::error::OSS validation command ${command_id} failed"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+      - name: Seal the source-bound OSS validation receipt
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANIFEST: ${{ github.workspace }}/contrib/mcp-get-aspect-history/manifest.json
+          PR_HEAD_SHA: ${{ steps.source.outputs.pull_request_head_sha }}
+          SOURCE_HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+          SOURCE_REPOSITORY: ${{ steps.source.outputs.source_repository }}
+          UPSTREAM_COMMIT: 9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9
+          UPSTREAM_DIRECTORY: ${{ steps.upstream.outputs.directory }}
+          UPSTREAM_REPOSITORY: https://github.com/acryldata/mcp-server-datahub
+        run: |
+          set -euo pipefail
+          receipt_directory="${RUNNER_TEMP}/oss-validation-receipt"
+          test ! -e "${receipt_directory}"
+          mkdir -p "${receipt_directory}"
+
+          cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
+            "${UPSTREAM_DIRECTORY}/src/mcp_server_datahub/tools/aspect_history.py"
+          cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/tests/test_mcp/test_get_aspect_history.py \
+            "${UPSTREAM_DIRECTORY}/tests/test_mcp/test_get_aspect_history.py"
+          actual_paths="$(
+            git -C "${UPSTREAM_DIRECTORY}" diff \
+              --name-only \
+              --no-ext-diff \
+              HEAD -- |
+              LC_ALL=C sort
+          )"
+          expected_paths="$(
+            printf '%s\n' \
+              src/mcp_server_datahub/mcp_server.py \
+              src/mcp_server_datahub/tools/__init__.py \
+              src/mcp_server_datahub/tools/aspect_history.py \
+              tests/test_mcp/test_get_aspect_history.py
+          )"
+          test "${actual_paths}" = "${expected_paths}"
+          LC_ALL=C git -C "${UPSTREAM_DIRECTORY}" --no-pager diff \
+            --binary \
+            --full-index \
+            --no-color \
+            --no-ext-diff \
+            --src-prefix=a/ \
+            --dst-prefix=b/ \
+            HEAD -- \
+            src/mcp_server_datahub/mcp_server.py \
+            src/mcp_server_datahub/tools/__init__.py \
             src/mcp_server_datahub/tools/aspect_history.py \
-            tests/test_mcp/test_get_aspect_history.py
-          uv run mypy \
-            src/mcp_server_datahub/tools/aspect_history.py
-          uv run pytest \
             tests/test_mcp/test_get_aspect_history.py \
-            tests/test_mcp/test_read_only.py \
-            --quiet
+            >"${receipt_directory}/applied.diff"
+          test -s "${receipt_directory}/applied.diff"
+
+          node \
+            contrib/mcp-get-aspect-history/scripts/render-validation-receipt.mjs \
+            --manifest "${MANIFEST}" \
+            --applied-diff "${receipt_directory}/applied.diff" \
+            --event-name "${EVENT_NAME}" \
+            --source-repository "${SOURCE_REPOSITORY}" \
+            --source-head-sha "${SOURCE_HEAD_SHA}" \
+            --pull-request-head-sha "${PR_HEAD_SHA}" \
+            --output "${receipt_directory}/receipt.json"
+          install -m 0644 "${MANIFEST}" \
+            "${receipt_directory}/manifest.json"
+          chmod 0644 \
+            "${receipt_directory}/applied.diff" \
+            "${receipt_directory}/receipt.json"
+
+          jq --exit-status \
+            --arg eventName "${EVENT_NAME}" \
+            --arg pullRequestHeadSha "${PR_HEAD_SHA}" \
+            --arg sourceHeadSha "${SOURCE_HEAD_SHA}" \
+            --arg sourceRepository "${SOURCE_REPOSITORY}" \
+            --arg upstreamCommit "${UPSTREAM_COMMIT}" \
+            --arg upstreamRepository "${UPSTREAM_REPOSITORY}" '
+              .schemaVersion == "archon.oss-validation-receipt/v1" and
+              .source.eventName == $eventName and
+              .source.headSha == $sourceHeadSha and
+              .source.repository == $sourceRepository and
+              .source.pullRequestHeadSha ==
+                (if $pullRequestHeadSha == "" then null
+                 else $pullRequestHeadSha end) and
+              .target.baseCommit == $upstreamCommit and
+              .target.repository == $upstreamRepository and
+              .dataHandling.credentialsIncluded == false and
+              (.candidate.files | length) == 2 and
+              all(.candidate.files[];
+                .sha256 | test("^[0-9a-f]{64}$")) and
+              (.candidate.integrationPatch.sha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.candidate.appliedDiff.sha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.candidate.manifest.sha256 |
+                test("^[0-9a-f]{64}$")) and
+              .validation.result == "pass" and
+              all(.validation.commands[]; .result == "pass")
+            ' "${receipt_directory}/receipt.json" >/dev/null
+          (
+            cd "${receipt_directory}"
+            sha256sum \
+              applied.diff \
+              manifest.json \
+              receipt.json >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            find "${receipt_directory}" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type f |
+              wc -l
+          )" = "4"
+          test -z "$(
+            find "${receipt_directory}" \
+              -mindepth 1 \
+              -type l \
+              -print \
+              -quit
+          )"
+      - name: Upload immutable OSS validation receipt
+        id: evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oss-validation-receipt-${{ steps.source.outputs.head_sha }}
+          path: ${{ runner.temp }}/oss-validation-receipt/
+          if-no-files-found: error
+          retention-days: 90
 
   security:
     name: Security and dependencies
@@ -1752,6 +1940,7 @@ jobs:
           BENCHMARK_ARTIFACT_DIGEST: ${{ needs.benchmark.outputs.artifact_digest }}
           BENCHMARK_RESULT: ${{ needs.benchmark.result }}
           CONTAINER_RESULT: ${{ needs.container.result }}
+          CONTRIB_ARTIFACT_DIGEST: ${{ needs.contrib.outputs.validation_receipt_digest }}
           CONTRIB_RESULT: ${{ needs.contrib.result }}
           INFRA_RESULT: ${{ needs.infra.result }}
           JUDGE_EVIDENCE_ARTIFACT_DIGEST: ${{ needs.judge-evidence.outputs.artifact_digest }}
@@ -1806,6 +1995,7 @@ jobs:
               "${JUDGE_EVIDENCE_ARTIFACT_DIGEST}" \
             --arg judgeEvidence "${JUDGE_EVIDENCE_RESULT}" \
             --arg web "${WEB_RESULT}" \
+            --arg contribArtifactDigest "${CONTRIB_ARTIFACT_DIGEST}" \
             --arg contrib "${CONTRIB_RESULT}" \
             --arg infra "${INFRA_RESULT}" \
             --arg readiness "${READINESS_RESULT}" \
@@ -1846,7 +2036,9 @@ jobs:
                   dataHubBenchmarkArtifactDigest:
                     $benchmarkArtifactDigest,
                   judgeEvidenceArtifactDigest:
-                    $judgeEvidenceArtifactDigest
+                    $judgeEvidenceArtifactDigest,
+                  ossContributionValidationArtifactDigest:
+                    $contribArtifactDigest
                 }
               }
             ' >"${evidence_dir}/predicate.json"
@@ -1858,6 +2050,8 @@ jobs:
             (.capabilityEvidence.dataHubBenchmarkArtifactDigest |
               test("^sha256:[0-9a-f]{64}$")) and
             (.capabilityEvidence.judgeEvidenceArtifactDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            (.capabilityEvidence.ossContributionValidationArtifactDigest |
               test("^sha256:[0-9a-f]{64}$"))
           ' "${evidence_dir}/predicate.json" >/dev/null
 

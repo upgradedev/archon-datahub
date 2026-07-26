@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "name": "get-aspect-history",
   "target": {
     "repository": "https://github.com/acryldata/mcp-server-datahub",
@@ -50,10 +50,64 @@
     "localTestsRun": false,
     "localSecurityScanRun": false
   },
+  "ciEnvironment": {
+    "runner": "ubuntu-24.04",
+    "uvVersion": "0.11.31",
+    "setupCommand": "uv sync --frozen --all-groups --no-cache"
+  },
   "requiredCi": [
-    "ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
-    "pytest tests/test_mcp/test_get_aspect_history.py",
-    "pytest tests/test_mcp/test_read_only.py",
-    "repository type checks and full test suite"
-  ]
+    {
+      "id": "candidate-lint",
+      "kind": "lint",
+      "scope": "candidate",
+      "command": "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py"
+    },
+    {
+      "id": "candidate-typecheck",
+      "kind": "typecheck",
+      "scope": "candidate",
+      "command": "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py"
+    },
+    {
+      "id": "candidate-tests",
+      "kind": "test",
+      "scope": "candidate",
+      "command": "uv run --frozen pytest tests/test_mcp/test_get_aspect_history.py --quiet"
+    },
+    {
+      "id": "read-only-regression",
+      "kind": "test",
+      "scope": "candidate",
+      "command": "uv run --frozen pytest tests/test_mcp/test_read_only.py --quiet"
+    },
+    {
+      "id": "repository-format-check",
+      "kind": "lint",
+      "scope": "repository",
+      "command": "uv run --frozen ruff format --check src tests scripts"
+    },
+    {
+      "id": "repository-lint",
+      "kind": "lint",
+      "scope": "repository",
+      "command": "uv run --frozen ruff check src tests scripts"
+    },
+    {
+      "id": "repository-typecheck",
+      "kind": "typecheck",
+      "scope": "repository",
+      "command": "uv run --frozen mypy src tests scripts"
+    },
+    {
+      "id": "repository-test-suite",
+      "kind": "test",
+      "scope": "repository",
+      "command": "uv run --frozen pytest --quiet"
+    }
+  ],
+  "validationReceipt": {
+    "schemaVersion": "archon.oss-validation-receipt/v1",
+    "artifactNamePrefix": "oss-validation-receipt-",
+    "retentionDays": 90
+  }
 }

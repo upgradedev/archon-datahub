@@ -192,21 +192,64 @@ The exact test file covers:
 - explicit unsupported-endpoint error;
 - fail-closed malformed and mismatched success responses.
 
-Required upstream CI commands are recorded in `manifest.json`. At minimum:
+### Exact upstream CI contract
+
+`manifest.json` is the executable source of truth. The contribution job checks out the
+exact Archon pull-request head, applies the candidate to the pinned upstream commit, and
+runs every command below individually and in this order:
 
 ```text
-ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py
-pytest tests/test_mcp/test_get_aspect_history.py
-pytest tests/test_mcp/test_read_only.py
+uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py
+uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py
+uv run --frozen pytest tests/test_mcp/test_get_aspect_history.py --quiet
+uv run --frozen pytest tests/test_mcp/test_read_only.py --quiet
+uv run --frozen ruff format --check src tests scripts
+uv run --frozen ruff check src tests scripts
+uv run --frozen mypy src tests scripts
+uv run --frozen pytest --quiet
 ```
 
-The upstream repository's type checks and full suite should also run. Security validation
-belongs in that CI/CD pipeline; this contribution does not depend on Codex Security.
+The first four commands provide focused candidate and read-only regression evidence. The
+last four reproduce the pinned upstream repository's complete `lint-check` expansion and
+full `test` target. Tests that require an external DataHub retain the pinned upstream
+fixture's own skip behavior when credentials are unavailable; this receipt does not
+reinterpret a skip as a live-integration pass. Dependencies are installed from the pinned
+upstream lock with:
+
+```text
+uv sync --frozen --all-groups --no-cache
+```
+
+Security validation belongs in that CI/CD pipeline; this contribution does not depend on
+Codex Security.
+
+### Deterministic CI validation receipt
+
+Only after setup and every manifest command succeeds, CI creates
+`oss-validation-receipt-<source-head-sha>` and retains it for **90 days**. The artifact is
+source-bound and self-verifying:
+
+- `receipt.json` records the Archon source repository, exact source SHA, exact pull-request
+  head SHA for pull-request runs, upstream repository/branch/commit, candidate and patch
+  SHA-256 digests, the applied full-index Git diff digest, every exact command, and its
+  `pass` result;
+- `applied.diff` is the deterministic binary-capable full-index diff of the four intended
+  upstream paths;
+- `manifest.json` is the exact manifest used by the run; and
+- `SHA256SUMS` seals and verifies all three files before upload.
+
+The artifact contains only public source metadata, digests, commands, and pass results. It
+does not copy environment variables, command logs, provider tokens, DataHub credentials,
+or any other secret material. A green job without the matching receipt is not accepted as
+the durable OSS bonus validation evidence. On the default branch, the artifact digest is
+also bound into the signed CI release predicate as
+`ossContributionValidationArtifactDigest`.
 
 ## Honest status
 
 **Staged, not submitted.** No pull request was opened, the patch was not applied to
 upstream, and no local build, test suite, or security scan was run. Those facts are also
 machine-readable in `manifest.json`. The artifacts are prepared for review and CI
-validation against the pinned commit; they are not represented as merged or as
-upstream-CI-passing evidence.
+validation against the pinned commit; they are not represented as merged. The expanded
+full-suite contract and its receipt must pass remotely before they are represented as
+current upstream-CI-compatible evidence.

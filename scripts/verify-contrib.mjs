@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve("contrib/datahub-audit");
@@ -12,9 +12,9 @@ const requiredFiles = [
 
 for (const relativePath of requiredFiles) {
   const file = resolve(root, relativePath);
-  const metadata = await stat(file);
-  if (!metadata.isFile()) {
-    throw new Error(`${relativePath} must be a regular file.`);
+  const metadata = await lstat(file);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`${relativePath} must be a regular, non-symlink file.`);
   }
 }
 
@@ -70,16 +70,18 @@ const aspectHistoryRequiredFiles = [
   "README.md",
   "manifest.json",
   "integration.patch",
+  "scripts/render-validation-receipt.mjs",
+  "tests/validation-receipt.test.mjs",
   "upstream/src/mcp_server_datahub/tools/aspect_history.py",
   "upstream/tests/test_mcp/test_get_aspect_history.py",
 ];
 
 for (const relativePath of aspectHistoryRequiredFiles) {
   const file = resolve(aspectHistoryRoot, relativePath);
-  const metadata = await stat(file);
-  if (!metadata.isFile()) {
+  const metadata = await lstat(file);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(
-      `mcp-get-aspect-history/${relativePath} must be a regular file.`
+      `mcp-get-aspect-history/${relativePath} must be a regular, non-symlink file.`
     );
   }
 }
@@ -89,7 +91,7 @@ const manifest = JSON.parse(
 );
 const pinnedCommit = "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9";
 if (
-  manifest.schemaVersion !== 1 ||
+  manifest.schemaVersion !== 2 ||
   manifest.name !== "get-aspect-history" ||
   manifest.target?.repository !==
     "https://github.com/acryldata/mcp-server-datahub" ||
@@ -150,18 +152,91 @@ if (
   );
 }
 
+const expectedCiEnvironment = {
+  runner: "ubuntu-24.04",
+  uvVersion: "0.11.31",
+  setupCommand: "uv sync --frozen --all-groups --no-cache",
+};
+const expectedRequiredCi = [
+  {
+    id: "candidate-lint",
+    kind: "lint",
+    scope: "candidate",
+    command:
+      "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
+  },
+  {
+    id: "candidate-typecheck",
+    kind: "typecheck",
+    scope: "candidate",
+    command:
+      "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py",
+  },
+  {
+    id: "candidate-tests",
+    kind: "test",
+    scope: "candidate",
+    command:
+      "uv run --frozen pytest tests/test_mcp/test_get_aspect_history.py --quiet",
+  },
+  {
+    id: "read-only-regression",
+    kind: "test",
+    scope: "candidate",
+    command:
+      "uv run --frozen pytest tests/test_mcp/test_read_only.py --quiet",
+  },
+  {
+    id: "repository-format-check",
+    kind: "lint",
+    scope: "repository",
+    command: "uv run --frozen ruff format --check src tests scripts",
+  },
+  {
+    id: "repository-lint",
+    kind: "lint",
+    scope: "repository",
+    command: "uv run --frozen ruff check src tests scripts",
+  },
+  {
+    id: "repository-typecheck",
+    kind: "typecheck",
+    scope: "repository",
+    command: "uv run --frozen mypy src tests scripts",
+  },
+  {
+    id: "repository-test-suite",
+    kind: "test",
+    scope: "repository",
+    command: "uv run --frozen pytest --quiet",
+  },
+];
+
 if (
   manifest.status?.state !== "staged-not-submitted" ||
   manifest.status?.pullRequestOpened !== false ||
   manifest.status?.appliedToUpstream !== false ||
   manifest.status?.localBuildRun !== false ||
   manifest.status?.localTestsRun !== false ||
-  manifest.status?.localSecurityScanRun !== false ||
-  !Array.isArray(manifest.requiredCi) ||
-  manifest.requiredCi.length < 4
+  manifest.status?.localSecurityScanRun !== false
 ) {
   throw new Error(
     "get-aspect-history manifest must report its honest staged and CI-required status."
+  );
+}
+if (
+  JSON.stringify(manifest.ciEnvironment) !==
+    JSON.stringify(expectedCiEnvironment) ||
+  JSON.stringify(manifest.requiredCi) !== JSON.stringify(expectedRequiredCi) ||
+  JSON.stringify(manifest.validationReceipt) !==
+    JSON.stringify({
+      schemaVersion: "archon.oss-validation-receipt/v1",
+      artifactNamePrefix: "oss-validation-receipt-",
+      retentionDays: 90,
+    })
+) {
+  throw new Error(
+    "get-aspect-history manifest must preserve the exact environment, command list, and receipt contract."
   );
 }
 
@@ -310,12 +385,43 @@ for (const documentationContract of [
   "no local build, test suite, or security scan was run",
   "Security and hard bounds",
   "Provenance contract",
-  "Required upstream CI commands",
+  "Exact upstream CI contract",
+  "Deterministic CI validation receipt",
+  "ossContributionValidationArtifactDigest",
+  "90 days",
   "does not depend on Codex Security",
 ]) {
   if (!aspectHistoryReadme.includes(documentationContract)) {
     throw new Error(
       `get-aspect-history README is missing honest documentation: ${documentationContract}`
+    );
+  }
+}
+for (const { command } of expectedRequiredCi) {
+  if (!aspectHistoryReadme.includes(command)) {
+    throw new Error(
+      `get-aspect-history README is missing exact required CI command: ${command}`
+    );
+  }
+}
+
+const receiptRenderer = await readFile(
+  resolve(
+    aspectHistoryRoot,
+    "scripts/render-validation-receipt.mjs"
+  ),
+  "utf8"
+);
+for (const receiptContract of [
+  "archon.oss-validation-receipt/v1",
+  "credentialsIncluded: false",
+  "git-diff-binary-full-index",
+  "pullRequestHeadSha must equal sourceHeadSha",
+  'result: "pass"',
+]) {
+  if (!receiptRenderer.includes(receiptContract)) {
+    throw new Error(
+      `validation receipt renderer is missing contract: ${receiptContract}`
     );
   }
 }
