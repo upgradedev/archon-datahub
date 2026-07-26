@@ -3339,13 +3339,15 @@ assert {source["key"] for source in registry["sources"] if source["required"]} =
     "operations",
 }
 assert "post_submit_run_id:" in producer
-for intentionally_absent_producer in (
-    "submission-devpost-confirmation.yml",
-):
-    assert not (ROOT / ".github" / "workflows" / intentionally_absent_producer).exists(), (
-        "a placeholder producer appeared without its dedicated contract tests: "
-        f"{intentionally_absent_producer}"
-    )
+assert (
+    ROOT / ".github" / "workflows" / "submission-devpost-confirmation.yml"
+).is_file(), "SQ11 Devpost-confirmation producer is missing"
+assert (
+    ROOT
+    / "tests"
+    / "pipeline"
+    / "submission_devpost_confirmation_contracts_test.py"
+).is_file(), "SQ11 dedicated contract is missing"
 assert (
     ROOT / ".github" / "workflows" / "submission-bonus-oss.yml"
 ).is_file(), "BONUS-OSS producer is missing"

@@ -83,6 +83,8 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_evidence_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_devpost_confirmation_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_bonus_oss_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_bonus_feedback_contracts_test.py

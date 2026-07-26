@@ -44,7 +44,9 @@ consumer may establish trusted readiness only by verifying the exact
 `https://archon.datahub.dev/attestations/submission-readiness-seal/v1` predicate signed by
 `.github/workflows/submission-readiness.yml` for the canonical sealed subjects. The
 post-submit `SQ11` confirmation remains a separate fact and cannot create a circular
-pre-submit prerequisite or make the unsigned projection claim submission.
+pre-submit prerequisite or make the unsigned projection claim submission. The enforced
+order is: aggregate without `SQ11`, protected readiness seal, real Devpost submission,
+post-submit `SQ11` attestation, then a new reporting aggregate that may include `SQ11`.
 
 All five official criterion IDs, both capability axes, and every registered external-proof
 check must remain present with its exact criterion and readiness role. Check IDs must be
@@ -194,8 +196,10 @@ The source artifact contract is intentionally fail-closed:
 `claims.json`, `predicate.json`, `SHA256SUMS`, and every referenced receipt must be
 regular, checksum-bound files; the custom predicate must be signed by the exact source
 workflow/release. Claims must include `D4`, `U3`, `SQ3`–`SQ8`, and `SQ10`. `SQ9`,
-`SQ11`, and the two bonus receipts remain optional in this bundle. If an upstream receipt
-does not yet exist, the workflow fails; it never creates a passing claim for it. The
+and the two bonus receipts remain optional in this bundle. `SQ11` is forbidden: the
+protected source verifier rejects both a claims entry and any retained `SQ11` receipt so
+the pre-submit seal cannot depend on post-submit evidence. If an upstream receipt does not
+yet exist, the workflow fails; it never creates a passing claim for it. The
 environment must be configured with prevent-self-review, at least one individual reviewer,
 and a master-only custom branch policy before this path can run.
 
@@ -243,8 +247,21 @@ The optional `.github/workflows/submission-judge-pack.yml` standard-v1 producer 
 for `SQ9`. It resolves only the latest successful current-release `master` CI push and its
 exact-attempt judge/container artifacts, verifies the signed CI release predicate, labels
 the evidence as a sanitized synthetic offline fixture rather than live proof, independently
-reconstructs the facts, and signs the exact four-subject inventory. The post-submit `SQ11`
-producer is still absent.
+reconstructs the facts, and signs the exact four-subject inventory.
+
+The post-submit
+`.github/workflows/submission-devpost-confirmation.yml` standard-v1 producer now exists
+for `SQ11` and is documented in
+[`SUBMISSION_DEVPOST_CONFIRMATION.md`](SUBMISSION_DEVPOST_CONFIRMATION.md). Its unprivileged
+prepare job revalidates the exact pre-submit seal and reviewed final content; its
+`submission-devpost-confirmation` protected job requires an independent individual
+reviewer to verify the private submission confirmation and salted commitment out of band;
+and its attester repeats the full source, approval, rules, and public-URL checks before
+signing and verifying all six subjects offline and through persisted lookup. It is
+source-complete and CI-unverified, but externally blocked until the real entry is submitted,
+the exact public Devpost URL and authoritative private submission time/commitment exist,
+all judging URLs are live, the protected environment is configured, and the independent
+review occurs.
 
 The optional `.github/workflows/submission-bonus-oss.yml` standard-v1 producer now exists.
 It credentiallessly binds the exact public Apache-2.0 upstream repository and independently
@@ -338,7 +355,7 @@ The five official Stage Two criteria are equally weighted.
 | Testing access through the judging period | **User-gated operational requirement.** | Before submission, activate free judge access, scheduled monitoring/alerting, rollback, recovery, and protected credential rotation. Keep those controls active through **2026-08-31, 17:00 Eastern Time**; the readiness projection records active controls, not fictional proof of future uptime. |
 | English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
 | New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
-| Completed Devpost entry | **Deferred-to-end; post-submit confirmation (`SQ11`).** | Once the protected readiness seal has been independently verified, enter every required field and submit before the deadline; then verify every URL in an unauthenticated browser and retain the confirmation. The unsigned projection itself never sets `readyToSubmit`. |
+| Completed Devpost entry | `SQ11` producer is **source-complete; CI-unverified; deferred-to-end and externally blocked.** | Seal an aggregate that excludes `SQ11`; submit every required field before the deadline; dispatch `submission-devpost-confirmation.yml` with the exact seal identity, public project URL, authoritative private UTC timestamp, and salted commitment; obtain independent protected approval; require persisted verification of all six subjects; only then build a new reporting aggregate that may include `SQ11`. The unsigned projection itself never sets `readyToSubmit`. |
 
 A separate blog post is not listed as a required deliverable. The optional Most Valuable
 Feedback action is a rules-defined Feedback Submission and the public overview places its
@@ -475,7 +492,20 @@ UI layout.
 - Record the final live demo only after the deployed commit and DataHub proof are fixed.
 - Write the English Devpost text and testing instructions, then perform a claim-by-claim
   consistency check against the README, video, live application, and retained evidence.
-- Submit on Devpost last.
+- Configure `submission-devpost-confirmation` with individual `User` reviewers,
+  prevent-self-review, and an exact `master` branch policy; the actor and triggering actor
+  cannot approve their own binding.
+- Seal the pre-submit aggregate without `SQ11`, then submit on Devpost last. Keep the
+  authenticated confirmation, salt, credentials, cookies, screenshots, and entrant PII
+  outside GitHub.
+- After submission, dispatch the `SQ11` workflow with the exact readiness run/artifact
+  identity, public Devpost project URL, authoritative private UTC timestamp, and salted
+  confirmation commitment. A public page or HTTP `200` alone cannot prove the private
+  timestamp, required fields, or application functionality.
+- Treat the real submitted entry, live public application/repository/video URLs, protected
+  reviewer, and private confirmation inputs as external blockers. Only after all six
+  subjects pass offline-bundle and persisted attestation verification may a later
+  reporting aggregate include `SQ11`; never reseal pre-submit readiness with that result.
 
 ## CI/CD truth
 

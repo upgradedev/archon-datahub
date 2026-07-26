@@ -257,6 +257,7 @@ jq -e \
     .releaseSha == $release and
     (.proofs | type) == "array" and
     (.bonuses | type) == "array" and
+    ([.proofs[].id, .bonuses[].id] | index("SQ11")) == null and
     all(
       .proofs[];
       (keys | sort) ==
@@ -281,7 +282,7 @@ jq -e \
           (
             .id == "SQ3" or .id == "SQ4" or .id == "SQ5" or
             .id == "SQ6" or .id == "SQ7" or .id == "SQ8" or
-            .id == "SQ9" or .id == "SQ10" or .id == "SQ11"
+            .id == "SQ9" or .id == "SQ10"
           ) and
           .criterion == "submission-quality"
         )
@@ -325,6 +326,24 @@ jq -e \
   echo "::error::claims.json violates the exact readiness claims contract"
   exit 1
 }
+
+receipt_directory="${extract_dir}/receipts"
+test -d "${receipt_directory}"
+test ! -L "${receipt_directory}"
+while IFS= read -r retained_receipt; do
+  test -f "${retained_receipt}"
+  test ! -L "${retained_receipt}"
+  if jq -e '.id == "SQ11"' "${retained_receipt}" >/dev/null; then
+    echo "::error::pre-submit readiness source must not contain an SQ11 receipt"
+    exit 1
+  fi
+done < <(
+  find "${receipt_directory}" \
+    -maxdepth 1 \
+    -type f \
+    -name '*.json' |
+    LC_ALL=C sort
+)
 
 while IFS=$'\t' read -r receipt_name receipt_digest; do
   [[ "${receipt_name}" =~ ^receipts/[A-Za-z0-9][A-Za-z0-9._/-]{0,180}\.json$ ]]

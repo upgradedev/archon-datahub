@@ -657,6 +657,57 @@ test("readiness: protected pipeline independently verifies and seals remote evid
     sourceVerifier,
     /"D4", "U3", "SQ3", "SQ4", "SQ5", "SQ6", "SQ7", "SQ8", "SQ10"/
   );
+  const assertPreSubmitSq11Exclusion = (candidate: string): void => {
+    assert.equal(
+      (
+        candidate.match(
+          /^\s+\(\[\.proofs\[\]\.id, \.bonuses\[\]\.id\] \| index\("SQ11"\)\) == null and$/gm
+        ) ?? []
+      ).length,
+      1,
+      "claims must contain one exact pre-submit SQ11 exclusion"
+    );
+    assert.match(
+      candidate,
+      /\.id == "SQ9" or \.id == "SQ10"\s*\)\s*and/,
+      "SQ11 must not remain in the pre-submit proof allowlist"
+    );
+    assert.equal(
+      (
+        candidate.match(
+          /^  if jq -e '\.id == "SQ11"' "\$\{retained_receipt\}" >\/dev\/null; then$/gm
+        ) ?? []
+      ).length,
+      1,
+      "retained receipts need an independent SQ11 envelope rejection"
+    );
+    assert.match(
+      candidate,
+      /pre-submit readiness source must not contain an SQ11 receipt/
+    );
+  };
+  assertPreSubmitSq11Exclusion(sourceVerifier);
+  const sq11GuardMutations = [
+    sourceVerifier.replace(
+      '    ([.proofs[].id, .bonuses[].id] | index("SQ11")) == null and\n',
+      ""
+    ),
+    sourceVerifier.replace(
+      ".id == \"SQ9\" or .id == \"SQ10\"",
+      '.id == "SQ9" or .id == "SQ10" or .id == "SQ11"'
+    ),
+    sourceVerifier.replace(
+      "  if jq -e '.id == \"SQ11\"' \"${retained_receipt}\" >/dev/null; then\n",
+      "  if false; then\n"
+    ),
+  ];
+  for (const mutation of sq11GuardMutations) {
+    assert.notEqual(mutation, sourceVerifier, "SQ11 guard mutation must apply");
+    assert.throws(
+      () => assertPreSubmitSq11Exclusion(mutation),
+      "tampering with either SQ11 exclusion boundary must be rejected"
+    );
+  }
 });
 
 test("readiness: valid evidence is complete but cannot make an unsigned ready claim", async () => {

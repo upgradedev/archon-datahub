@@ -141,7 +141,8 @@ pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
 [production availability](docs/AVAILABILITY.md), [production paging delivery
 proof](docs/PRODUCTION_PAGING_TEST.md), and [protected judge
 access](docs/JUDGE_ACCESS.md), [final submission content
-review](docs/SUBMISSION_CONTENT_REVIEW.md), plus [evidence-based
+review](docs/SUBMISSION_CONTENT_REVIEW.md), [post-submit Devpost
+confirmation](docs/SUBMISSION_DEVPOST_CONFIRMATION.md), plus [evidence-based
 readiness](docs/READINESS.md), the [merged-upstream OSS bonus evidence
 contract](docs/SUBMISSION_BONUS_OSS.md), and the [privacy-preserving optional
 feedback evidence contract](docs/SUBMISSION_BONUS_FEEDBACK.md).
@@ -462,6 +463,14 @@ Workflows:
   the persisted full-subject GitHub attestation. The fail-closed operating
   contract is in
   [docs/SUBMISSION_CONTENT_REVIEW.md](docs/SUBMISSION_CONTENT_REVIEW.md).
+- [Devpost submission confirmation](.github/workflows/submission-devpost-confirmation.yml) —
+  post-submit-only `SQ11` producer that independently revalidates the
+  pre-submit readiness seal, protected reviewer approval, reviewed content,
+  official rules, and all public judging URLs. It retains no Devpost
+  credentials or private confirmation bytes and verifies all six signed
+  subjects both against the returned bundle and through persisted lookup.
+  Its non-circular operating sequence is in
+  [docs/SUBMISSION_DEVPOST_CONFIRMATION.md](docs/SUBMISSION_DEVPOST_CONFIRMATION.md).
 - [Submission bonus OSS](.github/workflows/submission-bonus-oss.yml) —
   intentionally accepts only a public merged PR for the exact four-path
   `get_aspect_history` candidate. It reconstructs the complete PR head tree
@@ -498,11 +507,12 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - GitHub `staging`, `production`, `production-observer`, `production-paging-test`,
   `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
   `judge-access-production`, `governed-canary`, `governed-canary-rollback`,
-  `governed-canary-recovery`, `submission-content-review`, and
-  `submission-bonus-feedback` environments and `master` protection must be
-  configured;
+  `governed-canary-recovery`, `submission-content-review`,
+  `submission-devpost-confirmation`, and `submission-bonus-feedback`
+  environments and `master` protection must be configured;
 - production, demo-seed, judge-access, and the three governed-canary approval
-  environments require a trusted second collaborator so self-review can remain disabled;
+  environments plus all submission review environments require a trusted
+  second collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
   user-gated;
 - a real retained-history contradiction and governed canary write/rollback need sanitized
@@ -510,6 +520,11 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - screenshots, the under-three-minute public video, Devpost copy, and optional public post
   are intentionally last; the content-review workflow remains fail-closed until
   its canonical final JSON, public video, and independent environment reviewer exist;
+- `SQ11` is source-complete but externally blocked until the pre-submit aggregate
+  (which must exclude `SQ11`) is sealed, the real Devpost entry is submitted,
+  its public URL and authoritative private timestamp/commitment are supplied,
+  and an independent `submission-devpost-confirmation` reviewer approves the
+  exact binding; only a later reporting aggregate may consume the attested result;
 - the optional OSS workflow remains intentionally blocked until an independent
   upstream maintainer merges the exact four-path candidate, after which the
   manifest and contribution README must record the concrete merged identity in
