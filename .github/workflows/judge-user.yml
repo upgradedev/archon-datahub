@@ -131,10 +131,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           JUDGE_USER_OPERATION: ${{ inputs.operation }}
-          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
-          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
-          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
@@ -419,10 +419,10 @@ jobs:
           CONTROL_PLANE_SHA: ${{ github.sha }}
           EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
           EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
-          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
-          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
-          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           bash scripts/manage-cognito-judge-user.sh request
@@ -457,10 +457,10 @@ jobs:
           CONTROL_PLANE_SHA: ${{ github.sha }}
           EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
           JUDGE_USER_OPERATION: ${{ inputs.operation }}
-          JOB_WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
-          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
-          JOB_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then

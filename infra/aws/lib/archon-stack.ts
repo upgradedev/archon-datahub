@@ -2003,6 +2003,17 @@ export class ArchonPlatformStack extends Stack {
         ]
       }
     });
+    const cfnUserPoolClient = userPoolClient.node
+      .defaultChild as cognito.CfnUserPoolClient;
+    // Keep the deployed/read-back contract canonical. The L2 currently serializes a
+    // one-day refresh token as 1,440 minutes, which is semantically equivalent but
+    // would defeat the exact lifecycle drift guard.
+    cfnUserPoolClient.refreshTokenValidity = 1;
+    cfnUserPoolClient.tokenValidityUnits = {
+      accessToken: "minutes",
+      idToken: "minutes",
+      refreshToken: "days"
+    };
     new cognito.CfnUserPoolRiskConfigurationAttachment(
       this,
       "SpaRiskConfiguration",

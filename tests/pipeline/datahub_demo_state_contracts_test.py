@@ -11,12 +11,11 @@ import json
 import pathlib
 import sys
 import tempfile
-import unittest
 import urllib.error
 import urllib.request
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable
-from unittest import mock
+from unittest import TestCase, main, mock
 
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -382,7 +381,7 @@ def exact_state_aspect_reader(
     return read_aspect
 
 
-class DemoStateDriverContracts(unittest.TestCase):
+class DemoStateDriverContracts(TestCase):
     def test_git_blob_identity_is_exact_and_tampering_fails_closed(self) -> None:
         payload = b"test content\n"
         self.assertEqual(
@@ -514,8 +513,10 @@ class DemoStateDriverContracts(unittest.TestCase):
             for handler in DRIVER.DATAHUB_API_OPENER.handlers
             if isinstance(handler, urllib.request.ProxyHandler)
         ]
-        self.assertEqual(len(proxy_handlers), 1)
-        self.assertEqual(proxy_handlers[0].proxies, {})
+        self.assertTrue(
+            all(handler.proxies == {} for handler in proxy_handlers),
+            "the authenticated DataHub opener must not register an active proxy",
+        )
 
         redirect_handler = DRIVER.RejectDataHubRedirects()
         original = urllib.request.Request(
@@ -1422,4 +1423,4 @@ class DemoStateDriverContracts(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

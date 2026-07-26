@@ -564,15 +564,19 @@ test("judge emergency deactivation binds current master without claiming green C
   );
   assert.match(
     judgeEmergencyControlPlaneVerifier,
-    /test "\$\{JOB_WORKFLOW_REPOSITORY\}" = "\$\{expected_repository\}"/u
+    /test "\$\{EXECUTING_WORKFLOW_REPOSITORY\}" = "\$\{expected_repository\}"/u
   );
   assert.match(
     judgeEmergencyControlPlaneVerifier,
-    /test "\$\{JOB_WORKFLOW_FILE_PATH\}" = "\$\{expected_workflow_path\}"/u
+    /test "\$\{EXECUTING_WORKFLOW_FILE_PATH\}" = "\$\{expected_workflow_path\}"/u
   );
   assert.match(
     judgeEmergencyControlPlaneVerifier,
-    /test "\$\{JOB_WORKFLOW_SHA\}" = "\$\{CONTROL_PLANE_SHA\}"/u
+    /test "\$\{EXECUTING_WORKFLOW_REF\}" = "\$\{expected_workflow_ref\}"/u
+  );
+  assert.match(
+    judgeEmergencyControlPlaneVerifier,
+    /test "\$\{EXECUTING_WORKFLOW_SHA\}" = "\$\{CONTROL_PLANE_SHA\}"/u
   );
   assert.match(
     judgeEmergencyControlPlaneVerifier,
@@ -769,7 +773,7 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeUserManager, /Permanent: true/u);
   assert.equal(
     [...judgeUserManager.matchAll(/Permanent: true/gu)].length,
-    2
+    3
   );
   assert.doesNotMatch(judgeUserManager, /Permanent: false/u);
   assert.match(
@@ -805,7 +809,11 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
     [provisionOperation, "wait_for_only_approver_group"],
     [rotateOperation, "require_only_approver_group"],
     [reactivateOperation, "wait_for_only_approver_group"]
-  ]) {
+  ] as const) {
+    assert.equal(
+      [...operation.matchAll(/Permanent: true/gu)].length,
+      1
+    );
     const finalGroupProof = operation.lastIndexOf(groupProof);
     const finalEnabledProof = operation.lastIndexOf("wait_for_enabled_status");
     const completion = operation.lastIndexOf("operation_complete=true");
@@ -967,12 +975,18 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeAccessDocumentation, /multi-network Hosted UI/iu);
 });
 
-test("example DataHub endpoints require HTTPS, private access, or a tunnel", () => {
+test("example DataHub endpoint requires authenticated HTTPS and runner-reachable routing", () => {
   assert.match(
     exampleEnvironment,
-    /DATAHUB_GMS_URL=https:\/\/datahub\.internal\.example/u
+    /DATAHUB_GMS_URL=https:\/\/datahub\.example\.com/u
   );
-  assert.match(exampleEnvironment, /VPC\/VPN\/private ingress/u);
+  assert.match(exampleEnvironment, /Remote endpoints MUST use authenticated/u);
+  assert.match(exampleEnvironment, /GitHub-hosted demo\/live/u);
+  assert.match(exampleEnvironment, /public HTTPS endpoint/u);
+  assert.match(
+    exampleEnvironment,
+    /private endpoints require a self-hosted runner/u
+  );
   assert.match(exampleEnvironment, /authenticated SSH\/VPN tunnel/u);
   assert.doesNotMatch(exampleEnvironment, /DATAHUB_GMS_URL=http:\/\//u);
 });

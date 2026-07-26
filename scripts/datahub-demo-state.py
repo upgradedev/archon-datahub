@@ -10,6 +10,7 @@ and receipts contain no credentials or raw provider responses.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -17,12 +18,11 @@ import os
 import pathlib
 import re
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, NoReturn
+from typing import Any, NoReturn
 
 MAX_CONTRACT_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -1423,10 +1423,8 @@ def prepare_demo_emission(
     try:
         emitter.test_connection()
     except Exception as exc:
-        try:
+        with contextlib.suppress(Exception):
             emitter.close()
-        except Exception:
-            pass
         fail(f"DataHub SDK connection failed: {type(exc).__name__}")
     return {
         "emitter": emitter,
@@ -1459,16 +1457,17 @@ def emit_demo_state(
     """Compatibility wrapper used by functional contracts and non-mutating callers."""
 
     prepared = prepare_demo_emission(contract, contract_digest, gms, token)
-    operation_failure: BaseException | None = None
+    operation_failure: Exception | SystemExit | None = None
     try:
         emit_prepared_demo_state(prepared)
-    except BaseException as exc:
+    except (Exception, SystemExit) as exc:
         operation_failure = exc
-    try:
-        close_prepared_demo_emission(prepared)
-    except BaseException as exc:
-        if operation_failure is None:
-            operation_failure = exc
+    finally:
+        try:
+            close_prepared_demo_emission(prepared)
+        except (Exception, SystemExit) as exc:
+            if operation_failure is None:
+                operation_failure = exc
     if operation_failure is not None:
         raise operation_failure
 
@@ -1715,7 +1714,7 @@ def command_apply(args: argparse.Namespace) -> None:
 
     if plan["mutationRequired"]:
         prepared = prepare_demo_emission(contract, contract_digest, gms, token)
-        mutation_failure: BaseException | None = None
+        mutation_failure: Exception | SystemExit | None = None
         try:
             if plan["operation"] == "reset":
                 for presence in before["ownedUrnPresence"]:
@@ -1750,13 +1749,14 @@ def command_apply(args: argparse.Namespace) -> None:
             )
             anchors_after_load = wait_for_anchors(contract, gms, token)
             emit_prepared_demo_state(prepared)
-        except BaseException as exc:
+        except (Exception, SystemExit) as exc:
             mutation_failure = exc
-        try:
-            close_prepared_demo_emission(prepared)
-        except BaseException as exc:
-            if mutation_failure is None:
-                mutation_failure = exc
+        finally:
+            try:
+                close_prepared_demo_emission(prepared)
+            except (Exception, SystemExit) as exc:
+                if mutation_failure is None:
+                    mutation_failure = exc
         if mutation_failure is not None:
             raise mutation_failure
     else:

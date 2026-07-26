@@ -1128,10 +1128,10 @@ run_emergency_verify() {
     GITHUB_WORKFLOW="Manage Cognito judge user" \
     GITHUB_WORKFLOW_REF="${VERIFY_EMERGENCY_GITHUB_WORKFLOW_REF:-upgradedev/archon-datahub/.github/workflows/judge-user.yml@refs/heads/master}" \
     GITHUB_WORKFLOW_SHA="${VERIFY_EMERGENCY_GITHUB_WORKFLOW_SHA:-${release_sha}}" \
-    JOB_WORKFLOW_FILE_PATH="${VERIFY_EMERGENCY_JOB_WORKFLOW_FILE_PATH:-.github/workflows/judge-user.yml}" \
-    JOB_WORKFLOW_REF="${VERIFY_EMERGENCY_JOB_WORKFLOW_REF:-upgradedev/archon-datahub/.github/workflows/judge-user.yml@refs/heads/master}" \
-    JOB_WORKFLOW_REPOSITORY="${VERIFY_EMERGENCY_JOB_WORKFLOW_REPOSITORY:-upgradedev/archon-datahub}" \
-    JOB_WORKFLOW_SHA="${VERIFY_EMERGENCY_JOB_WORKFLOW_SHA:-${release_sha}}" \
+    EXECUTING_WORKFLOW_FILE_PATH="${VERIFY_EMERGENCY_EXECUTING_WORKFLOW_FILE_PATH:-.github/workflows/judge-user.yml}" \
+    EXECUTING_WORKFLOW_REF="${VERIFY_EMERGENCY_EXECUTING_WORKFLOW_REF:-upgradedev/archon-datahub/.github/workflows/judge-user.yml@refs/heads/master}" \
+    EXECUTING_WORKFLOW_REPOSITORY="${VERIFY_EMERGENCY_EXECUTING_WORKFLOW_REPOSITORY:-upgradedev/archon-datahub}" \
+    EXECUTING_WORKFLOW_SHA="${VERIFY_EMERGENCY_EXECUTING_WORKFLOW_SHA:-${release_sha}}" \
     JUDGE_USER_OPERATION="${operation}" \
     CONTROL_PLANE_SHA="${release_sha}" \
     EXPECTED_GATE_SHA256="${EMERGENCY_EXPECTED_GATE_SHA256:-}" \
@@ -1199,7 +1199,7 @@ VERIFY_EMERGENCY_GITHUB_WORKFLOW_SHA="$(
 test ! -s "${state_dir}/gh-calls"
 
 reset_state absent
-VERIFY_EMERGENCY_JOB_WORKFLOW_REF=upgradedev/archon-datahub/.github/workflows/other.yml@refs/heads/master \
+VERIFY_EMERGENCY_EXECUTING_WORKFLOW_REF=upgradedev/archon-datahub/.github/workflows/other.yml@refs/heads/master \
   expect_failure run_emergency_verify
 test ! -s "${state_dir}/gh-calls"
 
@@ -1398,9 +1398,33 @@ test "$(
     "${workflow_source}"
 )" = "3"
 test "$(
-  grep -Fc 'JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}' \
+  grep -Fc \
+    'EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml' \
     "${workflow_source}"
 )" = "3"
+test "$(
+  grep -Fc \
+    'EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}' \
+    "${workflow_source}"
+)" = "3"
+test "$(
+  grep -Fc \
+    'EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}' \
+    "${workflow_source}"
+)" = "3"
+test "$(
+  grep -Fc \
+    'EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}' \
+    "${workflow_source}"
+)" = "3"
+if grep -Eq '\$\{\{[[:space:]]*job\.workflow_' "${workflow_source}"; then
+  printf 'judge-user.yml must not use unsupported job.workflow_* expressions\n' >&2
+  exit 1
+fi
+if grep -Eq '^[[:space:]]*workflow_call:' "${workflow_source}"; then
+  printf 'judge-user.yml must remain directly dispatched, not reusable\n' >&2
+  exit 1
+fi
 grep -Fq \
   'Emergency deactivation binds the exact current master workflow and run, but deliberately does not assert green CI status.' \
   "${workflow_source}"

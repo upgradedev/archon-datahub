@@ -5,6 +5,8 @@ set -euo pipefail
 # It deliberately does not assert green CI status. Instead, it binds the current
 # default-branch commit, the directly executing workflow file, and this exact
 # workflow-run attempt into a stable receipt that the V3 approval digest seals.
+# judge-user.yml has no workflow_call entry point, so the mapped github.workflow_*
+# identity below is the identity of this directly dispatched workflow.
 
 fail() {
   printf '::error::%s\n' "$1" >&2
@@ -27,10 +29,10 @@ fail() {
 : "${GITHUB_WORKFLOW_SHA:?GITHUB_WORKFLOW_SHA is required}"
 : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL is required}"
 : "${GITHUB_API_URL:?GITHUB_API_URL is required}"
-: "${JOB_WORKFLOW_REPOSITORY:?JOB_WORKFLOW_REPOSITORY is required}"
-: "${JOB_WORKFLOW_FILE_PATH:?JOB_WORKFLOW_FILE_PATH is required}"
-: "${JOB_WORKFLOW_REF:?JOB_WORKFLOW_REF is required}"
-: "${JOB_WORKFLOW_SHA:?JOB_WORKFLOW_SHA is required}"
+: "${EXECUTING_WORKFLOW_REPOSITORY:?EXECUTING_WORKFLOW_REPOSITORY is required}"
+: "${EXECUTING_WORKFLOW_FILE_PATH:?EXECUTING_WORKFLOW_FILE_PATH is required}"
+: "${EXECUTING_WORKFLOW_REF:?EXECUTING_WORKFLOW_REF is required}"
+: "${EXECUTING_WORKFLOW_SHA:?EXECUTING_WORKFLOW_SHA is required}"
 : "${JUDGE_USER_OPERATION:?JUDGE_USER_OPERATION is required}"
 : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
 : "${OUTPUT_PATH:?OUTPUT_PATH is required}"
@@ -66,12 +68,12 @@ test "${GITHUB_REF}" = "refs/heads/${expected_branch}" &&
 test "${GITHUB_WORKFLOW}" = "${expected_workflow_name}" &&
   test "${GITHUB_WORKFLOW_REF}" = "${expected_workflow_ref}" &&
   test "${GITHUB_WORKFLOW_SHA}" = "${CONTROL_PLANE_SHA}" ||
-  fail "The caller workflow identity is not the exact current-master judge workflow"
-test "${JOB_WORKFLOW_REPOSITORY}" = "${expected_repository}" &&
-  test "${JOB_WORKFLOW_FILE_PATH}" = "${expected_workflow_path}" &&
-  test "${JOB_WORKFLOW_REF}" = "${expected_workflow_ref}" &&
-  test "${JOB_WORKFLOW_SHA}" = "${CONTROL_PLANE_SHA}" ||
-  fail "The executing job is not defined directly by the exact judge workflow"
+  fail "The GitHub workflow identity is not the exact current-master judge workflow"
+test "${EXECUTING_WORKFLOW_REPOSITORY}" = "${expected_repository}" &&
+  test "${EXECUTING_WORKFLOW_FILE_PATH}" = "${expected_workflow_path}" &&
+  test "${EXECUTING_WORKFLOW_REF}" = "${expected_workflow_ref}" &&
+  test "${EXECUTING_WORKFLOW_SHA}" = "${CONTROL_PLANE_SHA}" ||
+  fail "The executing workflow is not the exact directly dispatched judge workflow"
 test "${GITHUB_SERVER_URL}" = "https://github.com" &&
   test "${GITHUB_API_URL}" = "https://api.github.com" ||
   fail "The GitHub service endpoints are invalid"

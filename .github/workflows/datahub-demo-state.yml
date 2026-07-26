@@ -888,6 +888,9 @@ jobs:
           set -euo pipefail
           test "${GITHUB_SHA}" = "${RELEASE_SHA}"
           test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
           default_sha="$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \

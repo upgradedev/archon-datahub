@@ -267,8 +267,12 @@ test("dry-run plan and GitHub digest receipt precede all mutation paths", () => 
   );
   assert.equal(configPreflights.length, 2);
   assert.equal(directDryRuns.length, 2);
-  assert.ok(configPreflights[0] < directDryRuns[0]);
-  assert.ok(configPreflights[1] < directDryRuns[1]);
+  const [planConfigPreflight, applyConfigPreflight] = configPreflights;
+  const [planDryRun, applyDryRun] = directDryRuns;
+  assert.ok(planConfigPreflight !== undefined && planDryRun !== undefined);
+  assert.ok(applyConfigPreflight !== undefined && applyDryRun !== undefined);
+  assert.ok(planConfigPreflight < planDryRun);
+  assert.ok(applyConfigPreflight < applyDryRun);
   assert.match(workflow, /--expected-fingerprint/u);
   assert.match(driver, /def gms_endpoint_fingerprint/u);
   assert.match(driver, /apply DataHub endpoint differs from the reviewed plan/u);
@@ -330,7 +334,7 @@ test("reset is exact-confirmation and hard-delete allowlist only", () => {
   assert.match(driver, /absence-proved-after-cli-error/u);
   assert.match(driver, /exact live readback/u);
   assert.match(documentation, /Dispatch a new `reset`/u);
-  assert.match(documentation, /skips already-absent owned URNs/u);
+  assert.match(documentation, /skips already-absent owned\s+URNs/u);
 });
 
 test("the planted state is exact and proves two stable sources, G6, and dangling lineage", () => {
@@ -419,7 +423,7 @@ test("credentials stay out of dispatch, argv, plans, and retained receipts", () 
     /`DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` are environment-only secret names/u
   );
   assert.match(documentation, /organization or repository scope/u);
-  assert.match(documentation, /rejects every HTTP redirect/u);
+  assert.match(documentation, /rejects every\s+HTTP redirect/u);
   assert.match(documentation, /exception messages are not surfaced in CI logs/u);
   assert.match(documentation, /`gmsEndpointFingerprint` is sealed into the plan/u);
   assert.match(documentation, /approval-receipt\.json/u);
