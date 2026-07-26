@@ -234,6 +234,8 @@ cleanup() {
 trap cleanup EXIT
 
 write_lifecycle_state_receipt() {
+  local cognito_subject
+  local cognito_subject_digest
   local completed_at
   local completed_epoch
   local identity_digest
@@ -251,12 +253,35 @@ write_lifecycle_state_receipt() {
       sha256sum |
       awk '{print $1}'
   )"
+  cognito_subject="$(
+    jq -er '
+      [
+        (.UserAttributes // [])[] |
+        select(.Name == "sub")
+      ] |
+      select(length == 1) |
+      .[0].Value |
+      select(
+        type == "string" and
+        test(
+          "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+      )
+    ' "${user_document}"
+  )" || fail "The final Cognito subject is not one canonical lower-case UUID"
+  cognito_subject_digest="$(
+    printf 'archon-cognito-subject-v1\0%s' "${cognito_subject}" |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  unset cognito_subject
   application_origin_sha256="$(
     printf '%s' "${EXPECTED_APPLICATION_URL}" |
       sha256sum |
       awk '{print $1}'
   )"
   [[ "${identity_digest}" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${cognito_subject_digest}" =~ ^[0-9a-f]{64}$ ]]
   [[ "${application_origin_sha256}" =~ ^[0-9a-f]{64}$ ]]
   for state_value in \
     "${prior_identity_state}" \
@@ -281,6 +306,7 @@ write_lifecycle_state_receipt() {
     --arg stage "${ARCHON_STAGE}" \
     --arg operation "${JUDGE_USER_OPERATION}" \
     --arg identityDigest "${identity_digest}" \
+    --arg cognitoSubjectDigest "${cognito_subject_digest}" \
     --arg applicationOriginSha256 "${application_origin_sha256}" \
     --arg startedAt "${lifecycle_started_at}" \
     --arg completedAt "${completed_at}" \
@@ -299,6 +325,7 @@ write_lifecycle_state_receipt() {
         stage: $stage,
         operation: $operation,
         identityDigest: $identityDigest,
+        cognitoSubjectDigest: $cognitoSubjectDigest,
         applicationOriginSha256: $applicationOriginSha256,
         priorState: {
           identity: $priorIdentity,
@@ -330,6 +357,7 @@ write_lifecycle_state_receipt() {
     --arg stage "${ARCHON_STAGE}" \
     --arg operation "${JUDGE_USER_OPERATION}" \
     --arg identityDigest "${identity_digest}" \
+    --arg cognitoSubjectDigest "${cognito_subject_digest}" \
     --arg applicationOriginSha256 "${application_origin_sha256}" \
     --arg startedAt "${lifecycle_started_at}" \
     --arg completedAt "${completed_at}" \
@@ -345,6 +373,7 @@ write_lifecycle_state_receipt() {
     --arg result "${transition_result}" '
       (keys | sort) == [
         "applicationOriginSha256",
+        "cognitoSubjectDigest",
         "completedAt",
         "finalState",
         "identityDigest",
@@ -363,6 +392,7 @@ write_lifecycle_state_receipt() {
       .stage == $stage and
       .operation == $operation and
       .identityDigest == $identityDigest and
+      .cognitoSubjectDigest == $cognitoSubjectDigest and
       .applicationOriginSha256 == $applicationOriginSha256 and
       .priorState == {
         identity: $priorIdentity,
@@ -837,6 +867,20 @@ user_identity_matches() {
       ] as $binding_attributes |
       ($binding_attributes | length) == 1 and
       $binding_attributes[0].Value == $binding
+    ) and
+    (
+      [
+        (.UserAttributes // [])[] |
+        select(.Name == "sub")
+      ] as $subject_attributes |
+      ($subject_attributes | length) == 1 and
+      (
+        $subject_attributes[0].Value |
+        type == "string" and
+        test(
+          "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+      )
     )
   ' "${user_document}" >/dev/null
 }

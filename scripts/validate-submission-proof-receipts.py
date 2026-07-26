@@ -1110,6 +1110,7 @@ def validate_facts(
                 "releaseSha",
                 "stage",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "chainDigest",
                 "operations",
@@ -1131,6 +1132,10 @@ def validate_facts(
         identity_digest = sha256_digest(
             lifecycle["identityDigest"],
             f"{label}.judgeUserLifecycle.identityDigest",
+        )
+        cognito_subject_digest = sha256_digest(
+            lifecycle["cognitoSubjectDigest"],
+            f"{label}.judgeUserLifecycle.cognitoSubjectDigest",
         )
         exact(
             raw_sha256(
@@ -1182,6 +1187,7 @@ def validate_facts(
                     "verificationDigest",
                     "releaseSha",
                     "identityDigest",
+                    "cognitoSubjectDigest",
                     "applicationOriginSha256",
                     "operationReceiptDigest",
                     "performedAt",
@@ -1253,6 +1259,11 @@ def validate_facts(
                 f"{operation_label}.identityDigest",
             )
             exact(
+                operation_receipt["cognitoSubjectDigest"],
+                cognito_subject_digest,
+                f"{operation_label}.cognitoSubjectDigest",
+            )
+            exact(
                 raw_sha256(
                     operation_receipt["applicationOriginSha256"],
                     f"{operation_label}.applicationOriginSha256",
@@ -1313,6 +1324,7 @@ def validate_facts(
                 "verificationDigest",
                 "releaseSha",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "journeyStartedAt",
                 "journeyCompletedAt",
@@ -1373,6 +1385,11 @@ def validate_facts(
             journey["identityDigest"],
             identity_digest,
             f"{label}.freshJudgeJourney.identityDigest",
+        )
+        exact(
+            journey["cognitoSubjectDigest"],
+            cognito_subject_digest,
+            f"{label}.freshJudgeJourney.cognitoSubjectDigest",
         )
         exact(
             raw_sha256(

@@ -169,9 +169,13 @@ JSON
       --arg email "${FAKE_EMAIL}" \
       --arg username "${canonical_username}" \
       --arg binding "${binding}" \
+      --arg subject \
+        "${FAKE_COGNITO_SUB:-12345678-1234-4abc-8def-1234567890ab}" \
       --arg status "${user_status}" \
       --arg emailVerified "${email_verified}" \
       --argjson enabled "${enabled}" \
+      --argjson duplicateSubject "${FAKE_DUPLICATE_SUB_DRIFT:-0}" \
+      --argjson omitSubject "${FAKE_OMIT_SUB_DRIFT:-0}" \
       --argjson userMfaSettings "${user_mfa_settings}" \
       --argjson legacyMfaOptions "${legacy_mfa_options}" \
       --arg preferredMfa "${preferred_mfa}" '
@@ -181,14 +185,29 @@ JSON
           UserStatus: $status,
           UserMFASettingList: $userMfaSettings,
           MFAOptions: $legacyMfaOptions,
-          UserAttributes: [
-            {Name: "email", Value: $email},
-            {Name: "email_verified", Value: $emailVerified},
-            {
-              Name: "custom:archon_judge_binding",
-              Value: $binding
-            }
-          ]
+          UserAttributes:
+            (
+              if $omitSubject == 1 then
+                []
+              else
+                [{Name: "sub", Value: $subject}]
+              end
+            ) +
+            [
+              {Name: "email", Value: $email},
+              {Name: "email_verified", Value: $emailVerified},
+              {
+                Name: "custom:archon_judge_binding",
+                Value: $binding
+              }
+            ] +
+            (
+              if $duplicateSubject == 1 then
+                [{Name: "sub", Value: $subject}]
+              else
+                []
+              end
+            )
         } +
         (
           if $preferredMfa == "" then
@@ -968,6 +987,7 @@ judge_account_id="$(
   printf '%064d' 0 |
     tr '0' 'a'
 )"
+cognito_subject="12345678-1234-4abc-8def-1234567890ab"
 operation_state_receipt="$(
   printf '%s/judge-user-operation-evidence/judge-operation-state.json' \
     "${test_root}"
@@ -1039,6 +1059,9 @@ run_apply() {
     FAKE_REGION=eu-west-1 \
     FAKE_EMAIL="${username}" \
     FAKE_JUDGE_PASSWORD="${password}" \
+    FAKE_COGNITO_SUB="${FAKE_COGNITO_SUB:-${cognito_subject}}" \
+    FAKE_DUPLICATE_SUB_DRIFT="${FAKE_DUPLICATE_SUB_DRIFT:-0}" \
+    FAKE_OMIT_SUB_DRIFT="${FAKE_OMIT_SUB_DRIFT:-0}" \
     FAKE_ADD_FAILURE="${FAKE_ADD_FAILURE:-0}" \
     FAKE_CREATE_APPLIED_ERROR="${FAKE_CREATE_APPLIED_ERROR:-0}" \
     FAKE_CREATE_RACE_ERROR="${FAKE_CREATE_RACE_ERROR:-0}" \
@@ -1129,10 +1152,16 @@ assert_operation_state_receipt() {
   local session_revocation="$6"
   local expected_result="$7"
   local identity_digest
+  local cognito_subject_digest
   local application_origin_sha256
 
   identity_digest="$(
     printf 'archon-judge-identity-v1\0%s' "${judge_account_id}" |
+      sha256sum |
+      awk '{print $1}'
+  )"
+  cognito_subject_digest="$(
+    printf 'archon-cognito-subject-v1\0%s' "${cognito_subject}" |
       sha256sum |
       awk '{print $1}'
   )"
@@ -1146,6 +1175,7 @@ assert_operation_state_receipt() {
   jq -e \
     --arg operation "${operation}" \
     --arg identityDigest "${identity_digest}" \
+    --arg cognitoSubjectDigest "${cognito_subject_digest}" \
     --arg applicationOriginSha256 "${application_origin_sha256}" \
     --arg startedAt "${lifecycle_started_at}" \
     --arg priorAccess "${prior_access}" \
@@ -1156,6 +1186,7 @@ assert_operation_state_receipt() {
     --arg result "${expected_result}" '
       (keys | sort) == [
         "applicationOriginSha256",
+        "cognitoSubjectDigest",
         "completedAt",
         "finalState",
         "identityDigest",
@@ -1174,6 +1205,7 @@ assert_operation_state_receipt() {
       .stage == "staging" and
       .operation == $operation and
       .identityDigest == $identityDigest and
+      .cognitoSubjectDigest == $cognitoSubjectDigest and
       .applicationOriginSha256 == $applicationOriginSha256 and
       .priorState.identity ==
         (if $operation == "provision" then "absent" else "exact-bound" end) and
@@ -1206,6 +1238,7 @@ assert_operation_state_receipt() {
     "${judge_password}" \
     "${rotated_password}" \
     "${judge_account_id}" \
+    "${cognito_subject}" \
     "111111111111" \
     "JudgePool123" \
     "JudgeClient123"; do
@@ -1870,6 +1903,26 @@ if grep -Fq "${rotated_password}" "${result_log}" ||
   echo "::error::Rotated judge password reached judge-user output" >&2
   exit 1
 fi
+
+reset_state confirmed archon-approvers
+FAKE_COGNITO_SUB="12345678-1234-4ABC-8DEF-1234567890AB" \
+  expect_failure run_apply rotate "${rotated_password}"
+test ! -e "${operation_state_receipt}"
+
+reset_state confirmed archon-approvers
+FAKE_COGNITO_SUB="not-a-canonical-uuid" \
+  expect_failure run_apply rotate "${rotated_password}"
+test ! -e "${operation_state_receipt}"
+
+reset_state confirmed archon-approvers
+FAKE_DUPLICATE_SUB_DRIFT=1 \
+  expect_failure run_apply rotate "${rotated_password}"
+test ! -e "${operation_state_receipt}"
+
+reset_state confirmed archon-approvers
+FAKE_OMIT_SUB_DRIFT=1 \
+  expect_failure run_apply rotate "${rotated_password}"
+test ! -e "${operation_state_receipt}"
 
 reset_state confirmed archon-approvers
 FAKE_PASSWORD_APPLIED_ERROR=1 \

@@ -578,6 +578,42 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
     [...judgeUserWorkflow.matchAll(/retention-days: 90/gu)].length,
     3
   );
+  assert.match(
+    judgeUserWorkflow,
+    /--arg cognitoSubjectDigest "\$\(\s+jq -er '\.cognitoSubjectDigest'/u
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /cognitoSubjectDigest: \$cognitoSubjectDigest/gu
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /\.cognitoSubjectDigest == \$state\[0\]\.cognitoSubjectDigest/gu
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /Lifecycle evidence retained a raw Cognito subject/gu
+      )
+    ].length,
+    2
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /\$\{raw_subject_pattern\}\|\\"sub\\"\[\[:space:\]\]\*:/gu
+      )
+    ].length,
+    2
+  );
 });
 
 test("judge emergency deactivation binds current master without claiming green CI", () => {
@@ -797,6 +833,24 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeUserManager, /custom:archon_judge_binding/u);
   assert.match(judgeUserManager, /--arg binding "\$\{JUDGE_ACCOUNT_ID\}"/u);
   assert.match(judgeUserManager, /\.Value == \$binding/u);
+  assert.match(judgeUserManager, /select\(\.Name == "sub"\)/u);
+  assert.match(
+    judgeUserManager,
+    /\(\$subject_attributes \| length\) == 1/u
+  );
+  assert.match(
+    judgeUserManager,
+    /\^\[0-9a-f\]\{8\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{4\}-\[0-9a-f\]\{12\}\$/u
+  );
+  assert.match(
+    judgeUserManager,
+    /printf 'archon-cognito-subject-v1\\0%s' "\$\{cognito_subject\}"/u
+  );
+  assert.match(judgeUserManager, /unset cognito_subject/u);
+  assert.match(
+    judgeUserManager,
+    /cognitoSubjectDigest: \$cognitoSubjectDigest/u
+  );
   assert.match(judgeUserManager, /automatic_containment\(\)/u);
   assert.match(judgeUserManager, /user_identity_matches_binding/u);
   assert.match(judgeUserManager, /file:\/\/\/dev\/stdin/u);

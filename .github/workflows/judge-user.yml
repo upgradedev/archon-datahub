@@ -580,6 +580,7 @@ jobs:
                 "stage",
                 "operation",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "priorState",
                 "finalState",
@@ -595,6 +596,7 @@ jobs:
               .stage == $stage and
               .operation == $operation and
               (.identityDigest | test("^[0-9a-f]{64}$")) and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
               .applicationOriginSha256 == $applicationOriginSha256 and
               exact_keys(.priorState; [
                 "identity",
@@ -718,6 +720,9 @@ jobs:
             --arg identityDigest "$(
               jq -er '.identityDigest' "${state_receipt}"
             )" \
+            --arg cognitoSubjectDigest "$(
+              jq -er '.cognitoSubjectDigest' "${state_receipt}"
+            )" \
             --arg applicationOriginSha256 "${application_origin_sha256}" \
             --arg environmentName "judge-access-${ARCHON_STAGE}" \
             --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
@@ -746,6 +751,7 @@ jobs:
                 stage: $stage,
                 operation: $operation,
                 identityDigest: $identityDigest,
+                cognitoSubjectDigest: $cognitoSubjectDigest,
                 applicationOriginSha256: $applicationOriginSha256,
                 approval: {
                   environment: $environmentName,
@@ -814,6 +820,9 @@ jobs:
             --arg identityDigest "$(
               jq -er '.identityDigest' "${state_receipt}"
             )" \
+            --arg cognitoSubjectDigest "$(
+              jq -er '.cognitoSubjectDigest' "${state_receipt}"
+            )" \
             --arg applicationOriginSha256 "${application_origin_sha256}" \
             --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
             --arg approvalReceiptSha256 "${approval_receipt_sha256}" \
@@ -841,6 +850,7 @@ jobs:
                 stage: $stage,
                 operation: $operation,
                 identityDigest: $identityDigest,
+                cognitoSubjectDigest: $cognitoSubjectDigest,
                 applicationOriginSha256: $applicationOriginSha256,
                 approval: {
                   environment: $environmentName,
@@ -921,6 +931,13 @@ jobs:
             test -f "${evidence_dir}/${name}"
             test ! -L "${evidence_dir}/${name}"
           done
+          raw_subject_pattern='(^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}([^0-9a-f]|$)'
+          if grep -R -E -q \
+            -- "${raw_subject_pattern}|\"sub\"[[:space:]]*:" \
+            "${evidence_dir}"; then
+            echo "::error::Lifecycle evidence retained a raw Cognito subject"
+            exit 1
+          fi
           {
             echo "artifact_name=judge-user-operation-${JUDGE_USER_OPERATION}-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}"
             echo "predicate_sha256=${predicate_sha256}"
@@ -1118,6 +1135,7 @@ jobs:
               .schemaVersion ==
                 "archon.judge-user-state-transition/v1" and
               .operation == $operation and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
               .finalState.identity == "exact-bound" and
               .finalState.access == "enabled" and
               .finalState.authorization == "sole-approver-group" and
@@ -1141,6 +1159,7 @@ jobs:
             .schemaVersion ==
               "archon.judge-user-state-transition/v1" and
             .operation == "deactivate" and
+            (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
             .finalState == {
               identity: "exact-bound",
               access: "disabled",
@@ -1287,6 +1306,13 @@ jobs:
             test -f "${EVIDENCE_DIR}/${name}"
             test ! -L "${EVIDENCE_DIR}/${name}"
           done
+          raw_subject_pattern='(^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}([^0-9a-f]|$)'
+          if grep -R -E -q \
+            -- "${raw_subject_pattern}|\"sub\"[[:space:]]*:" \
+            "${EVIDENCE_DIR}"; then
+            echo "::error::Lifecycle evidence retained a raw Cognito subject"
+            exit 1
+          fi
           (
             cd "${EVIDENCE_DIR}"
             sha256sum --check --strict SHA256SUMS
@@ -1342,6 +1368,7 @@ jobs:
                 "stage",
                 "operation",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "priorState",
                 "finalState",
@@ -1357,6 +1384,7 @@ jobs:
               .stage == $stage and
               .operation == $operation and
               (.identityDigest | test("^[0-9a-f]{64}$")) and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
               .applicationOriginSha256 == $applicationOriginSha256 and
               (.priorState | keys | sort) ==
                 (["identity", "access", "authentication", "authorization"] | sort) and
@@ -1477,6 +1505,7 @@ jobs:
                 "stage",
                 "operation",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "approval",
                 "controlPlane",
@@ -1500,6 +1529,7 @@ jobs:
               .stage == $stage and
               .operation == $operation and
               .identityDigest == $state[0].identityDigest and
+              .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
               .applicationOriginSha256 == $applicationOriginSha256 and
               .approval == {
                 environment: $environmentName,
@@ -1592,6 +1622,7 @@ jobs:
                 "stage",
                 "operation",
                 "identityDigest",
+                "cognitoSubjectDigest",
                 "applicationOriginSha256",
                 "approval",
                 "controlPlane",
@@ -1614,6 +1645,7 @@ jobs:
               .stage == $stage and
               .operation == $operation and
               .identityDigest == $state[0].identityDigest and
+              .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
               .applicationOriginSha256 == $applicationOriginSha256 and
               .approval == {
                 environment: $environmentName,

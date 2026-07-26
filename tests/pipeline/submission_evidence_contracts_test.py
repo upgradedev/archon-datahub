@@ -76,6 +76,7 @@ def valid_facts() -> dict[str, dict]:
         "predicateDigest": DIGEST,
     }
     identity_digest = DIGEST
+    cognito_subject_digest = ALT_DIGEST
     lifecycle_operations = []
     for index, (operation, result, receipt_character) in enumerate(
         (
@@ -107,6 +108,7 @@ def valid_facts() -> dict[str, dict]:
                 "verificationDigest": DIGEST,
                 "releaseSha": RELEASE,
                 "identityDigest": identity_digest,
+                "cognitoSubjectDigest": cognito_subject_digest,
                 "applicationOriginSha256": application_origin_sha256,
                 "operationReceiptDigest": receipt_digest,
                 "performedAt": iso(NOW - dt.timedelta(hours=4 - index)),
@@ -223,6 +225,7 @@ def valid_facts() -> dict[str, dict]:
                 "releaseSha": RELEASE,
                 "stage": "production",
                 "identityDigest": identity_digest,
+                "cognitoSubjectDigest": cognito_subject_digest,
                 "applicationOriginSha256": application_origin_sha256,
                 "chainDigest": validator.canonical_json_digest(
                     lifecycle_operations
@@ -247,6 +250,7 @@ def valid_facts() -> dict[str, dict]:
                 "verificationDigest": DIGEST,
                 "releaseSha": RELEASE,
                 "identityDigest": identity_digest,
+                "cognitoSubjectDigest": cognito_subject_digest,
                 "applicationOriginSha256": application_origin_sha256,
                 "journeyStartedAt": iso(NOW - dt.timedelta(minutes=30)),
                 "journeyCompletedAt": iso(NOW - dt.timedelta(minutes=10)),
@@ -620,6 +624,42 @@ for registered_id, facts in facts_by_id.items():
         f"{registered_id} accepted an empty literal-only receipt",
     )
 
+sq4_lifecycle_support = validator.expected_support_bindings(
+    "SQ4",
+    "fresh-identity-lifecycle",
+    facts_by_id["SQ4"],
+)
+assert (
+    sq4_lifecycle_support["judgeUserLifecycle"]["cognitoSubjectDigest"]
+    == ALT_DIGEST
+)
+assert all(
+    operation["cognitoSubjectDigest"] == ALT_DIGEST
+    for operation in sq4_lifecycle_support["judgeUserLifecycle"]["operations"]
+)
+assert (
+    sq4_lifecycle_support["freshJudgeJourney"]["cognitoSubjectDigest"]
+    == ALT_DIGEST
+)
+sq4_journey_support = validator.expected_support_bindings(
+    "SQ4",
+    "fresh-judge-journey",
+    facts_by_id["SQ4"],
+)
+assert (
+    sq4_journey_support["freshJudgeJourney"]["cognitoSubjectDigest"]
+    == ALT_DIGEST
+)
+sq4_rotation_support = validator.expected_support_bindings(
+    "SQ4",
+    "credential-rotation-recovery",
+    facts_by_id["SQ4"],
+)
+assert (
+    sq4_rotation_support["judgeUserLifecycle"]["cognitoSubjectDigest"]
+    == ALT_DIGEST
+)
+
 
 def rejects_mutation(
     proof_id: str, mutate, description: str
@@ -656,6 +696,14 @@ def mutate_sq4_application_origin(value: dict, digest: str) -> None:
     value["freshJudgeJourney"]["applicationOriginSha256"] = digest
 
 
+def mutate_sq4_operation_subject(value: dict, digest: str) -> None:
+    lifecycle = value["judgeUserLifecycle"]
+    lifecycle["operations"][2]["cognitoSubjectDigest"] = digest
+    lifecycle["chainDigest"] = validator.canonical_json_digest(
+        lifecycle["operations"]
+    )
+
+
 rejects_mutation(
     "SQ3",
     lambda value: value.update(applicationUrl="http://wrong.example"),
@@ -675,6 +723,25 @@ rejects_mutation(
     "SQ4",
     lambda value: mutate_sq4_application_origin(value, "a" * 64),
     "SQ4 accepted lifecycle and journey receipts for another application origin",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: mutate_sq4_operation_subject(value, DIGEST),
+    "SQ4 accepted a lifecycle operation for another Cognito subject",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: value["judgeUserLifecycle"].update(
+        cognitoSubjectDigest="c" * 64
+    ),
+    "SQ4 accepted a non-prefixed Cognito subject digest",
+)
+rejects_mutation(
+    "SQ4",
+    lambda value: value["freshJudgeJourney"].update(
+        cognitoSubjectDigest=DIGEST
+    ),
+    "SQ4 accepted a browser journey for another Cognito subject",
 )
 rejects_mutation(
     "SQ4",
