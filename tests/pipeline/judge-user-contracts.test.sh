@@ -337,9 +337,12 @@ JSON
     ;;
 
   cognito-idp:describe-user-pool-client)
+    printf 'entered\n' >"${FAKE_STATE_DIR}/client-config-stage"
     test "$(argument_value --user-pool-id "$@")" = \
       "${FAKE_REGION}_JudgePool123"
+    printf 'pool-argument-verified\n' >"${FAKE_STATE_DIR}/client-config-stage"
     test "$(argument_value --client-id "$@")" = "JudgeClient123"
+    printf 'client-argument-verified\n' >"${FAKE_STATE_DIR}/client-config-stage"
     explicit_auth_flows='["ALLOW_REFRESH_TOKEN_AUTH"]'
     oauth_flows='["code"]'
     oauth_scopes='["openid","email","archon/approve"]'
@@ -380,6 +383,7 @@ JSON
     if [[ "${FAKE_DEFAULT_REDIRECT_DRIFT:-0}" == "1" ]]; then
       default_redirect="https://attacker.example/callback"
     fi
+    printf 'rendering-response\n' >"${FAKE_STATE_DIR}/client-config-stage"
     jq -cn \
       --arg pool "${FAKE_REGION}_JudgePool123" \
       --argjson authFlows "${explicit_auth_flows}" \
@@ -424,6 +428,7 @@ JSON
           )
         }
       '
+    printf 'response-rendered\n' >"${FAKE_STATE_DIR}/client-config-stage"
     ;;
 
   cognito-idp:describe-risk-configuration)
@@ -973,6 +978,7 @@ reset_state() {
   : >"${state_dir}/gh-calls"
   : >"${state_dir}/password-history"
   rm -f -- \
+    "${state_dir}/client-config-stage" \
     "${state_dir}/emergency-ref-reads" \
     "${state_dir}/emergency-run-reads"
   if [[ "${status}" != "absent" ]]; then
@@ -998,6 +1004,7 @@ run_apply() {
   local operation="$1"
   local password="${2:-}"
   local username="${3:-${email}}"
+  local client_config_stage=""
   local manager_reason=""
   local reason=""
   local status=0
@@ -1085,6 +1092,21 @@ run_apply() {
       printf \
         "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Manager failure reason was not a fixed source literal and remains redacted\n" \
         "${BASH_LINENO[0]:-1}" >&9
+    fi
+    if [[ -f "${state_dir}/client-config-stage" ]]; then
+      client_config_stage="$(<"${state_dir}/client-config-stage")"
+      case "${client_config_stage}" in
+        entered|pool-argument-verified|client-argument-verified|rendering-response|response-rendered)
+          printf \
+            "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Safe fake client checkpoint: %s\n" \
+            "${BASH_LINENO[0]:-1}" "${client_config_stage}" >&9
+          ;;
+        *)
+          printf \
+            "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Fake client checkpoint was malformed and remains redacted\n" \
+            "${BASH_LINENO[0]:-1}" >&9
+          ;;
+      esac
     fi
   fi
   return "${status}"
