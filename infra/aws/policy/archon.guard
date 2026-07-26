@@ -745,10 +745,10 @@ rule archon_alarm_topics_have_exact_http_s_delivery_feedback
   %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
     ':archon-staging-alarms'
   %staging_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][10] ==
+  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][4] ==
     '/archon-staging-alarms'
   %staging_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][10] ==
+  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][4] ==
     '/archon-staging-alarms:log-stream:*'
   %production_alarm_topic_count == 0 OR
   %production_delivery_log_group_count == 1
@@ -759,10 +759,10 @@ rule archon_alarm_topics_have_exact_http_s_delivery_feedback
   %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
     ':archon-production-alarms'
   %production_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][10] ==
+  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][4] ==
     '/archon-production-alarms'
   %production_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][10] ==
+  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][4] ==
     '/archon-production-alarms:log-stream:*'
   %archon_alarm_topics {
     DeletionPolicy == 'Retain'
