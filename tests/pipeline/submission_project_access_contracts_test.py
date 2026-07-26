@@ -639,6 +639,10 @@ def validate_workflow(workflow: str) -> None:
             "pipeline-managed-confirmed",
             "2026-08-31T21:00:00Z",
             "secretMaterialRetained",
+            (
+                '"availabilityObservedAt":\n'
+                '                          availability["observedAt"],'
+            ),
         ),
     )
     for relative in EXPECTED_FILES:
@@ -847,6 +851,11 @@ def validate_workflow(workflow: str) -> None:
             'live_manifest.get("verification", {}).get("result")',
             'live_manifest.get("spa", {}).get("objects")',
             "availability_observed = instant(",
+            (
+                'availability.get("observedAt")\n'
+                '              != sq3["observation"]'
+                '["availabilityObservedAt"]'
+            ),
             "availability_observed > now + dt.timedelta(minutes=5)",
             "now - availability_observed > dt.timedelta(hours=7)",
         ),
@@ -1302,6 +1311,16 @@ tamper_cases = {
         "              or now - availability_observed > dt.timedelta(hours=7)\n",
         "              or now - availability_observed > dt.timedelta(hours=24)\n",
     ),
+    "package relabels availability time as the public probe": replace_in_step(
+        workflow_text,
+        "produce",
+        "Assemble exact registered SQ3 SQ4 and SQ5 subjects",
+        (
+            '                      "availabilityObservedAt":\n'
+            '                          availability["observedAt"],\n'
+        ),
+        '                      "availabilityObservedAt": observed_at,\n',
+    ),
     "producer public manifest byte binding weakened": replace_in_step(
         workflow_text,
         "produce",
@@ -1488,6 +1507,17 @@ tamper_cases = {
         "Recheck cross-source semantics and canonical state before attestation",
         "              or now - availability_observed > dt.timedelta(hours=7)\n",
         "              or now - availability_observed > dt.timedelta(hours=24)\n",
+    ),
+    "final availability timestamp binding removed": replace_in_step(
+        workflow_text,
+        "attest",
+        "Recheck cross-source semantics and canonical state before attestation",
+        (
+            '              or availability.get("observedAt")\n'
+            '              != sq3["observation"]'
+            '["availabilityObservedAt"]\n'
+        ),
+        "",
     ),
     "final retained attempts no longer match producer": replace_in_step(
         workflow_text,

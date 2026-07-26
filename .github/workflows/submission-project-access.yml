@@ -2017,6 +2017,8 @@ jobs:
                   "deployment": deployment,
                   "observation": {
                       "observedAt": observed_at,
+                      "availabilityObservedAt":
+                          availability["observedAt"],
                       "loggedOutAccessible": True,
                       "httpStatus":
                           public["application"]["httpStatus"],
@@ -3881,6 +3883,8 @@ jobs:
                   "workflowRunAttempt"
               )
               != sq3["observation"]["availabilityRunAttempt"]
+              or availability.get("observedAt")
+              != sq3["observation"]["availabilityObservedAt"]
               or availability_observed > now + dt.timedelta(minutes=5)
               or now - availability_observed > dt.timedelta(hours=7)
               or availability.get("publicRuntime", {}).get(

@@ -1238,6 +1238,7 @@ def validate_facts(
             facts["observation"],
             {
                 "observedAt",
+                "availabilityObservedAt",
                 "loggedOutAccessible",
                 "httpStatus",
                 "redirectsObserved",
@@ -1253,7 +1254,21 @@ def validate_facts(
             },
             f"{label}.observation",
         )
-        fresh(observation["observedAt"], f"{label}.observation.observedAt", dt.timedelta(hours=7))
+        public_observed_at = fresh(
+            observation["observedAt"],
+            f"{label}.observation.observedAt",
+            dt.timedelta(hours=7),
+        )
+        availability_observed_at = fresh(
+            observation["availabilityObservedAt"],
+            f"{label}.observation.availabilityObservedAt",
+            dt.timedelta(hours=7),
+        )
+        if availability_observed_at > public_observed_at:
+            fail(
+                f"{label}.observation.availabilityObservedAt must not "
+                "follow the public probe"
+            )
         exact(observation["loggedOutAccessible"], True, f"{label}.observation.loggedOutAccessible")
         exact(observation["httpStatus"], 200, f"{label}.observation.httpStatus")
         exact(observation["redirectsObserved"], 0, f"{label}.observation.redirectsObserved")
@@ -3231,7 +3246,7 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
                 "predicateDigest": sq3_observation[
                     "availabilityPredicateDigest"
                 ],
-                "observedAt": sq3_observation["observedAt"],
+                "observedAt": sq3_observation["availabilityObservedAt"],
                 "result": "passed",
             },
             "SQ3/SQ10 availability source binding",

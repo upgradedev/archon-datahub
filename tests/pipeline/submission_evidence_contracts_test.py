@@ -62,6 +62,7 @@ def valid_facts() -> dict[str, dict]:
     application = "https://www.datahub.com"
     application_digest = validator.sha256_text(application)
     application_origin_sha256 = application_digest.removeprefix("sha256:")
+    availability_observed_at = iso(NOW - dt.timedelta(minutes=30))
     deployment = {
         "workflowPath": ".github/workflows/deploy.yml",
         "runId": 201,
@@ -197,6 +198,7 @@ def valid_facts() -> dict[str, dict]:
             "deployment": copy.deepcopy(deployment),
             "observation": {
                 "observedAt": iso(),
+                "availabilityObservedAt": availability_observed_at,
                 "loggedOutAccessible": True,
                 "httpStatus": 200,
                 "redirectsObserved": 0,
@@ -412,7 +414,7 @@ def valid_facts() -> dict[str, dict]:
                     "attestations/production-availability/v1"
                 ),
                 "predicateDigest": DIGEST,
-                "observedAt": iso(),
+                "observedAt": availability_observed_at,
                 "result": "passed",
             },
             "posture": {
@@ -696,6 +698,19 @@ for registered_id, facts in facts_by_id.items():
         f"{registered_id} accepted an empty literal-only receipt",
     )
 
+sq3_availability_support = validator.expected_support_bindings(
+    "SQ3",
+    "availability-verification",
+    facts_by_id["SQ3"],
+)
+assert (
+    sq3_availability_support["observation"]["availabilityObservedAt"]
+    == facts_by_id["SQ10"]["availability"]["observedAt"]
+)
+assert (
+    sq3_availability_support["observation"]["availabilityObservedAt"]
+    != sq3_availability_support["observation"]["observedAt"]
+)
 sq4_lifecycle_support = validator.expected_support_bindings(
     "SQ4",
     "fresh-identity-lifecycle",
@@ -838,6 +853,13 @@ rejects_mutation(
     "SQ3",
     lambda value: value.update(applicationUrl="http://wrong.example"),
     "SQ3 accepted a non-HTTPS or origin-mismatched URL",
+)
+rejects_mutation(
+    "SQ3",
+    lambda value: value["observation"].update(
+        availabilityObservedAt=iso(NOW + dt.timedelta(minutes=1))
+    ),
+    "SQ3 accepted availability evidence observed after its public probe",
 )
 rejects_mutation(
     "SQ4",
@@ -1107,6 +1129,12 @@ rejects_sq10_cross_mutation(
         artifactName=f"production-availability-{RELEASE}-3",
     ),
     "SQ10 accepted availability evidence different from SQ3",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["availability"].update(
+        observedAt=facts_by_id["SQ3"]["observation"]["observedAt"]
+    ),
+    "SQ10 accepted the later SQ3 public-probe time as availability evidence",
 )
 rejects_sq10_cross_mutation(
     lambda value: value["access"]["projectAccess"].update(
