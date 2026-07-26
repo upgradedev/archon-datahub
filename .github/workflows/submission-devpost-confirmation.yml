@@ -251,7 +251,7 @@ jobs:
           content="${work}/content-candidate"
           verification="${work}/readiness-verification"
           test ! -e "${work}"
-          mkdir --mode=0700 -p "${seal}" "${content}" "${verification}"
+          install -d -m 0700 "${seal}" "${content}" "${verification}"
 
           readiness_run="$(
             gh api \
@@ -1766,7 +1766,7 @@ jobs:
           verification="${work}/readiness-verification"
           content="${work}/content"
           test ! -e "${work}"
-          mkdir --mode=0700 -p "${seal}" "${verification}" "${content}"
+          install -d -m 0700 "${seal}" "${verification}" "${content}"
           extract_archive() {
             local archive_path="$1"
             local output_path="$2"
@@ -2995,7 +2995,7 @@ jobs:
           readiness_verification="${work}/readiness-verification"
           content="${work}/content"
           test ! -e "${work}"
-          mkdir --mode=0700 -p \
+          install -d -m 0700 \
             "${readiness}" \
             "${readiness_verification}" \
             "${content}"
