@@ -560,7 +560,7 @@ def validate_workflow(workflow: str) -> None:
         )
         require(
             extraction.count(
-                '"/actions/artifacts/${id}/zip"'
+                '"/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip"'
             )
             == 1
             and extraction.count(
