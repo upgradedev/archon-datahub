@@ -260,13 +260,17 @@ write_lifecycle_state_receipt() {
         select(.Name == "sub")
       ] |
       select(length == 1) |
-      .[0].Value |
+      .[0].Value as $subject |
       select(
-        type == "string" and
-        test(
-          "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        ($subject | type) == "string" and
+        (
+          $subject |
+          test(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          )
         )
-      )
+      ) |
+      $subject
     ' "${user_document}"
   )" || fail "The final Cognito subject is not one canonical lower-case UUID"
   cognito_subject_digest="$(
@@ -880,10 +884,13 @@ user_subject_matches() {
       ] as $subject_attributes |
       ($subject_attributes | length) == 1 and
       (
-        $subject_attributes[0].Value |
-        type == "string" and
-        test(
-          "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        $subject_attributes[0].Value as $subject |
+        ($subject | type) == "string" and
+        (
+          $subject |
+          test(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          )
         )
       )
     )

@@ -1775,8 +1775,18 @@ mkdir -p "${operation_evidence_dir}"
 chmod 0500 "${operation_evidence_dir}"
 expect_failure run_apply provision "${judge_password}"
 chmod 0700 "${operation_evidence_dir}"
-if [[ "$(<"${state_dir}/status")" != "disabled" ]]; then
-  echo "::error::Receipt-write containment did not leave the judge identity disabled" >&2
+receipt_failure_status="$(<"${state_dir}/status")"
+if [[ "${receipt_failure_status}" != "disabled" ]]; then
+  case "${receipt_failure_status}" in
+    absent|confirmed|disabled-force|force)
+      printf \
+        '::error::Receipt-write containment ended in unexpected safe diagnostic state %s\n' \
+        "${receipt_failure_status}" >&2
+      ;;
+    *)
+      echo "::error::Receipt-write containment ended in an invalid diagnostic state" >&2
+      ;;
+  esac
   exit 1
 fi
 if [[ -s "${state_dir}/groups" ]]; then
