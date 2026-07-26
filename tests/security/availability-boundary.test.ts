@@ -22,6 +22,10 @@ const reportValidator = readFileSync(
   new URL("../../scripts/validate-audit-report.jq", import.meta.url),
   "utf8"
 );
+const webIndex = readFileSync(
+  new URL("../../web/index.html", import.meta.url),
+  "utf8"
+);
 
 test("availability is scheduled/manual on a protected, unprivileged observer", () => {
   assert.match(workflow, /^on:\n  schedule:/mu);
@@ -198,6 +202,11 @@ test("hosted observers share one strict report and model-provenance contract", (
 });
 
 test("public runtime, response, and header contracts are exact and sanitized", () => {
+  assert.doesNotMatch(
+    webIndex,
+    /http-equiv=["']Content-Security-Policy["']/iu,
+    "a static meta CSP would intersect the Cognito-aware production header"
+  );
   assert.match(workflow, /"\$\{APPLICATION_URL\}\/runtime-config\.json"/u);
   assert.match(
     workflow,
