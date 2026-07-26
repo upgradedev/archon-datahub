@@ -10,6 +10,24 @@ trap '
   printf \
     "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Judge-user contract stage %s case %s failed with status %s\n" \
     "${LINENO}" "${contract_stage}" "${contract_case}" "${status}" >&9
+  if [[ -n "${state_dir:-}" && -f "${state_dir}/status" ]]; then
+    safe_state="$(<"${state_dir}/status")"
+    case "${safe_state}" in
+      absent|force|confirmed|disabled|disabled-force)
+        printf "::error::Safe fake identity state: %s\n" "${safe_state}" >&9
+        ;;
+    esac
+  fi
+  if [[ -n "${state_dir:-}" && -s "${state_dir}/calls" ]] &&
+    grep -Eqv "^[a-z0-9-]+:[a-z0-9-]+$" "${state_dir}/calls"; then
+    printf "::error::Fake call trace was malformed and remains redacted\n" >&9
+  elif [[ -n "${state_dir:-}" && -s "${state_dir}/calls" ]]; then
+    safe_calls="$(
+      tail -n 12 "${state_dir}/calls" |
+        paste -sd ">" -
+    )"
+    printf "::error::Safe fixed fake call tail: %s\n" "${safe_calls}" >&9
+  fi
   exit "${status}"
 ' ERR
 
