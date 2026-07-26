@@ -239,8 +239,8 @@ def validate_contract(workflow: str, documentation: str) -> None:
         "protected review environment is absent",
     )
     require(
-        "    environment:" not in jobs["prepare"]
-        and "    environment:" not in jobs["attest"],
+        not re.search(r"(?m)^    environment:", jobs["prepare"])
+        and not re.search(r"(?m)^    environment:", jobs["attest"]),
         "only the human review job may target the protected environment",
     )
     require(
@@ -353,10 +353,34 @@ def validate_contract(workflow: str, documentation: str) -> None:
         workflow.count(approval_phrase) == 5,
         "approval must be reconstructed at every initial and final trust check",
     )
-    for binding in APPROVAL_BINDINGS:
-        require(
-            workflow.count(binding) >= 3,
-            f"approval lost exact binding: {binding}",
+    approval_construction_steps = (
+        (
+            jobs["prepare"],
+            "Publish exact private-review approval request",
+        ),
+        (
+            jobs["review"],
+            "Verify exact independent protected-environment approval",
+        ),
+        (
+            jobs["review"],
+            "Recheck candidate approval and master before retention",
+        ),
+        (
+            jobs["attest"],
+            "Independently rederive candidate rules approval and retained facts",
+        ),
+        (
+            jobs["attest"],
+            "Recheck immutable evidence approval rules and master before signing",
+        ),
+    )
+    for job, step_name in approval_construction_steps:
+        step = named_step(job, step_name)
+        require_all(
+            step,
+            (approval_phrase, *APPROVAL_BINDINGS),
+            f"{step_name} approval construction",
         )
     approval_step = named_step(
         jobs["review"],
