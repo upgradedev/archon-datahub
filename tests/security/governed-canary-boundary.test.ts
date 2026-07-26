@@ -103,6 +103,22 @@ test("production requires a fail-closed exact-run governed canary gate", () => {
     production,
     /preProductionGovernedCanary: \{[\s\S]+rollbackSubjectSha256:[\s\S]+attestationVerificationSha256:[\s\S]+result: "write-verified-and-rollback-proven"/u
   );
+  assert.match(
+    production,
+    /deploymentWorkflowRunId:\s+\(\$deploymentRunId \| tonumber\)/u
+  );
+  assert.match(
+    production,
+    /workflowRunId: \(\$governedCanaryRunId \| tonumber\)/u
+  );
+  assert.doesNotMatch(
+    production,
+    /deploymentWorkflowRunId: \$deploymentRunId/u
+  );
+  assert.doesNotMatch(
+    production,
+    /workflowRunId: \$governedCanaryRunId/u
+  );
 });
 
 test("an active parent deployment is accepted only after same-attempt staging and before production", () => {

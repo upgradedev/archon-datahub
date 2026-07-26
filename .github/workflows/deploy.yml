@@ -7087,8 +7087,9 @@ jobs:
                 productionAttestationReverificationSha256:
                   $productionAttestationSha256,
                 preProductionGovernedCanary: {
-                  deploymentWorkflowRunId: $deploymentRunId,
-                  workflowRunId: $governedCanaryRunId,
+                  deploymentWorkflowRunId:
+                    ($deploymentRunId | tonumber),
+                  workflowRunId: ($governedCanaryRunId | tonumber),
                   workflowRunUrl: $governedCanaryRunUrl,
                   releaseSha: $releaseSha,
                   controlPlaneSha: $controlPlaneSha,
