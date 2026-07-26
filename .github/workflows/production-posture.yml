@@ -549,6 +549,289 @@ jobs:
             ' <<<"${subscription_json}"
           )"
 
+          production_stack_id="$(
+            jq -er '.stackId' \
+              <<<"${initial_snapshots[Archon-production]}"
+          )"
+          operational_alarm_logical_id_prefixes="$(
+            jq -cn '[
+              "Api5xxAlarm",
+              "ApiLatencyAlarm",
+              "ApiCpuAlarm",
+              "AuditDlqAlarm",
+              "ApprovalDlqAlarm",
+              "RemediationDlqAlarm",
+              "StateMachineFailuresAlarm",
+              "ApprovalLambdaErrorsAlarm",
+              "ApprovalHandoffLambdaErrorsAlarm",
+              "ControlLambdaErrorsAlarm"
+            ]'
+          )"
+          snapshot_alarm_inventory() {
+            local label="$1"
+            local stack_id="$2"
+            local topic_arn="$3"
+            local work_dir="${RUNNER_TEMP}/production-posture-alarms-${label}"
+            local pages="${work_dir}/stack-resource-pages.ndjson"
+            local resources="${work_dir}/alarm-resources.json"
+            local alarm_response="${work_dir}/cloudwatch-alarms.json"
+            local next_token=""
+            local response
+            local request
+            local token_digest
+            local pagination_complete="false"
+            declare -A seen_page_tokens=()
+
+            mkdir -p "${work_dir}"
+            : >"${pages}"
+            for page in {1..100}; do
+              if [[ -z "${next_token}" ]]; then
+                request="$(
+                  jq -cn --arg stackId "${stack_id}" \
+                    '{StackName: $stackId}'
+                )"
+              else
+                request="$(
+                  jq -cn \
+                    --arg nextToken "${next_token}" \
+                    --arg stackId "${stack_id}" '
+                      {
+                        StackName: $stackId,
+                        NextToken: $nextToken
+                      }
+                    '
+                )"
+              fi
+              response="$(
+                aws cloudformation list-stack-resources \
+                  --region "${DEPLOY_REGION}" \
+                  --cli-input-json "${request}" \
+                  --no-paginate \
+                  --output json
+              )"
+              jq -e '
+                (.StackResourceSummaries | type == "array") and
+                (
+                  (has("NextToken") | not) or
+                  (
+                    (.NextToken | type) == "string" and
+                    (.NextToken | length) > 0 and
+                    (.NextToken | length) <= 4096
+                  )
+                )
+              ' <<<"${response}" >/dev/null || {
+                echo "::error::Archon-production returned a malformed stack-resource page" >&2
+                return 1
+              }
+              jq -cS '.' <<<"${response}" >>"${pages}"
+              next_token="$(jq -er '.NextToken // ""' <<<"${response}")"
+              if [[ -z "${next_token}" ]]; then
+                pagination_complete="true"
+                break
+              fi
+              token_digest="$(
+                printf '%s' "${next_token}" |
+                  sha256sum |
+                  awk '{print $1}'
+              )"
+              [[ -z "${seen_page_tokens[$token_digest]+x}" ]] || {
+                echo "::error::Archon-production repeated a stack-resource pagination token" >&2
+                return 1
+              }
+              seen_page_tokens["${token_digest}"]="seen"
+            done
+            test "${pagination_complete}" = "true" || {
+              echo "::error::Archon-production stack-resource pagination exceeded 100 pages" >&2
+              return 1
+            }
+
+            jq -cSs \
+              --argjson expectedOperational \
+                "${operational_alarm_logical_id_prefixes}" '
+              def matching_operational_prefixes:
+                .logicalResourceId as $logicalResourceId |
+                [
+                  $expectedOperational[] as $prefix |
+                  select(
+                    $logicalResourceId |
+                    test("^" + $prefix + "[A-F0-9]{8}$")
+                  ) |
+                  $prefix
+                ];
+              def is_operational:
+                (matching_operational_prefixes | length) == 1;
+              [
+                .[].StackResourceSummaries[] |
+                select(.ResourceType == "AWS::CloudWatch::Alarm") |
+                {
+                  logicalResourceId: .LogicalResourceId,
+                  physicalResourceId: .PhysicalResourceId,
+                  resourceType: .ResourceType,
+                  resourceStatus: .ResourceStatus
+                }
+              ] |
+              sort_by(.logicalResourceId, .physicalResourceId) |
+              . as $allStackAlarms |
+              if (
+                ($expectedOperational | length) == 10 and
+                ($expectedOperational | unique | length) == 10 and
+                length == 14 and
+                ([.[].logicalResourceId] | unique | length) == 14 and
+                ([.[].physicalResourceId] | unique | length) == 14 and
+                all(
+                  .[];
+                  (
+                    .logicalResourceId |
+                    type == "string" and
+                    test("^[A-Za-z][A-Za-z0-9]{0,254}$")
+                  ) and
+                  (
+                    .physicalResourceId |
+                    type == "string" and
+                    length > 0 and
+                    length <= 255 and
+                    (
+                      explode |
+                      all(.[]; . >= 32 and . != 127)
+                    )
+                  ) and
+                  .resourceType == "AWS::CloudWatch::Alarm" and
+                  (
+                    .resourceStatus == "CREATE_COMPLETE" or
+                    .resourceStatus == "UPDATE_COMPLETE"
+                  )
+                ) and
+                ([
+                  $expectedOperational[] as $prefix |
+                  ([
+                    $allStackAlarms[] |
+                    select(
+                      .logicalResourceId |
+                      test("^" + $prefix + "[A-F0-9]{8}$")
+                    )
+                  ] | length)
+                ] | all(.[]; . == 1)) and
+                ([.[] | select(is_operational)] | length) == 10 and
+                ([.[] | select(is_operational | not)] | length) == 4 and
+                all(
+                  .[] | select(is_operational);
+                  . as $resource |
+                  $resource.physicalResourceId |
+                  startswith(
+                    "Archon-production-" +
+                    $resource.logicalResourceId
+                  )
+                )
+              ) then
+                {
+                  stackAlarmResources: $allStackAlarms,
+                  operationalAlarmResources:
+                    [$allStackAlarms[] | select(is_operational)]
+                }
+              else
+                error(
+                  "expected fourteen stack alarms and the exact ten operational alarm logical IDs"
+                )
+              end
+            ' "${pages}" >"${resources}" || {
+              echo "::error::Archon-production must own the exact fourteen-alarm stack inventory and ten operational alarms" >&2
+              return 1
+            }
+
+            request="$(
+              jq -c '
+                {
+                  AlarmNames:
+                    [.operationalAlarmResources[].physicalResourceId],
+                  AlarmTypes: ["MetricAlarm"]
+                }
+              ' \
+                "${resources}"
+            )"
+            aws cloudwatch describe-alarms \
+              --region "${DEPLOY_REGION}" \
+              --cli-input-json "${request}" \
+              --no-paginate \
+              --output json >"${alarm_response}"
+            jq -cnS \
+              --arg alarmArnPrefix \
+                "arn:${partition}:cloudwatch:${DEPLOY_REGION}:${EXPECTED_ACCOUNT_ID}:alarm:" \
+              --arg topic "${topic_arn}" \
+              --slurpfile alarmResponses "${alarm_response}" \
+              --slurpfile resources "${resources}" '
+                ($alarmResponses[0]) as $alarms |
+                ($resources[0]) as $stackInventory |
+                ($stackInventory.operationalAlarmResources) as $stackAlarms |
+                (($alarms.MetricAlarms // []) |
+                  sort_by(.AlarmName)) as $metricAlarms |
+                if (
+                  ($alarmResponses | length) == 1 and
+                  ($alarms | has("NextToken") | not) and
+                  (($alarms.CompositeAlarms // []) | length) == 0 and
+                  (($alarms.LogAlarms // []) | length) == 0 and
+                  ($metricAlarms | length) == 10 and
+                  ([$stackAlarms[].physicalResourceId] | sort) ==
+                    ([$metricAlarms[].AlarmName] | sort) and
+                  ([ $metricAlarms[].AlarmName ] | unique | length) == 10 and
+                  all(
+                    $metricAlarms[];
+                    (.AlarmArn == ($alarmArnPrefix + .AlarmName)) and
+                    .ActionsEnabled == true and
+                    .AlarmActions == [$topic] and
+                    .OKActions == [$topic] and
+                    .InsufficientDataActions == []
+                  )
+                ) then
+                  {
+                    stackAlarmResources:
+                      $stackInventory.stackAlarmResources,
+                    operationalAlarmActions: (
+                      [
+                        $stackAlarms[] as $resource |
+                        $metricAlarms[] |
+                        select(
+                          .AlarmName ==
+                            $resource.physicalResourceId
+                        ) |
+                        {
+                          logicalResourceId:
+                            $resource.logicalResourceId,
+                          physicalResourceId:
+                            $resource.physicalResourceId,
+                          resourceType: $resource.resourceType,
+                          resourceStatus: $resource.resourceStatus,
+                          alarmArn: .AlarmArn,
+                          actionsEnabled: .ActionsEnabled,
+                          alarmActions: .AlarmActions,
+                          okActions: .OKActions,
+                          insufficientDataActions:
+                            .InsufficientDataActions
+                        }
+                      ] |
+                      sort_by(
+                        .logicalResourceId,
+                        .physicalResourceId
+                      )
+                    )
+                  }
+                else
+                  error(
+                    "CloudWatch alarm inventory or action bindings are not exact"
+                  )
+                end
+              ' || {
+                echo "::error::Every allowlisted operational alarm must be present, enabled, and bound only to ArchonAlarmTopicArn for ALARM and OK" >&2
+                return 1
+              }
+          }
+
+          initial_alarm_inventory="$(
+            snapshot_alarm_inventory \
+              "initial" \
+              "${production_stack_id}" \
+              "${alarm_topic_arn}"
+          )"
+
           for name in "${stack_names[@]}"; do
             region="${stack_regions[$name]}"
             detection_id="$(
@@ -649,6 +932,18 @@ jobs:
               ' <<<"${final_snapshot}" >>"${stack_evidence}"
           done
 
+          final_alarm_inventory="$(
+            snapshot_alarm_inventory \
+              "final" \
+              "${production_stack_id}" \
+              "${alarm_topic_arn}"
+          )"
+          test "${final_alarm_inventory}" = \
+            "${initial_alarm_inventory}" || {
+            echo "::error::The exact production alarm inventory changed during verification"
+            exit 1
+          }
+
           final_subscription_json="$(
             aws sns get-subscription-attributes \
               --region "${DEPLOY_REGION}" \
@@ -706,6 +1001,11 @@ jobs:
               sha256sum |
               awk '{print $1}'
           )"
+          alarm_inventory_sha256="sha256:$(
+            printf '%s\n' "${final_alarm_inventory}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
           subscription_arn_sha256="sha256:$(
             printf '%s' "${ALARM_SUBSCRIPTION_ARN}" |
               sha256sum |
@@ -721,6 +1021,7 @@ jobs:
           jq -cSs \
             --slurpfile gates "${EVIDENCE_DIR}/control-plane-gates.json" \
             --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg alarmInventorySha256 "${alarm_inventory_sha256}" \
             --arg alarmTopicSha256 "${alarm_topic_sha256}" \
             --arg completedAt "${posture_completed_at}" \
             --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
@@ -752,6 +1053,15 @@ jobs:
                   owner: $subscription.owner,
                   protocol: $subscription.protocol,
                   pendingConfirmation: false,
+                  alarmInventory: {
+                    observedAt: $completedAt,
+                    alarmCount: 10,
+                    allActionsEnabled: true,
+                    alarmActionsBoundToTopic: true,
+                    okActionsBoundToTopic: true,
+                    insufficientDataActionsEmpty: true,
+                    inventoryDigest: $alarmInventorySha256
+                  },
                   unchangedAfterVerification: true
                 },
                 verification: {
@@ -777,6 +1087,17 @@ jobs:
                 .unchangedAfterVerification == true
               ) and
               .alarms.pendingConfirmation == false and
+              .alarms.alarmInventory.observedAt ==
+                .verification.completedAt and
+              .alarms.alarmInventory.alarmCount == 10 and
+              .alarms.alarmInventory.allActionsEnabled == true and
+              .alarms.alarmInventory.alarmActionsBoundToTopic == true and
+              .alarms.alarmInventory.okActionsBoundToTopic == true and
+              .alarms.alarmInventory.insufficientDataActionsEmpty == true and
+              (
+                .alarms.alarmInventory.inventoryDigest |
+                test("^sha256:[0-9a-f]{64}$")
+              ) and
               .alarms.unchangedAfterVerification == true and
               .verification.result == "passed"
             ' "${EVIDENCE_DIR}/production-posture.json" >/dev/null
@@ -790,12 +1111,16 @@ jobs:
               awk '{print $1}'
           )"
           jq -cnS \
+            --arg alarmInventorySha256 "${alarm_inventory_sha256}" \
+            --arg alarmTopicSha256 "${alarm_topic_sha256}" \
             --arg controlPlaneGatesSha256 "sha256:${gate_sha256}" \
+            --arg observedAt "${posture_completed_at}" \
             --arg productionPostureSha256 "sha256:${posture_sha256}" \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
-            --arg sha "${CONTROL_PLANE_SHA}" '
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --arg subscriptionArnSha256 "${subscription_arn_sha256}" '
               {
                 schemaVersion: "archon.production-posture-manifest/v1",
                 repository: $repository,
@@ -808,6 +1133,12 @@ jobs:
                 files: {
                   "control-plane-gates.json": $controlPlaneGatesSha256,
                   "production-posture.json": $productionPostureSha256
+                },
+                postureBinding: {
+                  observedAt: $observedAt,
+                  topicArnSha256: $alarmTopicSha256,
+                  subscriptionArnSha256: $subscriptionArnSha256,
+                  alarmInventoryDigest: $alarmInventorySha256
                 }
               }
             ' >"${EVIDENCE_DIR}/manifest.json"
@@ -816,16 +1147,26 @@ jobs:
               awk '{print $1}'
           )"
           jq -cnS \
+            --arg alarmInventorySha256 "${alarm_inventory_sha256}" \
+            --arg alarmTopicSha256 "${alarm_topic_sha256}" \
             --arg evidenceSha256 "sha256:${posture_sha256}" \
             --arg manifestSha256 "sha256:${manifest_sha256}" \
+            --arg observedAt "${posture_completed_at}" \
             --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha "${CONTROL_PLANE_SHA}" '
+            --arg sha "${CONTROL_PLANE_SHA}" \
+            --arg subscriptionArnSha256 "${subscription_arn_sha256}" '
               {
                 schemaVersion: "archon.production-posture-attestation/v1",
                 repository: $repository,
                 controlPlaneSha: $sha,
                 evidenceSha256: $evidenceSha256,
                 manifestSha256: $manifestSha256,
+                postureBinding: {
+                  observedAt: $observedAt,
+                  topicArnSha256: $alarmTopicSha256,
+                  subscriptionArnSha256: $subscriptionArnSha256,
+                  alarmInventoryDigest: $alarmInventorySha256
+                },
                 verificationResult: "passed"
               }
             ' >"${EVIDENCE_DIR}/attestation-predicate.json"

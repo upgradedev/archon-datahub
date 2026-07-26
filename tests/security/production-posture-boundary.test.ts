@@ -44,10 +44,173 @@ const archonInfrastructure = readFileSync(
   new URL("../../infra/aws/lib/archon-stack.ts", import.meta.url),
   "utf8"
 );
+const archonInfrastructureTests = readFileSync(
+  new URL("../../infra/aws/test/archon-stack.test.ts", import.meta.url),
+  "utf8"
+);
 const exampleEnvironment = readFileSync(
   new URL("../../.env.example", import.meta.url),
   "utf8"
 );
+
+const expectedOperationalAlarmIds = [
+  "Api5xxAlarm",
+  "ApiLatencyAlarm",
+  "ApiCpuAlarm",
+  "AuditDlqAlarm",
+  "ApprovalDlqAlarm",
+  "RemediationDlqAlarm",
+  "StateMachineFailuresAlarm",
+  "ApprovalLambdaErrorsAlarm",
+  "ApprovalHandoffLambdaErrorsAlarm",
+  "ControlLambdaErrorsAlarm"
+] as const;
+
+function assertExactAlarmInventoryContract(source: string): void {
+  assert.match(
+    source,
+    /production_stack_id="\$\(\s+jq -er '\.stackId'/u
+  );
+  assert.match(source, /snapshot_alarm_inventory\(\)/u);
+  assert.match(source, /for page in \{1\.\.100\}/u);
+  assert.match(source, /local pagination_complete="false"/u);
+  assert.match(
+    source,
+    /test "\$\{pagination_complete\}" = "true"/u
+  );
+  assert.match(
+    source,
+    /seen_page_tokens\["\$\{token_digest\}"\]="seen"/u
+  );
+  assert.match(source, /repeated a stack-resource pagination token/u);
+  assert.equal(
+    [...source.matchAll(/StackName: \$stackId/gu)].length,
+    2
+  );
+  assert.match(
+    source,
+    /aws cloudformation list-stack-resources\s+\\\s+--region "\$\{DEPLOY_REGION\}"\s+\\\s+--cli-input-json "\$\{request\}"\s+\\\s+--no-paginate/u
+  );
+  assert.match(
+    source,
+    /select\(\.ResourceType == "AWS::CloudWatch::Alarm"\)/u
+  );
+  const allowlistStart = source.indexOf(
+    'operational_alarm_logical_id_prefixes="$('
+  );
+  const allowlistEnd = source.indexOf(
+    "\n          snapshot_alarm_inventory()",
+    allowlistStart
+  );
+  assert.ok(allowlistStart >= 0);
+  assert.ok(allowlistEnd > allowlistStart);
+  const configuredOperationalAlarmIds = [
+    ...source
+      .slice(allowlistStart, allowlistEnd)
+      .matchAll(/^\s+"([A-Za-z0-9]+)",?$/gmu)
+  ].map((match) => match[1]);
+  assert.deepEqual(
+    configuredOperationalAlarmIds,
+    expectedOperationalAlarmIds
+  );
+  assert.match(source, /\(\$expectedOperational \| length\) == 10/u);
+  assert.match(
+    source,
+    /\(\$expectedOperational \| unique \| length\) == 10/u
+  );
+  assert.match(source, /length == 14 and/u);
+  assert.match(
+    source,
+    /\(\[\.\[\]\.logicalResourceId\] \| unique \| length\) == 14/u
+  );
+  assert.match(
+    source,
+    /\(\[\.\[\]\.physicalResourceId\] \| unique \| length\) == 14/u
+  );
+  assert.match(
+    source,
+    /\(\[\.\[\] \| select\(is_operational\)\] \| length\) == 10/u
+  );
+  assert.match(
+    source,
+    /\(\[\.\[\] \| select\(is_operational \| not\)\] \| length\) == 4/u
+  );
+  assert.match(
+    source,
+    /startswith\(\s+"Archon-production-" \+\s+\$resource\.logicalResourceId\s+\)/u
+  );
+  assert.match(
+    source,
+    /\.resourceStatus == "CREATE_COMPLETE" or\s+\.resourceStatus == "UPDATE_COMPLETE"/u
+  );
+  assert.match(
+    source,
+    /AlarmNames:\s+\[\.operationalAlarmResources\[\]\.physicalResourceId\],\s+AlarmTypes: \["MetricAlarm"\]/u
+  );
+  assert.match(
+    source,
+    /aws cloudwatch describe-alarms\s+\\\s+--region "\$\{DEPLOY_REGION\}"\s+\\\s+--cli-input-json "\$\{request\}"\s+\\\s+--no-paginate/u
+  );
+  assert.match(source, /\(\$alarms \| has\("NextToken"\) \| not\)/u);
+  assert.match(
+    source,
+    /\(\(\$alarms\.CompositeAlarms \/\/ \[\]\) \| length\) == 0/u
+  );
+  assert.match(
+    source,
+    /\(\(\$alarms\.LogAlarms \/\/ \[\]\) \| length\) == 0/u
+  );
+  assert.match(source, /\(\$metricAlarms \| length\) == 10/u);
+  assert.match(
+    source,
+    /\(\[\$stackAlarms\[\]\.physicalResourceId\] \| sort\) ==\s+\(\[\$metricAlarms\[\]\.AlarmName\] \| sort\)/u
+  );
+  assert.match(
+    source,
+    /\.AlarmArn == \(\$alarmArnPrefix \+ \.AlarmName\)/u
+  );
+  assert.match(source, /\.ActionsEnabled == true and/u);
+  assert.match(source, /\.AlarmActions == \[\$topic\] and/u);
+  assert.match(source, /\.OKActions == \[\$topic\] and/u);
+  assert.match(source, /\.InsufficientDataActions == \[\]/u);
+  assert.match(
+    source,
+    /stackAlarmResources:\s+\$stackInventory\.stackAlarmResources,\s+operationalAlarmActions:/u
+  );
+
+  const initialObservation = source.indexOf(
+    'initial_alarm_inventory="$('
+  );
+  const driftDetection = source.indexOf(
+    "aws cloudformation detect-stack-drift"
+  );
+  const finalObservation = source.indexOf(
+    'final_alarm_inventory="$('
+  );
+  const exactEquality = source.indexOf(
+    'test "${final_alarm_inventory}" ='
+  );
+  const evidenceProjection = source.indexOf(
+    'schemaVersion: "archon.production-posture-evidence/v1"'
+  );
+  assert.ok(initialObservation >= 0);
+  assert.ok(driftDetection > initialObservation);
+  assert.ok(finalObservation > driftDetection);
+  assert.ok(exactEquality > finalObservation);
+  assert.ok(evidenceProjection > exactEquality);
+  assert.match(
+    source.slice(initialObservation, driftDetection),
+    /"initial"\s+\\\s+"\$\{production_stack_id\}"\s+\\\s+"\$\{alarm_topic_arn\}"/u
+  );
+  assert.match(
+    source.slice(finalObservation, exactEquality),
+    /"final"\s+\\\s+"\$\{production_stack_id\}"\s+\\\s+"\$\{alarm_topic_arn\}"/u
+  );
+  assert.match(
+    source.slice(exactEquality, evidenceProjection),
+    /"\$\{initial_alarm_inventory\}"/u
+  );
+}
 
 test("shared privileged-workflow gate rejects a changing whole snapshot", () => {
   assert.match(controlPlaneVerifier, /read_gate_snapshot\(\)/u);
@@ -188,7 +351,73 @@ test("production posture checks exact protected stacks, drift, and termination p
   );
 });
 
+test("operational alarm allowlist is cross-bound to the fourteen-alarm IaC topology", () => {
+  const explicitOperationalAlarmIds = [
+    ...archonInfrastructure.matchAll(
+      /new cloudwatch\.Alarm\(this, "([A-Za-z0-9]+)"/gu
+    )
+  ].map((match) => match[1]);
+  assert.deepEqual(
+    explicitOperationalAlarmIds,
+    expectedOperationalAlarmIds
+  );
+  assert.equal(
+    [...archonInfrastructure.matchAll(/\.scaleOnMetric\(/gu)].length,
+    2
+  );
+  assert.match(
+    archonInfrastructureTests,
+    /resourceCountIs\("AWS::CloudWatch::Alarm", 14\)/u
+  );
+  const alarmArrayStart = archonInfrastructure.indexOf(
+    "const alarms = ["
+  );
+  const alarmArrayEnd = archonInfrastructure.indexOf(
+    "\n    ];",
+    alarmArrayStart
+  );
+  assert.ok(alarmArrayStart >= 0);
+  assert.ok(alarmArrayEnd > alarmArrayStart);
+  assert.doesNotMatch(
+    archonInfrastructure.slice(alarmArrayStart, alarmArrayEnd),
+    /\balarmName:/u
+  );
+
+  const actionLoopStart = archonInfrastructure.indexOf(
+    "for (const alarm of alarms) {"
+  );
+  const actionLoopEnd = archonInfrastructure.indexOf(
+    "\n    }",
+    actionLoopStart
+  );
+  assert.ok(actionLoopStart >= 0);
+  assert.ok(actionLoopEnd > actionLoopStart);
+  const actionLoop = archonInfrastructure.slice(
+    actionLoopStart,
+    actionLoopEnd
+  );
+  assert.equal(
+    [...actionLoop.matchAll(/alarm\.addAlarmAction\(alarmAction\)/gu)]
+      .length,
+    1
+  );
+  assert.equal(
+    [...actionLoop.matchAll(/alarm\.addOkAction\(alarmAction\)/gu)]
+      .length,
+    1
+  );
+  assert.equal(
+    [...archonInfrastructure.matchAll(/\.addAlarmAction\(/gu)].length,
+    1
+  );
+  assert.equal(
+    [...archonInfrastructure.matchAll(/\.addOkAction\(/gu)].length,
+    1
+  );
+});
+
 test("alarm verification is exact and evidence never projects the SNS endpoint", () => {
+  assertExactAlarmInventoryContract(workflow);
   assert.match(
     workflow,
     /ALARM_SUBSCRIPTION_ARN: \$\{\{ vars\.ALARM_SUBSCRIPTION_ARN \}\}/u
@@ -210,7 +439,107 @@ test("alarm verification is exact and evidence never projects the SNS endpoint",
   );
   assert.match(workflow, /topicArnSha256: \$alarmTopicSha256/u);
   assert.match(workflow, /subscriptionArnSha256: \$subscriptionArnSha256/u);
+  assert.match(
+    workflow,
+    /alarmInventory: \{\s+observedAt: \$completedAt,\s+alarmCount: 10,\s+allActionsEnabled: true,\s+alarmActionsBoundToTopic: true,\s+okActionsBoundToTopic: true,\s+insufficientDataActionsEmpty: true,\s+inventoryDigest: \$alarmInventorySha256/u
+  );
+  assert.match(
+    workflow,
+    /\.alarms\.alarmInventory\.observedAt ==\s+\.verification\.completedAt/u
+  );
+  assert.equal(
+    [
+      ...workflow.matchAll(
+        /alarmInventoryDigest: \$alarmInventorySha256/gu
+      )
+    ].length,
+    2
+  );
+  const evidenceStart = workflow.indexOf(
+    'schemaVersion: "archon.production-posture-evidence/v1"'
+  );
+  const evidenceEnd = workflow.indexOf(
+    '>"${EVIDENCE_DIR}/production-posture.json"',
+    evidenceStart
+  );
+  assert.ok(evidenceEnd > evidenceStart);
+  const evidenceProjection = workflow.slice(evidenceStart, evidenceEnd);
+  assert.doesNotMatch(
+    evidenceProjection,
+    /(?:logicalResourceId|physicalResourceId|alarmArn|AlarmName)/u
+  );
   assert.match(workflow, /pendingConfirmation: false/u);
+});
+
+test("production posture rejects weakened alarm inventory and action proofs", () => {
+  const mutants = [
+    workflow.replace(
+      'local pagination_complete="false"',
+      'local pagination_complete="true"'
+    ),
+    workflow.replace(
+      'seen_page_tokens["${token_digest}"]="seen"',
+      'seen_page_tokens["${token_digest}"]="ignored"'
+    ),
+    workflow.replace(
+      'select(.ResourceType == "AWS::CloudWatch::Alarm")',
+      "select(true)"
+    ),
+    workflow.replace("length == 14 and", "length >= 14 and"),
+    workflow.replace(
+      '"Api5xxAlarm",',
+      '"AuditWorkerServiceTaskCountScalingAlarm",'
+    ),
+    workflow.replace(
+      ".ActionsEnabled == true and",
+      ".ActionsEnabled != false and"
+    ),
+    workflow.replace(
+      '.resourceStatus == "UPDATE_COMPLETE"',
+      '.resourceStatus == "UPDATE_IN_PROGRESS"'
+    ),
+    workflow.replace(
+      '"Archon-production-" +',
+      '"Archon-" +'
+    ),
+    workflow.replace(
+      ".AlarmArn == ($alarmArnPrefix + .AlarmName)",
+      ".AlarmArn != ($alarmArnPrefix + .AlarmName)"
+    ),
+    workflow.replace(
+      ".AlarmActions == [$topic] and",
+      "(.AlarmActions | index($topic)) != null and"
+    ),
+    workflow.replace(
+      ".OKActions == [$topic] and",
+      "(.OKActions | index($topic)) != null and"
+    ),
+    workflow.replace(
+      ".InsufficientDataActions == []",
+      "(.InsufficientDataActions | index($topic)) == null"
+    ),
+    workflow.replace(
+      "([$stackAlarms[].physicalResourceId] | sort) ==",
+      "([$stackAlarms[].physicalResourceId] | unique | sort) =="
+    ),
+    workflow.replace(
+      "$stackInventory.stackAlarmResources,",
+      "$stackInventory.operationalAlarmResources,"
+    ),
+    workflow.replace(
+      'AlarmTypes: ["MetricAlarm"]',
+      'AlarmTypes: ["CompositeAlarm"]'
+    ),
+    workflow.replace(
+      'test "${final_alarm_inventory}" =',
+      'test -n "${final_alarm_inventory}" &&'
+    )
+  ];
+
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => assertExactAlarmInventoryContract(mutant));
+  }
 });
 
 test("posture evidence is checksum-sealed, signed, retained, and documented", () => {
@@ -240,7 +569,52 @@ test("posture evidence is checksum-sealed, signed, retained, and documented", ()
 
   assert.match(documentation, /production-observer/u);
   assert.match(documentation, /cloudformation:DetectStackDrift/u);
+  assert.match(documentation, /cloudformation:ListStackResources/u);
+  assert.match(documentation, /cloudwatch:DescribeAlarms/u);
+  const alarmIamStart = documentation.indexOf(
+    '"Sid": "DescribeOnlyOperationalAlarmPrefixes"'
+  );
+  const alarmIamEnd = documentation.indexOf(
+    "\n    },",
+    alarmIamStart
+  );
+  assert.ok(alarmIamStart >= 0);
+  assert.ok(alarmIamEnd > alarmIamStart);
+  const alarmIam = documentation.slice(alarmIamStart, alarmIamEnd);
+  for (const alarmId of expectedOperationalAlarmIds) {
+    assert.ok(
+      alarmIam.includes(
+        `arn:aws:cloudwatch:WORKLOAD_REGION:ACCOUNT_ID:alarm:Archon-production-${alarmId}*`
+      )
+    );
+  }
+  assert.equal(
+    [
+      ...alarmIam.matchAll(
+        /arn:aws:cloudwatch:WORKLOAD_REGION:ACCOUNT_ID:alarm:/gu
+      )
+    ].length,
+    10
+  );
+  assert.doesNotMatch(
+    alarmIam,
+    /alarm:Archon-production-\*"|"Resource": "\*"/u
+  );
+  assert.match(
+    documentation,
+    /instead of `DescribeStackResources`/u
+  );
   assert.match(documentation, /sns:GetSubscriptionAttributes/u);
+  assert.match(documentation, /ActionsEnabled=true/u);
+  assert.match(documentation, /fourteen unique, stable stack alarm resources/u);
+  assert.match(documentation, /ten explicit operational alarms/u);
+  assert.match(documentation, /four upper\/lower alarms/u);
+  assert.match(
+    documentation,
+    /`AlarmActions` exactly equal to the one-element/u
+  );
+  assert.match(documentation, /`InsufficientDataActions` exactly empty/u);
+  assert.match(documentation, /byte-for-byte identical in the late observation/u);
   assert.match(documentation, /never stores its endpoint/u);
 });
 
