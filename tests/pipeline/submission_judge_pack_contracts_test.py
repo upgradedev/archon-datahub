@@ -251,6 +251,19 @@ def validate_ci_retry_contract(ci_workflow: str) -> None:
             "${{ github.run_attempt }}",
         ),
     )
+    require(
+        judge.count(
+            "      artifact_name: judge-evidence-${{ github.sha }}-"
+            "${{ github.run_attempt }}\n"
+        )
+        == 1
+        and judge.count(
+            "          name: judge-evidence-${{ github.sha }}-"
+            "${{ github.run_attempt }}\n"
+        )
+        == 1,
+        "CI judge artifact output and upload names must remain exact",
+    )
     require_tokens(
         container,
         "stable retry-safe CI container artifact",
@@ -264,6 +277,17 @@ def validate_ci_retry_contract(ci_workflow: str) -> None:
             "name: container-${{ github.sha }}",
             "overwrite: true",
         ),
+    )
+    require(
+        container.count(
+            "      artifact_name: container-${{ github.sha }}\n"
+        )
+        == 1
+        and container.count(
+            "          name: container-${{ github.sha }}\n"
+        )
+        == 1,
+        "CI container artifact output and upload must remain an exact stable alias",
     )
     require_tokens(
         ci_workflow,
