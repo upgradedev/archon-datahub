@@ -707,6 +707,9 @@ jobs:
                 testingInstructionsDigest: $testingDigest
               }
             ' >"${candidate_dir}/candidate.json"
+          candidate_inventory="$(
+            mktemp "${RUNNER_TEMP}/submission-content-candidate.XXXXXX.SHA256SUMS"
+          )"
           (
             cd "${candidate_dir}"
             find . -type f ! -name SHA256SUMS -printf '%P\n' |
@@ -715,7 +718,9 @@ jobs:
                 printf '%s  %s\n' \
                   "$(sha256sum "${name}" | awk '{print $1}')" \
                   "${name}"
-              done >SHA256SUMS
+              done >"${candidate_inventory}"
+            sha256sum --check --strict "${candidate_inventory}"
+            mv -- "${candidate_inventory}" SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
           test "$(
