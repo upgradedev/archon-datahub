@@ -256,6 +256,7 @@ def validate_video_validator(source: str) -> None:
             'node.get("playabilityStatus")',
             "direct_id_matches(node, provider, video_id)",
             "if len(candidates) != 1:",
+            "if not 1 <= result <= 179:",
             "target video duration must be from 1 through 179 seconds",
             "json.JSONDecoder(object_pairs_hook=reject_duplicate_pairs)",
             "decoded = json.loads(\n"
@@ -792,7 +793,7 @@ def validate_workflow(workflow: str) -> None:
             "videoObservationDigest: $videoObservationDigest",
             "projectAccessBindingDigest:",
             "printf '%s' \"${expected_approval}\"",
-            "comment_digest=sha256:",
+            'comment_digest="sha256:$(',
         ),
     )
     review_revalidation = named_step(
