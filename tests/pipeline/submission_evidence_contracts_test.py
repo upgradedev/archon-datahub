@@ -19,6 +19,7 @@ NOTICE_PATH = ROOT / "NOTICE.md"
 RELEASE = "a" * 40
 DIGEST = "sha256:" + ("b" * 64)
 ALT_DIGEST = "sha256:" + ("c" * 64)
+THIRD_DIGEST = "sha256:" + ("d" * 64)
 NOW = (
     dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)
 ).replace(microsecond=0)
@@ -63,6 +64,39 @@ def valid_facts() -> dict[str, dict]:
     application_digest = validator.sha256_text(application)
     application_origin_sha256 = application_digest.removeprefix("sha256:")
     availability_observed_at = iso(NOW - dt.timedelta(minutes=30))
+    feedback_rules_observed_at = BONUS_EVENT + dt.timedelta(seconds=10)
+    feedback_review_job_started_at = BONUS_EVENT + dt.timedelta(seconds=20)
+    bonus_oss_paths = [
+        "src/mcp_server_datahub/mcp_server.py",
+        "src/mcp_server_datahub/tools/__init__.py",
+        "src/mcp_server_datahub/tools/aspect_history.py",
+        "tests/test_mcp/test_get_aspect_history.py",
+    ]
+    bonus_oss_base_sha = "1" * 40
+    bonus_oss_head_sha = "2" * 40
+    bonus_oss_head_tree_sha = "3" * 40
+    bonus_oss_merge_sha = "4" * 40
+    bonus_oss_merge_tree_sha = "5" * 40
+    bonus_oss_files = [
+        {
+            "path": path,
+            "mode": "100644",
+            "gitBlobSha": f"{index + 6:x}" * 40,
+            "sha256": DIGEST,
+        }
+        for index, path in enumerate(bonus_oss_paths)
+    ]
+    bonus_oss_applied_diff_digest = ALT_DIGEST
+    bonus_oss_candidate_digest = validator.canonical_json_digest(
+        {
+            "schemaVersion": "archon.oss-candidate-binding/v1",
+            "upstreamRepository": "acryldata/mcp-server-datahub",
+            "baseCommit": bonus_oss_base_sha,
+            "appliedDiffDigest": bonus_oss_applied_diff_digest,
+            "reconstructedTreeSha": bonus_oss_head_tree_sha,
+            "files": bonus_oss_files,
+        }
+    )
     deployment = {
         "workflowPath": ".github/workflows/deploy.yml",
         "runId": 201,
@@ -629,7 +663,31 @@ def valid_facts() -> dict[str, dict]:
             "acceptedByMaintainer": True,
             "acceptedAt": iso(BONUS_EVENT),
             "patchDigest": DIGEST,
-            "validatedCandidateDigest": DIGEST,
+            "validatedCandidateDigest": bonus_oss_candidate_digest,
+            "upstreamPullRequest": {
+                "number": 12345,
+                "baseRef": "main",
+                "baseSha": bonus_oss_base_sha,
+                "headSha": bonus_oss_head_sha,
+                "headTreeSha": bonus_oss_head_tree_sha,
+                "mergeCommitSha": bonus_oss_merge_sha,
+                "mergeTreeSha": bonus_oss_merge_tree_sha,
+                "changedPaths": bonus_oss_paths,
+                "authorId": 601,
+                "authorLogin": "archon-contributor",
+                "mergedById": 602,
+                "mergedByLogin": "datahub-maintainer",
+                "mergedAt": iso(BONUS_EVENT),
+            },
+            "candidateBinding": {
+                "baseCommit": bonus_oss_base_sha,
+                "appliedDiffDigest": bonus_oss_applied_diff_digest,
+                "reconstructedTreeSha": bonus_oss_head_tree_sha,
+                "canonicalFileManifestDigest": bonus_oss_candidate_digest,
+                "files": bonus_oss_files,
+                "exactHeadTreeMatch": True,
+                "exactMergedPathBytesMatch": True,
+            },
             "ciValidation": {
                 "workflowPath": ".github/workflows/ci.yml",
                 "runId": 501,
@@ -637,14 +695,78 @@ def valid_facts() -> dict[str, dict]:
                 "artifactId": 502,
                 "artifactName": f"oss-validation-receipt-{RELEASE}",
                 "artifactDigest": DIGEST,
+                "artifactProducerAttempt": 1,
+                "receiptDigest": ALT_DIGEST,
+                "predicateType": (
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/ci-release/v1"
+                ),
+                "predicateDigest": THIRD_DIGEST,
+                "attestedSubjectName": "archon-lambdas.tar.gz",
+                "attestedSubjectDigest": DIGEST,
             },
         },
         "BONUS-FEEDBACK": {
+            "challengeUrl": "https://datahub.devpost.com/",
             "officialRulesUrl": "https://datahub.devpost.com/rules",
-            "confirmationDigest": DIGEST,
+            "status": "submitted",
             "submittedAt": iso(BONUS_EVENT),
+            "canonicalEvidenceDigest": DIGEST,
+            "confirmationDigest": ALT_DIGEST,
+            "entrantBindingDigest": THIRD_DIGEST,
+            "entrantKind": "individual",
+            "registeredEntrant": True,
             "oneEntryPerEntrant": True,
-            "separateFromProjectSubmission": True,
+            "individualNotProjectPrize": True,
+            "distinctFeedbackSubmissionUnderRules": True,
+            "feedbackQuality": {
+                "complete": True,
+                "actionable": True,
+                "viable": True,
+                "potentialImpact": True,
+            },
+            "privacyDisclosure": {
+                "rawFeedbackIncluded": False,
+                "rawEntrantPersonalDataIncluded": False,
+                "devpostCredentialsIncluded": False,
+                "privateConfirmationBytesIncluded": False,
+                "pseudonymousEntrantCommitmentIncluded": True,
+                "publicReviewerNumericIdentifierIncluded": True,
+            },
+            "rulesObservation": {
+                "observedAt": iso(feedback_rules_observed_at),
+                "feedbackStart": "2026-07-06T13:00:00Z",
+                "feedbackDeadline": "2026-08-10T21:00:00Z",
+                "semanticDigest": DIGEST,
+                "authenticatedUiObserved": False,
+                "publicOverviewInstruction": (
+                    "complete-feedback-section-during-submission"
+                ),
+            },
+            "approvalTiming": {
+                "authoritativeApprovalTimestampAvailable": False,
+                "reviewJobStartedAt": iso(feedback_review_job_started_at),
+            },
+            "reviewApproval": {
+                "environment": "submission-bonus-feedback",
+                "workflowPath": (
+                    ".github/workflows/submission-bonus-feedback.yml"
+                ),
+                "runId": 991,
+                "runAttempt": 1,
+                "environmentId": 802,
+                "workflowActorId": 803,
+                "triggeringActorId": 804,
+                "reviewerId": 805,
+                "candidateRunAttempt": 1,
+                "candidateArtifactId": 806,
+                "candidateArtifactDigest": DIGEST,
+                "candidateDigest": ALT_DIGEST,
+                "canonicalEvidenceDigest": DIGEST,
+                "confirmationDigest": ALT_DIGEST,
+                "approvalCommentDigest": THIRD_DIGEST,
+                "approvalReceiptDigest": DIGEST,
+            },
         },
     }
     return facts
@@ -717,6 +839,17 @@ sq9_partial_attester_retry["ci"]["runAttempt"] = 2
 validator.validate_facts(
     "SQ9",
     sq9_partial_attester_retry,
+    RELEASE,
+    notice_path=NOTICE_PATH,
+)
+
+feedback_partial_attester_retry = copy.deepcopy(
+    facts_by_id["BONUS-FEEDBACK"]
+)
+feedback_partial_attester_retry["reviewApproval"]["runAttempt"] = 2
+validator.validate_facts(
+    "BONUS-FEEDBACK",
+    feedback_partial_attester_retry,
     RELEASE,
     notice_path=NOTICE_PATH,
 )
@@ -796,6 +929,33 @@ assert set(sq10_rotation_support) == {"access", "recovery"}
 assert (
     sq10_rotation_support["access"]["projectAccess"]["workflowPath"]
     == ".github/workflows/submission-project-access.yml"
+)
+bonus_oss_upstream_support = validator.expected_support_bindings(
+    "BONUS-OSS",
+    "upstream-pr",
+    facts_by_id["BONUS-OSS"],
+)
+assert (
+    bonus_oss_upstream_support["upstreamPullRequest"]["number"] == 12345
+)
+assert (
+    bonus_oss_upstream_support["acceptedAt"]
+    == bonus_oss_upstream_support["upstreamPullRequest"]["mergedAt"]
+)
+bonus_oss_ci_support = validator.expected_support_bindings(
+    "BONUS-OSS",
+    "ci-validation",
+    facts_by_id["BONUS-OSS"],
+)
+assert (
+    bonus_oss_ci_support["validatedCandidateDigest"]
+    == bonus_oss_ci_support["candidateBinding"][
+        "canonicalFileManifestDigest"
+    ]
+)
+assert (
+    bonus_oss_ci_support["ciValidation"]["artifactProducerAttempt"]
+    <= bonus_oss_ci_support["ciValidation"]["runAttempt"]
 )
 validator.cross_validate(
     {
@@ -1311,9 +1471,156 @@ rejects_mutation(
     "BONUS-OSS accepted the wrong upstream repository",
 )
 rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value.update(state="accepted"),
+    "BONUS-OSS accepted a non-merged upstream state",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value.update(acceptedAt="2026-07-06T12:59:59Z"),
+    "BONUS-OSS accepted maintainer evidence before the submission period",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["upstreamPullRequest"].update(number=12346),
+    "BONUS-OSS accepted a pull-request number detached from its URL",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["upstreamPullRequest"]["changedPaths"].append(
+        "src/mcp_server_datahub/unrelated.py"
+    ),
+    "BONUS-OSS accepted an extra upstream path",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["upstreamPullRequest"].update(mergedById=601),
+    "BONUS-OSS accepted a self-merged upstream pull request",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["candidateBinding"].update(baseCommit="f" * 40),
+    "BONUS-OSS accepted a candidate detached from the upstream base",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["candidateBinding"].update(
+        reconstructedTreeSha="e" * 40
+    ),
+    "BONUS-OSS accepted a candidate detached from the pull-request head tree",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["candidateBinding"]["files"][0].update(mode="100755"),
+    "BONUS-OSS accepted an executable-mode candidate path",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value.update(validatedCandidateDigest=DIGEST),
+    "BONUS-OSS accepted a detached canonical candidate digest",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["candidateBinding"].update(exactHeadTreeMatch=False),
+    "BONUS-OSS accepted a failed exact head-tree match",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["ciValidation"].update(artifactProducerAttempt=2),
+    "BONUS-OSS accepted a future CI artifact producer attempt",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["ciValidation"].update(artifactId=501),
+    "BONUS-OSS accepted an artifact ID equal to its CI run ID",
+)
+rejects_mutation(
+    "BONUS-OSS",
+    lambda value: value["ciValidation"].update(
+        predicateType="https://attacker.example/ci-release/v1"
+    ),
+    "BONUS-OSS accepted the wrong signed CI predicate type",
+)
+rejects_mutation(
     "BONUS-FEEDBACK",
     lambda value: value.update(submittedAt="2026-07-06T12:59:59Z"),
     "BONUS-FEEDBACK accepted a pre-period confirmation",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["rulesObservation"].update(
+        authenticatedUiObserved=True
+    ),
+    "BONUS-FEEDBACK relabeled public wording as authenticated UI evidence",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["privacyDisclosure"].update(
+        pseudonymousEntrantCommitmentIncluded=False
+    ),
+    "BONUS-FEEDBACK hid its pseudonymous entrant commitment",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["privacyDisclosure"].update(
+        rawEntrantPersonalDataIncluded=True
+    ),
+    "BONUS-FEEDBACK accepted raw entrant personal data",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["privacyDisclosure"].update(
+        publicReviewerNumericIdentifierIncluded=False
+    ),
+    "BONUS-FEEDBACK hid the retained public reviewer identifier",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["feedbackQuality"].update(actionable=False),
+    "BONUS-FEEDBACK accepted incomplete quality assertions",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["reviewApproval"].update(reviewerId=803),
+    "BONUS-FEEDBACK accepted review by the workflow actor",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["approvalTiming"].update(
+        authoritativeApprovalTimestampAvailable=True
+    ),
+    "BONUS-FEEDBACK invented an authoritative approval timestamp",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["approvalTiming"].update(
+        reviewJobStartedAt="2026-07-06T12:59:59Z"
+    ),
+    "BONUS-FEEDBACK accepted an approval bound before submission",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["rulesObservation"].update(
+        publicOverviewInstruction="authenticated-feedback-form-observed"
+    ),
+    "BONUS-FEEDBACK accepted altered public overview semantics",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["reviewApproval"].update(
+        confirmationDigest=THIRD_DIGEST
+    ),
+    "BONUS-FEEDBACK accepted an unbound confirmation digest",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value["reviewApproval"].update(candidateRunAttempt=3),
+    "BONUS-FEEDBACK accepted a future candidate attempt",
+)
+rejects_mutation(
+    "BONUS-FEEDBACK",
+    lambda value: value.update(distinctFeedbackSubmissionUnderRules=False),
+    "BONUS-FEEDBACK accepted a non-distinct rules submission",
 )
 
 expect_rejected(
@@ -1656,6 +1963,72 @@ def reseal_standard_inventory(root: Path, source_key: str) -> None:
     )
 
 
+def rebind_feedback_source_facts(output: Path, mutate) -> None:
+    source = sources["bonus-feedback"]
+    proof_path = output / "proofs" / "BONUS-FEEDBACK.json"
+    support_name = (
+        "support/BONUS-FEEDBACK/feedback-confirmation.json"
+    )
+    support_path = output / support_name
+    predicate_path = output / source["predicateFile"]
+    envelope = validator.load_json(
+        proof_path,
+        "BONUS-FEEDBACK envelope",
+    )
+    mutate(envelope["facts"])
+    retained_support = validator.load_json(
+        support_path,
+        "BONUS-FEEDBACK support",
+    )
+    support_value = validator.standard_support_subject_value(
+        "BONUS-FEEDBACK",
+        "feedback-confirmation",
+        envelope["facts"],
+        validator.REPOSITORY,
+        RELEASE,
+        retained_support["capture"]["capturedAt"],
+    )
+    support_path.write_text(
+        validator.canonical_json_text(support_value),
+        encoding="utf-8",
+        newline="\n",
+    )
+    support_subject = {
+        "role": "feedback-confirmation",
+        "name": support_name,
+        "digest": validator.sha256_file(support_path),
+    }
+    envelope["supportSubjects"] = [support_subject]
+    proof_path.write_text(
+        validator.canonical_json_text(envelope),
+        encoding="utf-8",
+        newline="\n",
+    )
+    predicate = validator.load_json(
+        predicate_path,
+        "BONUS-FEEDBACK predicate",
+    )
+    proof = next(
+        item
+        for item in predicate["proofs"]
+        if item["id"] == "BONUS-FEEDBACK"
+    )
+    proof["subjects"] = [
+        {
+            "role": "proof-envelope",
+            "name": "proofs/BONUS-FEEDBACK.json",
+            "digest": validator.sha256_file(proof_path),
+        },
+        support_subject,
+    ]
+    predicate_path.write_text(
+        validator.canonical_json_text(predicate),
+        encoding="utf-8",
+        newline="\n",
+    )
+    reseal_standard_inventory(output, "bonus-feedback")
+
+
 with tempfile.TemporaryDirectory(
     prefix="submission-standard-assembler-"
 ) as raw:
@@ -1823,6 +2196,45 @@ with tempfile.TemporaryDirectory(
         "standard source accepted a resealed false support binding",
     )
 
+    oss_support_root = temporary / "oss-support"
+    oss_support_root.mkdir()
+    oss_support_output, _ = assemble_standard_fixture(
+        oss_support_root,
+        "bonus-oss",
+        "assembled",
+    )
+    oss_support_path = (
+        oss_support_output
+        / "support"
+        / "BONUS-OSS"
+        / "ci-validation.json"
+    )
+    oss_support = validator.load_json(
+        oss_support_path,
+        "assembled BONUS-OSS support",
+    )
+    oss_support["bindings"]["candidateBinding"][
+        "exactHeadTreeMatch"
+    ] = False
+    oss_support_path.write_text(
+        validator.canonical_json_text(oss_support),
+        encoding="utf-8",
+        newline="\n",
+    )
+    reseal_standard_inventory(oss_support_output, "bonus-oss")
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            oss_support_output,
+            sources["bonus-oss"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted a resealed false OSS tree binding",
+    )
+
     predicate_root = temporary / "predicate"
     predicate_root.mkdir()
     predicate_output, _ = assemble_standard_fixture(
@@ -1853,6 +2265,54 @@ with tempfile.TemporaryDirectory(
             NOTICE_PATH,
         ),
         "standard source accepted a resealed wrong predicate run attempt",
+    )
+
+    detached_run_root = temporary / "detached-run"
+    detached_run_root.mkdir()
+    detached_run_output, _ = assemble_standard_fixture(
+        detached_run_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    rebind_feedback_source_facts(
+        detached_run_output,
+        lambda value: value["reviewApproval"].update(runId=992),
+    )
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            detached_run_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted feedback approval from another run",
+    )
+
+    detached_attempt_root = temporary / "detached-attempt"
+    detached_attempt_root.mkdir()
+    detached_attempt_output, _ = assemble_standard_fixture(
+        detached_attempt_root,
+        "bonus-feedback",
+        "assembled",
+    )
+    rebind_feedback_source_facts(
+        detached_attempt_output,
+        lambda value: value["reviewApproval"].update(runAttempt=2),
+    )
+    expect_rejected(
+        lambda: validator.validate_standard_source(
+            detached_attempt_output,
+            sources["bonus-feedback"],
+            validator.REPOSITORY,
+            RELEASE,
+            991,
+            1,
+            NOTICE_PATH,
+        ),
+        "standard source accepted feedback approval from another attempt",
     )
 
     inventory_root = temporary / "inventory"
@@ -2880,14 +3340,24 @@ assert {source["key"] for source in registry["sources"] if source["required"]} =
 }
 assert "post_submit_run_id:" in producer
 for intentionally_absent_producer in (
-    "submission-bonus-oss.yml",
-    "submission-bonus-feedback.yml",
     "submission-devpost-confirmation.yml",
 ):
     assert not (ROOT / ".github" / "workflows" / intentionally_absent_producer).exists(), (
         "a placeholder producer appeared without its dedicated contract tests: "
         f"{intentionally_absent_producer}"
     )
+assert (
+    ROOT / ".github" / "workflows" / "submission-bonus-oss.yml"
+).is_file(), "BONUS-OSS producer is missing"
+assert (
+    ROOT / "tests" / "pipeline" / "submission_bonus_oss_contracts_test.py"
+).is_file(), "BONUS-OSS dedicated contract is missing"
+assert (
+    ROOT / ".github" / "workflows" / "submission-bonus-feedback.yml"
+).is_file(), "BONUS-FEEDBACK producer is missing"
+assert (
+    ROOT / "tests" / "pipeline" / "submission_bonus_feedback_contracts_test.py"
+).is_file(), "BONUS-FEEDBACK dedicated contract is missing"
 
 print(
     json.dumps(

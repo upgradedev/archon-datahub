@@ -126,8 +126,8 @@ EVIDENCE_SUMMARIES = {
         "with maintainer acceptance."
     ),
     "BONUS-FEEDBACK": (
-        "A separate, one-per-entrant feedback submission confirmation is "
-        "retained."
+        "A rules-defined, one-per-entrant feedback submission was privately "
+        "reviewed and retained through privacy-preserving bindings."
     ),
 }
 
@@ -303,17 +303,31 @@ SUPPORT_BINDING_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
         "acceptedByMaintainer",
         "acceptedAt",
         "patchDigest",
+        "upstreamPullRequest",
     ),
     ("BONUS-OSS", "ci-validation"): (
         "validatedCandidateDigest",
+        "candidateBinding",
         "ciValidation",
     ),
     ("BONUS-FEEDBACK", "feedback-confirmation"): (
+        "challengeUrl",
         "officialRulesUrl",
-        "confirmationDigest",
+        "status",
         "submittedAt",
+        "canonicalEvidenceDigest",
+        "confirmationDigest",
+        "entrantBindingDigest",
+        "entrantKind",
+        "registeredEntrant",
         "oneEntryPerEntrant",
-        "separateFromProjectSubmission",
+        "individualNotProjectPrize",
+        "distinctFeedbackSubmissionUnderRules",
+        "feedbackQuality",
+        "privacyDisclosure",
+        "rulesObservation",
+        "approvalTiming",
+        "reviewApproval",
     ),
     ("SQ11", "pre-submit-readiness-seal"): ("preSubmitSeal",),
     ("SQ11", "devpost-submission-confirmation"): (
@@ -2845,7 +2859,13 @@ def validate_facts(
         return
 
     if proof_id == "BONUS-OSS":
-        exact_keys(
+        expected_paths = [
+            "src/mcp_server_datahub/mcp_server.py",
+            "src/mcp_server_datahub/tools/__init__.py",
+            "src/mcp_server_datahub/tools/aspect_history.py",
+            "tests/test_mcp/test_get_aspect_history.py",
+        ]
+        facts = exact_keys(
             facts,
             {
                 "upstreamRepositoryUrl",
@@ -2856,69 +2876,561 @@ def validate_facts(
                 "acceptedAt",
                 "patchDigest",
                 "validatedCandidateDigest",
+                "upstreamPullRequest",
+                "candidateBinding",
                 "ciValidation",
             },
             label,
         )
-        upstream = public_https_url(facts["upstreamRepositoryUrl"], f"{label}.upstreamRepositoryUrl")
-        pull_request = public_https_url(facts["pullRequestUrl"], f"{label}.pullRequestUrl")
+        upstream = public_https_url(
+            facts["upstreamRepositoryUrl"],
+            f"{label}.upstreamRepositoryUrl",
+        )
+        pull_request = public_https_url(
+            facts["pullRequestUrl"],
+            f"{label}.pullRequestUrl",
+        )
         exact(
             upstream,
             "https://github.com/acryldata/mcp-server-datahub",
             f"{label}.upstreamRepositoryUrl",
         )
-        if not re.fullmatch(r"https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*", pull_request):
-            fail(f"{label}.pullRequestUrl must be a public GitHub pull request URL")
-        if not pull_request.startswith(upstream.rstrip("/") + "/pull/"):
-            fail(f"{label}.pullRequestUrl must belong to upstreamRepositoryUrl")
-        if facts["state"] not in {"merged", "accepted"}:
-            fail(f"{label}.state must be merged or accepted")
+        exact(facts["state"], "merged", f"{label}.state")
         exact(facts["publiclyAccessible"], True, f"{label}.publiclyAccessible")
         exact(facts["acceptedByMaintainer"], True, f"{label}.acceptedByMaintainer")
         accepted_at = not_future(facts["acceptedAt"], f"{label}.acceptedAt")
-        if accepted_at > SUBMISSION_DEADLINE:
-            fail(f"{label}.acceptedAt is after the submission deadline")
+        exact(
+            facts["acceptedAt"],
+            accepted_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            f"{label}.acceptedAt",
+        )
+        if not SUBMISSION_START <= accepted_at <= SUBMISSION_DEADLINE:
+            fail(f"{label}.acceptedAt is outside the official submission period")
         sha256_digest(facts["patchDigest"], f"{label}.patchDigest")
-        sha256_digest(facts["validatedCandidateDigest"], f"{label}.validatedCandidateDigest")
+
+        pull = exact_keys(
+            facts["upstreamPullRequest"],
+            {
+                "number",
+                "baseRef",
+                "baseSha",
+                "headSha",
+                "headTreeSha",
+                "mergeCommitSha",
+                "mergeTreeSha",
+                "changedPaths",
+                "authorId",
+                "authorLogin",
+                "mergedById",
+                "mergedByLogin",
+                "mergedAt",
+            },
+            f"{label}.upstreamPullRequest",
+        )
+        pull_number = positive_int(
+            pull["number"],
+            f"{label}.upstreamPullRequest.number",
+        )
+        exact(
+            pull_request,
+            f"{upstream}/pull/{pull_number}",
+            f"{label}.pullRequestUrl",
+        )
+        exact(
+            pull["baseRef"],
+            "main",
+            f"{label}.upstreamPullRequest.baseRef",
+        )
+        for key in (
+            "baseSha",
+            "headSha",
+            "headTreeSha",
+            "mergeCommitSha",
+            "mergeTreeSha",
+        ):
+            release_sha(
+                pull[key],
+                f"{label}.upstreamPullRequest.{key}",
+            )
+        exact(
+            pull["changedPaths"],
+            expected_paths,
+            f"{label}.upstreamPullRequest.changedPaths",
+        )
+        author_id = positive_int(
+            pull["authorId"],
+            f"{label}.upstreamPullRequest.authorId",
+        )
+        merger_id = positive_int(
+            pull["mergedById"],
+            f"{label}.upstreamPullRequest.mergedById",
+        )
+        if author_id == merger_id:
+            fail(f"{label}.upstreamPullRequest merger must be independent")
+        nonempty(
+            pull["authorLogin"],
+            f"{label}.upstreamPullRequest.authorLogin",
+            100,
+        )
+        nonempty(
+            pull["mergedByLogin"],
+            f"{label}.upstreamPullRequest.mergedByLogin",
+            100,
+        )
+        merged_at = not_future(
+            pull["mergedAt"],
+            f"{label}.upstreamPullRequest.mergedAt",
+        )
+        exact(
+            pull["mergedAt"],
+            merged_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            f"{label}.upstreamPullRequest.mergedAt",
+        )
+        if not SUBMISSION_START <= merged_at <= SUBMISSION_DEADLINE:
+            fail(
+                f"{label}.upstreamPullRequest.mergedAt is outside the "
+                "official submission period"
+            )
+        exact(
+            facts["acceptedAt"],
+            pull["mergedAt"],
+            f"{label}.acceptedAt",
+        )
+
+        binding = exact_keys(
+            facts["candidateBinding"],
+            {
+                "baseCommit",
+                "appliedDiffDigest",
+                "reconstructedTreeSha",
+                "canonicalFileManifestDigest",
+                "files",
+                "exactHeadTreeMatch",
+                "exactMergedPathBytesMatch",
+            },
+            f"{label}.candidateBinding",
+        )
+        release_sha(
+            binding["baseCommit"],
+            f"{label}.candidateBinding.baseCommit",
+        )
+        exact(
+            binding["baseCommit"],
+            pull["baseSha"],
+            f"{label}.candidateBinding.baseCommit",
+        )
+        sha256_digest(
+            binding["appliedDiffDigest"],
+            f"{label}.candidateBinding.appliedDiffDigest",
+        )
+        release_sha(
+            binding["reconstructedTreeSha"],
+            f"{label}.candidateBinding.reconstructedTreeSha",
+        )
+        exact(
+            binding["reconstructedTreeSha"],
+            pull["headTreeSha"],
+            f"{label}.candidateBinding.reconstructedTreeSha",
+        )
+        exact(
+            binding["exactHeadTreeMatch"],
+            True,
+            f"{label}.candidateBinding.exactHeadTreeMatch",
+        )
+        exact(
+            binding["exactMergedPathBytesMatch"],
+            True,
+            f"{label}.candidateBinding.exactMergedPathBytesMatch",
+        )
+        files = binding["files"]
+        if not isinstance(files, list) or len(files) != len(expected_paths):
+            fail(f"{label}.candidateBinding.files inventory is not exact")
+        for index, expected_path in enumerate(expected_paths):
+            entry = exact_keys(
+                files[index],
+                {"path", "mode", "gitBlobSha", "sha256"},
+                f"{label}.candidateBinding.files[{index}]",
+            )
+            exact(
+                entry["path"],
+                expected_path,
+                f"{label}.candidateBinding.files[{index}].path",
+            )
+            exact(
+                entry["mode"],
+                "100644",
+                f"{label}.candidateBinding.files[{index}].mode",
+            )
+            release_sha(
+                entry["gitBlobSha"],
+                f"{label}.candidateBinding.files[{index}].gitBlobSha",
+            )
+            sha256_digest(
+                entry["sha256"],
+                f"{label}.candidateBinding.files[{index}].sha256",
+            )
+        candidate_manifest = {
+            "schemaVersion": "archon.oss-candidate-binding/v1",
+            "upstreamRepository": "acryldata/mcp-server-datahub",
+            "baseCommit": binding["baseCommit"],
+            "appliedDiffDigest": binding["appliedDiffDigest"],
+            "reconstructedTreeSha": binding["reconstructedTreeSha"],
+            "files": files,
+        }
+        candidate_digest = canonical_json_digest(candidate_manifest)
+        exact(
+            binding["canonicalFileManifestDigest"],
+            candidate_digest,
+            f"{label}.candidateBinding.canonicalFileManifestDigest",
+        )
+        exact(
+            facts["validatedCandidateDigest"],
+            candidate_digest,
+            f"{label}.validatedCandidateDigest",
+        )
+
         ci = exact_keys(
             facts["ciValidation"],
-            {"workflowPath", "runId", "runAttempt", "artifactId", "artifactName", "artifactDigest"},
+            {
+                "workflowPath",
+                "runId",
+                "runAttempt",
+                "artifactId",
+                "artifactName",
+                "artifactDigest",
+                "artifactProducerAttempt",
+                "receiptDigest",
+                "predicateType",
+                "predicateDigest",
+                "attestedSubjectName",
+                "attestedSubjectDigest",
+            },
             f"{label}.ciValidation",
         )
-        exact(ci["workflowPath"], ".github/workflows/ci.yml", f"{label}.ciValidation.workflowPath")
-        positive_int(ci["runId"], f"{label}.ciValidation.runId")
-        positive_int(ci["runAttempt"], f"{label}.ciValidation.runAttempt")
-        positive_int(ci["artifactId"], f"{label}.ciValidation.artifactId")
-        exact(ci["artifactName"], f"oss-validation-receipt-{release}", f"{label}.ciValidation.artifactName")
-        sha256_digest(ci["artifactDigest"], f"{label}.ciValidation.artifactDigest")
+        exact(
+            ci["workflowPath"],
+            ".github/workflows/ci.yml",
+            f"{label}.ciValidation.workflowPath",
+        )
+        ci_run_id = positive_int(
+            ci["runId"],
+            f"{label}.ciValidation.runId",
+        )
+        run_attempt = positive_int(
+            ci["runAttempt"],
+            f"{label}.ciValidation.runAttempt",
+        )
+        if run_attempt > 20:
+            fail(f"{label}.ciValidation.runAttempt exceeds the bounded history")
+        artifact_id = positive_int(
+            ci["artifactId"],
+            f"{label}.ciValidation.artifactId",
+        )
+        if ci_run_id == artifact_id:
+            fail(f"{label}.ciValidation run and artifact IDs must be distinct")
+        exact(
+            ci["artifactName"],
+            f"oss-validation-receipt-{release}",
+            f"{label}.ciValidation.artifactName",
+        )
+        sha256_digest(
+            ci["artifactDigest"],
+            f"{label}.ciValidation.artifactDigest",
+        )
+        producer_attempt = positive_int(
+            ci["artifactProducerAttempt"],
+            f"{label}.ciValidation.artifactProducerAttempt",
+        )
+        if producer_attempt > run_attempt:
+            fail(
+                f"{label}.ciValidation artifact producer attempt exceeds "
+                "the signed CI attempt"
+            )
+        sha256_digest(
+            ci["receiptDigest"],
+            f"{label}.ciValidation.receiptDigest",
+        )
+        exact(
+            ci["predicateType"],
+            (
+                "https://github.com/upgradedev/archon-datahub/"
+                "attestations/ci-release/v1"
+            ),
+            f"{label}.ciValidation.predicateType",
+        )
+        sha256_digest(
+            ci["predicateDigest"],
+            f"{label}.ciValidation.predicateDigest",
+        )
+        exact(
+            ci["attestedSubjectName"],
+            "archon-lambdas.tar.gz",
+            f"{label}.ciValidation.attestedSubjectName",
+        )
+        sha256_digest(
+            ci["attestedSubjectDigest"],
+            f"{label}.ciValidation.attestedSubjectDigest",
+        )
         return
 
     if proof_id == "BONUS-FEEDBACK":
         exact_keys(
             facts,
             {
+                "challengeUrl",
                 "officialRulesUrl",
-                "confirmationDigest",
+                "status",
                 "submittedAt",
+                "canonicalEvidenceDigest",
+                "confirmationDigest",
+                "entrantBindingDigest",
+                "entrantKind",
+                "registeredEntrant",
                 "oneEntryPerEntrant",
-                "separateFromProjectSubmission",
+                "individualNotProjectPrize",
+                "distinctFeedbackSubmissionUnderRules",
+                "feedbackQuality",
+                "privacyDisclosure",
+                "rulesObservation",
+                "approvalTiming",
+                "reviewApproval",
             },
             label,
+        )
+        exact(
+            facts["challengeUrl"],
+            "https://datahub.devpost.com/",
+            f"{label}.challengeUrl",
         )
         exact(
             facts["officialRulesUrl"],
             "https://datahub.devpost.com/rules",
             f"{label}.officialRulesUrl",
         )
-        sha256_digest(facts["confirmationDigest"], f"{label}.confirmationDigest")
+        exact(facts["status"], "submitted", f"{label}.status")
         submitted_at = not_future(facts["submittedAt"], f"{label}.submittedAt")
         if not FEEDBACK_START <= submitted_at <= SUBMISSION_DEADLINE:
             fail(f"{label}.submittedAt is outside the official feedback period")
+        canonical_digest = sha256_digest(
+            facts["canonicalEvidenceDigest"],
+            f"{label}.canonicalEvidenceDigest",
+        )
+        confirmation_digest = sha256_digest(
+            facts["confirmationDigest"],
+            f"{label}.confirmationDigest",
+        )
+        entrant_digest = sha256_digest(
+            facts["entrantBindingDigest"],
+            f"{label}.entrantBindingDigest",
+        )
+        if len({canonical_digest, confirmation_digest, entrant_digest}) != 3:
+            fail(
+                f"{label} canonical, confirmation, and entrant-binding "
+                "digests must be distinct"
+            )
+        exact(facts["entrantKind"], "individual", f"{label}.entrantKind")
+        exact(facts["registeredEntrant"], True, f"{label}.registeredEntrant")
         exact(facts["oneEntryPerEntrant"], True, f"{label}.oneEntryPerEntrant")
         exact(
-            facts["separateFromProjectSubmission"],
+            facts["individualNotProjectPrize"],
             True,
-            f"{label}.separateFromProjectSubmission",
+            f"{label}.individualNotProjectPrize",
+        )
+        exact(
+            facts["distinctFeedbackSubmissionUnderRules"],
+            True,
+            f"{label}.distinctFeedbackSubmissionUnderRules",
+        )
+
+        quality = exact_keys(
+            facts["feedbackQuality"],
+            {"complete", "actionable", "viable", "potentialImpact"},
+            f"{label}.feedbackQuality",
+        )
+        for key in ("complete", "actionable", "viable", "potentialImpact"):
+            exact(quality[key], True, f"{label}.feedbackQuality.{key}")
+
+        privacy = exact_keys(
+            facts["privacyDisclosure"],
+            {
+                "rawFeedbackIncluded",
+                "rawEntrantPersonalDataIncluded",
+                "devpostCredentialsIncluded",
+                "privateConfirmationBytesIncluded",
+                "pseudonymousEntrantCommitmentIncluded",
+                "publicReviewerNumericIdentifierIncluded",
+            },
+            f"{label}.privacyDisclosure",
+        )
+        for key in (
+            "rawFeedbackIncluded",
+            "rawEntrantPersonalDataIncluded",
+            "devpostCredentialsIncluded",
+            "privateConfirmationBytesIncluded",
+        ):
+            exact(privacy[key], False, f"{label}.privacyDisclosure.{key}")
+        for key in (
+            "pseudonymousEntrantCommitmentIncluded",
+            "publicReviewerNumericIdentifierIncluded",
+        ):
+            exact(privacy[key], True, f"{label}.privacyDisclosure.{key}")
+
+        observation = exact_keys(
+            facts["rulesObservation"],
+            {
+                "observedAt",
+                "feedbackStart",
+                "feedbackDeadline",
+                "semanticDigest",
+                "authenticatedUiObserved",
+                "publicOverviewInstruction",
+            },
+            f"{label}.rulesObservation",
+        )
+        observed_at = not_future(
+            observation["observedAt"],
+            f"{label}.rulesObservation.observedAt",
+        )
+        exact(
+            observation["feedbackStart"],
+            "2026-07-06T13:00:00Z",
+            f"{label}.rulesObservation.feedbackStart",
+        )
+        exact(
+            observation["feedbackDeadline"],
+            "2026-08-10T21:00:00Z",
+            f"{label}.rulesObservation.feedbackDeadline",
+        )
+        sha256_digest(
+            observation["semanticDigest"],
+            f"{label}.rulesObservation.semanticDigest",
+        )
+        exact(
+            observation["authenticatedUiObserved"],
+            False,
+            f"{label}.rulesObservation.authenticatedUiObserved",
+        )
+        exact(
+            observation["publicOverviewInstruction"],
+            "complete-feedback-section-during-submission",
+            f"{label}.rulesObservation.publicOverviewInstruction",
+        )
+
+        approval_timing = exact_keys(
+            facts["approvalTiming"],
+            {
+                "authoritativeApprovalTimestampAvailable",
+                "reviewJobStartedAt",
+            },
+            f"{label}.approvalTiming",
+        )
+        exact(
+            approval_timing["authoritativeApprovalTimestampAvailable"],
+            False,
+            f"{label}.approvalTiming.authoritativeApprovalTimestampAvailable",
+        )
+        review_job_started_at = not_future(
+            approval_timing["reviewJobStartedAt"],
+            f"{label}.approvalTiming.reviewJobStartedAt",
+        )
+        if not (
+            submitted_at
+            <= observed_at
+            <= review_job_started_at
+            <= SUBMISSION_DEADLINE
+        ):
+            fail(
+                f"{label} must order submission, rules observation, and the "
+                "conservative review-job approval bound within the feedback period"
+            )
+
+        approval = exact_keys(
+            facts["reviewApproval"],
+            {
+                "environment",
+                "workflowPath",
+                "runId",
+                "runAttempt",
+                "environmentId",
+                "workflowActorId",
+                "triggeringActorId",
+                "reviewerId",
+                "candidateRunAttempt",
+                "candidateArtifactId",
+                "candidateArtifactDigest",
+                "candidateDigest",
+                "canonicalEvidenceDigest",
+                "confirmationDigest",
+                "approvalCommentDigest",
+                "approvalReceiptDigest",
+            },
+            f"{label}.reviewApproval",
+        )
+        exact(
+            approval["environment"],
+            "submission-bonus-feedback",
+            f"{label}.reviewApproval.environment",
+        )
+        exact(
+            approval["workflowPath"],
+            ".github/workflows/submission-bonus-feedback.yml",
+            f"{label}.reviewApproval.workflowPath",
+        )
+        positive_int(approval["runId"], f"{label}.reviewApproval.runId")
+        run_attempt = positive_int(
+            approval["runAttempt"],
+            f"{label}.reviewApproval.runAttempt",
+        )
+        positive_int(
+            approval["environmentId"],
+            f"{label}.reviewApproval.environmentId",
+        )
+        actor_id = positive_int(
+            approval["workflowActorId"],
+            f"{label}.reviewApproval.workflowActorId",
+        )
+        triggering_id = positive_int(
+            approval["triggeringActorId"],
+            f"{label}.reviewApproval.triggeringActorId",
+        )
+        reviewer_id = positive_int(
+            approval["reviewerId"],
+            f"{label}.reviewApproval.reviewerId",
+        )
+        if reviewer_id in {actor_id, triggering_id}:
+            fail(f"{label}.reviewApproval reviewer must be independent")
+        candidate_attempt = positive_int(
+            approval["candidateRunAttempt"],
+            f"{label}.reviewApproval.candidateRunAttempt",
+        )
+        if candidate_attempt > run_attempt:
+            fail(
+                f"{label}.reviewApproval candidate attempt exceeds the "
+                "retained producer attempt"
+            )
+        positive_int(
+            approval["candidateArtifactId"],
+            f"{label}.reviewApproval.candidateArtifactId",
+        )
+        for key in (
+            "candidateArtifactDigest",
+            "candidateDigest",
+            "approvalCommentDigest",
+            "approvalReceiptDigest",
+        ):
+            sha256_digest(
+                approval[key],
+                f"{label}.reviewApproval.{key}",
+            )
+        exact(
+            approval["canonicalEvidenceDigest"],
+            canonical_digest,
+            f"{label}.reviewApproval.canonicalEvidenceDigest",
+        )
+        exact(
+            approval["confirmationDigest"],
+            confirmation_digest,
+            f"{label}.reviewApproval.confirmationDigest",
         )
         return
 
@@ -3980,6 +4492,21 @@ def validate_standard_source(
             release,
             notice_path=notice_path,
         )
+        if proof_id == "BONUS-FEEDBACK":
+            approval = record(
+                envelope["facts"]["reviewApproval"],
+                "BONUS-FEEDBACK.facts.reviewApproval",
+            )
+            exact(
+                approval["runId"],
+                run_id,
+                "BONUS-FEEDBACK.facts.reviewApproval.runId",
+            )
+            exact(
+                approval["runAttempt"],
+                run_attempt,
+                "BONUS-FEEDBACK.facts.reviewApproval.runAttempt",
+            )
         support_subjects = resolved_support_subjects(
             source_dir,
             source_registry,
@@ -4448,6 +4975,21 @@ def assemble_standard_source(
         release,
         notice_path,
     )
+    if "BONUS-FEEDBACK" in facts_by_id:
+        approval = record(
+            facts_by_id["BONUS-FEEDBACK"]["reviewApproval"],
+            "BONUS-FEEDBACK facts.reviewApproval",
+        )
+        exact(
+            approval["runId"],
+            run_id,
+            "BONUS-FEEDBACK facts.reviewApproval.runId",
+        )
+        exact(
+            approval["runAttempt"],
+            run_attempt,
+            "BONUS-FEEDBACK facts.reviewApproval.runAttempt",
+        )
 
     envelopes: dict[
         str,

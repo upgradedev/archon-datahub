@@ -212,16 +212,73 @@ const expectedRequiredCi = [
   },
 ];
 
-if (
-  manifest.status?.state !== "staged-not-submitted" ||
-  manifest.status?.pullRequestOpened !== false ||
-  manifest.status?.appliedToUpstream !== false ||
-  manifest.status?.localBuildRun !== false ||
-  manifest.status?.localTestsRun !== false ||
-  manifest.status?.localSecurityScanRun !== false
-) {
+const status = manifest.status;
+const stagedStatus = {
+  state: "staged-not-submitted",
+  pullRequestOpened: false,
+  appliedToUpstream: false,
+  localBuildRun: false,
+  localTestsRun: false,
+  localSecurityScanRun: false,
+};
+const mergedStatusKeys = [
+  "appliedToUpstream",
+  "headSha",
+  "localBuildRun",
+  "localSecurityScanRun",
+  "localTestsRun",
+  "mergeCommitSha",
+  "mergedAt",
+  "pullRequestNumber",
+  "pullRequestOpened",
+  "state",
+  "url",
+];
+const statusKeys =
+  status !== null && typeof status === "object" && !Array.isArray(status)
+    ? Object.keys(status).sort()
+    : [];
+const localExecutionAbsent =
+  status?.localBuildRun === false &&
+  status?.localTestsRun === false &&
+  status?.localSecurityScanRun === false;
+const stagedStatusValid =
+  JSON.stringify(statusKeys) ===
+    JSON.stringify(Object.keys(stagedStatus).sort()) &&
+  status?.state === stagedStatus.state &&
+  status?.pullRequestOpened === stagedStatus.pullRequestOpened &&
+  status?.appliedToUpstream === stagedStatus.appliedToUpstream &&
+  localExecutionAbsent;
+const mergedAtPattern =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const mergedAtMilliseconds =
+  typeof status?.mergedAt === "string" && mergedAtPattern.test(status.mergedAt)
+    ? Date.parse(status.mergedAt)
+    : Number.NaN;
+const mergedAtIsCanonical =
+  Number.isFinite(mergedAtMilliseconds) &&
+  new Date(mergedAtMilliseconds).toISOString().replace(".000Z", "Z") ===
+    status.mergedAt;
+const mergedStatusValid =
+  JSON.stringify(statusKeys) === JSON.stringify(mergedStatusKeys) &&
+  status?.state === "merged-upstream" &&
+  status?.pullRequestOpened === true &&
+  status?.appliedToUpstream === true &&
+  Number.isSafeInteger(status?.pullRequestNumber) &&
+  status.pullRequestNumber > 0 &&
+  status.url ===
+    `https://github.com/acryldata/mcp-server-datahub/pull/${status.pullRequestNumber}` &&
+  typeof status?.headSha === "string" &&
+  /^[0-9a-f]{40}$/.test(status.headSha) &&
+  typeof status?.mergeCommitSha === "string" &&
+  /^[0-9a-f]{40}$/.test(status.mergeCommitSha) &&
+  mergedAtIsCanonical &&
+  mergedAtMilliseconds >= Date.parse("2026-07-06T13:00:00Z") &&
+  mergedAtMilliseconds <= Date.parse("2026-08-10T21:00:00Z") &&
+  localExecutionAbsent;
+if (!stagedStatusValid && !mergedStatusValid) {
   throw new Error(
-    "get-aspect-history manifest must report its honest staged and CI-required status."
+    "get-aspect-history manifest must use the exact staged or merged-upstream status contract."
   );
 }
 if (
@@ -382,8 +439,6 @@ const aspectHistoryReadme = await readFile(
 const normalizedAspectHistoryReadme = aspectHistoryReadme.replace(/\s+/gu, " ");
 for (const documentationContract of [
   pinnedCommit,
-  "Staged, not submitted",
-  "no local build, test suite, or security scan was run",
   "Security and hard bounds",
   "Provenance contract",
   "Exact upstream CI contract",
@@ -397,6 +452,30 @@ for (const documentationContract of [
       `get-aspect-history README is missing honest documentation: ${documentationContract}`
     );
   }
+}
+const stagedReadmeStatus =
+  "**Staged, not submitted.** No pull request was opened, the patch was not applied to upstream, and no local build, test suite, or security scan was run.";
+const mergedReadmeStatus =
+  `**Merged upstream.** Pull request [#${status.pullRequestNumber}](${status.url}) ` +
+  `was merged by an independent upstream maintainer at \`${status.mergedAt}\`. ` +
+  `Head commit: \`${status.headSha}\`. Merge commit: \`${status.mergeCommitSha}\`. ` +
+  "No local build, test suite, or security scan was run; all validation and security evidence was produced by CI/CD.";
+const stagedReadmeStatusValid =
+  normalizedAspectHistoryReadme.includes(stagedReadmeStatus) &&
+  !normalizedAspectHistoryReadme.includes("**Merged upstream.**");
+const mergedReadmeStatusValid =
+  normalizedAspectHistoryReadme.includes(mergedReadmeStatus) &&
+  !normalizedAspectHistoryReadme.includes("**Staged, not submitted.**") &&
+  !normalizedAspectHistoryReadme.includes("No pull request was opened");
+if (stagedStatusValid && !stagedReadmeStatusValid) {
+  throw new Error(
+    "get-aspect-history README must preserve the exact truthful staged status."
+  );
+}
+if (mergedStatusValid && !mergedReadmeStatusValid) {
+  throw new Error(
+    "get-aspect-history README must record the exact truthful merged status."
+  );
 }
 for (const { command } of expectedRequiredCi) {
   if (!aspectHistoryReadme.includes(command)) {

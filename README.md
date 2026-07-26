@@ -142,7 +142,9 @@ pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
 proof](docs/PRODUCTION_PAGING_TEST.md), and [protected judge
 access](docs/JUDGE_ACCESS.md), [final submission content
 review](docs/SUBMISSION_CONTENT_REVIEW.md), plus [evidence-based
-readiness](docs/READINESS.md).
+readiness](docs/READINESS.md), the [merged-upstream OSS bonus evidence
+contract](docs/SUBMISSION_BONUS_OSS.md), and the [privacy-preserving optional
+feedback evidence contract](docs/SUBMISSION_BONUS_FEEDBACK.md).
 
 ## Run locally without external services
 
@@ -210,7 +212,9 @@ The primary OSS bonus candidate is a bounded, read-only
 [`get_aspect_history` tool](contrib/mcp-get-aspect-history/) for the official DataHub MCP
 server. CI applies its exact source, tests, and registration patch to a pinned upstream
 revision before running upstream lint, type, and focused test contracts. It remains
-explicitly “staged, not submitted” until a real public upstream PR exists.
+explicitly “staged, not submitted” until a real public upstream PR exists. The
+source-complete bonus evidence workflow intentionally remains blocked until that exact
+candidate is merged by an independent upstream maintainer.
 
 ## Connect a real DataHub
 
@@ -458,6 +462,21 @@ Workflows:
   the persisted full-subject GitHub attestation. The fail-closed operating
   contract is in
   [docs/SUBMISSION_CONTENT_REVIEW.md](docs/SUBMISSION_CONTENT_REVIEW.md).
+- [Submission bonus OSS](.github/workflows/submission-bonus-oss.yml) —
+  intentionally accepts only a public merged PR for the exact four-path
+  `get_aspect_history` candidate. It reconstructs the complete PR head tree
+  from the immutable CI receipt and pinned upstream base, compares merged path
+  modes and bytes, verifies the signed CI release predicate, retains four
+  checksum-sealed subjects, and verifies the persisted full-subject
+  attestation. Its activation sequence and fail-closed contract are in
+  [docs/SUBMISSION_BONUS_OSS.md](docs/SUBMISSION_BONUS_OSS.md).
+- [Submission bonus feedback](.github/workflows/submission-bonus-feedback.yml) —
+  retains only privacy-preserving commitments and exact public-rules metadata
+  after an independent protected-environment reviewer privately verifies the
+  real one-per-entrant feedback confirmation. It never receives Devpost
+  credentials, raw feedback, raw entrant identifiers, or private confirmation
+  bytes. Its fail-closed contract is in
+  [docs/SUBMISSION_BONUS_FEEDBACK.md](docs/SUBMISSION_BONUS_FEEDBACK.md).
 
 CI also enforces an intentionally offline core-path SLO through `load/audit.js`: ten
 concurrent virtual users complete 200 deterministic pipeline/MCP iterations with zero
@@ -479,8 +498,9 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - GitHub `staging`, `production`, `production-observer`, `production-paging-test`,
   `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
   `judge-access-production`, `governed-canary`, `governed-canary-rollback`,
-  `governed-canary-recovery`, and `submission-content-review` environments and
-  `master` protection must be configured;
+  `governed-canary-recovery`, `submission-content-review`, and
+  `submission-bonus-feedback` environments and `master` protection must be
+  configured;
 - production, demo-seed, judge-access, and the three governed-canary approval
   environments require a trusted second collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
@@ -489,7 +509,15 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
   evidence;
 - screenshots, the under-three-minute public video, Devpost copy, and optional public post
   are intentionally last; the content-review workflow remains fail-closed until
-  its canonical final JSON, public video, and independent environment reviewer exist.
+  its canonical final JSON, public video, and independent environment reviewer exist;
+- the optional OSS workflow remains intentionally blocked until an independent
+  upstream maintainer merges the exact four-path candidate, after which the
+  manifest and contribution README must record the concrete merged identity in
+  a normal CI-reviewed release before the evidence workflow is dispatched;
+- the optional feedback workflow remains undispatchable until a registered
+  entrant submits the real feedback once, commits the privacy-preserving
+  canonical confirmation, and an independent reviewer can verify its private
+  preimages out of band.
 
 ## Prior-work disclosure
 

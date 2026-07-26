@@ -75,7 +75,8 @@ operational obligation; it does not falsely claim that future uptime has already
 
 The `bonus` axis is independent of official eligibility. `BONUS-OSS` requires public
 upstream contribution/acceptance evidence, and `BONUS-FEEDBACK` requires confirmation of
-the separate optional feedback entry. `bonus.allBonusesReady` never changes
+the rules-defined, one-per-entrant optional Feedback Submission. `bonus.allBonusesReady`
+never changes
 `submission.evidenceCompleteForSealing` or any readiness trust decision.
 
 ### Strict external-evidence transition
@@ -242,8 +243,28 @@ The optional `.github/workflows/submission-judge-pack.yml` standard-v1 producer 
 for `SQ9`. It resolves only the latest successful current-release `master` CI push and its
 exact-attempt judge/container artifacts, verifies the signed CI release predicate, labels
 the evidence as a sanitized synthetic offline fixture rather than live proof, independently
-reconstructs the facts, and signs the exact four-subject inventory. Post-submit `SQ11`,
-`BONUS-OSS`, and `BONUS-FEEDBACK` producers are still absent.
+reconstructs the facts, and signs the exact four-subject inventory. The post-submit `SQ11`
+producer is still absent.
+
+The optional `.github/workflows/submission-bonus-oss.yml` standard-v1 producer now exists.
+It credentiallessly binds the exact public Apache-2.0 upstream repository and independently
+merged four-path pull request to the immutable CI validation receipt, reconstructs the
+complete candidate head tree from both receipt bytes and staged source, verifies merged path
+modes/bytes plus the signed CI release predicate, and signs the exact registered four-subject
+inventory. Its contract is documented in
+[`SUBMISSION_BONUS_OSS.md`](SUBMISSION_BONUS_OSS.md). It is source-complete and CI-unverified
+but intentionally blocked: no upstream PR has been opened or changed, no matching merged PR
+exists, and the contribution manifest/README truthfully remain in the staged phase.
+
+The optional
+`.github/workflows/submission-bonus-feedback.yml` standard-v1 producer now exists. It
+retains only public rules metadata, privacy-preserving commitments, and independently
+reviewed GitHub approval provenance; signs the exact registered three-subject inventory;
+and is documented in
+[`SUBMISSION_BONUS_FEEDBACK.md`](SUBMISSION_BONUS_FEEDBACK.md). It is source-complete and
+CI-unverified, but deliberately cannot pass before the real feedback, authoritative
+confirmation timestamp/reference, canonical confirmation file, protected environment,
+and independent private reviewer exist.
 Consequently the aggregate workflow fails closed when any required run is missing or comes
 from another workflow; it does not reinterpret CI fixtures, availability, posture, paging,
 or local OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and
@@ -300,8 +321,8 @@ The five official Stage Two criteria are equally weighted.
 | **3. Originality** | “Audit the catalog itself” positioning; temporal/provenance contradictions rather than generic catalog chat; lineage-aware blast radius; evidence dossier, human approval, exact-action catalog, verified writeback, hash-chained receipt; frozen positive and false-positive-control cases. | **Implemented / source-complete; benchmark CI-unverified.** | Retain the exact benchmark artifact and live proof. Do not describe the current-view boundary as a competitor-product benchmark or claim hosted statistical superiority. |
 | **4. Real-World Usefulness** | Governance checks, current-view drift, version-history conflict detection, blast radius, JSON/Markdown/SARIF exporters, browser and CI judge packs, safe remediation contracts, dashboard, scheduled public-path availability proof, and production-oriented AWS topology. | **Implemented / source-complete; operational value user-gated.** | Complete one realistic catalog incident end-to-end on live infrastructure; show a practitioner-readable report and verified remediation receipt; prove authentication, least-privilege read/write separation, failure behavior, audit retention, rollback, and sustained availability. |
 | **5. Submission Quality** | Public-facing README and design/research documents; guided UI; deterministic sample-output generator/verifier; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Source-complete except final/live media; CI-unverified.** | Retain the verified judge pack, then add the public working-project URL, final screenshots, concise English testing instructions, sub-three-minute public demo video, required Devpost text, and claim consistency review. |
-| **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, and a CI job that applies it to that revision and runs upstream lint/type/focused tests. The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source-complete; CI-unverified; no bonus claimed yet.** | Obtain green remote candidate CI, recheck upstream overlap immediately before submission, open a focused public upstream PR with maintainer-ready context, and link it. A local folder or CI result alone does not earn the bonus. |
-| **Most Valuable Feedback prize (separate)** | The [official rules](https://datahub.devpost.com/rules) define an optional entrant feedback form, not a Project feature or Submission deliverable. | **User-gated; completion unverified.** | While registered for the hackathon, submit at most one complete, actionable feedback form per entrant before **2026-08-10, 17:00 EDT**. Keep it separate from the Devpost Project submission and do not treat it as a substitute for the OSS contribution. |
+| **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, CI validation receipt, and a source-complete [merged-upstream evidence producer](SUBMISSION_BONUS_OSS.md). The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source-complete; CI-unverified; externally blocked; no PR opened and no bonus claimed.** | Obtain green remote candidate CI, recheck overlap, open one public PR limited to the exact four paths, and obtain an independent upstream maintainer merge within the submission period. Then update only the manifest status and contribution README status paragraph to their exact merged phase in a normal CI-reviewed release and dispatch the evidence workflow. A local folder, CI result, or merely open PR does not earn the bonus. |
+| **Most Valuable Feedback prize** | The [official rules](https://datahub.devpost.com/rules) define an optional, one-per-entrant Feedback Submission and award its prize to individuals rather than Projects; the public challenge overview instructs entrants to complete the feedback section during submission. The [privacy-preserving evidence producer](SUBMISSION_BONUS_FEEDBACK.md) is source-complete. | **Source-complete; CI-unverified; user-gated; completion unverified.** | While registered for the hackathon, opt in and submit at most one complete, actionable feedback response before **2026-08-10, 17:00 EDT**. Retain only the documented salted commitments and protected independent review; do not treat the feedback as a Project feature or substitute for the OSS contribution. |
 
 ## Required deliverables
 
@@ -320,8 +341,10 @@ The five official Stage Two criteria are equally weighted.
 | Completed Devpost entry | **Deferred-to-end; post-submit confirmation (`SQ11`).** | Once the protected readiness seal has been independently verified, enter every required field and submit before the deadline; then verify every URL in an unauthenticated browser and retain the confirmation. The unsigned projection itself never sets `readyToSubmit`. |
 
 A separate blog post is not listed as a required deliverable. The optional Most Valuable
-Feedback form above is likewise separate from the Project submission, but it must be
-completed during the Feedback Period to be eligible for that prize.
+Feedback action is a rules-defined Feedback Submission and the public overview places its
+feedback section during submission; it must be completed during the Feedback Period to be
+eligible for that prize. This wording does not claim a separate public page or authenticated
+UI layout.
 
 ## Remaining proof gates
 

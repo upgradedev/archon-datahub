@@ -1,0 +1,2536 @@
+name: Submission bonus feedback evidence
+
+# Privacy-preserving, fail-closed producer for the optional Most Valuable
+# Feedback prize. The authenticated Devpost form and its answers never enter
+# GitHub Actions. A protected, independent reviewer verifies the private
+# confirmation/reference out of band and approves an immutable digest-bound
+# candidate. The workflow only retains public rules metadata, salted digests,
+# GitHub approval provenance, and explicit non-sensitive assertions.
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release containing the canonical confirmation
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-bonus-feedback-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-bonus-feedback/v1
+  FEEDBACK_START: "2026-07-06T13:00:00Z"
+  FEEDBACK_DEADLINE: "2026-08-10T21:00:00Z"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare privacy-preserving feedback candidate
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.candidate.outputs.artifact_name }}
+      candidate_digest: ${{ steps.candidate.outputs.candidate_digest }}
+      canonical_evidence_digest: ${{ steps.candidate.outputs.canonical_evidence_digest }}
+      confirmation_digest: ${{ steps.candidate.outputs.confirmation_digest }}
+      entrant_binding_digest: ${{ steps.candidate.outputs.entrant_binding_digest }}
+      producer_attempt: ${{ steps.candidate.outputs.producer_attempt }}
+      rules_projection_digest: ${{ steps.candidate.outputs.rules_projection_digest }}
+      submitted_at: ${{ steps.candidate.outputs.submitted_at }}
+    steps:
+      - name: Bind dispatch to the exact current release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}" || {
+            echo "::error::Feedback evidence requires the exact current master release"
+            exit 1
+          }
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              (.actor.id | type) == "number" and
+              .actor.id > 0 and
+              (.triggering_actor.id | type) == "number" and
+              .triggering_actor.id > 0
+            ' <<<"${run}" >/dev/null
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback"
+          )"
+          jq -e '
+            .name == "submission-bonus-feedback" and
+            (.id | type) == "number" and
+            .id > 0 and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] |
+              length
+            ) == 1 and
+            any(
+              .protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              (.reviewers | length) >= 1 and
+              all(
+                .reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0 and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | length) > 0
+              )
+            )
+          ' <<<"${environment_json}" >/dev/null || {
+            echo "::error::submission-bonus-feedback requires individual User reviewers, prevent-self-review, and a custom master-only branch policy"
+            exit 1
+          }
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"] and
+            [.[].branch_policies[].type] == ["branch"]
+          ' <<<"${policies}" >/dev/null
+
+      - name: Check out the exact unprivileged candidate producer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify official rules and canonical confirmation projection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          work="${RUNNER_TEMP}/submission-bonus-feedback-prepare"
+          test ! -e "${work}"
+          mkdir --mode=0700 "${work}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${work}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
+          confirmation="docs/SUBMISSION_FEEDBACK_CONFIRMATION.json"
+          test -f "${confirmation}"
+          test ! -L "${confirmation}"
+          confirmation_size="$(stat --format='%s' "${confirmation}")"
+          (( confirmation_size >= 1 && confirmation_size <= 4096 ))
+          python3 - "${confirmation}" "${FEEDBACK_START}" "${FEEDBACK_DEADLINE}" <<'PY'
+          import datetime as dt
+          import json
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          start = dt.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00"))
+          deadline = dt.datetime.fromisoformat(sys.argv[3].replace("Z", "+00:00"))
+          raw = path.read_bytes()
+          try:
+              value = json.loads(raw)
+          except (UnicodeDecodeError, json.JSONDecodeError) as error:
+              raise SystemExit(f"invalid canonical feedback confirmation: {error}")
+
+          def exact_keys(candidate, expected, label):
+              if not isinstance(candidate, dict) or set(candidate) != set(expected):
+                  raise SystemExit(f"{label} must contain exactly {sorted(expected)}")
+
+          exact_keys(
+              value,
+              {
+                  "assertions",
+                  "challengeUrl",
+                  "confirmation",
+                  "entrant",
+                  "officialRulesUrl",
+                  "privacy",
+                  "schemaVersion",
+                  "status",
+                  "submittedAt",
+              },
+              "confirmation",
+          )
+          exact_keys(
+              value["entrant"],
+              {"bindingDigest", "bindingScheme", "kind"},
+              "confirmation.entrant",
+          )
+          exact_keys(
+              value["confirmation"],
+              {"digest", "scheme"},
+              "confirmation.confirmation",
+          )
+          exact_keys(
+              value["assertions"],
+              {
+                  "actionable",
+                  "complete",
+                  "distinctFeedbackSubmissionUnderRules",
+                  "individualNotProjectPrize",
+                  "oneEntryPerEntrant",
+                  "potentialImpact",
+                  "registeredEntrant",
+                  "viable",
+              },
+              "confirmation.assertions",
+          )
+          exact_keys(
+              value["privacy"],
+              {
+                  "devpostCredentialsIncluded",
+                  "pseudonymousEntrantCommitmentIncluded",
+                  "rawEntrantPersonalDataIncluded",
+                  "rawFeedbackIncluded",
+              },
+              "confirmation.privacy",
+          )
+          if value["schemaVersion"] != "archon.submission-feedback-confirmation/v1":
+              raise SystemExit("unexpected feedback confirmation schema")
+          if value["challengeUrl"] != "https://datahub.devpost.com/":
+              raise SystemExit("unexpected challenge URL")
+          if value["officialRulesUrl"] != "https://datahub.devpost.com/rules":
+              raise SystemExit("unexpected official rules URL")
+          if value["status"] != "submitted":
+              raise SystemExit("feedback confirmation must be submitted")
+          if value["entrant"] != {
+              "bindingDigest": value["entrant"]["bindingDigest"],
+              "bindingScheme": "archon.salted-devpost-entrant-binding/v1",
+              "kind": "individual",
+          }:
+              raise SystemExit("entrant binding contract changed")
+          if value["confirmation"] != {
+              "digest": value["confirmation"]["digest"],
+              "scheme": "archon.salted-private-feedback-reference/v1",
+          }:
+              raise SystemExit("private confirmation reference contract changed")
+          digest = re.compile(r"^sha256:[0-9a-f]{64}$")
+          entrant_digest = value["entrant"]["bindingDigest"]
+          confirmation_digest = value["confirmation"]["digest"]
+          if not digest.fullmatch(entrant_digest):
+              raise SystemExit("entrant binding digest is invalid")
+          if not digest.fullmatch(confirmation_digest):
+              raise SystemExit("confirmation reference digest is invalid")
+          if entrant_digest == confirmation_digest:
+              raise SystemExit("entrant and confirmation digests must be domain-separated")
+          if value["assertions"] != {
+              "actionable": True,
+              "complete": True,
+              "distinctFeedbackSubmissionUnderRules": True,
+              "individualNotProjectPrize": True,
+              "oneEntryPerEntrant": True,
+              "potentialImpact": True,
+              "registeredEntrant": True,
+              "viable": True,
+          }:
+              raise SystemExit("feedback eligibility or quality assertions are incomplete")
+          if value["privacy"] != {
+              "devpostCredentialsIncluded": False,
+              "pseudonymousEntrantCommitmentIncluded": True,
+              "rawEntrantPersonalDataIncluded": False,
+              "rawFeedbackIncluded": False,
+          }:
+              raise SystemExit("canonical evidence must contain no private form material")
+          submitted_text = value["submittedAt"]
+          if not isinstance(submitted_text, str) or not re.fullmatch(
+              r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", submitted_text
+          ):
+              raise SystemExit("submittedAt must be canonical UTC RFC3339")
+          submitted = dt.datetime.fromisoformat(
+              submitted_text.replace("Z", "+00:00")
+          )
+          now = dt.datetime.now(dt.timezone.utc)
+          if not start <= submitted <= deadline:
+              raise SystemExit("submittedAt is outside the official feedback period")
+          if submitted > now:
+              raise SystemExit("submittedAt is in the future")
+          canonical = (
+              json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+          ).encode()
+          if raw != canonical:
+              raise SystemExit("feedback confirmation must use canonical sorted JSON")
+          PY
+
+          fetch_public() {
+            local url="$1"
+            local output="$2"
+            local status
+            local attempt
+            for attempt in {1..4}; do
+              status="$(
+                curl \
+                  --fail-with-body \
+                  --silent \
+                  --show-error \
+                  --proto '=https' \
+                  --tlsv1.2 \
+                  --max-redirs 0 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  --max-filesize 2097152 \
+                  --output "${output}" \
+                  --write-out '%{http_code}' \
+                  "${url}"
+              )" && test "${status}" = "200" && return 0
+              if (( attempt < 4 )); then
+                sleep $(( attempt * 2 ))
+              fi
+            done
+            echo "::error::Unable to fetch authoritative public page ${url}"
+            return 1
+          }
+          fetch_public \
+            "https://datahub.devpost.com/rules" \
+            "${work}/rules.html"
+          fetch_public \
+            "https://datahub.devpost.com/" \
+            "${work}/challenge.html"
+          for page in "${work}/rules.html" "${work}/challenge.html"; do
+            test -f "${page}"
+            test ! -L "${page}"
+            page_size="$(stat --format='%s' "${page}")"
+            (( page_size >= 1 && page_size <= 2097152 ))
+          done
+          python3 - \
+            "${work}/rules.html" \
+            "${work}/challenge.html" \
+            "${work}/rules-projection.json" <<'PY'
+          import html
+          import json
+          import pathlib
+          import re
+          import sys
+          from html.parser import HTMLParser
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.values = []
+              def handle_data(self, data):
+                  self.values.append(data)
+
+          def visible_text(path):
+              parser = TextExtractor()
+              parser.feed(pathlib.Path(path).read_text(encoding="utf-8"))
+              return re.sub(
+                  r"\s+",
+                  " ",
+                  html.unescape(" ".join(parser.values)).replace("\xa0", " "),
+              ).strip()
+
+          rules = visible_text(sys.argv[1])
+          challenge = visible_text(sys.argv[2])
+          required_rules = (
+              "Feedback Period: July 6, 2026 (09:00 am Eastern Time)",
+              "August 10, 2026 (05:00 pm Eastern Time)",
+              "registered for the hackathon on Devpost",
+              "complete an online form",
+              "complete with actionable comments",
+              "One Feedback Submission per Entrant.",
+              "completeness, viability, and potential impact of the feedback",
+              "Feedback Prizes are awarded to individuals, not to Projects",
+          )
+          for required in required_rules:
+              if required not in rules:
+                  raise SystemExit(f"official feedback rule missing: {required}")
+          if "complete the feedback section during submission" not in challenge:
+              raise SystemExit("official challenge feedback-section wording changed")
+          projection = {
+              "authenticatedUiObserved": False,
+              "challengeUrl": "https://datahub.devpost.com/",
+              "completeActionableFeedbackRequired": True,
+              "distinctFeedbackSubmissionUnderRules": True,
+              "evaluationCriteria": [
+                  "completeness",
+                  "viability",
+                  "potential-impact",
+              ],
+              "feedbackDeadline": "2026-08-10T21:00:00Z",
+              "feedbackStart": "2026-07-06T13:00:00Z",
+              "individualNotProjectPrize": True,
+              "oneEntryPerEntrant": True,
+              "onlineFormRequired": True,
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "publicOverviewInstruction":
+                  "complete-feedback-section-during-submission",
+              "registeredEntrantRequired": True,
+              "schemaVersion": "archon.datahub-feedback-rules/v1",
+          }
+          pathlib.Path(sys.argv[3]).write_text(
+              json.dumps(projection, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Prepare immutable digest-bound feedback candidate
+        id: candidate
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/submission-bonus-feedback-prepare"
+          candidate_dir="${RUNNER_TEMP}/submission-bonus-feedback-candidate"
+          test ! -e "${candidate_dir}"
+          mkdir --mode=0700 "${candidate_dir}"
+          cp docs/SUBMISSION_FEEDBACK_CONFIRMATION.json \
+            "${candidate_dir}/confirmation.json"
+          rules_projection_digest="sha256:$(
+            sha256sum "${work}/rules-projection.json" | awk '{print $1}'
+          )"
+          observed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          jq -cnS \
+            --slurpfile semantics "${work}/rules-projection.json" \
+            --arg observedAt "${observed_at}" \
+            --arg semanticDigest "${rules_projection_digest}" '
+              {
+                schemaVersion:
+                  "archon.submission-feedback-rules-observation/v1",
+                observedAt: $observedAt,
+                semanticDigest: $semanticDigest,
+                semantics: $semantics[0]
+              }
+            ' >"${candidate_dir}/rules-observation.json"
+          canonical_evidence_digest="sha256:$(
+            sha256sum "${candidate_dir}/confirmation.json" | awk '{print $1}'
+          )"
+          rules_observation_digest="sha256:$(
+            sha256sum "${candidate_dir}/rules-observation.json" | awk '{print $1}'
+          )"
+          confirmation_digest="$(
+            jq -er '.confirmation.digest' "${candidate_dir}/confirmation.json"
+          )"
+          entrant_binding_digest="$(
+            jq -er '.entrant.bindingDigest' "${candidate_dir}/confirmation.json"
+          )"
+          submitted_at="$(
+            jq -er '.submittedAt' "${candidate_dir}/confirmation.json"
+          )"
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg workflowPath \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg canonicalEvidenceDigest "${canonical_evidence_digest}" \
+            --arg confirmationDigest "${confirmation_digest}" \
+            --arg entrantBindingDigest "${entrant_binding_digest}" \
+            --arg submittedAt "${submitted_at}" \
+            --arg rulesObservationDigest "${rules_observation_digest}" \
+            --arg rulesProjectionDigest "${rules_projection_digest}" \
+            --arg rulesObservedAt "${observed_at}" '
+              {
+                schemaVersion:
+                  "archon.submission-feedback-candidate/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                evidence: {
+                  path: "confirmation.json",
+                  digest: $canonicalEvidenceDigest
+                },
+                confirmationDigest: $confirmationDigest,
+                entrantBindingDigest: $entrantBindingDigest,
+                submittedAt: $submittedAt,
+                rules: {
+                  path: "rules-observation.json",
+                  observationDigest: $rulesObservationDigest,
+                  projectionDigest: $rulesProjectionDigest,
+                  observedAt: $rulesObservedAt
+                },
+                privacy: {
+                  devpostCredentialsIncluded: false,
+                  pseudonymousEntrantCommitmentIncluded: true,
+                  rawEntrantPersonalDataIncluded: false,
+                  rawFeedbackIncluded: false
+                }
+              }
+            ' >"${candidate_dir}/candidate.json"
+          (
+            cd "${candidate_dir}"
+            sha256sum \
+              candidate.json \
+              confirmation.json \
+              rules-observation.json >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          candidate_digest="sha256:$(
+            sha256sum "${candidate_dir}/candidate.json" | awk '{print $1}'
+          )"
+          {
+            echo "artifact_name=submission-bonus-feedback-candidate-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "candidate_digest=${candidate_digest}"
+            echo "canonical_evidence_digest=${canonical_evidence_digest}"
+            echo "confirmation_digest=${confirmation_digest}"
+            echo "entrant_binding_digest=${entrant_binding_digest}"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "rules_projection_digest=${rules_projection_digest}"
+            echo "submitted_at=${submitted_at}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Upload immutable feedback candidate
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-bonus-feedback-candidate
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 90
+          compression-level: 0
+
+      - name: Publish exact private-review approval request
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+          CANDIDATE_ARTIFACT_ID: ${{ steps.upload.outputs['artifact-id'] }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.candidate_digest }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ steps.candidate.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ steps.candidate.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ steps.candidate.outputs.entrant_binding_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SUBMITTED_AT: ${{ steps.candidate.outputs.submitted_at }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
+          {
+            echo "### Independent private feedback confirmation required"
+            echo
+            echo "A configured reviewer must privately verify the authenticated Devpost confirmation, registration, one-entry limit, and complete/actionable/viable/potentially impactful feedback."
+            echo "No answers, raw entrant identifiers, cookies, credentials, screenshots, or private confirmation bytes may be placed in the approval comment or workflow."
+            echo
+            echo "Approve the protected environment with this exact comment:"
+            echo
+            echo "\`${approval}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  review:
+    name: Independently approve and seal feedback evidence
+    needs: prepare
+    if: needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: submission-bonus-feedback
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      producer_attempt: ${{ steps.package.outputs.producer_attempt }}
+    steps:
+      - name: Verify exact independent protected-environment approval
+        id: approval
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANONICAL_EVIDENCE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CONFIRMATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${ENTRANT_BINDING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          (( CANDIDATE_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          expected_approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
+
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback"
+          )"
+          environment_id="$(jq -er '
+            select(
+              .name == "submission-bonus-feedback" and
+              (.id | type) == "number" and
+              .id > 0 and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == true and
+              ($rules[0].reviewers | length) >= 1 and
+              all(
+                $rules[0].reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0 and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | length) > 0
+              )
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid independent reviewer posture")
+            end
+          ' <<<"${environment_json}")"
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"] and
+            [.[].branch_policies[].type] == ["branch"]
+          ' <<<"${policies}" >/dev/null
+
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${run}" >/dev/null
+          actor_id="$(jq -er '.actor.id' <<<"${run}")"
+          triggering_actor_id="$(jq -er '.triggering_actor.id' <<<"${run}")"
+          [[ "${actor_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          matched="$(jq -ce \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | type) == "array" and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-bonus-feedback" and
+                  .environments[0].id == $environmentId and
+                  (.user.id | type) == "number" and
+                  (.user.login | type) == "string" and
+                  (.user.id as $id | ($reviewerIds | index($id)) != null) and
+                  .user.id != $actorId and
+                  .user.id != $triggeringActorId
+                )
+              ] |
+              if length == 1 then .[0]
+              else error("expected exactly one matching independent approval")
+              end
+            ' <<<"${approvals}")" || {
+            echo "::error::Missing one exact independent feedback approval"
+            exit 1
+          }
+          review_job_started_at=""
+          for api_attempt in {1..12}; do
+            jobs="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=all&per_page=100"
+            )"
+            if review_job_started_at="$(jq -er \
+              --argjson attempt "${GITHUB_RUN_ATTEMPT}" '
+                [
+                  .[].jobs[] |
+                  select(
+                    .name ==
+                      "Independently approve and seal feedback evidence" and
+                    .run_attempt == $attempt and
+                    .status == "in_progress" and
+                    .conclusion == null and
+                    (.started_at | type) == "string"
+                  ) |
+                  .started_at
+                ] |
+                if length == 1 then .[0]
+                else error("review job identity is missing or ambiguous")
+                end
+              ' <<<"${jobs}")"; then
+              break
+            fi
+            review_job_started_at=""
+            if (( api_attempt < 12 )); then
+              sleep 2
+            fi
+          done
+          test -n "${review_job_started_at}"
+          python3 - \
+            "${SUBMITTED_AT}" \
+            "${review_job_started_at}" \
+            "${FEEDBACK_START}" \
+            "${FEEDBACK_DEADLINE}" <<'PY'
+          import datetime as dt
+          import sys
+
+          values = [
+              dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              for value in sys.argv[1:]
+          ]
+          submitted, review_job_started, start, deadline = values
+          now = dt.datetime.now(dt.timezone.utc)
+          if not start <= submitted <= review_job_started <= deadline:
+              raise SystemExit("feedback submission/review-job ordering is invalid")
+          if review_job_started > now + dt.timedelta(minutes=1):
+              raise SystemExit("review job start timestamp is in the future")
+          PY
+
+          receipt_dir="${RUNNER_TEMP}/submission-bonus-feedback-approval"
+          test ! -e "${receipt_dir}"
+          mkdir --mode=0700 "${receipt_dir}"
+          receipt="${receipt_dir}/approval-receipt.json"
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg workflowPath \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg reviewJobStartedAt "${review_job_started_at}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched}")" \
+            --arg reviewerLogin "$(jq -er '.user.login' <<<"${matched}")" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg canonicalEvidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson actorId "${actor_id}" \
+            --argjson triggeringActorId "${triggering_actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerId "$(jq -er '.user.id' <<<"${matched}")" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" '
+              {
+                schemaVersion:
+                  "archon.submission-feedback-approval/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  ref: $workflowRef,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  actorId: $actorId,
+                  triggeringActorId: $triggeringActorId
+                },
+                environment: {
+                  name: "submission-bonus-feedback",
+                  id: $environmentId
+                },
+                approval: {
+                  reviewer: {
+                    id: $reviewerId,
+                    login: $reviewerLogin
+                  },
+                  comment: $comment,
+                  authoritativeApprovalTimestampAvailable: false,
+                  reviewJobStartedAt: $reviewJobStartedAt
+                },
+                candidate: {
+                  runAttempt: $candidateRunAttempt,
+                  artifactId: $candidateArtifactId,
+                  artifactDigest: $candidateArtifactDigest,
+                  digest: $candidateDigest,
+                  canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                  confirmationDigest: $confirmationDigest,
+                  entrantBindingDigest: $entrantBindingDigest,
+                  submittedAt: $submittedAt
+                }
+              }
+            ' >"${receipt}"
+          receipt_digest="sha256:$(
+            sha256sum "${receipt}" | awk '{print $1}'
+          )"
+          comment_digest="sha256:$(
+            printf '%s' "${expected_approval}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          {
+            echo "actor_id=${actor_id}"
+            echo "comment_digest=${comment_digest}"
+            echo "environment_id=${environment_id}"
+            echo "receipt_digest=${receipt_digest}"
+            echo "receipt_path=${receipt}"
+            echo "review_job_started_at=${review_job_started_at}"
+            echo "reviewer_id=$(jq -er '.user.id' <<<"${matched}")"
+            echo "triggering_actor_id=${triggering_actor_id}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Check out the exact protected producer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve exact current-attempt candidate artifact
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          gate="${RUNNER_TEMP}/submission-bonus-feedback-review-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy exact-current \
+              --artifact-prefix "submission-bonus-feedback-candidate-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${CANDIDATE_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name \
+              "submission-bonus-feedback-candidate-${RELEASE_SHA}-${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson attempt "${CANDIDATE_RUN_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest and
+              .metadata.expired == false
+            ' <<<"${selected}" >/dev/null
+          direct="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name \
+              "submission-bonus-feedback-candidate-${RELEASE_SHA}-${CANDIDATE_RUN_ATTEMPT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release and
+              .workflow_run.repository_id > 0 and
+              (.archive_download_url |
+                startswith("https://api.github.com/repos/" + $repository + "/actions/artifacts/"))
+            ' <<<"${direct}" >/dev/null
+
+      - name: Download exact immutable feedback candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-bonus-feedback-candidate-reviewed
+
+      - name: Independently revalidate private-reference candidate and public rules
+        env:
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          RULES_PROJECTION_DIGEST: ${{ needs.prepare.outputs.rules_projection_digest }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-bonus-feedback-candidate-reviewed"
+          test -d "${root}"
+          test "$(
+            find "${root}" -type l -print -quit
+          )" = ""
+          test "$(
+            find "${root}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              candidate.json \
+              confirmation.json \
+              rules-observation.json |
+              LC_ALL=C sort
+          )"
+          test "$(
+            find "${root}" -type d -printf '%P\n' | sed '/^$/d' | LC_ALL=C sort
+          )" = ""
+          total_size="$(
+            find "${root}" -type f -printf '%s\n' |
+              awk '{sum += $1} END {print sum + 0}'
+          )"
+          (( total_size >= 1 && total_size <= 32768 ))
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "sha256:$(
+            sha256sum "${root}/candidate.json" | awk '{print $1}'
+          )" = "${CANDIDATE_DIGEST}"
+          test "sha256:$(
+            sha256sum "${root}/confirmation.json" | awk '{print $1}'
+          )" = "${CANONICAL_EVIDENCE_DIGEST}"
+          cmp --silent \
+            docs/SUBMISSION_FEEDBACK_CONFIRMATION.json \
+            "${root}/confirmation.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg evidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --arg rulesDigest "${RULES_PROJECTION_DIGEST}" '
+              (keys | sort) == [
+                "confirmationDigest",
+                "entrantBindingDigest",
+                "evidence",
+                "privacy",
+                "releaseSha",
+                "repository",
+                "rules",
+                "schemaVersion",
+                "submittedAt",
+                "workflow"
+              ] and
+              .schemaVersion ==
+                "archon.submission-feedback-candidate/v1" and
+              .repository == $repository and
+              .releaseSha == $release and
+              .workflow == {
+                path: ".github/workflows/submission-bonus-feedback.yml",
+                runId: $runId,
+                runAttempt: $runAttempt
+              } and
+              .evidence == {
+                path: "confirmation.json",
+                digest: $evidenceDigest
+              } and
+              .confirmationDigest == $confirmationDigest and
+              .entrantBindingDigest == $entrantBindingDigest and
+              .submittedAt == $submittedAt and
+              .rules.path == "rules-observation.json" and
+              .rules.projectionDigest == $rulesDigest and
+              (.rules.observationDigest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              (.rules.observedAt |
+                test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+              .privacy == {
+                devpostCredentialsIncluded: false,
+                pseudonymousEntrantCommitmentIncluded: true,
+                rawEntrantPersonalDataIncluded: false,
+                rawFeedbackIncluded: false
+              }
+            ' "${root}/candidate.json" >/dev/null
+          test "sha256:$(
+            sha256sum "${root}/rules-observation.json" | awk '{print $1}'
+          )" = "$(
+            jq -er '.rules.observationDigest' "${root}/candidate.json"
+          )"
+
+          fresh="${RUNNER_TEMP}/submission-bonus-feedback-review-rules"
+          test ! -e "${fresh}"
+          mkdir --mode=0700 "${fresh}"
+          fetch_public() {
+            local url="$1"
+            local output="$2"
+            local status
+            local attempt
+            for attempt in {1..4}; do
+              status="$(
+                curl \
+                  --fail-with-body \
+                  --silent \
+                  --show-error \
+                  --proto '=https' \
+                  --tlsv1.2 \
+                  --max-redirs 0 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  --max-filesize 2097152 \
+                  --output "${output}" \
+                  --write-out '%{http_code}' \
+                  "${url}"
+              )" && test "${status}" = "200" && return 0
+              if (( attempt < 4 )); then
+                sleep $(( attempt * 2 ))
+              fi
+            done
+            return 1
+          }
+          fetch_public \
+            "https://datahub.devpost.com/rules" \
+            "${fresh}/rules.html"
+          fetch_public \
+            "https://datahub.devpost.com/" \
+            "${fresh}/challenge.html"
+          python3 - \
+            "${fresh}/rules.html" \
+            "${fresh}/challenge.html" \
+            "${fresh}/rules-projection.json" <<'PY'
+          import html
+          import json
+          import pathlib
+          import re
+          import sys
+          from html.parser import HTMLParser
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.values = []
+              def handle_data(self, data):
+                  self.values.append(data)
+
+          def text(path):
+              parser = TextExtractor()
+              parser.feed(pathlib.Path(path).read_text(encoding="utf-8"))
+              return re.sub(
+                  r"\s+", " ",
+                  html.unescape(" ".join(parser.values)).replace("\xa0", " "),
+              ).strip()
+
+          rules = text(sys.argv[1])
+          challenge = text(sys.argv[2])
+          required = (
+              "Feedback Period: July 6, 2026 (09:00 am Eastern Time)",
+              "August 10, 2026 (05:00 pm Eastern Time)",
+              "registered for the hackathon on Devpost",
+              "complete an online form",
+              "complete with actionable comments",
+              "One Feedback Submission per Entrant.",
+              "completeness, viability, and potential impact of the feedback",
+              "Feedback Prizes are awarded to individuals, not to Projects",
+          )
+          if any(value not in rules for value in required):
+              raise SystemExit("official feedback rule changed")
+          if "complete the feedback section during submission" not in challenge:
+              raise SystemExit("official feedback-section wording changed")
+          projection = {
+              "authenticatedUiObserved": False,
+              "challengeUrl": "https://datahub.devpost.com/",
+              "completeActionableFeedbackRequired": True,
+              "distinctFeedbackSubmissionUnderRules": True,
+              "evaluationCriteria": [
+                  "completeness", "viability", "potential-impact"
+              ],
+              "feedbackDeadline": "2026-08-10T21:00:00Z",
+              "feedbackStart": "2026-07-06T13:00:00Z",
+              "individualNotProjectPrize": True,
+              "oneEntryPerEntrant": True,
+              "onlineFormRequired": True,
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "publicOverviewInstruction":
+                  "complete-feedback-section-during-submission",
+              "registeredEntrantRequired": True,
+              "schemaVersion": "archon.datahub-feedback-rules/v1",
+          }
+          pathlib.Path(sys.argv[3]).write_text(
+              json.dumps(projection, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          test "sha256:$(
+            sha256sum "${fresh}/rules-projection.json" | awk '{print $1}'
+          )" = "${RULES_PROJECTION_DIGEST}"
+          jq -cS '.semantics' "${root}/rules-observation.json" \
+            >"${fresh}/retained-semantics.json"
+          jq -cS . "${fresh}/rules-projection.json" \
+            >"${fresh}/fresh-semantics.json"
+          cmp --silent \
+            "${fresh}/retained-semantics.json" \
+            "${fresh}/fresh-semantics.json"
+
+      - name: Assemble exact protected BONUS-FEEDBACK facts
+        id: package
+        env:
+          ACTOR_ID: ${{ steps.approval.outputs.actor_id }}
+          APPROVAL_COMMENT_DIGEST: ${{ steps.approval.outputs.comment_digest }}
+          APPROVAL_RECEIPT_DIGEST: ${{ steps.approval.outputs.receipt_digest }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          ENVIRONMENT_ID: ${{ steps.approval.outputs.environment_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEW_JOB_STARTED_AT: ${{ steps.approval.outputs.review_job_started_at }}
+          REVIEWER_ID: ${{ steps.approval.outputs.reviewer_id }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+          TRIGGERING_ACTOR_ID: ${{ steps.approval.outputs.triggering_actor_id }}
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/submission-bonus-feedback-candidate-reviewed"
+          facts="${RUNNER_TEMP}/submission-bonus-feedback-facts"
+          output="${RUNNER_TEMP}/submission-bonus-feedback-standard"
+          work="${RUNNER_TEMP}/submission-bonus-feedback-review-package"
+          test ! -e "${facts}"
+          test ! -e "${output}"
+          test ! -e "${work}"
+          mkdir --mode=0700 "${facts}" "${output}" "${work}"
+          rules_projection_digest="$(
+            jq -er '.rules.projectionDigest' "${candidate}/candidate.json"
+          )"
+          rules_observed_at="$(
+            jq -er '.rules.observedAt' "${candidate}/candidate.json"
+          )"
+          jq -cnS \
+            --slurpfile confirmation "${candidate}/confirmation.json" \
+            --arg canonicalEvidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --arg rulesProjectionDigest "${rules_projection_digest}" \
+            --arg rulesObservedAt "${rules_observed_at}" \
+            --arg reviewJobStartedAt "${REVIEW_JOB_STARTED_AT}" \
+            --arg environment "submission-bonus-feedback" \
+            --arg workflowPath \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg approvalCommentDigest "${APPROVAL_COMMENT_DIGEST}" \
+            --arg approvalReceiptDigest "${APPROVAL_RECEIPT_DIGEST}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson environmentId "${ENVIRONMENT_ID}" \
+            --argjson actorId "${ACTOR_ID}" \
+            --argjson triggeringActorId "${TRIGGERING_ACTOR_ID}" \
+            --argjson reviewerId "${REVIEWER_ID}" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" '
+              {
+                challengeUrl: "https://datahub.devpost.com/",
+                officialRulesUrl: "https://datahub.devpost.com/rules",
+                status: "submitted",
+                submittedAt: $submittedAt,
+                canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                confirmationDigest: $confirmationDigest,
+                entrantBindingDigest: $entrantBindingDigest,
+                entrantKind: "individual",
+                registeredEntrant: true,
+                oneEntryPerEntrant: true,
+                individualNotProjectPrize: true,
+                distinctFeedbackSubmissionUnderRules: true,
+                feedbackQuality: {
+                  complete: true,
+                  actionable: true,
+                  viable: true,
+                  potentialImpact: true
+                },
+                privacyDisclosure: {
+                  rawFeedbackIncluded: false,
+                  rawEntrantPersonalDataIncluded: false,
+                  devpostCredentialsIncluded: false,
+                  privateConfirmationBytesIncluded: false,
+                  pseudonymousEntrantCommitmentIncluded: true,
+                  publicReviewerNumericIdentifierIncluded: true
+                },
+                rulesObservation: {
+                  observedAt: $rulesObservedAt,
+                  feedbackStart: "2026-07-06T13:00:00Z",
+                  feedbackDeadline: "2026-08-10T21:00:00Z",
+                  semanticDigest: $rulesProjectionDigest,
+                  authenticatedUiObserved: false,
+                  publicOverviewInstruction:
+                    "complete-feedback-section-during-submission"
+                },
+                approvalTiming: {
+                  authoritativeApprovalTimestampAvailable: false,
+                  reviewJobStartedAt: $reviewJobStartedAt
+                },
+                reviewApproval: {
+                  environment: $environment,
+                  workflowPath: $workflowPath,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  environmentId: $environmentId,
+                  workflowActorId: $actorId,
+                  triggeringActorId: $triggeringActorId,
+                  reviewerId: $reviewerId,
+                  candidateRunAttempt: $candidateRunAttempt,
+                  candidateArtifactId: $candidateArtifactId,
+                  candidateArtifactDigest: $candidateArtifactDigest,
+                  candidateDigest: $candidateDigest,
+                  canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                  confirmationDigest: $confirmationDigest,
+                  approvalCommentDigest: $approvalCommentDigest,
+                  approvalReceiptDigest: $approvalReceiptDigest
+                }
+              }
+            ' >"${facts}/BONUS-FEEDBACK.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            assemble-standard \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-feedback \
+            --facts-dir "${facts}" \
+            --output-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${work}/assembled-validation.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-feedback \
+            --source-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${work}/retained-validation.json"
+          cmp --silent \
+            "${work}/assembled-validation.json" \
+            "${work}/retained-validation.json"
+          jq -e '
+            .sourceKey == "bonus-feedback" and
+            .workflowPath ==
+              ".github/workflows/submission-bonus-feedback.yml" and
+            .subjectCount == 3 and
+            .proofIds == ["BONUS-FEEDBACK"] and
+            .result == "verified"
+          ' "${work}/retained-validation.json" >/dev/null
+          test "$(
+            find "${output}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/BONUS-FEEDBACK.json \
+              support/BONUS-FEEDBACK/feedback-confirmation.json |
+              LC_ALL=C sort
+          )"
+          (
+            cd "${output}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            awk '{print $2}' "${output}/SHA256SUMS"
+          )" = "$(
+            printf '%s\n' \
+              attestation-predicate.json \
+              proofs/BONUS-FEEDBACK.json \
+              support/BONUS-FEEDBACK/feedback-confirmation.json |
+              LC_ALL=C sort
+          )"
+          {
+            echo "artifact_name=submission-bonus-feedback-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Recheck candidate approval and master before retention
+        env:
+          ACTOR_ID: ${{ steps.approval.outputs.actor_id }}
+          APPROVAL_COMMENT_DIGEST: ${{ steps.approval.outputs.comment_digest }}
+          APPROVAL_RECEIPT_DIGEST: ${{ steps.approval.outputs.receipt_digest }}
+          APPROVAL_RECEIPT_PATH: ${{ steps.approval.outputs.receipt_path }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          ENVIRONMENT_ID: ${{ steps.approval.outputs.environment_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEWER_ID: ${{ steps.approval.outputs.reviewer_id }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+          TRIGGERING_ACTOR_ID: ${{ steps.approval.outputs.triggering_actor_id }}
+        run: |
+          set -euo pipefail
+          expected_approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
+          for identifier in \
+            "${ACTOR_ID}" \
+            "${TRIGGERING_ACTOR_ID}" \
+            "${REVIEWER_ID}" \
+            "${ENVIRONMENT_ID}"; do
+            [[ "${identifier}" =~ ^[1-9][0-9]*$ ]]
+          done
+          test "${REVIEWER_ID}" != "${ACTOR_ID}"
+          test "${REVIEWER_ID}" != "${TRIGGERING_ACTOR_ID}"
+          test "sha256:$(
+            printf '%s' "${expected_approval}" | sha256sum | awk '{print $1}'
+          )" = "${APPROVAL_COMMENT_DIGEST}"
+          test -f "${APPROVAL_RECEIPT_PATH}"
+          test ! -L "${APPROVAL_RECEIPT_PATH}"
+          test "sha256:$(
+            sha256sum "${APPROVAL_RECEIPT_PATH}" | awk '{print $1}'
+          )" = "${APPROVAL_RECEIPT_DIGEST}"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${run}" >/dev/null
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          direct="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${direct}" >/dev/null
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          jq -e \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${ACTOR_ID}" \
+            --argjson environmentId "${ENVIRONMENT_ID}" \
+            --argjson reviewerId "${REVIEWER_ID}" \
+            --argjson triggeringActorId "${TRIGGERING_ACTOR_ID}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-bonus-feedback" and
+                  .environments[0].id == $environmentId and
+                  .user.id == $reviewerId and
+                  .user.id != $actorId and
+                  .user.id != $triggeringActorId
+                )
+              ] |
+              length == 1
+            ' <<<"${approvals}" >/dev/null
+          (
+            cd "${RUNNER_TEMP}/submission-bonus-feedback-standard"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Retain exact checksum-sealed feedback subjects
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-bonus-feedback-standard
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 90
+          compression-level: 0
+
+  attest:
+    name: Independently revalidate and attest feedback evidence
+    needs:
+      - prepare
+      - review
+    if: >-
+      needs.prepare.result == 'success' &&
+      needs.review.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind attester to the exact current release and workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${run}" >/dev/null
+
+      - name: Check out the exact unprivileged attester
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve latest retained producer and exact candidate artifacts
+        id: artifacts
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ARTIFACT_DIGEST: ${{ needs.review.outputs.artifact_digest }}
+          PRODUCER_ARTIFACT_ID: ${{ needs.review.outputs.artifact_id }}
+          PRODUCER_ARTIFACT_NAME: ${{ needs.review.outputs.artifact_name }}
+          PRODUCER_ATTEMPT: ${{ needs.review.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          [[ "${PRODUCER_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( PRODUCER_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          (( CANDIDATE_RUN_ATTEMPT <= PRODUCER_ATTEMPT ))
+          [[ "${PRODUCER_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gate="${RUNNER_TEMP}/submission-bonus-feedback-attester-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          producer="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-bonus-feedback-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          candidate="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy exact-current \
+              --artifact-prefix "submission-bonus-feedback-candidate-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${CANDIDATE_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          jq -e \
+            --arg digest "${PRODUCER_ARTIFACT_DIGEST}" \
+            --arg name "${PRODUCER_ARTIFACT_NAME}" \
+            --argjson artifactId "${PRODUCER_ARTIFACT_ID}" \
+            --argjson attempt "${PRODUCER_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest and
+              .metadata.expired == false
+            ' <<<"${producer}" >/dev/null
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name \
+              "submission-bonus-feedback-candidate-${RELEASE_SHA}-${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson attempt "${CANDIDATE_RUN_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest and
+              .metadata.expired == false
+            ' <<<"${candidate}" >/dev/null
+          for artifact_id in \
+            "${PRODUCER_ARTIFACT_ID}" \
+            "${CANDIDATE_ARTIFACT_ID}"; do
+            direct="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            )"
+            jq -e \
+              --arg release "${RELEASE_SHA}" \
+              --argjson runId "${GITHUB_RUN_ID}" '
+                .expired == false and
+                .workflow_run.id == $runId and
+                .workflow_run.head_sha == $release
+              ' <<<"${direct}" >/dev/null
+          done
+          {
+            echo "candidate_artifact_id=${CANDIDATE_ARTIFACT_ID}"
+            echo "candidate_attempt=${CANDIDATE_RUN_ATTEMPT}"
+            echo "producer_artifact_id=${PRODUCER_ARTIFACT_ID}"
+            echo "producer_attempt=${PRODUCER_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact retained feedback subjects
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.producer_artifact_id }}
+          path: ${{ runner.temp }}/submission-bonus-feedback-attestation
+
+      - name: Download exact approved feedback candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.candidate_artifact_id }}
+          path: ${{ runner.temp }}/submission-bonus-feedback-candidate-attester
+
+      - name: Independently rederive candidate rules approval and retained facts
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.artifacts.outputs.candidate_attempt }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ steps.artifacts.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          RULES_PROJECTION_DIGEST: ${{ needs.prepare.outputs.rules_projection_digest }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/submission-bonus-feedback-candidate-attester"
+          retained="${RUNNER_TEMP}/submission-bonus-feedback-attestation"
+          for root in "${candidate}" "${retained}"; do
+            test -d "${root}"
+            test "$(find "${root}" -type l -print -quit)" = ""
+          done
+          test "$(
+            find "${candidate}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              candidate.json \
+              confirmation.json \
+              rules-observation.json |
+              LC_ALL=C sort
+          )"
+          test "$(
+            find "${retained}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/BONUS-FEEDBACK.json \
+              support/BONUS-FEEDBACK/feedback-confirmation.json |
+              LC_ALL=C sort
+          )"
+          for root in "${candidate}" "${retained}"; do
+            total_size="$(
+              find "${root}" -type f -printf '%s\n' |
+                awk '{sum += $1} END {print sum + 0}'
+            )"
+            (( total_size >= 1 && total_size <= 131072 ))
+            (
+              cd "${root}"
+              sha256sum --check --strict SHA256SUMS
+            )
+          done
+          test "sha256:$(
+            sha256sum "${candidate}/candidate.json" | awk '{print $1}'
+          )" = "${CANDIDATE_DIGEST}"
+          test "sha256:$(
+            sha256sum "${candidate}/confirmation.json" | awk '{print $1}'
+          )" = "${CANONICAL_EVIDENCE_DIGEST}"
+          cmp --silent \
+            docs/SUBMISSION_FEEDBACK_CONFIRMATION.json \
+            "${candidate}/confirmation.json"
+          test "$(
+            jq -er '.confirmation.digest' "${candidate}/confirmation.json"
+          )" = "${CONFIRMATION_DIGEST}"
+          test "$(
+            jq -er '.entrant.bindingDigest' "${candidate}/confirmation.json"
+          )" = "${ENTRANT_BINDING_DIGEST}"
+          test "$(
+            jq -er '.submittedAt' "${candidate}/confirmation.json"
+          )" = "${SUBMITTED_AT}"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --arg evidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --arg rulesDigest "${RULES_PROJECTION_DIGEST}" '
+              .schemaVersion ==
+                "archon.submission-feedback-candidate/v1" and
+              .repository == $repository and
+              .releaseSha == $release and
+              .workflow == {
+                path: ".github/workflows/submission-bonus-feedback.yml",
+                runId: $runId,
+                runAttempt: $runAttempt
+              } and
+              .evidence.digest == $evidenceDigest and
+              .confirmationDigest == $confirmationDigest and
+              .entrantBindingDigest == $entrantBindingDigest and
+              .submittedAt == $submittedAt and
+              .rules.projectionDigest == $rulesDigest and
+              .privacy == {
+                devpostCredentialsIncluded: false,
+                pseudonymousEntrantCommitmentIncluded: true,
+                rawEntrantPersonalDataIncluded: false,
+                rawFeedbackIncluded: false
+              }
+            ' "${candidate}/candidate.json" >/dev/null
+
+          fresh="${RUNNER_TEMP}/submission-bonus-feedback-attester-rules"
+          test ! -e "${fresh}"
+          mkdir --mode=0700 "${fresh}"
+          fetch_public() {
+            local url="$1"
+            local output="$2"
+            local status
+            local attempt
+            for attempt in {1..4}; do
+              status="$(
+                curl \
+                  --fail-with-body \
+                  --silent \
+                  --show-error \
+                  --proto '=https' \
+                  --tlsv1.2 \
+                  --max-redirs 0 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  --max-filesize 2097152 \
+                  --output "${output}" \
+                  --write-out '%{http_code}' \
+                  "${url}"
+              )" && test "${status}" = "200" && return 0
+              if (( attempt < 4 )); then
+                sleep $(( attempt * 2 ))
+              fi
+            done
+            return 1
+          }
+          fetch_public \
+            "https://datahub.devpost.com/rules" \
+            "${fresh}/rules.html"
+          fetch_public \
+            "https://datahub.devpost.com/" \
+            "${fresh}/challenge.html"
+          python3 - \
+            "${fresh}/rules.html" \
+            "${fresh}/challenge.html" \
+            "${fresh}/rules-projection.json" <<'PY'
+          import html
+          import json
+          import pathlib
+          import re
+          import sys
+          from html.parser import HTMLParser
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.values = []
+              def handle_data(self, data):
+                  self.values.append(data)
+
+          def text(path):
+              parser = TextExtractor()
+              parser.feed(pathlib.Path(path).read_text(encoding="utf-8"))
+              return re.sub(
+                  r"\s+", " ",
+                  html.unescape(" ".join(parser.values)).replace("\xa0", " "),
+              ).strip()
+
+          rules = text(sys.argv[1])
+          challenge = text(sys.argv[2])
+          required = (
+              "Feedback Period: July 6, 2026 (09:00 am Eastern Time)",
+              "August 10, 2026 (05:00 pm Eastern Time)",
+              "registered for the hackathon on Devpost",
+              "complete an online form",
+              "complete with actionable comments",
+              "One Feedback Submission per Entrant.",
+              "completeness, viability, and potential impact of the feedback",
+              "Feedback Prizes are awarded to individuals, not to Projects",
+          )
+          if any(value not in rules for value in required):
+              raise SystemExit("official feedback rule changed")
+          if "complete the feedback section during submission" not in challenge:
+              raise SystemExit("official feedback-section wording changed")
+          projection = {
+              "authenticatedUiObserved": False,
+              "challengeUrl": "https://datahub.devpost.com/",
+              "completeActionableFeedbackRequired": True,
+              "distinctFeedbackSubmissionUnderRules": True,
+              "evaluationCriteria": [
+                  "completeness", "viability", "potential-impact"
+              ],
+              "feedbackDeadline": "2026-08-10T21:00:00Z",
+              "feedbackStart": "2026-07-06T13:00:00Z",
+              "individualNotProjectPrize": True,
+              "oneEntryPerEntrant": True,
+              "onlineFormRequired": True,
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "publicOverviewInstruction":
+                  "complete-feedback-section-during-submission",
+              "registeredEntrantRequired": True,
+              "schemaVersion": "archon.datahub-feedback-rules/v1",
+          }
+          pathlib.Path(sys.argv[3]).write_text(
+              json.dumps(projection, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          test "sha256:$(
+            sha256sum "${fresh}/rules-projection.json" | awk '{print $1}'
+          )" = "${RULES_PROJECTION_DIGEST}"
+          jq -cS '.semantics' "${candidate}/rules-observation.json" \
+            >"${fresh}/retained-semantics.json"
+          jq -cS . "${fresh}/rules-projection.json" \
+            >"${fresh}/fresh-semantics.json"
+          cmp --silent \
+            "${fresh}/retained-semantics.json" \
+            "${fresh}/fresh-semantics.json"
+
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback"
+          )"
+          environment_id="$(jq -er '
+            select(
+              .name == "submission-bonus-feedback" and
+              (.id | type) == "number" and
+              .id > 0 and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == true and
+              ($rules[0].reviewers | length) >= 1 and
+              all(
+                $rules[0].reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0
+              )
+            )
+            then ([$rules[0].reviewers[].reviewer.id] | sort | unique)
+            else error("invalid independent reviewer posture")
+            end
+          ' <<<"${environment_json}")"
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-bonus-feedback/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"] and
+            [.[].branch_policies[].type] == ["branch"]
+          ' <<<"${policies}" >/dev/null
+          producer_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${PRODUCER_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${PRODUCER_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${producer_run}" >/dev/null
+          actor_id="$(jq -er '.actor.id' <<<"${producer_run}")"
+          triggering_actor_id="$(
+            jq -er '.triggering_actor.id' <<<"${producer_run}"
+          )"
+          jobs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=all&per_page=100"
+          )"
+          review_job_started_at="$(jq -er \
+            --argjson attempt "${PRODUCER_ATTEMPT}" '
+              [
+                .[].jobs[] |
+                select(
+                  .name ==
+                    "Independently approve and seal feedback evidence" and
+                  .run_attempt == $attempt and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  (.started_at | type) == "string"
+                ) |
+                .started_at
+              ] |
+              if length == 1 then .[0]
+              else error("successful review job is missing or ambiguous")
+              end
+            ' <<<"${jobs}")"
+          expected_approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${PRODUCER_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          matched="$(jq -ce \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-bonus-feedback" and
+                  .environments[0].id == $environmentId and
+                  (.user.id as $id | ($reviewerIds | index($id)) != null) and
+                  .user.id != $actorId and
+                  .user.id != $triggeringActorId
+                )
+              ] |
+              if length == 1 then .[0]
+              else error("exact independent approval is missing or ambiguous")
+              end
+            ' <<<"${approvals}")"
+          python3 - \
+            "${SUBMITTED_AT}" \
+            "${review_job_started_at}" \
+            "${FEEDBACK_START}" \
+            "${FEEDBACK_DEADLINE}" <<'PY'
+          import datetime as dt
+          import sys
+          submitted, review_job_started, start, deadline = [
+              dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              for value in sys.argv[1:]
+          ]
+          if not start <= submitted <= review_job_started <= deadline:
+              raise SystemExit("feedback submission/review-job ordering is invalid")
+          PY
+          approval_dir="${RUNNER_TEMP}/submission-bonus-feedback-attester-approval"
+          test ! -e "${approval_dir}"
+          mkdir --mode=0700 "${approval_dir}"
+          receipt="${approval_dir}/approval-receipt.json"
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg workflowPath \
+              ".github/workflows/submission-bonus-feedback.yml" \
+            --arg workflowRef \
+              "${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml@refs/heads/master" \
+            --arg reviewJobStartedAt "${review_job_started_at}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched}")" \
+            --arg reviewerLogin "$(jq -er '.user.login' <<<"${matched}")" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg canonicalEvidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${PRODUCER_ATTEMPT}" \
+            --argjson actorId "${actor_id}" \
+            --argjson triggeringActorId "${triggering_actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerId "$(jq -er '.user.id' <<<"${matched}")" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" '
+              {
+                schemaVersion:
+                  "archon.submission-feedback-approval/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  ref: $workflowRef,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  actorId: $actorId,
+                  triggeringActorId: $triggeringActorId
+                },
+                environment: {
+                  name: "submission-bonus-feedback",
+                  id: $environmentId
+                },
+                approval: {
+                  reviewer: {
+                    id: $reviewerId,
+                    login: $reviewerLogin
+                  },
+                  comment: $comment,
+                  authoritativeApprovalTimestampAvailable: false,
+                  reviewJobStartedAt: $reviewJobStartedAt
+                },
+                candidate: {
+                  runAttempt: $candidateRunAttempt,
+                  artifactId: $candidateArtifactId,
+                  artifactDigest: $candidateArtifactDigest,
+                  digest: $candidateDigest,
+                  canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                  confirmationDigest: $confirmationDigest,
+                  entrantBindingDigest: $entrantBindingDigest,
+                  submittedAt: $submittedAt
+                }
+              }
+            ' >"${receipt}"
+          approval_receipt_digest="sha256:$(
+            sha256sum "${receipt}" | awk '{print $1}'
+          )"
+          approval_comment_digest="sha256:$(
+            printf '%s' "${expected_approval}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          rules_observed_at="$(
+            jq -er '.rules.observedAt' "${candidate}/candidate.json"
+          )"
+          expected="${RUNNER_TEMP}/submission-bonus-feedback-expected"
+          test ! -e "${expected}"
+          mkdir --mode=0700 "${expected}"
+          jq -cnS \
+            --arg canonicalEvidenceDigest "${CANONICAL_EVIDENCE_DIGEST}" \
+            --arg confirmationDigest "${CONFIRMATION_DIGEST}" \
+            --arg entrantBindingDigest "${ENTRANT_BINDING_DIGEST}" \
+            --arg submittedAt "${SUBMITTED_AT}" \
+            --arg rulesProjectionDigest "${RULES_PROJECTION_DIGEST}" \
+            --arg rulesObservedAt "${rules_observed_at}" \
+            --arg reviewJobStartedAt "${review_job_started_at}" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg approvalCommentDigest "${approval_comment_digest}" \
+            --arg approvalReceiptDigest "${approval_receipt_digest}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${PRODUCER_ATTEMPT}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson actorId "${actor_id}" \
+            --argjson triggeringActorId "${triggering_actor_id}" \
+            --argjson reviewerId "$(jq -er '.user.id' <<<"${matched}")" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" '
+              {
+                challengeUrl: "https://datahub.devpost.com/",
+                officialRulesUrl: "https://datahub.devpost.com/rules",
+                status: "submitted",
+                submittedAt: $submittedAt,
+                canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                confirmationDigest: $confirmationDigest,
+                entrantBindingDigest: $entrantBindingDigest,
+                entrantKind: "individual",
+                registeredEntrant: true,
+                oneEntryPerEntrant: true,
+                individualNotProjectPrize: true,
+                distinctFeedbackSubmissionUnderRules: true,
+                feedbackQuality: {
+                  complete: true,
+                  actionable: true,
+                  viable: true,
+                  potentialImpact: true
+                },
+                privacyDisclosure: {
+                  rawFeedbackIncluded: false,
+                  rawEntrantPersonalDataIncluded: false,
+                  devpostCredentialsIncluded: false,
+                  privateConfirmationBytesIncluded: false,
+                  pseudonymousEntrantCommitmentIncluded: true,
+                  publicReviewerNumericIdentifierIncluded: true
+                },
+                rulesObservation: {
+                  observedAt: $rulesObservedAt,
+                  feedbackStart: "2026-07-06T13:00:00Z",
+                  feedbackDeadline: "2026-08-10T21:00:00Z",
+                  semanticDigest: $rulesProjectionDigest,
+                  authenticatedUiObserved: false,
+                  publicOverviewInstruction:
+                    "complete-feedback-section-during-submission"
+                },
+                approvalTiming: {
+                  authoritativeApprovalTimestampAvailable: false,
+                  reviewJobStartedAt: $reviewJobStartedAt
+                },
+                reviewApproval: {
+                  environment: "submission-bonus-feedback",
+                  workflowPath:
+                    ".github/workflows/submission-bonus-feedback.yml",
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  environmentId: $environmentId,
+                  workflowActorId: $actorId,
+                  triggeringActorId: $triggeringActorId,
+                  reviewerId: $reviewerId,
+                  candidateRunAttempt: $candidateRunAttempt,
+                  candidateArtifactId: $candidateArtifactId,
+                  candidateArtifactDigest: $candidateArtifactDigest,
+                  candidateDigest: $candidateDigest,
+                  canonicalEvidenceDigest: $canonicalEvidenceDigest,
+                  confirmationDigest: $confirmationDigest,
+                  approvalCommentDigest: $approvalCommentDigest,
+                  approvalReceiptDigest: $approvalReceiptDigest
+                }
+              }
+            ' >"${expected}/BONUS-FEEDBACK.json"
+          jq -cS . "${expected}/BONUS-FEEDBACK.json" \
+            >"${fresh}/expected-facts.json"
+          jq -cS '.facts' "${retained}/proofs/BONUS-FEEDBACK.json" \
+            >"${fresh}/retained-facts.json"
+          cmp --silent \
+            "${fresh}/expected-facts.json" \
+            "${fresh}/retained-facts.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-feedback \
+            --source-dir "${retained}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${PRODUCER_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${fresh}/retained-validation.json"
+          jq -e '
+            .sourceKey == "bonus-feedback" and
+            .subjectCount == 3 and
+            .proofIds == ["BONUS-FEEDBACK"] and
+            .result == "verified"
+          ' "${fresh}/retained-validation.json" >/dev/null
+
+      - name: Recheck immutable evidence approval rules and master before signing
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
+          CONFIRMATION_DIGEST: ${{ needs.prepare.outputs.confirmation_digest }}
+          ENTRANT_BINDING_DIGEST: ${{ needs.prepare.outputs.entrant_binding_digest }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ARTIFACT_DIGEST: ${{ needs.review.outputs.artifact_digest }}
+          PRODUCER_ARTIFACT_ID: ${{ needs.review.outputs.artifact_id }}
+          PRODUCER_ATTEMPT: ${{ needs.review.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          RULES_PROJECTION_DIGEST: ${{ needs.prepare.outputs.rules_projection_digest }}
+          SUBMITTED_AT: ${{ needs.prepare.outputs.submitted_at }}
+        run: |
+          set -euo pipefail
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          facts="${RUNNER_TEMP}/submission-bonus-feedback-attestation/proofs/BONUS-FEEDBACK.json"
+          actor_id="$(jq -er '.facts.reviewApproval.workflowActorId' "${facts}")"
+          triggering_actor_id="$(
+            jq -er '.facts.reviewApproval.triggeringActorId' "${facts}"
+          )"
+          reviewer_id="$(jq -er '.facts.reviewApproval.reviewerId' "${facts}")"
+          environment_id="$(
+            jq -er '.facts.reviewApproval.environmentId' "${facts}"
+          )"
+          expected_approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${PRODUCER_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
+          for identifier in \
+            "${actor_id}" \
+            "${triggering_actor_id}" \
+            "${reviewer_id}" \
+            "${environment_id}"; do
+            [[ "${identifier}" =~ ^[1-9][0-9]*$ ]]
+          done
+          test "${reviewer_id}" != "${actor_id}"
+          test "${reviewer_id}" != "${triggering_actor_id}"
+          test "sha256:$(
+            printf '%s' "${expected_approval}" | sha256sum | awk '{print $1}'
+          )" = "$(
+            jq -er '.facts.reviewApproval.approvalCommentDigest' "${facts}"
+          )"
+          for binding in \
+            "${PRODUCER_ARTIFACT_ID}|${PRODUCER_ARTIFACT_DIGEST}" \
+            "${CANDIDATE_ARTIFACT_ID}|${CANDIDATE_ARTIFACT_DIGEST}"; do
+            artifact_id="${binding%%|*}"
+            artifact_digest="${binding#*|}"
+            direct="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            )"
+            jq -e \
+              --arg digest "${artifact_digest}" \
+              --arg release "${RELEASE_SHA}" \
+              --argjson runId "${GITHUB_RUN_ID}" '
+                .digest == $digest and
+                .expired == false and
+                .workflow_run.id == $runId and
+                .workflow_run.head_sha == $release
+              ' <<<"${direct}" >/dev/null
+          done
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          jq -e \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerId "${reviewer_id}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-bonus-feedback" and
+                  .environments[0].id == $environmentId and
+                  .user.id == $reviewerId and
+                  .user.id != $actorId and
+                  .user.id != $triggeringActorId
+                )
+              ] |
+              length == 1
+            ' <<<"${approvals}" >/dev/null
+          final_rules="${RUNNER_TEMP}/submission-bonus-feedback-final-rules.html"
+          final_challenge="${RUNNER_TEMP}/submission-bonus-feedback-final-challenge.html"
+          for pair in \
+            "https://datahub.devpost.com/rules|${final_rules}" \
+            "https://datahub.devpost.com/|${final_challenge}"; do
+            url="${pair%%|*}"
+            output="${pair#*|}"
+            status="$(
+              curl \
+                --fail-with-body \
+                --silent \
+                --show-error \
+                --proto '=https' \
+                --tlsv1.2 \
+                --max-redirs 0 \
+                --connect-timeout 10 \
+                --max-time 30 \
+                --max-filesize 2097152 \
+                --output "${output}" \
+                --write-out '%{http_code}' \
+                "${url}"
+            )"
+            test "${status}" = "200"
+          done
+          python3 - \
+            "${final_rules}" \
+            "${final_challenge}" \
+            "${RULES_PROJECTION_DIGEST}" <<'PY'
+          import hashlib
+          import html
+          import json
+          import pathlib
+          import re
+          import sys
+          from html.parser import HTMLParser
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.values = []
+              def handle_data(self, data):
+                  self.values.append(data)
+
+          def text(path):
+              parser = TextExtractor()
+              parser.feed(pathlib.Path(path).read_text(encoding="utf-8"))
+              return re.sub(
+                  r"\s+", " ",
+                  html.unescape(" ".join(parser.values)).replace("\xa0", " "),
+              ).strip()
+
+          rules = text(sys.argv[1])
+          challenge = text(sys.argv[2])
+          required = (
+              "Feedback Period: July 6, 2026 (09:00 am Eastern Time)",
+              "August 10, 2026 (05:00 pm Eastern Time)",
+              "registered for the hackathon on Devpost",
+              "complete an online form",
+              "complete with actionable comments",
+              "One Feedback Submission per Entrant.",
+              "completeness, viability, and potential impact of the feedback",
+              "Feedback Prizes are awarded to individuals, not to Projects",
+          )
+          if any(value not in rules for value in required):
+              raise SystemExit("official feedback rule changed before signing")
+          if "complete the feedback section during submission" not in challenge:
+              raise SystemExit("official feedback-section wording changed before signing")
+          projection = {
+              "authenticatedUiObserved": False,
+              "challengeUrl": "https://datahub.devpost.com/",
+              "completeActionableFeedbackRequired": True,
+              "distinctFeedbackSubmissionUnderRules": True,
+              "evaluationCriteria": [
+                  "completeness", "viability", "potential-impact"
+              ],
+              "feedbackDeadline": "2026-08-10T21:00:00Z",
+              "feedbackStart": "2026-07-06T13:00:00Z",
+              "individualNotProjectPrize": True,
+              "oneEntryPerEntrant": True,
+              "onlineFormRequired": True,
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "publicOverviewInstruction":
+                  "complete-feedback-section-during-submission",
+              "registeredEntrantRequired": True,
+              "schemaVersion": "archon.datahub-feedback-rules/v1",
+          }
+          encoded = (
+              json.dumps(projection, sort_keys=True, separators=(",", ":")) + "\n"
+          ).encode()
+          actual = "sha256:" + hashlib.sha256(encoded).hexdigest()
+          if actual != sys.argv[3]:
+              raise SystemExit("official rules projection changed before signing")
+          PY
+          (
+            cd "${RUNNER_TEMP}/submission-bonus-feedback-attestation"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Attest all three exact feedback subjects
+        id: attest
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-bonus-feedback-attestation/SHA256SUMS
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-bonus-feedback-attestation/attestation-predicate.json
+
+      - name: Verify persisted signed full-subject attestation
+        env:
+          ATTESTATION_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${ATTESTATION_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${ATTESTATION_URL}" = \
+            "https://github.com/${GITHUB_REPOSITORY}/attestations/${ATTESTATION_ID}"
+          test -f "${ATTESTATION_BUNDLE_PATH}"
+          test ! -L "${ATTESTATION_BUNDLE_PATH}"
+          bundle_size="$(stat --format='%s' "${ATTESTATION_BUNDLE_PATH}")"
+          (( bundle_size >= 1 && bundle_size <= 16777216 ))
+          root="${RUNNER_TEMP}/submission-bonus-feedback-attestation"
+          expected_subjects="$(
+            jq -Rn '
+              [
+                inputs |
+                capture(
+                  "^(?<sha>[0-9a-f]{64})  " +
+                  "(?<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+                ) |
+                {
+                  name: .name,
+                  digest: {sha256: .sha}
+                }
+              ] |
+              sort_by(.name)
+            ' <"${root}/SHA256SUMS"
+          )"
+          test "$(jq 'length' <<<"${expected_subjects}")" = "3"
+          verification_dir="$(
+            mktemp -d "${RUNNER_TEMP}/submission-bonus-feedback-verification.XXXXXX"
+          )"
+          validate_verification_result() {
+            local output_path="$1"
+            jq -e \
+              --slurpfile predicate "${root}/attestation-predicate.json" \
+              --arg predicateType "${PREDICATE_TYPE}" \
+              --argjson expectedSubjects "${expected_subjects}" '
+                [
+                  .[] |
+                  select(
+                    .verificationResult.statement.predicateType ==
+                      $predicateType and
+                    .verificationResult.statement.predicate ==
+                      $predicate[0] and
+                    (
+                      .verificationResult.statement.subject |
+                      sort_by(.name)
+                    ) == $expectedSubjects
+                  ) |
+                  .verificationResult.statement
+                ] |
+                unique |
+                length == 1
+              ' "${output_path}" >/dev/null
+          }
+          verify_subject() {
+            local subject_path="$1"
+            local output_path="$2"
+            local attempt
+            for attempt in {1..12}; do
+              if gh attestation verify \
+                "${subject_path}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --predicate-type "${PREDICATE_TYPE}" \
+                --signer-workflow \
+                  "${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml" \
+                --signer-digest "${RELEASE_SHA}" \
+                --source-digest "${RELEASE_SHA}" \
+                --source-ref refs/heads/master \
+                --deny-self-hosted-runners \
+                --format json >"${output_path}" &&
+                validate_verification_result "${output_path}"; then
+                return 0
+              fi
+              if (( attempt < 12 )); then
+                sleep 5
+              fi
+            done
+            echo "::error::Persisted full-subject feedback attestation could not be verified"
+            return 1
+          }
+          verify_subject \
+            "${root}/proofs/BONUS-FEEDBACK.json" \
+            "${verification_dir}/BONUS-FEEDBACK.json"
+          verify_subject \
+            "${root}/attestation-predicate.json" \
+            "${verification_dir}/predicate.json"
+          {
+            echo "### Feedback evidence sealed"
+            echo
+            echo "- Artifact: \`${{ needs.review.outputs.artifact_name }}\`"
+            echo "- Subjects: 3 plus \`SHA256SUMS\`"
+            echo "- Attestation: ${ATTESTATION_URL}"
+            echo "- Privacy: no feedback answers, raw entrant identifiers, Devpost credentials, cookies, or private confirmation bytes retained; the salted entrant commitment and public reviewer numeric ID are disclosed"
+          } >>"${GITHUB_STEP_SUMMARY}"
