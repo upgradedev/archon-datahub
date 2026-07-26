@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+contract_stage="bootstrap"
+exec 9>&2
+trap '
+  status=$?
+  printf \
+    "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Judge-user contract stage %s failed with status %s\n" \
+    "${LINENO}" "${contract_stage}" "${status}" >&9
+  exit "${status}"
+' ERR
+
 repository_root="$(
   cd "$(dirname "${BASH_SOURCE[0]}")/../.."
   pwd
@@ -1081,6 +1091,7 @@ target_sha256="$(
 )"
 [[ "${target_sha256}" =~ ^[0-9a-f]{64}$ ]]
 
+contract_stage="emergency-control-plane"
 emergency_receipt_path="${test_root}/judge-emergency-control-plane.json"
 run_emergency_verify() {
   local operation="${1:-deactivate}"
@@ -1231,6 +1242,7 @@ EMERGENCY_EXPECTED_GATE_SHA256="$(
     tr '0' 'f'
 )" expect_failure run_emergency_verify
 
+contract_stage="approval-control-plane"
 request_sha256="$(
   env \
     ARCHON_STAGE=staging \
@@ -1381,6 +1393,7 @@ if env \
 fi
 test ! -s "${state_dir}/calls"
 
+contract_stage="workflow-source-contract"
 workflow_source="${repository_root}/.github/workflows/judge-user.yml"
 test "$(
   grep -Fc \
@@ -1456,6 +1469,7 @@ grep -Fq \
   "${workflow_source}"
 grep -Fq 'gate_mode="full-green"' "${workflow_source}"
 
+contract_stage="manager-apply-contracts"
 reset_state absent
 if env \
   AWS_ENDPOINT_URL_COGNITO_IDENTITY_PROVIDER=https://attacker.invalid \

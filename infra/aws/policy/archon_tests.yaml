@@ -424,6 +424,14 @@
         Properties:
           ResourceArn: arn:aws:apigateway:eu-west-1::/restapis/example/stages/staging
           WebACLArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
+      CognitoUserPool:
+        Type: AWS::Cognito::UserPool
+        Properties: {}
+      CognitoWafAssociation:
+        Type: AWS::WAFv2::WebACLAssociation
+        Properties:
+          ResourceArn: arn:aws:cognito-idp:eu-west-1:111111111111:userpool/eu-west-1_example
+          WebACLArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
   expectations:
     rules:
       ecr_repositories_are_hardened: PASS
@@ -1447,6 +1455,28 @@
       PlatformMarker:
         Type: AWS::ECS::Cluster
         Properties: {}
+  expectations:
+    rules:
+      platform_has_regional_waf: FAIL
+
+- name: a platform with only one of the two required regional WAF associations is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      RegionalWebAcl:
+        Type: AWS::WAFv2::WebACL
+        Properties:
+          Scope: REGIONAL
+      RegionalWafLogging:
+        Type: AWS::WAFv2::LoggingConfiguration
+        Properties: {}
+      ApiWafAssociation:
+        Type: AWS::WAFv2::WebACLAssociation
+        Properties:
+          ResourceArn: arn:aws:apigateway:eu-west-1::/restapis/example/stages/staging
+          WebACLArn: arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/archon/id
   expectations:
     rules:
       platform_has_regional_waf: FAIL

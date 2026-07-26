@@ -29,7 +29,9 @@ coverage, as defined below.
 2. **Offline capability evidence.** It groups machine-checkable repository evidence into
    separate `engineering` and `security` axes. Its 95% gate is a CI regression gate only.
    A pass means the offline evidence remains healthy; it does **not** mean the entry is
-   ready to submit.
+   ready to submit. Engineering projections use stable `ENG-<official-id>` identifiers,
+   while native security checks use `SEC-<number>`, keeping both capability namespaces
+   disjoint from the unchanged official IDs.
 
 Final readiness is fail-closed. The 95% offline threshold is never reused as a submission
 threshold: `submission.ready = true` requires every official check and every engineering

@@ -892,7 +892,9 @@ rule platform_has_regional_waf when %platform_markers !empty {
   let waf_association_count = count(%waf_associations)
   let waf_web_acl_count = count(%waf_web_acls)
   let waf_logging_configuration_count = count(%waf_logging_configurations)
-  %waf_association_count == 1
+  # One shared regional ACL must be bound independently to the API Gateway
+  # stage and the Cognito user pool.
+  %waf_association_count == 2
   %waf_web_acl_count == 1
   %waf_logging_configuration_count == 1
   %waf_associations !empty

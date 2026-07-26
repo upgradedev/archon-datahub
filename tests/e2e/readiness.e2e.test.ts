@@ -186,11 +186,20 @@ test("readiness: engineering and security stay separate offline capability axes"
     r.capabilityEvidence.axes.map((axis) => axis.id),
     ["engineering", "security"]
   );
+  const automatedOfficialIds = r.checks
+    .filter((check) => check.status !== "user-gated")
+    .map((check) => check.id);
   assert.deepEqual(
     r.capabilityEvidence.checks
-      .filter((check) => check.id.startsWith("SEC"))
-      .map((check) => check.axis),
-    ["security", "security", "security"]
+      .filter((check) => check.axis === "engineering")
+      .map((check) => check.id),
+    automatedOfficialIds.map((id) => `ENG-${id}`)
+  );
+  assert.deepEqual(
+    r.capabilityEvidence.checks
+      .filter((check) => check.axis === "security")
+      .map((check) => check.id),
+    ["SEC-1", "SEC-2", "SEC-3"]
   );
 });
 
