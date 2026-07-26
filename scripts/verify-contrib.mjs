@@ -379,6 +379,7 @@ const aspectHistoryReadme = await readFile(
   resolve(aspectHistoryRoot, "README.md"),
   "utf8"
 );
+const normalizedAspectHistoryReadme = aspectHistoryReadme.replace(/\s+/gu, " ");
 for (const documentationContract of [
   pinnedCommit,
   "Staged, not submitted",
@@ -391,7 +392,7 @@ for (const documentationContract of [
   "90 days",
   "does not depend on Codex Security",
 ]) {
-  if (!aspectHistoryReadme.includes(documentationContract)) {
+  if (!normalizedAspectHistoryReadme.includes(documentationContract)) {
     throw new Error(
       `get-aspect-history README is missing honest documentation: ${documentationContract}`
     );
