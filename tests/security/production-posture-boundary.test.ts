@@ -1038,6 +1038,10 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeAccessDocumentation, /GetWebACLForResource/u);
   assert.match(
     judgeAccessDocumentation,
+    /wafv2:GetWebACLForResource/u
+  );
+  assert.doesNotMatch(
+    judgeAccessDocumentation,
     /cognito-idp:GetWebACLForResource/u
   );
   assert.match(judgeAccessDocumentation, /wafv2:GetWebACL/u);
