@@ -538,7 +538,46 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
     privileged.slice(deactivation),
     /JUDGE_PASSWORD/u
   );
-  assert.doesNotMatch(judgeUserWorkflow, /upload-artifact/u);
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/gu
+      )
+    ].length,
+    3
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /name: \$\{\{ steps\.operation_receipt\.outputs\.artifact_name \}\}/gu
+      )
+    ].length,
+    2
+  );
+  assert.match(
+    judgeUserWorkflow,
+    /name: judge-user-evidence-failure-containment-\$\{\{ inputs\.operation \}\}-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_attempt \}\}/u
+  );
+  assert.equal(
+    [
+      ...judgeUserWorkflow.matchAll(
+        /path: \$\{\{ runner\.temp \}\}\/judge-user-operation-evidence/gu
+      )
+    ].length,
+    2
+  );
+  assert.match(
+    judgeUserWorkflow,
+    /path: \$\{\{ runner\.temp \}\}\/judge-user-evidence-failure-containment\/judge-user-operation-evidence/u
+  );
+  assert.equal(
+    [...judgeUserWorkflow.matchAll(/if-no-files-found: error/gu)].length,
+    3
+  );
+  assert.equal(
+    [...judgeUserWorkflow.matchAll(/retention-days: 90/gu)].length,
+    3
+  );
 });
 
 test("judge emergency deactivation binds current master without claiming green CI", () => {
@@ -863,7 +902,31 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeUserManager, /disable_response_proved=false/u);
   assert.match(judgeUserManager, /sign_out_response_proved=false/u);
   assert.match(judgeUserManager, /group_removal_response_proved=false/u);
-  assert.match(judgeUserManager, /deactivation_state_proved/u);
+  const exactContainedState = judgeUserManager.slice(
+    judgeUserManager.indexOf("\nexact_contained_state_proved()"),
+    judgeUserManager.indexOf("\nwait_for_exact_contained_state()")
+  );
+  assert.match(
+    exactContainedState,
+    /read_user_exact[\s\S]*read_groups_exact[\s\S]*read_user_exact/u
+  );
+  assert.equal(
+    [...exactContainedState.matchAll(/read_user_exact/gu)].length,
+    2
+  );
+  const exactContainedStateWait = judgeUserManager.slice(
+    judgeUserManager.indexOf("\nwait_for_exact_contained_state()"),
+    judgeUserManager.indexOf("\nautomatic_containment()")
+  );
+  assert.match(exactContainedStateWait, /for attempt in \{1\.\.5\}/u);
+  assert.match(
+    exactContainedStateWait,
+    /exact_contained_state_proved "\$\{username\}"/u
+  );
+  assert.match(
+    judgeUserManager,
+    /wait_for_exact_contained_state "\$\{canonical\}"/u
+  );
   assert.doesNotMatch(judgeUserManager, /set -x/u);
   assert.doesNotMatch(
     judgeUserManager,
