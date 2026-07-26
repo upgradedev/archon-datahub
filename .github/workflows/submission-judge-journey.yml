@@ -1,0 +1,4076 @@
+name: Submission judge journey
+
+run-name: Prove protected production judge journey for ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      deployment_run_id:
+        description: Exact successful production deployment run ID
+        required: true
+        type: string
+      provision_run_id:
+        description: Exact attested production provision run ID
+        required: true
+        type: string
+      rotate_run_id:
+        description: Exact attested production rotate run ID
+        required: true
+        type: string
+      deactivate_run_id:
+        description: Exact attested production deactivate run ID
+        required: true
+        type: string
+      reactivate_run_id:
+        description: Exact attested production reactivate run ID
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: archon-judge-user-production
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22.23.1
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-judge-journey/v1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prerequisites:
+    name: Resolve exact attested deployment and lifecycle chain
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      application_origin: ${{ steps.verify.outputs.application_origin }}
+      application_origin_sha256: ${{ steps.verify.outputs.application_origin_sha256 }}
+      cognito_client_id: ${{ steps.verify.outputs.cognito_client_id }}
+      cognito_hosted_ui_origin: ${{ steps.verify.outputs.cognito_hosted_ui_origin }}
+      cognito_issuer: ${{ steps.verify.outputs.cognito_issuer }}
+      cognito_subject_digest: ${{ steps.verify.outputs.cognito_subject_digest }}
+      control_plane_gate_sha256: ${{ steps.sources.outputs.control_plane_gate_sha256 }}
+      identity_digest: ${{ steps.verify.outputs.identity_digest }}
+      lifecycle_digest: ${{ steps.verify.outputs.lifecycle_digest }}
+      prerequisite_binding: ${{ steps.verify.outputs.prerequisite_binding }}
+      runtime_config_sha256: ${{ steps.verify.outputs.runtime_config_sha256 }}
+    steps:
+      - name: Bind dispatch to the exact current release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-judge-journey.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          for run_id in \
+            "${DEPLOYMENT_RUN_ID}" \
+            "${PROVISION_RUN_ID}" \
+            "${ROTATE_RUN_ID}" \
+            "${DEACTIVATE_RUN_ID}" \
+            "${REACTIVATE_RUN_ID}"; do
+            [[ "${run_id}" =~ ^[1-9][0-9]*$ ]]
+          done
+          test "$(
+            printf '%s\n' \
+              "${DEPLOYMENT_RUN_ID}" \
+              "${PROVISION_RUN_ID}" \
+              "${ROTATE_RUN_ID}" \
+              "${DEACTIVATE_RUN_ID}" \
+              "${REACTIVATE_RUN_ID}" |
+              LC_ALL=C sort -u |
+              wc -l
+          )" = "5"
+          repository="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          test "$(jq -er '.default_branch' <<<"${repository}")" = "master"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}" || {
+            echo "::error::Judge journey requires the exact current master release"
+            exit 1
+          }
+
+      - name: Check out the exact unprivileged control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve exact prerequisite runs and artifacts
+        id: sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+          control_plane_dir="${RUNNER_TEMP}/judge-journey-resolver"
+          test ! -e "${control_plane_dir}"
+          mkdir --mode=0700 "${control_plane_dir}"
+          control_plane="${control_plane_dir}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${control_plane}" \
+            bash scripts/verify-github-control-plane.sh
+          control_plane_gate_sha256="$(
+            sha256sum "${control_plane}" |
+              awk '{print $1}'
+          )"
+          [[ "${control_plane_gate_sha256}" =~ ^[0-9a-f]{64}$ ]]
+
+          assert_latest_deployment() {
+            local runs
+            local latest
+            runs="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+            )"
+            latest="$(
+              jq -ce \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .path == ".github/workflows/deploy.yml" and
+                      .event == "workflow_dispatch" and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  select(. != null)
+                ' <<<"${runs}"
+            )"
+            test "$(jq -er '.id' <<<"${latest}")" = "${DEPLOYMENT_RUN_ID}" || {
+              echo "::error::Selected deployment is not the newest successful production deployment"
+              exit 1
+            }
+          }
+
+          resolve_run() {
+            local key="$1"
+            local run_id="$2"
+            local workflow_path="$3"
+            local operation="${4:-}"
+            local run
+            local run_attempt
+            local artifacts
+            local artifact
+            local artifact_name
+            local artifact_id
+            local artifact_digest
+            local producer_attempt
+
+            run="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            )"
+            jq -e \
+              --argjson runId "${run_id}" \
+              --arg path "${workflow_path}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                .id == $runId and
+                .path == $path and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                .conclusion == "success" and
+                .head_sha == $release and
+                .head_branch == "master" and
+                .head_repository.full_name == $repository and
+                (.run_attempt | type == "number" and . >= 1)
+              ' <<<"${run}" >/dev/null || {
+              echo "::error::${key} run does not bind the exact successful release"
+              exit 1
+            }
+            run_attempt="$(jq -er '.run_attempt' <<<"${run}")"
+            artifacts="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
+            )"
+            if [[ "${key}" == "deployment" ]]; then
+              artifact_name="deployment-evidence-${RELEASE_SHA}-${run_attempt}"
+              artifact="$(
+                jq -ce \
+                  --arg name "${artifact_name}" \
+                  --arg release "${RELEASE_SHA}" \
+                  --argjson runId "${run_id}" '
+                    [
+                      .[] |
+                      .artifacts[] |
+                      select(
+                        .name == $name and
+                        .expired == false and
+                        (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                        (.size_in_bytes | type == "number") and
+                        .size_in_bytes > 0 and
+                        .size_in_bytes <= 536870912 and
+                        .workflow_run.id == $runId and
+                        .workflow_run.head_sha == $release
+                      )
+                    ] |
+                    if length == 1 then .[0]
+                    else error("expected one exact deployment artifact")
+                    end
+                  ' <<<"${artifacts}"
+              )"
+              producer_attempt="${run_attempt}"
+            else
+              artifact="$(
+                jq -ce \
+                  --arg operation "${operation}" \
+                  --arg release "${RELEASE_SHA}" \
+                  --argjson runId "${run_id}" '
+                    [
+                      .[] |
+                      .artifacts[] |
+                      select(
+                        (
+                          .name |
+                          test(
+                            "^judge-user-operation-" +
+                            $operation + "-" + $release +
+                            "-[1-9][0-9]*$"
+                          )
+                        ) and
+                        .expired == false and
+                        (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                        (.size_in_bytes | type == "number") and
+                        .size_in_bytes > 0 and
+                        .size_in_bytes <= 10485760 and
+                        .workflow_run.id == $runId and
+                        .workflow_run.head_sha == $release
+                      )
+                    ] |
+                    if length == 1 then .[0]
+                    else error("expected one exact lifecycle artifact")
+                    end
+                  ' <<<"${artifacts}"
+              )"
+              artifact_name="$(jq -er '.name' <<<"${artifact}")"
+              producer_attempt="${artifact_name##*-}"
+              [[ "${producer_attempt}" =~ ^[1-9][0-9]*$ ]]
+              (( producer_attempt <= run_attempt ))
+            fi
+            artifact_id="$(jq -er '.id' <<<"${artifact}")"
+            artifact_digest="$(jq -er '.digest' <<<"${artifact}")"
+            [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            {
+              echo "${key}_run_attempt=${run_attempt}"
+              echo "${key}_producer_attempt=${producer_attempt}"
+              echo "${key}_artifact_id=${artifact_id}"
+              echo "${key}_artifact_name=${artifact_name}"
+              echo "${key}_artifact_digest=${artifact_digest}"
+            } >>"${GITHUB_OUTPUT}"
+          }
+
+          assert_latest_deployment
+          resolve_run \
+            deployment \
+            "${DEPLOYMENT_RUN_ID}" \
+            .github/workflows/deploy.yml
+          resolve_run \
+            provision \
+            "${PROVISION_RUN_ID}" \
+            .github/workflows/judge-user.yml \
+            provision
+          resolve_run \
+            rotate \
+            "${ROTATE_RUN_ID}" \
+            .github/workflows/judge-user.yml \
+            rotate
+          resolve_run \
+            deactivate \
+            "${DEACTIVATE_RUN_ID}" \
+            .github/workflows/judge-user.yml \
+            deactivate
+          resolve_run \
+            reactivate \
+            "${REACTIVATE_RUN_ID}" \
+            .github/workflows/judge-user.yml \
+            reactivate
+          echo "control_plane_gate_sha256=${control_plane_gate_sha256}" \
+            >>"${GITHUB_OUTPUT}"
+
+      - name: Initialize isolated prerequisite directories
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/judge-journey-prerequisites"
+          test ! -e "${root}"
+          mkdir --mode=0700 "${root}"
+
+      - name: Download exact deployment evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.sources.outputs.deployment_artifact_id }}
+          path: ${{ runner.temp }}/judge-journey-prerequisites/deployment
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Download exact provision evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.sources.outputs.provision_artifact_id }}
+          path: ${{ runner.temp }}/judge-journey-prerequisites/provision
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Download exact rotate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.sources.outputs.rotate_artifact_id }}
+          path: ${{ runner.temp }}/judge-journey-prerequisites/rotate
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Download exact deactivate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.sources.outputs.deactivate_artifact_id }}
+          path: ${{ runner.temp }}/judge-journey-prerequisites/deactivate
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Download exact reactivate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.sources.outputs.reactivate_artifact_id }}
+          path: ${{ runner.temp }}/judge-journey-prerequisites/reactivate
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Verify deployment, ordered lifecycle, and every attestation
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          DEPLOYMENT_RUN_ATTEMPT: ${{ steps.sources.outputs.deployment_run_attempt }}
+          DEPLOYMENT_ARTIFACT_ID: ${{ steps.sources.outputs.deployment_artifact_id }}
+          DEPLOYMENT_ARTIFACT_NAME: ${{ steps.sources.outputs.deployment_artifact_name }}
+          DEPLOYMENT_ARTIFACT_DIGEST: ${{ steps.sources.outputs.deployment_artifact_digest }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          PROVISION_RUN_ATTEMPT: ${{ steps.sources.outputs.provision_run_attempt }}
+          PROVISION_PRODUCER_ATTEMPT: ${{ steps.sources.outputs.provision_producer_attempt }}
+          PROVISION_ARTIFACT_ID: ${{ steps.sources.outputs.provision_artifact_id }}
+          PROVISION_ARTIFACT_NAME: ${{ steps.sources.outputs.provision_artifact_name }}
+          PROVISION_ARTIFACT_DIGEST: ${{ steps.sources.outputs.provision_artifact_digest }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          ROTATE_RUN_ATTEMPT: ${{ steps.sources.outputs.rotate_run_attempt }}
+          ROTATE_PRODUCER_ATTEMPT: ${{ steps.sources.outputs.rotate_producer_attempt }}
+          ROTATE_ARTIFACT_ID: ${{ steps.sources.outputs.rotate_artifact_id }}
+          ROTATE_ARTIFACT_NAME: ${{ steps.sources.outputs.rotate_artifact_name }}
+          ROTATE_ARTIFACT_DIGEST: ${{ steps.sources.outputs.rotate_artifact_digest }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          DEACTIVATE_RUN_ATTEMPT: ${{ steps.sources.outputs.deactivate_run_attempt }}
+          DEACTIVATE_PRODUCER_ATTEMPT: ${{ steps.sources.outputs.deactivate_producer_attempt }}
+          DEACTIVATE_ARTIFACT_ID: ${{ steps.sources.outputs.deactivate_artifact_id }}
+          DEACTIVATE_ARTIFACT_NAME: ${{ steps.sources.outputs.deactivate_artifact_name }}
+          DEACTIVATE_ARTIFACT_DIGEST: ${{ steps.sources.outputs.deactivate_artifact_digest }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          REACTIVATE_RUN_ATTEMPT: ${{ steps.sources.outputs.reactivate_run_attempt }}
+          REACTIVATE_PRODUCER_ATTEMPT: ${{ steps.sources.outputs.reactivate_producer_attempt }}
+          REACTIVATE_ARTIFACT_ID: ${{ steps.sources.outputs.reactivate_artifact_id }}
+          REACTIVATE_ARTIFACT_NAME: ${{ steps.sources.outputs.reactivate_artifact_name }}
+          REACTIVATE_ARTIFACT_DIGEST: ${{ steps.sources.outputs.reactivate_artifact_digest }}
+          CONTROL_PLANE_GATE_SHA256: ${{ steps.sources.outputs.control_plane_gate_sha256 }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/judge-journey-prerequisites"
+          verification_root="${RUNNER_TEMP}/judge-journey-prerequisite-verifications"
+          test ! -e "${verification_root}"
+          mkdir --mode=0700 "${verification_root}"
+
+          verify_checksum_inventory() {
+            local directory="$1"
+            test -d "${directory}"
+            test ! -L "${directory}"
+            test -f "${directory}/SHA256SUMS"
+            test ! -L "${directory}/SHA256SUMS"
+            if find "${directory}" -type l -print -quit | grep -q .; then
+              echo "::error::Prerequisite evidence contains a symbolic link"
+              exit 1
+            fi
+            python3 - "${directory}" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          checksum = root / "SHA256SUMS"
+          raw = checksum.read_bytes()
+          if b"\r" in raw or not raw.endswith(b"\n"):
+              raise SystemExit("checksum inventory is not canonical LF text")
+          try:
+              lines = raw.decode("ascii").splitlines()
+          except UnicodeDecodeError as error:
+              raise SystemExit("checksum inventory is not ASCII") from error
+          if not lines or len(lines) > 4096:
+              raise SystemExit("checksum inventory size is invalid")
+          pattern = re.compile(
+              r"^(?P<digest>[0-9a-f]{64})  "
+              r"(?P<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+          )
+          names = []
+          for line in lines:
+              match = pattern.fullmatch(line)
+              if match is None:
+                  raise SystemExit("checksum inventory line is not canonical")
+              name = match.group("name")
+              path = pathlib.PurePosixPath(name)
+              if (
+                  path.is_absolute()
+                  or "\\" in name
+                  or "//" in name
+                  or any(part in {"", ".", ".."} for part in path.parts)
+              ):
+                  raise SystemExit("checksum inventory path is unsafe")
+              names.append(name)
+          if len(names) != len(set(names)):
+              raise SystemExit(
+                  "checksum inventory names are not unique"
+              )
+          actual = sorted(
+              path.relative_to(root).as_posix()
+              for path in root.rglob("*")
+              if path.is_file() and path != checksum
+          )
+          if actual != sorted(names):
+              raise SystemExit("checksum inventory is not closed")
+          PY
+            (
+              cd "${directory}"
+              sha256sum --check --strict SHA256SUMS
+            )
+          }
+
+          deployment_dir="${root}/deployment"
+          verify_checksum_inventory "${deployment_dir}"
+          for required in \
+            deployment-evidence.json \
+            live-runtime-manifest.json \
+            production-cdk-outputs.json \
+            production-runtime-config.json; do
+            test -f "${deployment_dir}/${required}"
+            test ! -L "${deployment_dir}/${required}"
+          done
+          deployment_evidence="${deployment_dir}/deployment-evidence.json"
+          runtime_config="${deployment_dir}/production-runtime-config.json"
+          cdk_outputs="${deployment_dir}/production-cdk-outputs.json"
+          live_runtime="${deployment_dir}/live-runtime-manifest.json"
+          expected_deployment_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg deploymentUrl "${expected_deployment_url}" '
+              .schemaVersion == 1 and
+              .promotionPolicy == "build-once-promote-same-artifacts" and
+              .rollbackSelector.releaseSha == $release and
+              .source.deploymentRunUrl == $deploymentUrl and
+              .source.deploymentControlPlaneSha == $release and
+              .immutableArtifacts.identicalImageDigest == true and
+              (.immutableArtifacts.productionEcrImageDigest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              .production.result == "passed" and
+              (.production.applicationUrl |
+                test("^https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")) and
+              (.production.runtimeConfigSha256 |
+                test("^[0-9a-f]{64}$")) and
+              (.production.liveRuntimeManifestSha256 |
+                test("^[0-9a-f]{64}$"))
+            ' "${deployment_evidence}" >/dev/null || {
+            echo "::error::Production deployment evidence is not exact"
+            exit 1
+          }
+          application_origin="$(
+            jq -er '.production.applicationUrl' "${deployment_evidence}"
+          )"
+          application_origin_sha256="$(
+            printf '%s' "${application_origin}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          runtime_config_sha256="$(
+            sha256sum "${runtime_config}" |
+              awk '{print $1}'
+          )"
+          test "${runtime_config_sha256}" = "$(
+            jq -er '.production.runtimeConfigSha256' "${deployment_evidence}"
+          )"
+          test "$(sha256sum "${live_runtime}" | awk '{print $1}')" = "$(
+            jq -er '.production.liveRuntimeManifestSha256' \
+              "${deployment_evidence}"
+          )"
+          jq -e --arg release "${RELEASE_SHA}" '
+            .schemaVersion == "archon.live-runtime-manifest/v1" and
+            .releaseBinding.releaseSha == $release and
+            (.spa.objects | length) > 0 and
+            .verification.result == "passed"
+          ' "${live_runtime}" >/dev/null
+          stack_name="$(
+            jq -er '.production.stackName' "${deployment_evidence}"
+          )"
+          user_pool_id="$(
+            jq -er \
+              --arg stack "${stack_name}" '
+                .[$stack].ArchonUserPoolId |
+                select(
+                  type == "string" and
+                  test("^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*_[A-Za-z0-9]+$")
+                )
+              ' "${cdk_outputs}"
+          )"
+          cognito_client_id="$(
+            jq -er \
+              --arg stack "${stack_name}" '
+                .[$stack].ArchonUserPoolClientId |
+                select(type == "string" and test("^[A-Za-z0-9]{8,128}$"))
+              ' "${cdk_outputs}"
+          )"
+          cognito_hosted_ui_origin="$(
+            jq -er \
+              --arg stack "${stack_name}" '
+                .[$stack].ArchonCognitoHostedUiOrigin |
+                select(
+                  type == "string" and
+                  test("^https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+                )
+              ' "${cdk_outputs}"
+          )"
+          test "$(
+            jq -er \
+              --arg stack "${stack_name}" '
+                .[$stack].ArchonApplicationUrl
+              ' "${cdk_outputs}"
+          )" = "${application_origin}"
+          region="${user_pool_id%%_*}"
+          if [[ "${region}" == cn-* ]]; then
+            cognito_issuer="https://cognito-idp.${region}.amazonaws.com.cn/${user_pool_id}"
+          else
+            cognito_issuer="https://cognito-idp.${region}.amazonaws.com/${user_pool_id}"
+          fi
+          jq -e \
+            --arg applicationOrigin "${application_origin}" \
+            --arg clientId "${cognito_client_id}" \
+            --arg hostedUiOrigin "${cognito_hosted_ui_origin}" '
+              (keys | sort) == ["auth", "demoQuery", "schemaVersion"] and
+              .schemaVersion == 1 and
+              (.demoQuery | type == "string" and length >= 1 and length <= 256) and
+              (.auth | keys | sort) == ([
+                "authorizationEndpoint",
+                "clientId",
+                "logoutEndpoint",
+                "logoutUri",
+                "redirectUri",
+                "scopes",
+                "tokenEndpoint"
+              ] | sort) and
+              .auth.clientId == $clientId and
+              .auth.authorizationEndpoint ==
+                ($hostedUiOrigin + "/oauth2/authorize") and
+              .auth.tokenEndpoint == ($hostedUiOrigin + "/oauth2/token") and
+              .auth.logoutEndpoint == ($hostedUiOrigin + "/logout") and
+              .auth.redirectUri == ($applicationOrigin + "/") and
+              .auth.logoutUri == ($applicationOrigin + "/") and
+              .auth.scopes == ["openid", "email", "archon/approve"]
+            ' "${runtime_config}" >/dev/null || {
+            echo "::error::Runtime configuration is not the exact deployed Cognito client"
+            exit 1
+          }
+
+          deployment_predicate_type="https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1"
+          deployment_expected_subjects="$(
+            jq -Rn '
+              [
+                inputs |
+                capture(
+                  "^(?<sha>[0-9a-f]{64})  (?<name>[^[:cntrl:]]+)$"
+                ) |
+                {
+                  name: .name,
+                  digest: {sha256: .sha}
+                }
+              ] |
+              sort_by(.name)
+            ' <"${deployment_dir}/SHA256SUMS"
+          )"
+          deployment_verification_raw="${verification_root}/deployment.raw.json"
+          gh attestation verify "${deployment_evidence}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow \
+              "github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml" \
+            --signer-digest "${RELEASE_SHA}" \
+            --source-digest "${RELEASE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "${deployment_predicate_type}" \
+            --deny-self-hosted-runners \
+            --format json >"${deployment_verification_raw}"
+          deployment_evidence_sha256="$(
+            sha256sum "${deployment_evidence}" |
+              awk '{print $1}'
+          )"
+          deployment_verification="${verification_root}/deployment.json"
+          jq -ceS \
+            --arg predicateType "${deployment_predicate_type}" \
+            --arg subjectSha256 "${deployment_evidence_sha256}" \
+            --argjson expectedSubjects "${deployment_expected_subjects}" \
+            --slurpfile expectedPredicate "${deployment_evidence}" '
+              [
+                .[] |
+                select(
+                  .verificationResult.statement.predicateType ==
+                    $predicateType and
+                  .verificationResult.statement.predicate ==
+                    $expectedPredicate[0] and
+                  (
+                    .verificationResult.statement.subject |
+                    sort_by(.name)
+                  ) == $expectedSubjects and
+                  any(
+                    .verificationResult.statement.subject[];
+                    .digest.sha256 == $subjectSha256
+                  )
+                ) |
+                {
+                  predicateType:
+                    .verificationResult.statement.predicateType,
+                  statement: .verificationResult.statement
+                }
+              ] |
+              if length == 1 then .[0]
+              else error(
+                "exactly one deployment attestation must bind the full subject set"
+              )
+              end
+            ' "${deployment_verification_raw}" >"${deployment_verification}"
+          rm -- "${deployment_verification_raw}"
+          deployment_predicate_digest="sha256:${deployment_evidence_sha256}"
+
+          validate_lifecycle() {
+            local operation="$1"
+            local run_id="$2"
+            local producer_attempt="$3"
+            local artifact_id="$4"
+            local artifact_name="$5"
+            local artifact_digest="$6"
+            local expected_result="$7"
+            local directory="${root}/${operation}"
+            local state="${directory}/judge-operation-state.json"
+            local receipt="${directory}/operation-receipt.json"
+            local manifest="${directory}/manifest.json"
+            local predicate="${directory}/attestation-predicate.json"
+            local subjects="${directory}/judge-user-operation-subject.sha256"
+            local expected_inventory
+            local actual_inventory
+            local expected_attested_subjects
+            local predicate_sha256
+            local receipt_sha256
+            local verification_dir
+            local raw_dir
+            local verification_set
+            local verification_digest
+            local subject_name
+            local subject_sha
+            local subject_path
+
+            expected_inventory="$(
+              printf '%s\n' \
+                SHA256SUMS \
+                attestation-predicate.json \
+                judge-operation-state.json \
+                judge-user-operation-subject.sha256 \
+                manifest.json \
+                operation-receipt.json
+            )"
+            test -d "${directory}"
+            test ! -L "${directory}"
+            if find "${directory}" -type l -print -quit | grep -q .; then
+              echo "::error::Lifecycle evidence contains a symbolic link"
+              exit 1
+            fi
+            actual_inventory="$(
+              find "${directory}" \
+                -mindepth 1 -maxdepth 1 -printf '%f\n' |
+                LC_ALL=C sort
+            )"
+            test "${actual_inventory}" = "${expected_inventory}"
+            for required in \
+              SHA256SUMS \
+              attestation-predicate.json \
+              judge-operation-state.json \
+              judge-user-operation-subject.sha256 \
+              manifest.json \
+              operation-receipt.json; do
+              test -f "${directory}/${required}"
+              test ! -L "${directory}/${required}"
+            done
+            test "$(
+              sed -nE \
+                's/^[0-9a-f]{64}  ([A-Za-z0-9][A-Za-z0-9._-]*)$/\1/p' \
+                "${subjects}"
+            )" = "$(
+              printf '%s\n' \
+                judge-operation-state.json \
+                operation-receipt.json \
+                manifest.json
+            )"
+            test "$(wc -l <"${subjects}")" = "3"
+            verify_checksum_inventory "${directory}"
+            (
+              cd "${directory}"
+              sha256sum --check --strict \
+                judge-user-operation-subject.sha256
+            )
+            raw_subject_pattern='(^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}([^0-9a-f]|$)'
+            if grep -R -E -q \
+              -- "${raw_subject_pattern}|\"sub\"[[:space:]]*:" \
+              "${directory}"; then
+              echo "::error::Lifecycle evidence retained a raw Cognito subject"
+              exit 1
+            fi
+
+            state_sha256="$(sha256sum "${state}" | awk '{print $1}')"
+            receipt_sha256="$(sha256sum "${receipt}" | awk '{print $1}')"
+            manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
+            predicate_sha256="$(sha256sum "${predicate}" | awk '{print $1}')"
+            state_size="$(stat -c '%s' "${state}")"
+            receipt_size="$(stat -c '%s' "${receipt}")"
+            jq -e \
+              --arg operation "${operation}" \
+              --arg applicationOriginSha256 "${application_origin_sha256}" \
+              --arg expectedResult "${expected_result}" '
+                (keys | sort) == ([
+                  "schemaVersion",
+                  "stage",
+                  "operation",
+                  "identityDigest",
+                  "cognitoSubjectDigest",
+                  "applicationOriginSha256",
+                  "priorState",
+                  "finalState",
+                  "sessionRevocation",
+                  "startedAt",
+                  "completedAt",
+                  "observation",
+                  "result",
+                  "sanitized",
+                  "secretMaterialRetained"
+                ] | sort) and
+                .schemaVersion ==
+                  "archon.judge-user-state-transition/v1" and
+                .stage == "production" and
+                .operation == $operation and
+                (.identityDigest | test("^[0-9a-f]{64}$")) and
+                (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
+                .applicationOriginSha256 == $applicationOriginSha256 and
+                (.priorState | keys | sort) ==
+                  ([
+                    "identity",
+                    "access",
+                    "authentication",
+                    "authorization"
+                  ] | sort) and
+                (.finalState | keys | sort) ==
+                  ([
+                    "identity",
+                    "access",
+                    "authentication",
+                    "authorization"
+                  ] | sort) and
+                (.startedAt |
+                  test(
+                    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" +
+                    "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                  )) and
+                (.completedAt |
+                  test(
+                    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" +
+                    "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                  )) and
+                (.startedAt | fromdateiso8601 | todateiso8601) ==
+                  .startedAt and
+                (.completedAt | fromdateiso8601 | todateiso8601) ==
+                  .completedAt and
+                (.startedAt | fromdateiso8601) <=
+                  (.completedAt | fromdateiso8601) and
+                .observation == {
+                  priorState: "exact-operation-precondition",
+                  finalState: "exact-aws-read-back"
+                } and
+                .result == $expectedResult and
+                (
+                  if $operation == "provision" then
+                    .priorState == {
+                      identity: "absent",
+                      access: "absent",
+                      authentication: "absent",
+                      authorization: "none"
+                    } and
+                    .finalState == {
+                      identity: "exact-bound",
+                      access: "enabled",
+                      authentication: "confirmed-permanent",
+                      authorization: "sole-approver-group"
+                    } and
+                    .sessionRevocation ==
+                      "not-applicable-fresh-identity"
+                  elif $operation == "rotate" then
+                    .priorState == {
+                      identity: "exact-bound",
+                      access: "enabled",
+                      authentication: "confirmed-permanent",
+                      authorization: "sole-approver-group"
+                    } and
+                    .finalState == {
+                      identity: "exact-bound",
+                      access: "enabled",
+                      authentication: "confirmed-permanent-rotated",
+                      authorization: "sole-approver-group"
+                    } and
+                    .sessionRevocation == "response-confirmed"
+                  elif $operation == "deactivate" then
+                    .priorState.identity == "exact-bound" and
+                    (
+                      .priorState.access == "enabled" or
+                      .priorState.access == "disabled" or
+                      .priorState.access == "unverified"
+                    ) and
+                    .priorState.authentication ==
+                      "not-relied-upon-for-containment" and
+                    .priorState.authorization ==
+                      "not-relied-upon-for-containment" and
+                    .finalState == {
+                      identity: "exact-bound",
+                      access: "disabled",
+                      authentication: "disabled-containment-boundary",
+                      authorization: "none"
+                    } and
+                    (
+                      .sessionRevocation == "response-confirmed" or
+                      .sessionRevocation ==
+                        "contained-by-disabled-state"
+                    )
+                  else
+                    $operation == "reactivate" and
+                    .priorState.identity == "exact-bound" and
+                    .priorState.access == "disabled" and
+                    (
+                      .priorState.authentication ==
+                        "confirmed-contained" or
+                      .priorState.authentication ==
+                        "bootstrap-contained"
+                    ) and
+                    .priorState.authorization == "none" and
+                    .finalState == {
+                      identity: "exact-bound",
+                      access: "enabled",
+                      authentication: "confirmed-permanent-rotated",
+                      authorization: "sole-approver-group"
+                    } and
+                    .sessionRevocation == "response-confirmed"
+                  end
+                ) and
+                .sanitized == true and
+                .secretMaterialRetained == false
+            ' "${state}" >/dev/null || {
+              echo "::error::${operation} state receipt is invalid"
+              exit 1
+            }
+            approval_request_sha256="$(
+              jq -er '
+                .approval.requestSha256 |
+                select(test("^[0-9a-f]{64}$"))
+              ' "${receipt}"
+            )"
+            approval_receipt_sha256="$(
+              printf '%s' \
+                "ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${run_id}|run_attempt=${producer_attempt}|request_sha256=${approval_request_sha256}" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            operation_gate_sha256="$(
+              jq -er '
+                .controlPlane.gateSha256 |
+                select(test("^[0-9a-f]{64}$"))
+              ' "${receipt}"
+            )"
+            expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/judge-user.yml@refs/heads/master"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg operation "${operation}" \
+              --arg applicationOriginSha256 "${application_origin_sha256}" \
+              --arg expectedResult "${expected_result}" \
+              --arg stateSha256 "${state_sha256}" \
+              --arg workflowRef "${expected_workflow_ref}" \
+              --arg requestSha256 "${approval_request_sha256}" \
+              --arg approvalReceiptSha256 \
+                "${approval_receipt_sha256}" \
+              --arg gateSha256 "${operation_gate_sha256}" \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${producer_attempt}" \
+              --slurpfile state "${state}" '
+                (keys | sort) == ([
+                  "schemaVersion",
+                  "repository",
+                  "releaseSha",
+                  "source",
+                  "stage",
+                  "operation",
+                  "identityDigest",
+                  "cognitoSubjectDigest",
+                  "applicationOriginSha256",
+                  "approval",
+                  "controlPlane",
+                  "transition",
+                  "performedAt",
+                  "result",
+                  "sanitized",
+                  "secretMaterialRetained"
+                ] | sort) and
+                .schemaVersion == "archon.judge-user-operation/v1" and
+                .repository == $repository and
+                .releaseSha == $release and
+                .source == {
+                  workflowPath: ".github/workflows/judge-user.yml",
+                  workflowRef: $workflowRef,
+                  controlPlaneSha: $release,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  event: "workflow_dispatch"
+                } and
+                .stage == "production" and
+                .operation == $operation and
+                .identityDigest == $state[0].identityDigest and
+                .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
+                .applicationOriginSha256 == $applicationOriginSha256 and
+                .approval == {
+                  environment: "judge-access-production",
+                  requestSha256: $requestSha256,
+                  approvalReceiptSha256: $approvalReceiptSha256,
+                  targetSha256: .approval.targetSha256,
+                  exactReceiptVerified: true,
+                  independentReviewerVerified: true
+                } and
+                (.approval.targetSha256 |
+                  test("^[0-9a-f]{64}$")) and
+                .controlPlane == {
+                  mode: "full-green",
+                  gateSha256: $gateSha256,
+                  emergencyWorkflowFileSha256: null
+                } and
+                .transition == {
+                  stateReceiptSha256: $stateSha256,
+                  startedAt: $state[0].startedAt,
+                  completedAt: $state[0].completedAt,
+                  priorState: $state[0].priorState,
+                  finalState: $state[0].finalState,
+                  sessionRevocation: $state[0].sessionRevocation,
+                  operationResult: $state[0].result
+                } and
+                .performedAt == $state[0].completedAt and
+                .result == $state[0].result and
+                .result == $expectedResult and
+                .sanitized == true and
+                .secretMaterialRetained == false
+              ' "${receipt}" >/dev/null || {
+              echo "::error::${operation} operation receipt is invalid"
+              exit 1
+            }
+            jq -e \
+              --arg stateSha256 "${state_sha256}" \
+              --arg receiptSha256 "${receipt_sha256}" \
+              --argjson stateSize "${state_size}" \
+              --argjson receiptSize "${receipt_size}" '
+                (keys | sort) == ["files", "schemaVersion"] and
+                .schemaVersion ==
+                  "archon.judge-user-operation-manifest/v1" and
+                .files == [
+                  {
+                    path: "judge-operation-state.json",
+                    sha256: $stateSha256,
+                    sizeBytes: $stateSize
+                  },
+                  {
+                    path: "operation-receipt.json",
+                    sha256: $receiptSha256,
+                    sizeBytes: $receiptSize
+                  }
+                ]
+              ' "${manifest}" >/dev/null
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg operation "${operation}" \
+              --arg applicationOriginSha256 "${application_origin_sha256}" \
+              --arg expectedResult "${expected_result}" \
+              --arg stateSha256 "${state_sha256}" \
+              --arg receiptSha256 "${receipt_sha256}" \
+              --arg manifestSha256 "${manifest_sha256}" \
+              --arg requestSha256 "${approval_request_sha256}" \
+              --arg approvalReceiptSha256 \
+                "${approval_receipt_sha256}" \
+              --arg targetSha256 "$(
+                jq -er '.approval.targetSha256' "${receipt}"
+              )" \
+              --arg gateSha256 "${operation_gate_sha256}" \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${producer_attempt}" \
+              --slurpfile state "${state}" '
+                (keys | sort) == ([
+                  "schemaVersion",
+                  "repository",
+                  "releaseSha",
+                  "source",
+                  "stage",
+                  "operation",
+                  "identityDigest",
+                  "cognitoSubjectDigest",
+                  "applicationOriginSha256",
+                  "approval",
+                  "controlPlane",
+                  "transition",
+                  "evidence",
+                  "result",
+                  "sanitized",
+                  "secretMaterialRetained"
+                ] | sort) and
+                .schemaVersion ==
+                  "archon.judge-user-operation-attestation/v1" and
+                .repository == $repository and
+                .releaseSha == $release and
+                .source == {
+                  workflowPath: ".github/workflows/judge-user.yml",
+                  controlPlaneSha: $release,
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                } and
+                .stage == "production" and
+                .operation == $operation and
+                .identityDigest == $state[0].identityDigest and
+                .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
+                .applicationOriginSha256 == $applicationOriginSha256 and
+                .approval == {
+                  environment: "judge-access-production",
+                  requestSha256: $requestSha256,
+                  approvalReceiptSha256: $approvalReceiptSha256,
+                  targetSha256: $targetSha256,
+                  exactReceiptVerified: true,
+                  independentReviewerVerified: true
+                } and
+                .controlPlane == {
+                  mode: "full-green",
+                  gateSha256: $gateSha256
+                } and
+                .transition == {
+                  startedAt: $state[0].startedAt,
+                  completedAt: $state[0].completedAt,
+                  sessionRevocation: $state[0].sessionRevocation,
+                  operationResult: $state[0].result
+                } and
+                .evidence == {
+                  stateReceiptSha256: $stateSha256,
+                  operationReceiptSha256: $receiptSha256,
+                  manifestSha256: $manifestSha256
+                } and
+                .result == $state[0].result and
+                .result == $expectedResult and
+                .sanitized == true and
+                .secretMaterialRetained == false
+              ' "${predicate}" >/dev/null || {
+              echo "::error::${operation} attestation predicate is invalid"
+              exit 1
+            }
+
+            expected_attested_subjects="$(
+              jq -Rn '
+                [
+                  inputs |
+                  capture(
+                    "^(?<sha>[0-9a-f]{64})  (?<name>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+                  ) |
+                  {
+                    name: .name,
+                    digest: {sha256: .sha}
+                  }
+                ] |
+                sort_by(.name)
+              ' <"${subjects}"
+            )"
+            verification_dir="${verification_root}/${operation}"
+            raw_dir="${verification_root}/${operation}-raw"
+            mkdir --mode=0700 "${verification_dir}" "${raw_dir}"
+            while read -r subject_sha subject_name; do
+              subject_path="${directory}/${subject_name}"
+              test -f "${subject_path}"
+              test "$(sha256sum "${subject_path}" | awk '{print $1}')" = \
+                "${subject_sha}"
+              raw_verification="${raw_dir}/${subject_name}.json"
+              projected_verification="${verification_dir}/${subject_name}.json"
+              gh attestation verify "${subject_path}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --signer-workflow \
+                  "github.com/${GITHUB_REPOSITORY}/.github/workflows/judge-user.yml" \
+                --signer-digest "${RELEASE_SHA}" \
+                --source-digest "${RELEASE_SHA}" \
+                --source-ref refs/heads/master \
+                --predicate-type \
+                  "https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1" \
+                --deny-self-hosted-runners \
+                --format json >"${raw_verification}"
+              jq -ceS \
+                --arg subjectName "${subject_name}" \
+                --arg subjectSha256 "${subject_sha}" \
+                --arg predicateType \
+                  "https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1" \
+                --argjson expectedSubjects "${expected_attested_subjects}" \
+                --slurpfile expectedPredicate "${predicate}" '
+                  [
+                    .[] |
+                    select(
+                      .verificationResult.statement.predicateType ==
+                        $predicateType and
+                      .verificationResult.statement.predicate ==
+                        $expectedPredicate[0] and
+                      (
+                        .verificationResult.statement.subject |
+                        sort_by(.name)
+                      ) == $expectedSubjects and
+                      any(
+                        .verificationResult.statement.subject[];
+                        .name == $subjectName and
+                        .digest.sha256 == $subjectSha256
+                      )
+                    ) |
+                    {
+                      subject: {
+                        name: $subjectName,
+                        digest: ("sha256:" + $subjectSha256)
+                      },
+                      statement: .verificationResult.statement
+                    }
+                  ] |
+                  if length == 1 then .[0]
+                  else error(
+                    "exactly one lifecycle attestation must bind the full subject set"
+                  )
+                  end
+                ' "${raw_verification}" >"${projected_verification}"
+              rm -- "${raw_verification}"
+            done <"${subjects}"
+            rmdir -- "${raw_dir}"
+            verification_set="${verification_root}/${operation}-set.json"
+            jq -cS -s \
+              'sort_by(.subject.name)' \
+              "${verification_dir}"/*.json >"${verification_set}"
+            verification_digest="sha256:$(
+              sha256sum "${verification_set}" |
+                awk '{print $1}'
+            )"
+
+            jq -cnS \
+              --arg operation "${operation}" \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${producer_attempt}" \
+              --argjson artifactId "${artifact_id}" \
+              --arg artifactName "${artifact_name}" \
+              --arg artifactDigest "${artifact_digest}" \
+              --arg predicateDigest "sha256:${predicate_sha256}" \
+              --arg verificationDigest "${verification_digest}" \
+              --arg releaseSha "${RELEASE_SHA}" \
+              --arg identityDigest "sha256:$(
+                jq -er '.identityDigest' "${receipt}"
+              )" \
+              --arg cognitoSubjectDigest "sha256:$(
+                jq -er '.cognitoSubjectDigest' "${receipt}"
+              )" \
+              --arg applicationOriginSha256 "${application_origin_sha256}" \
+              --arg operationReceiptDigest "sha256:${receipt_sha256}" \
+              --arg performedAt "$(jq -er '.performedAt' "${receipt}")" \
+              --arg result "${expected_result}" '
+                {
+                  operation: $operation,
+                  workflowPath: ".github/workflows/judge-user.yml",
+                  stage: "production",
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  artifactId: $artifactId,
+                  artifactName: $artifactName,
+                  artifactDigest: $artifactDigest,
+                  predicateType:
+                    "https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1",
+                  predicateDigest: $predicateDigest,
+                  verificationDigest: $verificationDigest,
+                  releaseSha: $releaseSha,
+                  identityDigest: $identityDigest,
+                  cognitoSubjectDigest: $cognitoSubjectDigest,
+                  applicationOriginSha256: $applicationOriginSha256,
+                  operationReceiptDigest: $operationReceiptDigest,
+                  performedAt: $performedAt,
+                  result: $result,
+                  sanitized: true,
+                  secretMaterialRetained: false
+                }
+              ' >"${verification_root}/${operation}-projection.json"
+          }
+
+          validate_lifecycle \
+            provision \
+            "${PROVISION_RUN_ID}" \
+            "${PROVISION_PRODUCER_ATTEMPT}" \
+            "${PROVISION_ARTIFACT_ID}" \
+            "${PROVISION_ARTIFACT_NAME}" \
+            "${PROVISION_ARTIFACT_DIGEST}" \
+            provisioned-and-readback-verified
+          validate_lifecycle \
+            rotate \
+            "${ROTATE_RUN_ID}" \
+            "${ROTATE_PRODUCER_ATTEMPT}" \
+            "${ROTATE_ARTIFACT_ID}" \
+            "${ROTATE_ARTIFACT_NAME}" \
+            "${ROTATE_ARTIFACT_DIGEST}" \
+            rotated-and-readback-verified
+          validate_lifecycle \
+            deactivate \
+            "${DEACTIVATE_RUN_ID}" \
+            "${DEACTIVATE_PRODUCER_ATTEMPT}" \
+            "${DEACTIVATE_ARTIFACT_ID}" \
+            "${DEACTIVATE_ARTIFACT_NAME}" \
+            "${DEACTIVATE_ARTIFACT_DIGEST}" \
+            deactivated-and-readback-verified
+          validate_lifecycle \
+            reactivate \
+            "${REACTIVATE_RUN_ID}" \
+            "${REACTIVATE_PRODUCER_ATTEMPT}" \
+            "${REACTIVATE_ARTIFACT_ID}" \
+            "${REACTIVATE_ARTIFACT_NAME}" \
+            "${REACTIVATE_ARTIFACT_DIGEST}" \
+            reactivated-and-readback-verified
+
+          operations="${verification_root}/operations.json"
+          jq -cS -s '.' \
+            "${verification_root}/provision-projection.json" \
+            "${verification_root}/rotate-projection.json" \
+            "${verification_root}/deactivate-projection.json" \
+            "${verification_root}/reactivate-projection.json" \
+            >"${operations}"
+          jq -e '
+            map(.operation) ==
+              ["provision", "rotate", "deactivate", "reactivate"] and
+            ([.[].runId] | unique | length) == 4 and
+            ([.[].artifactId] | unique | length) == 4 and
+            ([.[].identityDigest] | unique | length) == 1 and
+            ([.[].cognitoSubjectDigest] | unique | length) == 1 and
+            ([.[].applicationOriginSha256] | unique | length) == 1 and
+            ([.[].releaseSha] | unique) == [$release] and
+            all(.[]; .stage == "production") and
+            (.[0].performedAt | fromdateiso8601) <
+              (.[1].performedAt | fromdateiso8601) and
+            (.[1].performedAt | fromdateiso8601) <
+              (.[2].performedAt | fromdateiso8601) and
+            (.[2].performedAt | fromdateiso8601) <
+              (.[3].performedAt | fromdateiso8601)
+          ' --arg release "${RELEASE_SHA}" "${operations}" >/dev/null || {
+            echo "::error::Judge lifecycle chain is not exact and strictly ordered"
+            exit 1
+          }
+          now_epoch="$(date -u +%s)"
+          while IFS= read -r performed_at; do
+            [[ "${performed_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+            lifecycle_epoch="$(date -u -d "${performed_at}" +%s)"
+            test "$(date -u -d "@${lifecycle_epoch}" +%Y-%m-%dT%H:%M:%SZ)" = \
+              "${performed_at}"
+            (( lifecycle_epoch <= now_epoch + 300 ))
+            (( now_epoch - lifecycle_epoch <= 604800 ))
+          done < <(jq -er '.[].performedAt' "${operations}")
+          lifecycle_digest="sha256:$(
+            sha256sum "${operations}" |
+              awk '{print $1}'
+          )"
+          identity_digest="$(jq -er '.[0].identityDigest' "${operations}")"
+          cognito_subject_digest="$(
+            jq -er '.[0].cognitoSubjectDigest' "${operations}"
+          )"
+          test "$(jq -er '.[0].applicationOriginSha256' "${operations}")" = \
+            "${application_origin_sha256}"
+
+          deployment_binding="${verification_root}/deployment-binding.json"
+          jq -cnS \
+            --argjson runId "${DEPLOYMENT_RUN_ID}" \
+            --argjson runAttempt "${DEPLOYMENT_RUN_ATTEMPT}" \
+            --argjson artifactId "${DEPLOYMENT_ARTIFACT_ID}" \
+            --arg artifactName "${DEPLOYMENT_ARTIFACT_NAME}" \
+            --arg artifactDigest "${DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --arg predicateType "${deployment_predicate_type}" \
+            --arg predicateDigest "${deployment_predicate_digest}" '
+              {
+                workflowPath: ".github/workflows/deploy.yml",
+                runId: $runId,
+                runAttempt: $runAttempt,
+                artifactId: $artifactId,
+                artifactName: $artifactName,
+                artifactDigest: $artifactDigest,
+                predicateType: $predicateType,
+                predicateDigest: $predicateDigest
+              }
+            ' >"${deployment_binding}"
+          lifecycle_binding="${verification_root}/lifecycle-binding.json"
+          jq -cnS \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg identityDigest "${identity_digest}" \
+            --arg cognitoSubjectDigest "${cognito_subject_digest}" \
+            --arg applicationOriginSha256 "${application_origin_sha256}" \
+            --arg chainDigest "${lifecycle_digest}" \
+            --slurpfile operations "${operations}" '
+              {
+                releaseSha: $releaseSha,
+                stage: "production",
+                identityDigest: $identityDigest,
+                cognitoSubjectDigest: $cognitoSubjectDigest,
+                applicationOriginSha256: $applicationOriginSha256,
+                chainDigest: $chainDigest,
+                operations: $operations[0],
+                sanitized: true,
+                secretMaterialRetained: false
+              }
+            ' >"${lifecycle_binding}"
+          prerequisite_binding="$(
+            jq -cnS \
+              --arg releaseSha "${RELEASE_SHA}" \
+              --arg applicationOrigin "${application_origin}" \
+              --arg applicationOriginSha256 "${application_origin_sha256}" \
+              --arg runtimeConfigSha256 "${runtime_config_sha256}" \
+              --arg cognitoHostedUiOrigin "${cognito_hosted_ui_origin}" \
+              --arg cognitoClientId "${cognito_client_id}" \
+              --arg cognitoIssuer "${cognito_issuer}" \
+              --arg controlPlaneGateSha256 \
+                "sha256:${CONTROL_PLANE_GATE_SHA256}" \
+              --slurpfile deployment "${deployment_binding}" \
+              --slurpfile lifecycle "${lifecycle_binding}" '
+                {
+                  schemaVersion:
+                    "archon.submission-judge-journey-prerequisites/v1",
+                  releaseSha: $releaseSha,
+                  deployment: $deployment[0],
+                  judgeUserLifecycle: $lifecycle[0],
+                  runtime: {
+                    applicationOrigin: $applicationOrigin,
+                    applicationOriginSha256:
+                      $applicationOriginSha256,
+                    runtimeConfigSha256:
+                      ("sha256:" + $runtimeConfigSha256),
+                    cognitoHostedUiOrigin:
+                      $cognitoHostedUiOrigin,
+                    cognitoClientId: $cognitoClientId,
+                    cognitoIssuer: $cognitoIssuer
+                  },
+                  controlPlaneGateSha256:
+                    $controlPlaneGateSha256,
+                  sanitized: true,
+                  secretMaterialRetained: false
+                }
+              '
+          )"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg identity "${identity_digest}" \
+            --arg subject "${cognito_subject_digest}" \
+            --arg lifecycle "${lifecycle_digest}" '
+              .releaseSha == $release and
+              .judgeUserLifecycle.identityDigest == $identity and
+              .judgeUserLifecycle.cognitoSubjectDigest == $subject and
+              .judgeUserLifecycle.chainDigest == $lifecycle and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' <<<"${prerequisite_binding}" >/dev/null
+
+          assert_current_release() {
+            local repository
+            local current_release
+            repository="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}"
+            )"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                .full_name == $repository and
+                .default_branch == "master" and
+                .archived == false and
+                .disabled == false
+              ' <<<"${repository}" >/dev/null
+            current_release="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+                --jq '.object.sha'
+            )"
+            test "${current_release}" = "${RELEASE_SHA}"
+          }
+
+          assert_latest_deployment() {
+            local runs
+            local latest
+            runs="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+            )"
+            latest="$(
+              jq -er \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .path == ".github/workflows/deploy.yml" and
+                      .event == "workflow_dispatch" and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  select(. != null) |
+                  .id
+                ' <<<"${runs}"
+            )"
+            test "${latest}" = "${DEPLOYMENT_RUN_ID}"
+          }
+
+          assert_current_lifecycle_chain() {
+            local runs
+            runs="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/workflows/judge-user.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+            )"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --argjson provision "${PROVISION_RUN_ID}" \
+              --argjson rotate "${ROTATE_RUN_ID}" \
+              --argjson deactivate "${DEACTIVATE_RUN_ID}" \
+              --argjson reactivate "${REACTIVATE_RUN_ID}" '
+                [
+                  .[] |
+                  .workflow_runs[] |
+                  select(
+                    .path == ".github/workflows/judge-user.yml" and
+                    .event == "workflow_dispatch" and
+                    .head_sha == $release and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repository and
+                    (
+                      .display_title |
+                      test(
+                        "^(provision|rotate|deactivate|reactivate) " +
+                        "judge access in production$"
+                      )
+                    )
+                  )
+                ] as $production |
+                (
+                  [
+                    $production[] |
+                    select(
+                      .status == "completed" and
+                      .conclusion == "success"
+                    ) |
+                    {
+                      id: .id,
+                      operation: (
+                        .display_title |
+                        capture(
+                          "^(?<operation>provision|rotate|" +
+                          "deactivate|reactivate) "
+                        ).operation
+                      )
+                    }
+                  ] |
+                  sort_by(.id) |
+                  .[-4:]
+                ) == [
+                  {id: $provision, operation: "provision"},
+                  {id: $rotate, operation: "rotate"},
+                  {id: $deactivate, operation: "deactivate"},
+                  {id: $reactivate, operation: "reactivate"}
+                ] and
+                all($production[]; .id <= $reactivate)
+              ' <<<"${runs}" >/dev/null || {
+              echo "::error::Selected lifecycle is not the exact current production chain"
+              exit 1
+            }
+          }
+
+          assert_exact_run_artifact() {
+            local key="$1"
+            local run_id="$2"
+            local run_attempt="$3"
+            local workflow_path="$4"
+            local artifact_id="$5"
+            local artifact_name="$6"
+            local artifact_digest="$7"
+            local maximum_size="$8"
+            local run
+            local artifact
+
+            run="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            )"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg path "${workflow_path}" \
+              --argjson runId "${run_id}" \
+              --argjson runAttempt "${run_attempt}" '
+                .id == $runId and
+                .run_attempt == $runAttempt and
+                .path == $path and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                .conclusion == "success" and
+                .head_sha == $release and
+                .head_branch == "master" and
+                .head_repository.full_name == $repository
+              ' <<<"${run}" >/dev/null || {
+              echo "::error::${key} run ownership changed"
+              exit 1
+            }
+            artifact="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            )"
+            jq -e \
+              --arg release "${RELEASE_SHA}" \
+              --arg name "${artifact_name}" \
+              --arg digest "${artifact_digest}" \
+              --argjson artifactId "${artifact_id}" \
+              --argjson runId "${run_id}" \
+              --argjson maximumSize "${maximum_size}" '
+                .id == $artifactId and
+                .name == $name and
+                .digest == $digest and
+                .expired == false and
+                (.size_in_bytes | type == "number") and
+                .size_in_bytes > 0 and
+                .size_in_bytes <= $maximumSize and
+                .workflow_run.id == $runId and
+                .workflow_run.head_sha == $release
+              ' <<<"${artifact}" >/dev/null || {
+              echo "::error::${key} artifact metadata changed"
+              exit 1
+            }
+          }
+
+          final_gate_dir="${RUNNER_TEMP}/judge-journey-final-control-plane"
+          test ! -e "${final_gate_dir}"
+          mkdir --mode=0700 "${final_gate_dir}"
+          final_gate="${final_gate_dir}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          EXPECTED_GATE_SHA256="${CONTROL_PLANE_GATE_SHA256}" \
+          OUTPUT_PATH="${final_gate}" \
+            bash scripts/verify-github-control-plane.sh
+          test "$(sha256sum "${final_gate}" | awk '{print $1}')" = \
+            "${CONTROL_PLANE_GATE_SHA256}"
+          assert_current_release
+          assert_latest_deployment
+          assert_current_lifecycle_chain
+          assert_exact_run_artifact \
+            deployment \
+            "${DEPLOYMENT_RUN_ID}" \
+            "${DEPLOYMENT_RUN_ATTEMPT}" \
+            .github/workflows/deploy.yml \
+            "${DEPLOYMENT_ARTIFACT_ID}" \
+            "${DEPLOYMENT_ARTIFACT_NAME}" \
+            "${DEPLOYMENT_ARTIFACT_DIGEST}" \
+            536870912
+          assert_exact_run_artifact \
+            provision \
+            "${PROVISION_RUN_ID}" \
+            "${PROVISION_RUN_ATTEMPT}" \
+            .github/workflows/judge-user.yml \
+            "${PROVISION_ARTIFACT_ID}" \
+            "${PROVISION_ARTIFACT_NAME}" \
+            "${PROVISION_ARTIFACT_DIGEST}" \
+            10485760
+          assert_exact_run_artifact \
+            rotate \
+            "${ROTATE_RUN_ID}" \
+            "${ROTATE_RUN_ATTEMPT}" \
+            .github/workflows/judge-user.yml \
+            "${ROTATE_ARTIFACT_ID}" \
+            "${ROTATE_ARTIFACT_NAME}" \
+            "${ROTATE_ARTIFACT_DIGEST}" \
+            10485760
+          assert_exact_run_artifact \
+            deactivate \
+            "${DEACTIVATE_RUN_ID}" \
+            "${DEACTIVATE_RUN_ATTEMPT}" \
+            .github/workflows/judge-user.yml \
+            "${DEACTIVATE_ARTIFACT_ID}" \
+            "${DEACTIVATE_ARTIFACT_NAME}" \
+            "${DEACTIVATE_ARTIFACT_DIGEST}" \
+            10485760
+          assert_exact_run_artifact \
+            reactivate \
+            "${REACTIVATE_RUN_ID}" \
+            "${REACTIVATE_RUN_ATTEMPT}" \
+            .github/workflows/judge-user.yml \
+            "${REACTIVATE_ARTIFACT_ID}" \
+            "${REACTIVATE_ARTIFACT_NAME}" \
+            "${REACTIVATE_ARTIFACT_DIGEST}" \
+            10485760
+          {
+            echo "application_origin=${application_origin}"
+            echo "application_origin_sha256=${application_origin_sha256}"
+            echo "runtime_config_sha256=${runtime_config_sha256}"
+            echo "cognito_hosted_ui_origin=${cognito_hosted_ui_origin}"
+            echo "cognito_client_id=${cognito_client_id}"
+            echo "cognito_issuer=${cognito_issuer}"
+            echo "identity_digest=${identity_digest}"
+            echo "cognito_subject_digest=${cognito_subject_digest}"
+            echo "lifecycle_digest=${lifecycle_digest}"
+            echo "prerequisite_binding=${prerequisite_binding}"
+          } >>"${GITHUB_OUTPUT}"
+
+  journey:
+    name: Run one reject-only journey and seal public evidence
+    needs: prerequisites
+    if: needs.prerequisites.result == 'success'
+    environment: judge-access-production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Recheck current release and immutable prerequisite binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          PREREQUISITE_BINDING: ${{ needs.prerequisites.outputs.prerequisite_binding }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-judge-journey.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}" || {
+            echo "::error::Master changed before the protected judge journey"
+            exit 1
+          }
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg applicationOrigin \
+              "${{ needs.prerequisites.outputs.application_origin }}" \
+            --arg identity \
+              "${{ needs.prerequisites.outputs.identity_digest }}" \
+            --arg subject \
+              "${{ needs.prerequisites.outputs.cognito_subject_digest }}" \
+            --arg lifecycle \
+              "${{ needs.prerequisites.outputs.lifecycle_digest }}" '
+              (keys | sort) == [
+                "controlPlaneGateSha256",
+                "deployment",
+                "judgeUserLifecycle",
+                "releaseSha",
+                "runtime",
+                "sanitized",
+                "schemaVersion",
+                "secretMaterialRetained"
+              ] and
+              .schemaVersion ==
+                "archon.submission-judge-journey-prerequisites/v1" and
+              .releaseSha == $release and
+              .runtime.applicationOrigin == $applicationOrigin and
+              .judgeUserLifecycle.identityDigest == $identity and
+              .judgeUserLifecycle.cognitoSubjectDigest == $subject and
+              .judgeUserLifecycle.chainDigest == $lifecycle and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' <<<"${PREREQUISITE_BINDING}" >/dev/null
+
+          latest_deployment="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100" |
+              jq -er \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .path == ".github/workflows/deploy.yml" and
+                      .event == "workflow_dispatch" and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  .id
+                '
+          )"
+          test "${latest_deployment}" = "${DEPLOYMENT_RUN_ID}" || {
+            echo "::error::A newer successful deployment appeared before the journey"
+            exit 1
+          }
+          later_lifecycle="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/judge-user.yml/runs?branch=master&event=workflow_dispatch&per_page=100" |
+              jq -er \
+                --argjson selected "${REACTIVATE_RUN_ID}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .id > $selected and
+                      (.display_title |
+                        endswith(" judge access in production")) and
+                      .status != "cancelled"
+                    )
+                  ] |
+                  length
+                '
+          )"
+          test "${later_lifecycle}" = "0" || {
+            echo "::error::A later production judge-user operation invalidated the selected chain"
+            exit 1
+          }
+
+      - name: Check out the exact unprivileged journey client
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up locked Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.3.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked browser dependencies
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm exec -- playwright install --with-deps chromium
+
+      - name: Prepare fresh journey and evidence directories
+        env:
+          PREREQUISITE_BINDING: ${{ needs.prerequisites.outputs.prerequisite_binding }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ inputs.release_sha }}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          journey_dir="${RUNNER_TEMP}/live-judge-journey"
+          evidence_dir="${RUNNER_TEMP}/submission-judge-journey-evidence"
+          binding="${RUNNER_TEMP}/submission-judge-journey-prerequisites.json"
+          for target in "${journey_dir}" "${evidence_dir}" "${binding}"; do
+            test ! -e "${target}"
+          done
+          mkdir --mode=0700 "${journey_dir}" "${evidence_dir}"
+          printf '%s\n' "${PREREQUISITE_BINDING}" |
+            jq -ceS . >"${binding}"
+          chmod 0600 "${binding}"
+
+      - name: Run the final trust gate before protected values
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          EXPECTED_GATE_SHA256: ${{ needs.prerequisites.outputs.control_plane_gate_sha256 }}
+        run: |
+          set -euo pipefail
+          binding="${RUNNER_TEMP}/submission-judge-journey-prerequisites.json"
+          test -f "${binding}"
+          test ! -L "${binding}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          final_gate_dir="${RUNNER_TEMP}/judge-journey-pre-credential-gate"
+          test ! -e "${final_gate_dir}"
+          mkdir --mode=0700 "${final_gate_dir}"
+          final_gate="${final_gate_dir}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${final_gate}" \
+            bash scripts/verify-github-control-plane.sh
+          test "$(sha256sum "${final_gate}" | awk '{print $1}')" = \
+            "${EXPECTED_GATE_SHA256}"
+
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          deployment_runs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson selected "${DEPLOYMENT_RUN_ID}" '
+              [
+                .[] |
+                .workflow_runs[] |
+                select(
+                  .path == ".github/workflows/deploy.yml" and
+                  .event == "workflow_dispatch" and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repository
+                )
+              ] |
+              sort_by(.id, .run_attempt) |
+              last |
+              .id == $selected
+            ' <<<"${deployment_runs}" >/dev/null
+
+          lifecycle_runs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/judge-user.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson provision "${PROVISION_RUN_ID}" \
+            --argjson rotate "${ROTATE_RUN_ID}" \
+            --argjson deactivate "${DEACTIVATE_RUN_ID}" \
+            --argjson reactivate "${REACTIVATE_RUN_ID}" '
+              [
+                .[] |
+                .workflow_runs[] |
+                select(
+                  .path == ".github/workflows/judge-user.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_sha == $release and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repository and
+                  (
+                    .display_title |
+                    test(
+                      "^(provision|rotate|deactivate|reactivate) " +
+                      "judge access in production$"
+                    )
+                  )
+                )
+              ] as $production |
+              (
+                [
+                  $production[] |
+                  select(
+                    .status == "completed" and
+                    .conclusion == "success"
+                  ) |
+                  {
+                    id: .id,
+                    operation: (
+                      .display_title |
+                      capture(
+                        "^(?<operation>provision|rotate|" +
+                        "deactivate|reactivate) "
+                      ).operation
+                    )
+                  }
+                ] |
+                sort_by(.id) |
+                .[-4:]
+              ) == [
+                {id: $provision, operation: "provision"},
+                {id: $rotate, operation: "rotate"},
+                {id: $deactivate, operation: "deactivate"},
+                {id: $reactivate, operation: "reactivate"}
+              ] and
+              all($production[]; .id <= $reactivate)
+            ' <<<"${lifecycle_runs}" >/dev/null || {
+            echo "::error::Lifecycle changed before protected credentials"
+            exit 1
+          }
+
+          jq -ce '
+            [
+              (
+                .deployment +
+                {kind: "deployment", producerAttemptIsExact: true}
+              ),
+              (
+                .judgeUserLifecycle.operations[] +
+                {kind: "lifecycle", producerAttemptIsExact: false}
+              )
+            ][]
+          ' "${binding}" |
+          while IFS= read -r source; do
+            run_id="$(jq -er '.runId' <<<"${source}")"
+            run_attempt="$(jq -er '.runAttempt' <<<"${source}")"
+            workflow_path="$(jq -er '.workflowPath' <<<"${source}")"
+            artifact_id="$(jq -er '.artifactId' <<<"${source}")"
+            artifact_name="$(jq -er '.artifactName' <<<"${source}")"
+            artifact_digest="$(jq -er '.artifactDigest' <<<"${source}")"
+            exact_attempt="$(
+              jq -er '.producerAttemptIsExact' <<<"${source}"
+            )"
+            run="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            )"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg path "${workflow_path}" \
+              --argjson runId "${run_id}" \
+              --argjson attempt "${run_attempt}" \
+              --argjson exact "${exact_attempt}" '
+                .id == $runId and
+                .path == $path and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                .conclusion == "success" and
+                .head_sha == $release and
+                .head_branch == "master" and
+                .head_repository.full_name == $repository and
+                (
+                  if $exact then .run_attempt == $attempt
+                  else .run_attempt >= $attempt
+                  end
+                )
+              ' <<<"${run}" >/dev/null
+            artifact="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            )"
+            jq -e \
+              --arg release "${RELEASE_SHA}" \
+              --arg name "${artifact_name}" \
+              --arg digest "${artifact_digest}" \
+              --argjson artifactId "${artifact_id}" \
+              --argjson runId "${run_id}" '
+                .id == $artifactId and
+                .name == $name and
+                .digest == $digest and
+                .expired == false and
+                (.size_in_bytes | type == "number") and
+                .size_in_bytes > 0 and
+                .workflow_run.id == $runId and
+                .workflow_run.head_sha == $release
+              ' <<<"${artifact}" >/dev/null
+          done
+
+      - name: Run the protected reject-only browser journey
+        working-directory: web
+        env:
+          ARCHON_LIVE_JUDGE_JOURNEY: "1"
+          ARCHON_LIVE_BASE_URL: ${{ needs.prerequisites.outputs.application_origin }}
+          ARCHON_LIVE_OUTPUT_DIR: ${{ runner.temp }}/live-judge-journey
+          ARCHON_EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          ARCHON_EXPECTED_APPLICATION_ORIGIN_SHA256: ${{ needs.prerequisites.outputs.application_origin_sha256 }}
+          ARCHON_EXPECTED_RUNTIME_CONFIG_SHA256: ${{ needs.prerequisites.outputs.runtime_config_sha256 }}
+          ARCHON_EXPECTED_COGNITO_HOSTED_UI_ORIGIN: ${{ needs.prerequisites.outputs.cognito_hosted_ui_origin }}
+          ARCHON_EXPECTED_COGNITO_CLIENT_ID: ${{ needs.prerequisites.outputs.cognito_client_id }}
+          ARCHON_EXPECTED_COGNITO_ISSUER: ${{ needs.prerequisites.outputs.cognito_issuer }}
+          ARCHON_EXPECTED_IDENTITY_DIGEST: ${{ needs.prerequisites.outputs.identity_digest }}
+          ARCHON_EXPECTED_COGNITO_SUBJECT_DIGEST: ${{ needs.prerequisites.outputs.cognito_subject_digest }}
+          ARCHON_EXPECTED_LIFECYCLE_DIGEST: ${{ needs.prerequisites.outputs.lifecycle_digest }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+          JUDGE_PASSWORD: ${{ secrets.JUDGE_PASSWORD }}
+          JUDGE_ACCOUNT_ID: ${{ vars.JUDGE_PRODUCTION_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          npm exec -- playwright test \
+            --config=playwright.live.config.ts
+
+      - name: Reobserve terminal state without protected values
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          APPLICATION_ORIGIN: ${{ needs.prerequisites.outputs.application_origin }}
+          APPLICATION_ORIGIN_SHA256: ${{ needs.prerequisites.outputs.application_origin_sha256 }}
+          IDENTITY_DIGEST: ${{ needs.prerequisites.outputs.identity_digest }}
+          COGNITO_SUBJECT_DIGEST: ${{ needs.prerequisites.outputs.cognito_subject_digest }}
+          LIFECYCLE_DIGEST: ${{ needs.prerequisites.outputs.lifecycle_digest }}
+        run: |
+          set -euo pipefail
+          journey_dir="${RUNNER_TEMP}/live-judge-journey"
+          capability="${journey_dir}/terminal-observer-capability.json"
+          receipt="${journey_dir}/browser-journey-receipt.json"
+          observation="${journey_dir}/terminal-observation.json"
+          cleanup_capability() {
+            rm -f -- "${capability}"
+          }
+          trap cleanup_capability EXIT
+          test -f "${capability}"
+          test ! -L "${capability}"
+          test "$(stat -c '%a' "${capability}")" = "600"
+          test -f "${receipt}"
+          test ! -L "${receipt}"
+          test "$(stat -c '%a' "${receipt}")" = "600"
+          export CAPABILITY_PATH="${capability}"
+          export RECEIPT_PATH="${receipt}"
+          export OBSERVATION_PATH="${observation}"
+          python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import ssl
+          import stat
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          def fail(message: str) -> None:
+              raise SystemExit(message)
+
+          def exact_keys(value: object, keys: set[str], label: str) -> dict:
+              if not isinstance(value, dict) or set(value) != keys:
+                  fail(f"{label} has invalid keys")
+              return value
+
+          def canonical(value: object) -> bytes:
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode("utf-8")
+
+          def digest_json(value: object) -> str:
+              return "sha256:" + hashlib.sha256(canonical(value)[:-1]).hexdigest()
+
+          def instant(value: object, label: str) -> dt.datetime:
+              if not isinstance(value, str) or not value.endswith("Z"):
+                  fail(f"{label} is not canonical UTC")
+              try:
+                  parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              except ValueError:
+                  fail(f"{label} is invalid")
+              if parsed.tzinfo != dt.timezone.utc:
+                  fail(f"{label} is not UTC")
+              return parsed
+
+          capability_path = pathlib.Path(os.environ["CAPABILITY_PATH"])
+          receipt_path = pathlib.Path(os.environ["RECEIPT_PATH"])
+          observation_path = pathlib.Path(os.environ["OBSERVATION_PATH"])
+          for item in (capability_path, receipt_path):
+              info = item.lstat()
+              if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                  fail("journey input is not a regular file")
+              if stat.S_IMODE(info.st_mode) != 0o600:
+                  fail("journey input permissions are not exact")
+          capability_raw = capability_path.read_bytes()
+          receipt_raw = receipt_path.read_bytes()
+          if (
+              len(capability_raw) > 16_384
+              or len(receipt_raw) > 1_048_576
+              or not capability_raw.endswith(b"\n")
+              or not receipt_raw.endswith(b"\n")
+          ):
+              fail("journey input size or framing is invalid")
+          capability = exact_keys(
+              json.loads(capability_raw),
+              {
+                  "schemaVersion",
+                  "applicationOrigin",
+                  "releaseSha",
+                  "auditId",
+                  "pollUrl",
+                  "expectedTerminalPublicProjectionSha256",
+                  "browserReceiptSha256",
+                  "issuedAt",
+                  "expiresAt",
+                  "containsCredentialMaterial",
+                  "transient",
+              },
+              "terminal capability",
+          )
+          receipt = exact_keys(
+              json.loads(receipt_raw),
+              {
+                  "schemaVersion",
+                  "bindings",
+                  "startedAt",
+                  "completedAt",
+                  "identityAuthenticatedAt",
+                  "identityIssuedAt",
+                  "cognitoIssuerSha256",
+                  "cognitoJwksSha256",
+                  "idTokenKidSha256",
+                  "accessTokenKidSha256",
+                  "auditScopeSha256",
+                  "auditCapabilitySha256",
+                  "oauth",
+                  "decisionRequestSha256",
+                  "decisionAckSha256",
+                  "decisionAckStatus",
+                  "decisionAckDisposition",
+                  "network",
+                  "terminalPublicProjection",
+                  "terminalPublicProjectionSha256",
+                  "outcome",
+                  "checks",
+              },
+              "browser receipt",
+          )
+          release = os.environ["RELEASE_SHA"]
+          application_origin = os.environ["APPLICATION_ORIGIN"]
+          if (
+              capability["schemaVersion"]
+              != "archon.browser-terminal-observer-capability/v1"
+              or capability["releaseSha"] != release
+              or capability["applicationOrigin"] != application_origin
+              or capability["containsCredentialMaterial"] is not False
+              or capability["transient"] is not True
+              or capability["browserReceiptSha256"]
+              != "sha256:" + hashlib.sha256(receipt_raw).hexdigest()
+              or receipt["schemaVersion"]
+              != "archon.browser-judge-journey-receipt/v1"
+              or receipt["bindings"]["releaseSha"] != release
+              or receipt["bindings"]["applicationOriginSha256"]
+              != os.environ["APPLICATION_ORIGIN_SHA256"]
+              or receipt["bindings"]["identityDigest"]
+              != os.environ["IDENTITY_DIGEST"]
+              or receipt["bindings"]["cognitoSubjectDigest"]
+              != os.environ["COGNITO_SUBJECT_DIGEST"]
+              or receipt["bindings"]["lifecycleDigest"]
+              != os.environ["LIFECYCLE_DIGEST"]
+              or receipt["checks"]["terminalCapabilityHandoffCreated"] is not True
+              or receipt["checks"]["sanitized"] is not True
+              or receipt["checks"]["secretMaterialRetained"] is not False
+          ):
+              fail("terminal capability does not bind the sanitized browser receipt")
+          issued = instant(capability["issuedAt"], "capability issuedAt")
+          expires = instant(capability["expiresAt"], "capability expiresAt")
+          now = dt.datetime.now(dt.timezone.utc)
+          if issued > now + dt.timedelta(minutes=1) or not (
+              issued < expires <= issued + dt.timedelta(minutes=10)
+          ) or now >= expires:
+              fail("terminal capability is not fresh")
+          audit_id = capability["auditId"]
+          poll_url = capability["pollUrl"]
+          if (
+              not isinstance(audit_id, str)
+              or len(audit_id) != 64
+              or any(character not in "0123456789abcdef" for character in audit_id)
+              or poll_url != f"/api/control-loops/{audit_id}"
+          ):
+              fail("terminal capability path is invalid")
+          parsed_origin = urllib.parse.urlsplit(application_origin)
+          if (
+              parsed_origin.scheme != "https"
+              or parsed_origin.path
+              or parsed_origin.query
+              or parsed_origin.fragment
+              or not parsed_origin.hostname
+          ):
+              fail("terminal capability origin is invalid")
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          request = urllib.request.Request(
+              application_origin + poll_url,
+              headers={
+                  "Accept": "application/json",
+                  "Authorization": "",
+                  "Cookie": "",
+                  "User-Agent": "archon-judge-terminal-observer/1",
+              },
+              method="GET",
+          )
+          opener = urllib.request.build_opener(
+              urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+              NoRedirect(),
+          )
+          try:
+              with opener.open(request, timeout=20) as response:
+                  if response.status != 200 or response.geturl() != request.full_url:
+                      fail("terminal public GET status or URL is invalid")
+                  content_type = response.headers.get("content-type", "").lower()
+                  if not content_type.startswith("application/json"):
+                      fail("terminal public GET was not JSON")
+                  raw = response.read(1_048_577)
+          except urllib.error.HTTPError as error:
+              fail(f"terminal public GET failed with {error.code}")
+          if len(raw) < 2 or len(raw) > 1_048_576:
+              fail("terminal public GET body is invalid")
+          value = exact_keys(
+              json.loads(raw),
+              {
+                  "schemaVersion",
+                  "auditId",
+                  "status",
+                  "submittedAt",
+                  "updatedAt",
+                  "completedAt",
+                  "releaseSha",
+                  "report",
+                  "approval",
+                  "result",
+              },
+              "terminal response",
+          )
+          result = exact_keys(
+              value["result"],
+              {
+                  "outcome",
+                  "receiptDigest",
+                  "executionEvidenceDigest",
+                  "completedAt",
+                  "verification",
+              },
+              "terminal result",
+          )
+          approval = value["approval"]
+          verification = result["verification"]
+          if (
+              value["schemaVersion"] != "archon.control-loop-status/v1"
+              or value["auditId"] != audit_id
+              or value["status"] != "SUCCEEDED"
+              or value["releaseSha"] != release
+              or not isinstance(approval, dict)
+              or approval.get("status") != "DECIDED"
+              or approval.get("decision") != "REJECT"
+              or result["outcome"] != "REJECTED"
+              or not isinstance(verification, dict)
+              or set(verification)
+              != {"checks", "eventCount", "rollbackAvailability"}
+              or verification["checks"] != []
+              or verification["eventCount"] != 5
+              or verification["rollbackAvailability"] != "NOT_APPLICABLE"
+          ):
+              fail("terminal response does not prove one rejected journey")
+          report_sha = digest_json(value["report"])
+          projection = {
+              "schemaVersion":
+                  "archon.control-loop-terminal-public-projection/v1",
+              "status": "SUCCEEDED",
+              "releaseSha": release,
+              "approvalDecision": "REJECT",
+              "outcome": "REJECTED",
+              "completedAt": result["completedAt"],
+              "receiptDigest": result["receiptDigest"],
+              "executionEvidenceDigest": result["executionEvidenceDigest"],
+              "reportSha256": report_sha,
+              "verification": {
+                  "checkCount": 0,
+                  "eventCount": 5,
+                  "rollbackAvailability": "NOT_APPLICABLE",
+              },
+          }
+          projection_digest = digest_json(projection)
+          if (
+              projection != receipt["terminalPublicProjection"]
+              or projection_digest != receipt["terminalPublicProjectionSha256"]
+              or projection_digest
+              != capability["expectedTerminalPublicProjectionSha256"]
+          ):
+              fail("independent terminal projection differs from the browser proof")
+          observed_at = dt.datetime.now(dt.timezone.utc).isoformat(
+              timespec="milliseconds"
+          ).replace("+00:00", "Z")
+          observation = {
+              "schemaVersion":
+                  "archon.submission-judge-terminal-observation/v1",
+              "releaseSha": release,
+              "applicationOriginSha256":
+                  os.environ["APPLICATION_ORIGIN_SHA256"],
+              "browserReceiptSha256":
+                  "sha256:" + hashlib.sha256(receipt_raw).hexdigest(),
+              "terminalPublicProjectionSha256": projection_digest,
+              "observedAt": observed_at,
+              "httpStatus": 200,
+              "redirectsObserved": 0,
+              "credentialMaterialUsed": False,
+              "status": "SUCCEEDED",
+              "outcome": "REJECTED",
+              "approvalDecision": "REJECT",
+              "sanitized": True,
+              "secretMaterialRetained": False,
+          }
+          encoded = canonical(observation)
+          temporary = observation_path.with_name(
+              f".{observation_path.name}.{os.getpid()}.tmp"
+          )
+          descriptor = os.open(
+              temporary,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+              0o600,
+          )
+          try:
+              os.write(descriptor, encoded)
+              os.fsync(descriptor)
+          finally:
+              os.close(descriptor)
+          os.link(temporary, observation_path)
+          temporary.unlink()
+          PY
+          test -f "${observation}"
+          test ! -L "${observation}"
+          test "$(stat -c '%a' "${observation}")" = "600"
+          rm -- "${capability}"
+          trap - EXIT
+
+      - name: Remove transient observer capability on every path
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f -- \
+            "${RUNNER_TEMP}/live-judge-journey/terminal-observer-capability.json"
+
+      - name: Recheck release and package sanitized journey evidence
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          APPLICATION_ORIGIN: ${{ needs.prerequisites.outputs.application_origin }}
+          APPLICATION_ORIGIN_SHA256: ${{ needs.prerequisites.outputs.application_origin_sha256 }}
+          RUNTIME_CONFIG_SHA256: ${{ needs.prerequisites.outputs.runtime_config_sha256 }}
+          EXPECTED_GATE_SHA256: ${{ needs.prerequisites.outputs.control_plane_gate_sha256 }}
+        run: |
+          set -euo pipefail
+          journey_dir="${RUNNER_TEMP}/live-judge-journey"
+          evidence_dir="${RUNNER_TEMP}/submission-judge-journey-evidence"
+          binding="${RUNNER_TEMP}/submission-judge-journey-prerequisites.json"
+          test ! -e \
+            "${journey_dir}/terminal-observer-capability.json"
+          test -f "${journey_dir}/browser-journey-receipt.json"
+          test -f "${journey_dir}/terminal-observation.json"
+          test -d "${evidence_dir}"
+          test -z "$(find "${evidence_dir}" -mindepth 1 -print -quit)"
+
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}" || {
+            echo "::error::Master changed before journey evidence sealing"
+            exit 1
+          }
+          gate_dir="${RUNNER_TEMP}/judge-journey-package-control-plane"
+          test ! -e "${gate_dir}"
+          mkdir --mode=0700 "${gate_dir}"
+          gate="${gate_dir}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          EXPECTED_GATE_SHA256="${EXPECTED_GATE_SHA256}" \
+          OUTPUT_PATH="${gate}" \
+            bash scripts/verify-github-control-plane.sh
+          gate_sha256="$(
+            sha256sum "${gate}" |
+              awk '{print $1}'
+          )"
+          test "${gate_sha256}" = "${EXPECTED_GATE_SHA256}" || {
+            echo "::error::Control-plane gates changed during the journey"
+            exit 1
+          }
+          latest_deployment="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100" |
+              jq -er \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .path == ".github/workflows/deploy.yml" and
+                      .event == "workflow_dispatch" and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  .id
+                '
+          )"
+          test "${latest_deployment}" = "${DEPLOYMENT_RUN_ID}"
+          lifecycle_runs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/judge-user.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson provision "${PROVISION_RUN_ID}" \
+            --argjson rotate "${ROTATE_RUN_ID}" \
+            --argjson deactivate "${DEACTIVATE_RUN_ID}" \
+            --argjson reactivate "${REACTIVATE_RUN_ID}" '
+              [
+                .[] |
+                .workflow_runs[] |
+                select(
+                  .path == ".github/workflows/judge-user.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_sha == $release and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repository and
+                  (
+                    .display_title |
+                    test(
+                      "^(provision|rotate|deactivate|reactivate) " +
+                      "judge access in production$"
+                    )
+                  )
+                )
+              ] as $production |
+              (
+                [
+                  $production[] |
+                  select(
+                    .status == "completed" and
+                    .conclusion == "success"
+                  ) |
+                  {
+                    id: .id,
+                    operation: (
+                      .display_title |
+                      capture(
+                        "^(?<operation>provision|rotate|" +
+                        "deactivate|reactivate) "
+                      ).operation
+                    )
+                  }
+                ] |
+                sort_by(.id) |
+                .[-4:]
+              ) == [
+                {id: $provision, operation: "provision"},
+                {id: $rotate, operation: "rotate"},
+                {id: $deactivate, operation: "deactivate"},
+                {id: $reactivate, operation: "reactivate"}
+              ] and
+              all($production[]; .id <= $reactivate)
+            ' <<<"${lifecycle_runs}" >/dev/null
+
+          cp -- \
+            "${journey_dir}/browser-journey-receipt.json" \
+            "${evidence_dir}/browser-journey-receipt.json"
+          cp -- \
+            "${journey_dir}/terminal-observation.json" \
+            "${evidence_dir}/terminal-observation.json"
+          jq -ceS '.deployment' "${binding}" \
+            >"${evidence_dir}/deployment-binding.json"
+          jq -ceS '.judgeUserLifecycle' "${binding}" \
+            >"${evidence_dir}/judge-user-lifecycle.json"
+
+          runtime="${evidence_dir}/production-runtime-config.json"
+          python3 - "${APPLICATION_ORIGIN}/runtime-config.json" "${runtime}" <<'PY'
+          import os
+          import pathlib
+          import ssl
+          import sys
+          import urllib.error
+          import urllib.request
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          url = sys.argv[1]
+          target = pathlib.Path(sys.argv[2])
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Accept": "application/json",
+                  "Authorization": "",
+                  "Cookie": "",
+                  "User-Agent": "archon-judge-runtime-sealer/1",
+              },
+              method="GET",
+          )
+          opener = urllib.request.build_opener(
+              urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+              NoRedirect(),
+          )
+          try:
+              with opener.open(request, timeout=20) as response:
+                  if response.status != 200 or response.geturl() != url:
+                      raise SystemExit("runtime config status or URL is invalid")
+                  if "no-store" not in response.headers.get(
+                      "cache-control", ""
+                  ).lower():
+                      raise SystemExit("runtime config is not no-store")
+                  raw = response.read(65_537)
+          except urllib.error.HTTPError as error:
+              raise SystemExit(f"runtime config GET failed with {error.code}")
+          if len(raw) < 2 or len(raw) > 65_536:
+              raise SystemExit("runtime config body is invalid")
+          temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+          descriptor = os.open(
+              temporary,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+              0o600,
+          )
+          try:
+              os.write(descriptor, raw)
+              os.fsync(descriptor)
+          finally:
+              os.close(descriptor)
+          os.link(temporary, target)
+          temporary.unlink()
+          PY
+          test "$(sha256sum "${runtime}" | awk '{print $1}')" = \
+            "${RUNTIME_CONFIG_SHA256}"
+
+          export EVIDENCE_DIR="${evidence_dir}"
+          export RELEASE_SHA
+          export RUN_ID="${GITHUB_RUN_ID}"
+          export PRODUCER_ATTEMPT="${GITHUB_RUN_ATTEMPT}"
+          export ARTIFACT_NAME="submission-judge-journey-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+          export PREDICATE_TYPE
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          root = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          release = os.environ["RELEASE_SHA"]
+          run_id = int(os.environ["RUN_ID"])
+          attempt = int(os.environ["PRODUCER_ATTEMPT"])
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          predicate_type = os.environ["PREDICATE_TYPE"]
+          digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+          def load(name: str) -> object:
+              path = root / name
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"{name} is not a regular file")
+              return json.loads(path.read_bytes())
+
+          def encoded(value: object) -> bytes:
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode("utf-8")
+
+          def sha(path: pathlib.Path) -> str:
+              return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+          browser = load("browser-journey-receipt.json")
+          deployment = load("deployment-binding.json")
+          lifecycle = load("judge-user-lifecycle.json")
+          terminal = load("terminal-observation.json")
+          load("production-runtime-config.json")
+          if (
+              browser.get("schemaVersion")
+              != "archon.browser-judge-journey-receipt/v1"
+              or browser.get("bindings", {}).get("releaseSha") != release
+              or browser.get("checks", {}).get("sanitized") is not True
+              or browser.get("checks", {}).get(
+                  "secretMaterialRetained"
+              ) is not False
+              or lifecycle.get("releaseSha") != release
+              or lifecycle.get("stage") != "production"
+              or lifecycle.get("identityDigest")
+              != browser.get("bindings", {}).get("identityDigest")
+              or lifecycle.get("cognitoSubjectDigest")
+              != browser.get("bindings", {}).get("cognitoSubjectDigest")
+              or lifecycle.get("chainDigest")
+              != browser.get("bindings", {}).get("lifecycleDigest")
+              or terminal.get("browserReceiptSha256")
+              != sha(root / "browser-journey-receipt.json")
+              or terminal.get("terminalPublicProjectionSha256")
+              != browser.get("terminalPublicProjectionSha256")
+              or terminal.get("sanitized") is not True
+              or terminal.get("secretMaterialRetained") is not False
+          ):
+              raise SystemExit("journey evidence bindings are inconsistent")
+
+          primary = [
+              ("browser-journey", "browser-journey-receipt.json"),
+              ("deployment-binding", "deployment-binding.json"),
+              ("judge-user-lifecycle", "judge-user-lifecycle.json"),
+              ("runtime-config", "production-runtime-config.json"),
+              ("terminal-observation", "terminal-observation.json"),
+          ]
+          subjects = [
+              {"role": role, "name": name, "digest": sha(root / name)}
+              for role, name in primary
+          ]
+          subject_inventory = "".join(
+              f"{entry['digest'].removeprefix('sha256:')}  {entry['name']}\n"
+              for entry in sorted(subjects, key=lambda item: item["name"])
+          ).encode("utf-8")
+          (root / "journey-subject.sha256").write_bytes(subject_inventory)
+
+          manifest = {
+              "schemaVersion":
+                  "archon.submission-judge-journey-manifest/v1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "releaseSha": release,
+              "source": {
+                  "workflowPath":
+                      ".github/workflows/submission-judge-journey.yml",
+                  "runId": run_id,
+                  "runAttempt": attempt,
+              },
+              "artifactName": artifact_name,
+              "subjects": subjects,
+              "journey": {
+                  "startedAt": browser["startedAt"],
+                  "completedAt": browser["completedAt"],
+                  "identityDigest": lifecycle["identityDigest"],
+                  "cognitoSubjectDigest":
+                      lifecycle["cognitoSubjectDigest"],
+                  "applicationOriginSha256":
+                      lifecycle["applicationOriginSha256"],
+                  "lifecycleDigest": lifecycle["chainDigest"],
+                  "terminalReceiptDigest":
+                      browser["terminalPublicProjection"]["receiptDigest"],
+              },
+              "result": "verified",
+              "sanitized": True,
+              "secretMaterialRetained": False,
+          }
+          (root / "manifest.json").write_bytes(encoded(manifest))
+          predicate = {
+              "schemaVersion":
+                  "archon.submission-judge-journey-attestation/v1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "releaseSha": release,
+              "source": manifest["source"],
+              "artifactName": artifact_name,
+              "predicateType": predicate_type,
+              "manifestSha256": sha(root / "manifest.json"),
+              "subjects": subjects,
+              "journey": manifest["journey"],
+              "checks": {
+                  "runtimeConfigRawDigestVerified": True,
+                  "oauthPkceRequestBound": True,
+                  "idTokenSignatureVerified": True,
+                  "accessTokenSignatureVerified": True,
+                  "identityIsFresh": True,
+                  "loginSucceeded": True,
+                  "startSucceeded": True,
+                  "statusPollingSucceeded": True,
+                  "terminalReceiptVerified": True,
+                  "logoutIsolationVerified": True,
+                  "independentTerminalObservation": True,
+              },
+              "result": "verified",
+              "sanitized": True,
+              "secretMaterialRetained": False,
+          }
+          (root / "attestation-predicate.json").write_bytes(
+              encoded(predicate)
+          )
+          final_names = sorted(
+              [
+                  *(name for _, name in primary),
+                  "attestation-predicate.json",
+                  "journey-subject.sha256",
+                  "manifest.json",
+              ]
+          )
+          checksum = "".join(
+              f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
+              for name in final_names
+          ).encode("utf-8")
+          (root / "SHA256SUMS").write_bytes(checksum)
+          if not all(
+              digest_pattern.fullmatch(subject["digest"])
+              for subject in subjects
+          ):
+              raise SystemExit("journey subject digest is invalid")
+          retained = sorted(
+              path.name for path in root.iterdir() if path.is_file()
+          )
+          if retained != sorted([*final_names, "SHA256SUMS"]):
+              raise SystemExit("journey artifact inventory is not exact")
+          raw = b"".join((root / name).read_bytes() for name in retained)
+          if re.search(
+              rb"(?i)(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+              rb"Bearer[ \t]+[A-Za-z0-9._~+/=-]{20,}|"
+              rb"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|"
+              rb"xox[baprs]-)",
+              raw,
+          ):
+              raise SystemExit("journey artifact contains credential material")
+          PY
+          chmod 0600 "${evidence_dir}"/*
+          (
+            cd "${evidence_dir}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test ! -e \
+            "${journey_dir}/terminal-observer-capability.json"
+          {
+            echo "artifact_name=submission-judge-journey-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Upload immutable sanitized journey evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-judge-journey-evidence
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 30
+
+  attest:
+    name: Independently revalidate and attest sanitized journey evidence
+    needs: journey
+    if: needs.journey.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Resolve one immutable producer artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-judge-journey.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+
+          current_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path ==
+                ".github/workflows/submission-judge-journey.yml" and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${current_run}" >/dev/null
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+
+          pattern="^submission-judge-journey-${RELEASE_SHA}-(?<attempt>[1-9][0-9]*)$"
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            jq -ce \
+              --arg pattern "${pattern}" \
+              --arg release "${RELEASE_SHA}" \
+              --argjson currentAttempt "${GITHUB_RUN_ATTEMPT}" \
+              --argjson runId "${GITHUB_RUN_ID}" '
+                [
+                  .[] |
+                  .artifacts[] |
+                  . as $artifact |
+                  select($artifact.name | test($pattern)) |
+                  (
+                    $artifact.name |
+                    capture($pattern) |
+                    .attempt |
+                    tonumber
+                  ) as $producerAttempt |
+                  select($producerAttempt <= $currentAttempt) |
+                  select(
+                    $artifact.expired == false and
+                    ($artifact.digest |
+                      test("^sha256:[0-9a-f]{64}$")) and
+                    ($artifact.size_in_bytes | type) == "number" and
+                    $artifact.size_in_bytes > 0 and
+                    $artifact.size_in_bytes <= 52428800 and
+                    $artifact.workflow_run.id == $runId and
+                    $artifact.workflow_run.head_sha == $release
+                  ) |
+                  {
+                    metadata: $artifact,
+                    producerAttempt: $producerAttempt
+                  }
+                ] as $eligible |
+                if ($eligible | length) == 0 then
+                  error("no eligible immutable journey artifact exists")
+                else
+                  (
+                    $eligible |
+                    map(.producerAttempt) |
+                    max
+                  ) as $latestAttempt |
+                  [
+                    $eligible[] |
+                    select(.producerAttempt == $latestAttempt)
+                  ] |
+                  if length == 1 then .[0]
+                  else error(
+                    "latest producer attempt has ambiguous journey artifacts"
+                  )
+                  end
+                end
+              ' <<<"${artifacts}"
+          )"
+          artifact_id="$(jq -er '.metadata.id' <<<"${selected}")"
+          artifact_name="$(jq -er '.metadata.name' <<<"${selected}")"
+          artifact_digest="$(jq -er '.metadata.digest' <<<"${selected}")"
+          producer_attempt="$(
+            jq -er '.producerAttempt' <<<"${selected}"
+          )"
+          [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${producer_attempt}" =~ ^[1-9][0-9]*$ ]]
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+          )"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg name "${artifact_name}" \
+            --arg digest "${artifact_digest}" \
+            --argjson artifactId "${artifact_id}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type == "number") and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 52428800 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${artifact}" >/dev/null
+          {
+            echo "artifact_id=${artifact_id}"
+            echo "artifact_name=${artifact_name}"
+            echo "artifact_digest=${artifact_digest}"
+            echo "producer_attempt=${producer_attempt}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Check out the exact unprivileged attester
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the exact immutable journey artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-judge-journey-attestation
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Independently validate exact journey bytes and semantics
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+          PRODUCER_ATTEMPT: ${{ steps.artifact.outputs.producer_attempt }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-judge-journey-attestation"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          export EVIDENCE_DIR="${root}"
+          python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import stat
+          import urllib.parse
+
+          root = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          expected_files = sorted(
+              [
+                  "SHA256SUMS",
+                  "attestation-predicate.json",
+                  "browser-journey-receipt.json",
+                  "deployment-binding.json",
+                  "judge-user-lifecycle.json",
+                  "journey-subject.sha256",
+                  "manifest.json",
+                  "production-runtime-config.json",
+                  "terminal-observation.json",
+              ]
+          )
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit("journey artifact root is invalid")
+          entries = sorted(root.iterdir(), key=lambda item: item.name)
+          if [item.name for item in entries] != expected_files:
+              raise SystemExit("journey artifact tree is not exact")
+          for item in entries:
+              metadata = item.lstat()
+              if (
+                  not stat.S_ISREG(metadata.st_mode)
+                  or stat.S_ISLNK(metadata.st_mode)
+                  or metadata.st_size < 1
+                  or metadata.st_size > 10_485_760
+              ):
+                  raise SystemExit(f"{item.name} is not a bounded regular file")
+
+          digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+          hex_pattern = re.compile(r"^[0-9a-f]{64}$")
+          instant_pattern = re.compile(
+              r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+              r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3})?Z$"
+          )
+
+          def sha_bytes(value: bytes) -> str:
+              return "sha256:" + hashlib.sha256(value).hexdigest()
+
+          def sha_file(name: str) -> str:
+              return sha_bytes((root / name).read_bytes())
+
+          def canonical(value: object) -> bytes:
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode("utf-8")
+
+          def digest_json(value: object) -> str:
+              return sha_bytes(canonical(value)[:-1])
+
+          def load(name: str) -> object:
+              raw = (root / name).read_bytes()
+              if not raw.endswith(b"\n"):
+                  raise SystemExit(f"{name} is not LF framed")
+              try:
+                  return json.loads(raw)
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise SystemExit(f"{name} is not valid JSON") from error
+
+          def exact(value: object, keys: set[str], label: str) -> dict:
+              if not isinstance(value, dict) or set(value) != keys:
+                  raise SystemExit(f"{label} keys are not exact")
+              return value
+
+          def instant(value: object, label: str) -> dt.datetime:
+              if not isinstance(value, str) or not instant_pattern.fullmatch(
+                  value
+              ):
+                  raise SystemExit(f"{label} is not canonical UTC")
+              parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+              if parsed.tzinfo != dt.timezone.utc:
+                  raise SystemExit(f"{label} is not UTC")
+              return parsed
+
+          checksum_raw = (root / "SHA256SUMS").read_bytes()
+          checksum_pattern = re.compile(
+              rb"^(?P<sha>[0-9a-f]{64})  "
+              rb"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+          )
+          checksum_lines = checksum_raw.splitlines()
+          if (
+              not checksum_raw.endswith(b"\n")
+              or b"\r" in checksum_raw
+              or len(checksum_lines) != 8
+          ):
+              raise SystemExit("journey checksum inventory framing is invalid")
+          checksum_names = []
+          for line in checksum_lines:
+              match = checksum_pattern.fullmatch(line)
+              if match is None:
+                  raise SystemExit("journey checksum line is not canonical")
+              name = match.group("name").decode("ascii")
+              checksum_names.append(name)
+              if sha_file(name) != "sha256:" + match.group("sha").decode(
+                  "ascii"
+              ):
+                  raise SystemExit(f"{name} checksum changed")
+          expected_checksum_names = sorted(
+              name for name in expected_files if name != "SHA256SUMS"
+          )
+          if checksum_names != expected_checksum_names:
+              raise SystemExit("journey checksum inventory is not closed")
+
+          primary_roles = [
+              ("browser-journey", "browser-journey-receipt.json"),
+              ("deployment-binding", "deployment-binding.json"),
+              ("judge-user-lifecycle", "judge-user-lifecycle.json"),
+              ("runtime-config", "production-runtime-config.json"),
+              ("terminal-observation", "terminal-observation.json"),
+          ]
+          expected_subject_lines = "".join(
+              f"{sha_file(name).removeprefix('sha256:')}  {name}\n"
+              for _, name in sorted(primary_roles, key=lambda item: item[1])
+          ).encode("ascii")
+          if (
+              (root / "journey-subject.sha256").read_bytes()
+              != expected_subject_lines
+          ):
+              raise SystemExit("journey subject inventory is not exact")
+
+          release = os.environ["RELEASE_SHA"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          run_id = int(os.environ["GITHUB_RUN_ID"])
+          producer_attempt = int(os.environ["PRODUCER_ATTEMPT"])
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          deployment_run_id = int(os.environ["DEPLOYMENT_RUN_ID"])
+          lifecycle_run_ids = [
+              int(os.environ["PROVISION_RUN_ID"]),
+              int(os.environ["ROTATE_RUN_ID"]),
+              int(os.environ["DEACTIVATE_RUN_ID"]),
+              int(os.environ["REACTIVATE_RUN_ID"]),
+          ]
+          predicate_type = (
+              "https://archon.datahub.dev/attestations/"
+              "submission-judge-journey/v1"
+          )
+
+          manifest = exact(
+              load("manifest.json"),
+              {
+                  "schemaVersion",
+                  "repository",
+                  "releaseSha",
+                  "source",
+                  "artifactName",
+                  "subjects",
+                  "journey",
+                  "result",
+                  "sanitized",
+                  "secretMaterialRetained",
+              },
+              "manifest",
+          )
+          expected_source = {
+              "workflowPath":
+                  ".github/workflows/submission-judge-journey.yml",
+              "runId": run_id,
+              "runAttempt": producer_attempt,
+          }
+          expected_subjects = [
+              {"role": role, "name": name, "digest": sha_file(name)}
+              for role, name in primary_roles
+          ]
+          if (
+              manifest["schemaVersion"]
+              != "archon.submission-judge-journey-manifest/v1"
+              or manifest["repository"] != repository
+              or manifest["releaseSha"] != release
+              or manifest["source"] != expected_source
+              or manifest["artifactName"] != artifact_name
+              or manifest["subjects"] != expected_subjects
+              or manifest["result"] != "verified"
+              or manifest["sanitized"] is not True
+              or manifest["secretMaterialRetained"] is not False
+          ):
+              raise SystemExit("journey manifest binding is invalid")
+
+          predicate = exact(
+              load("attestation-predicate.json"),
+              {
+                  "schemaVersion",
+                  "repository",
+                  "releaseSha",
+                  "source",
+                  "artifactName",
+                  "predicateType",
+                  "manifestSha256",
+                  "subjects",
+                  "journey",
+                  "checks",
+                  "result",
+                  "sanitized",
+                  "secretMaterialRetained",
+              },
+              "predicate",
+          )
+          expected_checks = {
+              "runtimeConfigRawDigestVerified": True,
+              "oauthPkceRequestBound": True,
+              "idTokenSignatureVerified": True,
+              "accessTokenSignatureVerified": True,
+              "identityIsFresh": True,
+              "loginSucceeded": True,
+              "startSucceeded": True,
+              "statusPollingSucceeded": True,
+              "terminalReceiptVerified": True,
+              "logoutIsolationVerified": True,
+              "independentTerminalObservation": True,
+          }
+          if (
+              predicate["schemaVersion"]
+              != "archon.submission-judge-journey-attestation/v1"
+              or predicate["repository"] != repository
+              or predicate["releaseSha"] != release
+              or predicate["source"] != expected_source
+              or predicate["artifactName"] != artifact_name
+              or predicate["predicateType"] != predicate_type
+              or predicate["manifestSha256"] != sha_file("manifest.json")
+              or predicate["subjects"] != expected_subjects
+              or predicate["journey"] != manifest["journey"]
+              or predicate["checks"] != expected_checks
+              or predicate["result"] != "verified"
+              or predicate["sanitized"] is not True
+              or predicate["secretMaterialRetained"] is not False
+          ):
+              raise SystemExit("journey predicate binding is invalid")
+
+          deployment = exact(
+              load("deployment-binding.json"),
+              {
+                  "workflowPath",
+                  "runId",
+                  "runAttempt",
+                  "artifactId",
+                  "artifactName",
+                  "artifactDigest",
+                  "predicateType",
+                  "predicateDigest",
+              },
+              "deployment binding",
+          )
+          if (
+              deployment["workflowPath"] != ".github/workflows/deploy.yml"
+              or deployment["runId"] != deployment_run_id
+              or not isinstance(deployment["runAttempt"], int)
+              or deployment["runAttempt"] < 1
+              or not isinstance(deployment["artifactId"], int)
+              or deployment["artifactId"] < 1
+              or deployment["artifactName"] !=
+                f"deployment-evidence-{release}-"
+                f"{deployment['runAttempt']}"
+              or not digest_pattern.fullmatch(
+                  deployment["artifactDigest"]
+              )
+              or deployment["predicateType"] !=
+                "https://github.com/upgradedev/archon-datahub/"
+                "attestations/production-deployment/v1"
+              or not digest_pattern.fullmatch(
+                  deployment["predicateDigest"]
+              )
+          ):
+              raise SystemExit("deployment binding is invalid")
+
+          lifecycle = exact(
+              load("judge-user-lifecycle.json"),
+              {
+                  "releaseSha",
+                  "stage",
+                  "identityDigest",
+                  "cognitoSubjectDigest",
+                  "applicationOriginSha256",
+                  "chainDigest",
+                  "operations",
+                  "sanitized",
+                  "secretMaterialRetained",
+              },
+              "lifecycle binding",
+          )
+          operation_names = [
+              "provision",
+              "rotate",
+              "deactivate",
+              "reactivate",
+          ]
+          operation_results = [
+              "provisioned-and-readback-verified",
+              "rotated-and-readback-verified",
+              "deactivated-and-readback-verified",
+              "reactivated-and-readback-verified",
+          ]
+          operations = lifecycle["operations"]
+          if not isinstance(operations, list) or len(operations) != 4:
+              raise SystemExit("lifecycle operation count is invalid")
+          performed = []
+          for index, operation in enumerate(operations):
+              operation = exact(
+                  operation,
+                  {
+                      "operation",
+                      "workflowPath",
+                      "stage",
+                      "runId",
+                      "runAttempt",
+                      "artifactId",
+                      "artifactName",
+                      "artifactDigest",
+                      "predicateType",
+                      "predicateDigest",
+                      "verificationDigest",
+                      "releaseSha",
+                      "identityDigest",
+                      "cognitoSubjectDigest",
+                      "applicationOriginSha256",
+                      "operationReceiptDigest",
+                      "performedAt",
+                      "result",
+                      "sanitized",
+                      "secretMaterialRetained",
+                  },
+                  f"lifecycle operation {index}",
+              )
+              expected_operation = operation_names[index]
+              expected_run_id = lifecycle_run_ids[index]
+              if (
+                  operation["operation"] != expected_operation
+                  or operation["workflowPath"] !=
+                    ".github/workflows/judge-user.yml"
+                  or operation["stage"] != "production"
+                  or operation["runId"] != expected_run_id
+                  or not isinstance(operation["runAttempt"], int)
+                  or operation["runAttempt"] < 1
+                  or not isinstance(operation["artifactId"], int)
+                  or operation["artifactId"] < 1
+                  or operation["artifactName"] !=
+                    f"judge-user-operation-{expected_operation}-"
+                    f"{release}-{operation['runAttempt']}"
+                  or any(
+                      not digest_pattern.fullmatch(operation[field])
+                      for field in (
+                          "artifactDigest",
+                          "predicateDigest",
+                          "verificationDigest",
+                          "identityDigest",
+                          "cognitoSubjectDigest",
+                          "operationReceiptDigest",
+                      )
+                  )
+                  or not hex_pattern.fullmatch(
+                      operation["applicationOriginSha256"]
+                  )
+                  or operation["predicateType"] !=
+                    "https://github.com/upgradedev/archon-datahub/"
+                    "attestations/judge-user-operation/v1"
+                  or operation["releaseSha"] != release
+                  or operation["result"] != operation_results[index]
+                  or operation["sanitized"] is not True
+                  or operation["secretMaterialRetained"] is not False
+              ):
+                  raise SystemExit(
+                      f"{expected_operation} lifecycle projection is invalid"
+                  )
+              performed.append(
+                  instant(
+                      operation["performedAt"],
+                      f"{expected_operation} performedAt",
+                  )
+              )
+          now = dt.datetime.now(dt.timezone.utc)
+          if (
+              performed != sorted(performed)
+              or len(set(performed)) != 4
+              or any(value > now + dt.timedelta(minutes=5) for value in performed)
+              or any(now - value > dt.timedelta(days=7) for value in performed)
+          ):
+              raise SystemExit("lifecycle timestamps are not fresh and strict")
+          if (
+              lifecycle["releaseSha"] != release
+              or lifecycle["stage"] != "production"
+              or lifecycle["identityDigest"] != operations[0]["identityDigest"]
+              or lifecycle["cognitoSubjectDigest"] !=
+                operations[0]["cognitoSubjectDigest"]
+              or lifecycle["applicationOriginSha256"] !=
+                operations[0]["applicationOriginSha256"]
+              or any(
+                  operation["identityDigest"] != lifecycle["identityDigest"]
+                  or operation["cognitoSubjectDigest"] !=
+                    lifecycle["cognitoSubjectDigest"]
+                  or operation["applicationOriginSha256"] !=
+                    lifecycle["applicationOriginSha256"]
+                  for operation in operations
+              )
+              or lifecycle["chainDigest"] != sha_bytes(canonical(operations))
+              or lifecycle["sanitized"] is not True
+              or lifecycle["secretMaterialRetained"] is not False
+          ):
+              raise SystemExit("lifecycle chain binding is invalid")
+
+          runtime = exact(
+              load("production-runtime-config.json"),
+              {"schemaVersion", "auth", "demoQuery"},
+              "runtime configuration",
+          )
+          auth = exact(
+              runtime["auth"],
+              {
+                  "authorizationEndpoint",
+                  "clientId",
+                  "logoutEndpoint",
+                  "logoutUri",
+                  "redirectUri",
+                  "scopes",
+                  "tokenEndpoint",
+              },
+              "runtime auth",
+          )
+          if (
+              runtime["schemaVersion"] != 1
+              or not isinstance(runtime["demoQuery"], str)
+              or not 1 <= len(runtime["demoQuery"]) <= 256
+              or auth["scopes"] != ["openid", "email", "archon/approve"]
+          ):
+              raise SystemExit("runtime configuration contract is invalid")
+          redirect = urllib.parse.urlsplit(auth["redirectUri"])
+          logout = urllib.parse.urlsplit(auth["logoutUri"])
+          if (
+              redirect.scheme != "https"
+              or redirect.path != "/"
+              or redirect.query
+              or redirect.fragment
+              or logout != redirect
+          ):
+              raise SystemExit("application origin binding is invalid")
+          application_origin = urllib.parse.urlunsplit(
+              (redirect.scheme, redirect.netloc, "", "", "")
+          )
+          authorize_suffix = "/oauth2/authorize"
+          token_suffix = "/oauth2/token"
+          logout_suffix = "/logout"
+          if (
+              not isinstance(auth["authorizationEndpoint"], str)
+              or not auth["authorizationEndpoint"].endswith(authorize_suffix)
+          ):
+              raise SystemExit("hosted UI authorization endpoint is invalid")
+          hosted_origin = auth["authorizationEndpoint"][
+              : -len(authorize_suffix)
+          ]
+          if (
+              auth["tokenEndpoint"] != hosted_origin + token_suffix
+              or auth["logoutEndpoint"] != hosted_origin + logout_suffix
+              or not re.fullmatch(r"[A-Za-z0-9]{8,128}", auth["clientId"])
+          ):
+              raise SystemExit("hosted UI endpoint binding is invalid")
+
+          browser = exact(
+              load("browser-journey-receipt.json"),
+              {
+                  "schemaVersion",
+                  "bindings",
+                  "startedAt",
+                  "completedAt",
+                  "identityAuthenticatedAt",
+                  "identityIssuedAt",
+                  "cognitoIssuerSha256",
+                  "cognitoJwksSha256",
+                  "idTokenKidSha256",
+                  "accessTokenKidSha256",
+                  "auditScopeSha256",
+                  "auditCapabilitySha256",
+                  "oauth",
+                  "decisionRequestSha256",
+                  "decisionAckSha256",
+                  "decisionAckStatus",
+                  "decisionAckDisposition",
+                  "network",
+                  "terminalPublicProjection",
+                  "terminalPublicProjectionSha256",
+                  "outcome",
+                  "checks",
+              },
+              "browser receipt",
+          )
+          bindings = exact(
+              browser["bindings"],
+              {
+                  "releaseSha",
+                  "applicationOriginSha256",
+                  "runtimeConfigSha256",
+                  "cognitoHostedUiOriginSha256",
+                  "cognitoClientIdSha256",
+                  "identityDigest",
+                  "lifecycleDigest",
+                  "cognitoSubjectDigest",
+              },
+              "browser bindings",
+          )
+          oauth = exact(
+              browser["oauth"],
+              {
+                  "authorizationRequestSha256",
+                  "authorizationCallbackSha256",
+                  "tokenRequestSha256",
+                  "logoutRedirectSha256",
+                  "postLogoutAuthorizationRequestSha256",
+              },
+              "OAuth evidence",
+          )
+          network = exact(
+              browser["network"],
+              {
+                  "allowedApplicationRequests",
+                  "allowedHostedUiRequests",
+                  "allowedIssuerRequests",
+                  "startRequests",
+                  "decisionRequests",
+                  "tokenRequests",
+                  "authorizationRequests",
+                  "callbackRequests",
+                  "logoutRequests",
+                  "unexpectedRequests",
+                  "blockedWebSockets",
+                  "serviceWorkerViolations",
+              },
+              "network evidence",
+          )
+          expected_browser_checks = {
+              "runtimeConfigRawDigestVerified": True,
+              "idTokenSignatureVerified": True,
+              "accessTokenSignatureVerified": True,
+              "oauthPkceRequestBound": True,
+              "identityIsFresh": True,
+              "login": True,
+              "start": True,
+              "status": True,
+              "decisionAck": True,
+              "terminal": True,
+              "terminalCapabilityHandoffCreated": True,
+              "logout": True,
+              "logoutRedirectChainVerified": True,
+              "sameContextLogoutProbe": True,
+              "freshContextLocked": True,
+              "browserContextOriginAndPathAllowlist": True,
+              "serviceWorkersBlocked": True,
+              "webSocketsBlocked": True,
+              "unexpectedMutationRequestEmitted": False,
+              "sanitized": True,
+              "secretMaterialRetained": False,
+          }
+          for name, value in network.items():
+              if (
+                  isinstance(value, bool)
+                  or not isinstance(value, int)
+                  or value < 0
+              ):
+                  raise SystemExit(
+                      f"network counter {name} is not a non-negative integer"
+                  )
+          for field in (
+              "cognitoIssuerSha256",
+              "cognitoJwksSha256",
+              "idTokenKidSha256",
+              "accessTokenKidSha256",
+              "auditCapabilitySha256",
+              "decisionRequestSha256",
+              "decisionAckSha256",
+              "terminalPublicProjectionSha256",
+          ):
+              if not digest_pattern.fullmatch(browser[field]):
+                  raise SystemExit(f"{field} is not a digest")
+          if any(not digest_pattern.fullmatch(value) for value in oauth.values()):
+              raise SystemExit("OAuth binding digest is invalid")
+          started = instant(browser["startedAt"], "browser startedAt")
+          completed = instant(browser["completedAt"], "browser completedAt")
+          instant(
+              browser["identityAuthenticatedAt"],
+              "identity authenticatedAt",
+          )
+          if (
+              browser["schemaVersion"] !=
+                "archon.browser-judge-journey-receipt/v1"
+              or bindings["releaseSha"] != release
+              or bindings["applicationOriginSha256"] !=
+                lifecycle["applicationOriginSha256"]
+              or bindings["runtimeConfigSha256"] !=
+                sha_file("production-runtime-config.json")
+              or bindings["cognitoHostedUiOriginSha256"] !=
+                sha_bytes(hosted_origin.encode("utf-8"))
+              or bindings["cognitoClientIdSha256"] !=
+                sha_bytes(auth["clientId"].encode("utf-8"))
+              or bindings["identityDigest"] != lifecycle["identityDigest"]
+              or bindings["lifecycleDigest"] != lifecycle["chainDigest"]
+              or bindings["cognitoSubjectDigest"] !=
+                lifecycle["cognitoSubjectDigest"]
+              or lifecycle["applicationOriginSha256"] !=
+                hashlib.sha256(application_origin.encode("utf-8")).hexdigest()
+              or browser["auditScopeSha256"] !=
+                sha_bytes(runtime["demoQuery"].encode("utf-8"))
+              or browser["checks"] != expected_browser_checks
+              or browser["outcome"] != "REJECTED"
+              or completed < started
+              or completed > now + dt.timedelta(minutes=5)
+              or now - completed > dt.timedelta(days=7)
+              or network["startRequests"] != 1
+              or network["decisionRequests"] != 1
+              or network["tokenRequests"] != 1
+              or network["authorizationRequests"] != 2
+              or network["callbackRequests"] != 1
+              or network["logoutRequests"] != 1
+              or network["allowedApplicationRequests"] < 1
+              or network["allowedHostedUiRequests"] < 1
+              or network["unexpectedRequests"] != 0
+              or network["blockedWebSockets"] != 0
+              or network["serviceWorkerViolations"] != 0
+              or (
+                  browser["decisionAckStatus"],
+                  browser["decisionAckDisposition"],
+              )
+              not in {
+                  (200, "recorded"),
+                  (200, "already_recorded"),
+                  (202, "recorded_callback_closed"),
+                  (202, "callback_delivery_in_progress"),
+              }
+          ):
+              raise SystemExit("browser journey contract is invalid")
+
+          terminal_projection = exact(
+              browser["terminalPublicProjection"],
+              {
+                  "schemaVersion",
+                  "status",
+                  "releaseSha",
+                  "approvalDecision",
+                  "outcome",
+                  "completedAt",
+                  "receiptDigest",
+                  "executionEvidenceDigest",
+                  "reportSha256",
+                  "verification",
+              },
+              "terminal public projection",
+          )
+          terminal_verification = exact(
+              terminal_projection["verification"],
+              {"checkCount", "eventCount", "rollbackAvailability"},
+              "terminal verification",
+          )
+          if (
+              terminal_projection["schemaVersion"] !=
+                "archon.control-loop-terminal-public-projection/v1"
+              or terminal_projection["status"] != "SUCCEEDED"
+              or terminal_projection["releaseSha"] != release
+              or terminal_projection["approvalDecision"] != "REJECT"
+              or terminal_projection["outcome"] != "REJECTED"
+              or any(
+                  not digest_pattern.fullmatch(terminal_projection[field])
+                  for field in (
+                      "receiptDigest",
+                      "executionEvidenceDigest",
+                      "reportSha256",
+                  )
+              )
+              or terminal_verification != {
+                  "checkCount": 0,
+                  "eventCount": 5,
+                  "rollbackAvailability": "NOT_APPLICABLE",
+              }
+              or browser["terminalPublicProjectionSha256"] !=
+                digest_json(terminal_projection)
+          ):
+              raise SystemExit("terminal public projection is invalid")
+
+          observation = exact(
+              load("terminal-observation.json"),
+              {
+                  "schemaVersion",
+                  "releaseSha",
+                  "applicationOriginSha256",
+                  "browserReceiptSha256",
+                  "terminalPublicProjectionSha256",
+                  "observedAt",
+                  "httpStatus",
+                  "redirectsObserved",
+                  "credentialMaterialUsed",
+                  "status",
+                  "outcome",
+                  "approvalDecision",
+                  "sanitized",
+                  "secretMaterialRetained",
+              },
+              "terminal observation",
+          )
+          observed = instant(observation["observedAt"], "observedAt")
+          if (
+              observation["schemaVersion"] !=
+                "archon.submission-judge-terminal-observation/v1"
+              or observation["releaseSha"] != release
+              or observation["applicationOriginSha256"] !=
+                lifecycle["applicationOriginSha256"]
+              or observation["browserReceiptSha256"] !=
+                sha_file("browser-journey-receipt.json")
+              or observation["terminalPublicProjectionSha256"] !=
+                browser["terminalPublicProjectionSha256"]
+              or observed < completed
+              or observation["httpStatus"] != 200
+              or observation["redirectsObserved"] != 0
+              or observation["credentialMaterialUsed"] is not False
+              or observation["status"] != "SUCCEEDED"
+              or observation["outcome"] != "REJECTED"
+              or observation["approvalDecision"] != "REJECT"
+              or observation["sanitized"] is not True
+              or observation["secretMaterialRetained"] is not False
+          ):
+              raise SystemExit("terminal observation binding is invalid")
+
+          journey = exact(
+              manifest["journey"],
+              {
+                  "startedAt",
+                  "completedAt",
+                  "identityDigest",
+                  "cognitoSubjectDigest",
+                  "applicationOriginSha256",
+                  "lifecycleDigest",
+                  "terminalReceiptDigest",
+              },
+              "manifest journey",
+          )
+          if (
+              journey["startedAt"] != browser["startedAt"]
+              or journey["completedAt"] != browser["completedAt"]
+              or journey["identityDigest"] != lifecycle["identityDigest"]
+              or journey["cognitoSubjectDigest"] !=
+                lifecycle["cognitoSubjectDigest"]
+              or journey["applicationOriginSha256"] !=
+                lifecycle["applicationOriginSha256"]
+              or journey["lifecycleDigest"] != lifecycle["chainDigest"]
+              or journey["terminalReceiptDigest"] !=
+                terminal_projection["receiptDigest"]
+          ):
+              raise SystemExit("manifest journey projection is invalid")
+
+          retained = b"".join((root / name).read_bytes() for name in expected_files)
+          if re.search(
+              rb"(?i)(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+              rb"Bearer[ \t]+[A-Za-z0-9._~+/=-]{20,}|"
+              rb"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|"
+              rb"xox[baprs]-)",
+              retained,
+          ):
+              raise SystemExit("journey evidence retained credential material")
+          PY
+
+      - name: Recheck canonical state immediately before attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+          PROVISION_RUN_ID: ${{ inputs.provision_run_id }}
+          ROTATE_RUN_ID: ${{ inputs.rotate_run_id }}
+          DEACTIVATE_RUN_ID: ${{ inputs.deactivate_run_id }}
+          REACTIVATE_RUN_ID: ${{ inputs.reactivate_run_id }}
+          JOURNEY_ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+          JOURNEY_ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+          JOURNEY_ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-judge-journey-attestation"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          repository="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .full_name == $repository and
+              .default_branch == "master" and
+              .archived == false and
+              .disabled == false
+            ' <<<"${repository}" >/dev/null
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          gate_dir="${RUNNER_TEMP}/judge-journey-attester-control-plane"
+          test ! -e "${gate_dir}"
+          mkdir --mode=0700 "${gate_dir}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate_dir}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
+          current_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path ==
+                ".github/workflows/submission-judge-journey.yml" and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository
+            ' <<<"${current_run}" >/dev/null
+          journey_artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${JOURNEY_ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg name "${JOURNEY_ARTIFACT_NAME}" \
+            --arg digest "${JOURNEY_ARTIFACT_DIGEST}" \
+            --argjson artifactId "${JOURNEY_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type == "number") and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 52428800 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${journey_artifact}" >/dev/null
+
+          latest_deployment="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs?branch=master&event=workflow_dispatch&per_page=100" |
+              jq -er \
+                --arg repository "${GITHUB_REPOSITORY}" '
+                  [
+                    .[] |
+                    .workflow_runs[] |
+                    select(
+                      .path == ".github/workflows/deploy.yml" and
+                      .event == "workflow_dispatch" and
+                      .status == "completed" and
+                      .conclusion == "success" and
+                      .head_branch == "master" and
+                      .head_repository.full_name == $repository
+                    )
+                  ] |
+                  sort_by(.id, .run_attempt) |
+                  last |
+                  .id
+                '
+          )"
+          test "${latest_deployment}" = "${DEPLOYMENT_RUN_ID}"
+
+          lifecycle_runs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/judge-user.yml/runs?branch=master&event=workflow_dispatch&per_page=100"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson provision "${PROVISION_RUN_ID}" \
+            --argjson rotate "${ROTATE_RUN_ID}" \
+            --argjson deactivate "${DEACTIVATE_RUN_ID}" \
+            --argjson reactivate "${REACTIVATE_RUN_ID}" '
+              [
+                .[] |
+                .workflow_runs[] |
+                select(
+                  .path == ".github/workflows/judge-user.yml" and
+                  .event == "workflow_dispatch" and
+                  .head_sha == $release and
+                  .head_branch == "master" and
+                  .head_repository.full_name == $repository and
+                  (
+                    .display_title |
+                    test(
+                      "^(provision|rotate|deactivate|reactivate) " +
+                      "judge access in production$"
+                    )
+                  )
+                )
+              ] as $production |
+              (
+                [
+                  $production[] |
+                  select(
+                    .status == "completed" and
+                    .conclusion == "success"
+                  ) |
+                  {
+                    id: .id,
+                    operation: (
+                      .display_title |
+                      capture(
+                        "^(?<operation>provision|rotate|" +
+                        "deactivate|reactivate) "
+                      ).operation
+                    )
+                  }
+                ] |
+                sort_by(.id) |
+                .[-4:]
+              ) == [
+                {id: $provision, operation: "provision"},
+                {id: $rotate, operation: "rotate"},
+                {id: $deactivate, operation: "deactivate"},
+                {id: $reactivate, operation: "reactivate"}
+              ] and
+              all($production[]; .id <= $reactivate)
+            ' <<<"${lifecycle_runs}" >/dev/null || {
+            echo "::error::Lifecycle changed before journey attestation"
+            exit 1
+          }
+
+          jq -cn \
+            --slurpfile deployment "${root}/deployment-binding.json" \
+            --slurpfile lifecycle "${root}/judge-user-lifecycle.json" '
+              [
+                (
+                  $deployment[0] +
+                  {producerAttemptIsExact: true}
+                ),
+                (
+                  $lifecycle[0].operations[] +
+                  {producerAttemptIsExact: false}
+                )
+              ][]
+            ' |
+          while IFS= read -r source; do
+            run_id="$(jq -er '.runId' <<<"${source}")"
+            run_attempt="$(jq -er '.runAttempt' <<<"${source}")"
+            workflow_path="$(jq -er '.workflowPath' <<<"${source}")"
+            artifact_id="$(jq -er '.artifactId' <<<"${source}")"
+            artifact_name="$(jq -er '.artifactName' <<<"${source}")"
+            artifact_digest="$(jq -er '.artifactDigest' <<<"${source}")"
+            exact_attempt="$(
+              jq -er '.producerAttemptIsExact' <<<"${source}"
+            )"
+            source_run="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+            )"
+            jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg release "${RELEASE_SHA}" \
+              --arg path "${workflow_path}" \
+              --argjson runId "${run_id}" \
+              --argjson attempt "${run_attempt}" \
+              --argjson exact "${exact_attempt}" '
+                .id == $runId and
+                .path == $path and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                .conclusion == "success" and
+                .head_sha == $release and
+                .head_branch == "master" and
+                .head_repository.full_name == $repository and
+                (
+                  if $exact then .run_attempt == $attempt
+                  else .run_attempt >= $attempt
+                  end
+                )
+              ' <<<"${source_run}" >/dev/null
+            source_artifact="$(
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+            )"
+            jq -e \
+              --arg release "${RELEASE_SHA}" \
+              --arg name "${artifact_name}" \
+              --arg digest "${artifact_digest}" \
+              --argjson artifactId "${artifact_id}" \
+              --argjson runId "${run_id}" '
+                .id == $artifactId and
+                .name == $name and
+                .digest == $digest and
+                .expired == false and
+                (.size_in_bytes | type == "number") and
+                .size_in_bytes > 0 and
+                .workflow_run.id == $runId and
+                .workflow_run.head_sha == $release
+              ' <<<"${source_artifact}" >/dev/null
+          done
+
+      - name: Attest the exact sanitized journey subjects
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-judge-journey-attestation/journey-subject.sha256
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-judge-journey-attestation/attestation-predicate.json

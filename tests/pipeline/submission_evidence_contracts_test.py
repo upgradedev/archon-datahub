@@ -2131,7 +2131,6 @@ assert {source["key"] for source in registry["sources"] if source["required"]} =
 assert "post_submit_run_id:" in producer
 for intentionally_absent_producer in (
     "submission-project-access.yml",
-    "submission-judge-journey.yml",
     "submission-content-review.yml",
     "submission-operations.yml",
     "submission-judge-pack.yml",

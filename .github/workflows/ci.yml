@@ -82,6 +82,8 @@ jobs:
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_evidence_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/submission_judge_journey_contracts_test.py
           bash tests/pipeline/judge-user-contracts.test.sh
           bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh
