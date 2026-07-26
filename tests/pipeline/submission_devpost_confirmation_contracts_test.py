@@ -873,7 +873,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             ".verificationResult.statement.predicateType ==",
             ".verificationResult.statement.predicate ==",
             "sort_by(.name)",
-            ") == $expectedSubjects",
+            "                      ) == $expectedSubjects\n",
             'for index in "${!expected_names[@]}"; do',
             '"${root}/${expected_names[$index]}"',
             '"${verification_dir}/bundle-${index}.json"',
@@ -1310,8 +1310,8 @@ mutations = {
     ),
     "full subject set weakened": replace_first(
         workflow_text,
-        ") == $expectedSubjects",
-        ") != []",
+        "                      ) == $expectedSubjects\n",
+        "                      ) != []\n",
         "full subject set",
     ),
     "offline bundle verification removed": replace_first(
