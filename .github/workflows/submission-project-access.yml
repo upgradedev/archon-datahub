@@ -782,7 +782,8 @@ jobs:
             local expected_subjects
             local expected_predicate
             local index=0
-            mkdir --mode=0700 -p "${raw_dir}" "${projections}"
+            mkdir --mode=0700 "${output}"
+            mkdir --mode=0700 "${raw_dir}" "${projections}"
             expected_subjects="$(
               jq -Rn '
                 [
