@@ -499,36 +499,6 @@ while IFS=$'\t' read -r proof_id role subject_name; do
     "${verification_output}/${proof_id}--${role}.json"
 done <"${subject_rows}"
 
-final_run_json="$(
-  api "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}"
-)"
-jq -e \
-  --arg path "${workflow_path}" \
-  --arg repository "${GITHUB_REPOSITORY}" \
-  --arg release "${RELEASE_SHA}" \
-  --argjson runAttempt "${attestation_run_attempt}" \
-  --argjson runId "${SOURCE_RUN_ID}" '
-    .id == $runId and
-    .path == $path and
-    .head_sha == $release and
-    .head_branch == "master" and
-    .head_repository.full_name == $repository and
-    .repository.full_name == $repository and
-    (.event == "workflow_dispatch" or .event == "workflow_call") and
-    .run_attempt == $runAttempt and
-    .status == "completed" and
-    .conclusion == "success"
-  ' <<<"${final_run_json}" >/dev/null || {
-  echo "::error::${SOURCE_KEY} source run changed during evidence collection"
-  exit 1
-}
-final_default_sha="$(
-  api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha'
-)"
-test "${final_default_sha}" = "${RELEASE_SHA}" || {
-  echo "::error::master changed during ${SOURCE_KEY} evidence collection"
-  exit 1
-}
 if test "${source_mode}" = "standard-v1"; then
   final_artifacts_json="$(
     api \
@@ -585,6 +555,36 @@ jq -e \
     .workflow_run.head_sha == $release
   ' <<<"${final_artifact_json}" >/dev/null || {
   echo "::error::${SOURCE_KEY} artifact changed during evidence collection"
+  exit 1
+}
+final_run_json="$(
+  api "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}"
+)"
+jq -e \
+  --arg path "${workflow_path}" \
+  --arg repository "${GITHUB_REPOSITORY}" \
+  --arg release "${RELEASE_SHA}" \
+  --argjson runAttempt "${attestation_run_attempt}" \
+  --argjson runId "${SOURCE_RUN_ID}" '
+    .id == $runId and
+    .path == $path and
+    .head_sha == $release and
+    .head_branch == "master" and
+    .head_repository.full_name == $repository and
+    .repository.full_name == $repository and
+    (.event == "workflow_dispatch" or .event == "workflow_call") and
+    .run_attempt == $runAttempt and
+    .status == "completed" and
+    .conclusion == "success"
+  ' <<<"${final_run_json}" >/dev/null || {
+  echo "::error::${SOURCE_KEY} source run changed during evidence collection"
+  exit 1
+}
+final_default_sha="$(
+  api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha'
+)"
+test "${final_default_sha}" = "${RELEASE_SHA}" || {
+  echo "::error::master changed during ${SOURCE_KEY} evidence collection"
   exit 1
 }
 

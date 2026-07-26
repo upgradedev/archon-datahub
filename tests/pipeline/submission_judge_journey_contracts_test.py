@@ -449,9 +449,53 @@ def validate_workflow(workflow: str) -> None:
             'else error("expected one exact lifecycle artifact")',
         ),
     )
+    cross_run_downloads = (
+        (
+            "Download exact deployment evidence",
+            "deployment_artifact_id",
+            "deployment_run_id",
+        ),
+        (
+            "Download exact provision evidence",
+            "provision_artifact_id",
+            "provision_run_id",
+        ),
+        (
+            "Download exact rotate evidence",
+            "rotate_artifact_id",
+            "rotate_run_id",
+        ),
+        (
+            "Download exact deactivate evidence",
+            "deactivate_artifact_id",
+            "deactivate_run_id",
+        ),
+        (
+            "Download exact reactivate evidence",
+            "reactivate_artifact_id",
+            "reactivate_run_id",
+        ),
+    )
+    for step_name, artifact_output, run_input in cross_run_downloads:
+        download = named_step(prerequisites, step_name)
+        require_tokens(
+            download,
+            f"cross-run artifact download {step_name}",
+            (
+                "actions/download-artifact@",
+                f"artifact-ids: "
+                f"${{{{ steps.sources.outputs.{artifact_output} }}}}",
+                f"run-id: ${{{{ inputs.{run_input} }}}}",
+                "github-token: ${{ github.token }}",
+            ),
+        )
     require(
         verification.count(") == $expectedSubjects") == 2,
         "deployment and lifecycle attestations must bind their full subject sets",
+    )
+    require(
+        verification.count("unique_by(.statement)") == 2,
+        "duplicate identical prerequisite attestations must collapse safely",
     )
     require_tokens(
         verification,
@@ -865,6 +909,13 @@ tamper_cases = {
         ".workflow_run.id == $runId",
         "true",
     ),
+    "cross-run download loses run binding": replace_in_step(
+        workflow_text,
+        "prerequisites",
+        "Download exact deployment evidence",
+        "          run-id: ${{ inputs.deployment_run_id }}\n",
+        "          run-id: ${{ github.run_id }}\n",
+    ),
     "final journey artifact owner removed": replace_exact(
         workflow_text,
         "/actions/artifacts/${JOURNEY_ARTIFACT_ID}",
@@ -875,6 +926,12 @@ tamper_cases = {
         "prerequisites",
         ") == $expectedSubjects",
         ") != []",
+    ),
+    "duplicate statements become ambiguous": replace_exact(
+        workflow_text,
+        "unique_by(.statement) |\n",
+        "",
+        count=2,
     ),
     "attester full subject set removed": replace_in_job(
         workflow_text,
