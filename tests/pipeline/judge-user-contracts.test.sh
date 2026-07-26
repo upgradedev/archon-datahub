@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 contract_stage="bootstrap"
 exec 9>&2
 trap '
   status=$?
+  trap - ERR
   printf \
     "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Judge-user contract stage %s failed with status %s\n" \
     "${LINENO}" "${contract_stage}" "${status}" >&9
