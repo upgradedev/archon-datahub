@@ -87,16 +87,16 @@ STANDARD_FILES = (
 )
 APPROVAL_BINDINGS = (
     "run_id=${GITHUB_RUN_ID}",
-    "run_attempt=",
-    "candidate_run_attempt=",
-    "release_sha=${RELEASE_SHA}",
-    "candidate_artifact_id=",
-    "candidate_artifact_digest=",
-    "candidate_digest=",
-    "canonical_evidence_digest=",
-    "confirmation_digest=",
-    "entrant_binding_digest=",
-    "submitted_at=",
+    " run_attempt=",
+    " candidate_run_attempt=",
+    " release_sha=${RELEASE_SHA}",
+    " candidate_artifact_id=",
+    " candidate_artifact_digest=",
+    " candidate_digest=",
+    " canonical_evidence_digest=",
+    " confirmation_digest=",
+    " entrant_binding_digest=",
+    " submitted_at=",
 )
 
 
@@ -222,6 +222,13 @@ def validate_contract(workflow: str, documentation: str) -> None:
     require(
         tuple(jobs) == EXPECTED_JOBS,
         f"unexpected job graph: {tuple(jobs)}",
+    )
+    require(
+        jobs["review"].count(
+            "    name: Independently approve and seal feedback evidence\n"
+        )
+        == 1,
+        "review display name must match approval and attester job lookups",
     )
     for job_name, expected_steps in EXPECTED_STEPS.items():
         actual_steps = tuple(name for name, _ in job_steps(jobs[job_name]))
@@ -551,6 +558,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "${{ steps.attest.outputs.bundle-path }}",
             "${{ steps.attest.outputs.attestation-id }}",
             "gh attestation verify",
+            '--bundle "${ATTESTATION_BUNDLE_PATH}"',
             "--predicate-type",
             "--signer-workflow",
             "--signer-digest",
@@ -558,8 +566,20 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "--source-ref refs/heads/master",
             "--deny-self-hosted-runners",
             "sort_by(.name)",
-            "unique",
             "length == 1",
+            'length == 1 and\n            (.[0] | type == "object")',
+            ".attestation == $bundle[0]",
+            'type == "array" and',
+            "expected_names=(\n"
+            "            attestation-predicate.json\n"
+            "            proofs/BONUS-FEEDBACK.json\n"
+            "            support/BONUS-FEEDBACK/feedback-confirmation.json\n"
+            "          )",
+            'test "${observed_names[*]}" = "${expected_names[*]}"',
+            'for index in "${!expected_names[@]}"; do',
+            '"${root}/${expected_names[$index]}"',
+            '"${verification_dir}/bundle-${index}.json"',
+            '"${verification_dir}/persisted-${index}.json"',
             'test "$(jq \'length\' <<<"${expected_subjects}")" = "3"',
         ),
         "persisted attestation verification",
@@ -618,6 +638,12 @@ mutations = {
         "",
         "review environment",
     ),
+    "review job display name changed": replace_first(
+        workflow_text,
+        "    name: Independently approve and seal feedback evidence\n",
+        "    name: Renamed protected reviewer\n",
+        "review job display name",
+    ),
     "producer gains signing authority": replace_first(
         workflow_text,
         "      contents: read\n    outputs:\n",
@@ -647,6 +673,12 @@ mutations = {
         " confirmation_digest=${CONFIRMATION_DIGEST}",
         "",
         "confirmation approval binding",
+    ),
+    "run attempt removed from approval": replace_first(
+        workflow_text,
+        " run_attempt=${GITHUB_RUN_ATTEMPT}",
+        "",
+        "run-attempt approval binding",
     ),
     "reviewer may equal actor": replace_first(
         workflow_text,
@@ -731,6 +763,31 @@ mutations = {
         "      - name: Verify persisted signed full-subject attestation\n",
         "      - name: Skip persisted signed full-subject attestation\n",
         "persisted verification",
+    ),
+    "only two persisted subjects verified": replace_first(
+        workflow_text,
+        "          expected_names=(\n"
+        "            attestation-predicate.json\n"
+        "            proofs/BONUS-FEEDBACK.json\n"
+        "            support/BONUS-FEEDBACK/feedback-confirmation.json\n"
+        "          )",
+        "          expected_names=(\n"
+        "            attestation-predicate.json\n"
+        "            proofs/BONUS-FEEDBACK.json\n"
+        "          )",
+        "persisted subject inventory",
+    ),
+    "offline bundle verification removed": replace_first(
+        workflow_text,
+        '              --bundle "${ATTESTATION_BUNDLE_PATH}" \\\n',
+        "",
+        "offline bundle verification",
+    ),
+    "bundle identity detached": replace_first(
+        workflow_text,
+        ".attestation == $bundle[0] and",
+        "true and",
+        "bundle identity",
     ),
     "self-hosted provenance allowed": replace_first(
         workflow_text,

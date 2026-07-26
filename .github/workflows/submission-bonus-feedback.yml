@@ -2449,7 +2449,25 @@ jobs:
           test ! -L "${ATTESTATION_BUNDLE_PATH}"
           bundle_size="$(stat --format='%s' "${ATTESTATION_BUNDLE_PATH}")"
           (( bundle_size >= 1 && bundle_size <= 16777216 ))
+          jq -e -s '
+            length == 1 and
+            (.[0] | type == "object")
+          ' "${ATTESTATION_BUNDLE_PATH}" >/dev/null
+
           root="${RUNNER_TEMP}/submission-bonus-feedback-attestation"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          expected_names=(
+            attestation-predicate.json
+            proofs/BONUS-FEEDBACK.json
+            support/BONUS-FEEDBACK/feedback-confirmation.json
+          )
+          mapfile -t observed_names < <(
+            awk '{print $2}' "${root}/SHA256SUMS"
+          )
+          test "${observed_names[*]}" = "${expected_names[*]}"
           expected_subjects="$(
             jq -Rn '
               [
@@ -2470,33 +2488,55 @@ jobs:
           verification_dir="$(
             mktemp -d "${RUNNER_TEMP}/submission-bonus-feedback-verification.XXXXXX"
           )"
+          cleanup() {
+            rm -rf -- "${verification_dir}"
+          }
+          trap cleanup EXIT
           validate_verification_result() {
             local output_path="$1"
             jq -e \
+              --slurpfile bundle "${ATTESTATION_BUNDLE_PATH}" \
               --slurpfile predicate "${root}/attestation-predicate.json" \
               --arg predicateType "${PREDICATE_TYPE}" \
               --argjson expectedSubjects "${expected_subjects}" '
-                [
-                  .[] |
-                  select(
-                    .verificationResult.statement.predicateType ==
-                      $predicateType and
-                    .verificationResult.statement.predicate ==
-                      $predicate[0] and
-                    (
-                      .verificationResult.statement.subject |
-                      sort_by(.name)
-                    ) == $expectedSubjects
-                  ) |
-                  .verificationResult.statement
-                ] |
-                unique |
-                length == 1
+                type == "array" and
+                (
+                  [
+                    .[] |
+                    select(
+                      .attestation == $bundle[0] and
+                      .verificationResult.statement.predicateType ==
+                        $predicateType and
+                      .verificationResult.statement.predicate ==
+                        $predicate[0] and
+                      (
+                        .verificationResult.statement.subject |
+                        sort_by(.name)
+                      ) == $expectedSubjects
+                    )
+                  ] |
+                  length == 1
+                )
               ' "${output_path}" >/dev/null
           }
           verify_subject() {
             local subject_path="$1"
-            local output_path="$2"
+            local bundle_output="$2"
+            local persisted_output="$3"
+            gh attestation verify \
+              "${subject_path}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --bundle "${ATTESTATION_BUNDLE_PATH}" \
+              --predicate-type "${PREDICATE_TYPE}" \
+              --signer-workflow \
+                "github.com/${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref refs/heads/master \
+              --deny-self-hosted-runners \
+              --format json >"${bundle_output}"
+            validate_verification_result "${bundle_output}"
+
             local attempt
             for attempt in {1..12}; do
               if gh attestation verify \
@@ -2504,13 +2544,13 @@ jobs:
                 --repo "${GITHUB_REPOSITORY}" \
                 --predicate-type "${PREDICATE_TYPE}" \
                 --signer-workflow \
-                  "${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml" \
+                  "github.com/${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-feedback.yml" \
                 --signer-digest "${RELEASE_SHA}" \
                 --source-digest "${RELEASE_SHA}" \
                 --source-ref refs/heads/master \
                 --deny-self-hosted-runners \
-                --format json >"${output_path}" &&
-                validate_verification_result "${output_path}"; then
+                --format json >"${persisted_output}" &&
+                validate_verification_result "${persisted_output}"; then
                 return 0
               fi
               if (( attempt < 12 )); then
@@ -2520,12 +2560,12 @@ jobs:
             echo "::error::Persisted full-subject feedback attestation could not be verified"
             return 1
           }
-          verify_subject \
-            "${root}/proofs/BONUS-FEEDBACK.json" \
-            "${verification_dir}/BONUS-FEEDBACK.json"
-          verify_subject \
-            "${root}/attestation-predicate.json" \
-            "${verification_dir}/predicate.json"
+          for index in "${!expected_names[@]}"; do
+            verify_subject \
+              "${root}/${expected_names[$index]}" \
+              "${verification_dir}/bundle-${index}.json" \
+              "${verification_dir}/persisted-${index}.json"
+          done
           {
             echo "### Feedback evidence sealed"
             echo

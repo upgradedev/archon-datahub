@@ -256,6 +256,13 @@ def validate_workflow(workflow: str) -> None:
     produce = jobs["produce"]
     attest = jobs["attest"]
     require(
+        produce.count(
+            "    name: Produce exact merged upstream contribution evidence\n"
+        )
+        == 1,
+        "producer display name must match the attester owner-job lookup",
+    )
+    require(
         step_names(produce) == EXPECTED_PRODUCE_STEPS,
         "producer steps or order changed",
     )
@@ -1148,6 +1155,11 @@ workflow_tamper_cases = {
         workflow_text,
         '"Produce exact merged upstream contribution evidence"',
         '"Any producer"',
+    ),
+    "producer job display name changed": replace_once(
+        workflow_text,
+        "    name: Produce exact merged upstream contribution evidence\n",
+        "    name: Renamed producer\n",
     ),
     "producer window widened": replace_once(
         workflow_text,
