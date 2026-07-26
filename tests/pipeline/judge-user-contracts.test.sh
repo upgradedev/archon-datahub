@@ -1775,12 +1775,28 @@ mkdir -p "${operation_evidence_dir}"
 chmod 0500 "${operation_evidence_dir}"
 expect_failure run_apply provision "${judge_password}"
 chmod 0700 "${operation_evidence_dir}"
-test "$(<"${state_dir}/status")" = "disabled"
-test ! -s "${state_dir}/groups"
-test ! -e "${operation_state_receipt}"
-grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
-grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
-grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
+if [[ "$(<"${state_dir}/status")" != "disabled" ]]; then
+  echo "::error::Receipt-write containment did not leave the judge identity disabled" >&2
+  exit 1
+fi
+if [[ -s "${state_dir}/groups" ]]; then
+  echo "::error::Receipt-write containment did not remove judge authorization" >&2
+  exit 1
+fi
+if [[ -e "${operation_state_receipt}" ]]; then
+  echo "::error::Receipt-write failure retained a canonical lifecycle receipt" >&2
+  exit 1
+fi
+for required_call in \
+  "cognito-idp:admin-disable-user" \
+  "cognito-idp:admin-user-global-sign-out" \
+  "cognito-idp:admin-remove-user-from-group"; do
+  if ! grep -Fxq "${required_call}" "${state_dir}/calls"; then
+    printf '::error::Receipt-write containment omitted required call %s\n' \
+      "${required_call}" >&2
+    exit 1
+  fi
+done
 
 reset_state absent
 run_apply provision "${judge_password}" >"${result_log}" 2>&1
