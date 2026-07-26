@@ -2,13 +2,14 @@
 set -Eeuo pipefail
 
 contract_stage="bootstrap"
+contract_case="initialization"
 exec 9>&2
 trap '
   status=$?
   trap - ERR
   printf \
-    "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Judge-user contract stage %s failed with status %s\n" \
-    "${LINENO}" "${contract_stage}" "${status}" >&9
+    "::error file=tests/pipeline/judge-user-contracts.test.sh,line=%s::Judge-user contract stage %s case %s failed with status %s\n" \
+    "${LINENO}" "${contract_stage}" "${contract_case}" "${status}" >&9
   exit "${status}"
 ' ERR
 
@@ -997,6 +998,7 @@ run_apply() {
   local operation="$1"
   local password="${2:-}"
   local username="${3:-${email}}"
+  contract_case="run-apply-${operation}-caller-${BASH_LINENO[0]:-unknown}"
 
   env \
     -u AWS_DEFAULT_PROFILE \
