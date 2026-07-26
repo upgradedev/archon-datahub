@@ -602,7 +602,8 @@ Every environment stack exports:
 - `ArchonApiSecurityGroupId`, `ArchonAuditWorkerSecurityGroupId`,
   `ArchonRemediationWorkerSecurityGroupId`, `ArchonVpcEndpointSecurityGroupId`
 - `ArchonReadSecretArn`, `ArchonWriteSecretArn`, `ArchonLlmSecretArn`
-- `ArchonAlarmTopicArn`
+- `ArchonAlarmTopicArn`, `ArchonAlarmTopicKmsKeyArn`
+- `ArchonAlarmDeliveryFeedbackRoleArn`, `ArchonAlarmDeliveryLogGroupName`
 - `ArchonContainerImageDigest`, `ArchonSpaArtifactSha256`,
   `ArchonContainerArchiveSha256`, `ArchonLambdaArchiveSha256`
 - `ArchonDeploymentWorkflowRunId`, `ArchonDeploymentWorkflowRunAttempt`,

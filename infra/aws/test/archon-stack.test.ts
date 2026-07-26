@@ -1568,6 +1568,12 @@ describe("Archon AWS reference architecture", () => {
     expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
       "/archon/staging/*"
     );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
+      "sns/"
+    );
+    expect(JSON.stringify(cloudWatchLogsStatement.Condition)).toContain(
+      "archon-staging-alarms"
+    );
     expect(JSON.stringify(cloudWatchLogsStatement.Condition)).not.toContain(
       "kms:ViaService"
     );
@@ -1620,6 +1626,10 @@ describe("Archon AWS reference architecture", () => {
       "ArchonReadSecretArn",
       "ArchonWriteSecretArn",
       "ArchonLlmSecretArn",
+      "ArchonAlarmTopicArn",
+      "ArchonAlarmTopicKmsKeyArn",
+      "ArchonAlarmDeliveryFeedbackRoleArn",
+      "ArchonAlarmDeliveryLogGroupName",
       "ArchonContainerImageDigest",
       "ArchonSpaArtifactSha256",
       "ArchonContainerArchiveSha256",
@@ -1656,6 +1666,184 @@ describe("Archon AWS reference architecture", () => {
         Value: { Ref: parameterName }
       });
     }
+  });
+
+  test("binds alarm delivery logging to the exact topic and least privilege", () => {
+    const { platform } = templates();
+    const roles = platform.findResources("AWS::IAM::Role");
+    const roleEntry = Object.entries(roles).find(
+      ([, resource]: [string, any]) =>
+        resource.Properties.RoleName ===
+        "archon-staging-sns-delivery-status"
+    );
+    expect(roleEntry).toBeDefined();
+    const [roleLogicalId, role] = roleEntry!;
+    const snsTrust =
+      role.Properties.AssumeRolePolicyDocument.Statement.find(
+        (statement: any) =>
+          statement.Principal?.Service === "sns.amazonaws.com"
+      );
+    expect(snsTrust).toMatchObject({
+      Action: "sts:AssumeRole",
+      Effect: "Allow",
+      Principal: { Service: "sns.amazonaws.com" }
+    });
+    expect(JSON.stringify(snsTrust.Condition)).toContain(
+      "aws:SourceAccount"
+    );
+    expect(JSON.stringify(snsTrust.Condition)).toContain(
+      "aws:SourceArn"
+    );
+    expect(JSON.stringify(snsTrust.Condition)).toContain(
+      "archon-staging-alarms"
+    );
+
+    const policies = Object.values(
+      platform.findResources("AWS::IAM::Policy")
+    ) as any[];
+    const deliveryPolicy = policies.find((policy) =>
+      (policy.Properties.Roles ?? []).some(
+        (candidate: any) => candidate.Ref === roleLogicalId
+      )
+    );
+    expect(deliveryPolicy).toBeDefined();
+    const deliveryStatements =
+      deliveryPolicy.Properties.PolicyDocument.Statement;
+    expect(deliveryStatements).toHaveLength(3);
+    expect(deliveryStatements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Action: "logs:CreateLogGroup",
+          Effect: "Allow",
+          Resource: expect.anything(),
+          Sid: "CreateOnlyArchonAlarmDeliveryLogGroups"
+        }),
+        expect.objectContaining({
+          Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+          Effect: "Allow",
+          Resource: expect.anything(),
+          Sid: "WriteOnlyArchonAlarmDeliveryLogStreams"
+        }),
+        expect.objectContaining({
+          Action: [
+            "kms:Encrypt",
+            "kms:ReEncrypt*",
+            "kms:Decrypt",
+            "kms:GenerateDataKey*",
+            "kms:Describe*"
+          ],
+          Effect: "Allow",
+          Resource: expect.anything(),
+          Sid: "UseExactLogsKeyOnlyThroughCloudWatchLogs"
+        })
+      ])
+    );
+    const serializedPolicy = JSON.stringify(deliveryStatements);
+    expect(serializedPolicy).toContain("log-group:sns/");
+    expect(serializedPolicy).toContain("AWS::Region");
+    expect(serializedPolicy).toContain("AWS::AccountId");
+    expect(serializedPolicy).toContain("archon-staging-alarms");
+    expect(serializedPolicy).toContain(":log-stream:*");
+    expect(serializedPolicy).not.toContain(":*:log-stream:");
+    expect(serializedPolicy).toContain("kms:ViaService");
+    expect(serializedPolicy).not.toContain('"Resource":"*"');
+
+    const serializedLogGroups = JSON.stringify(
+      platform.findResources("AWS::Logs::LogGroup")
+    );
+    expect(serializedLogGroups).toContain("sns/");
+    expect(serializedLogGroups).toContain("archon-staging-alarms");
+    const deliveryLogGroups = Object.values(
+      platform.findResources("AWS::Logs::LogGroup")
+    ).filter((resource: any) =>
+      JSON.stringify(resource.Properties.LogGroupName).includes(
+        "archon-staging-alarms"
+      )
+    ) as any[];
+    expect(deliveryLogGroups).toHaveLength(1);
+    for (const logGroup of deliveryLogGroups) {
+      expect(logGroup.Properties.KmsKeyId).toBeDefined();
+      expect(logGroup.Properties.RetentionInDays).toBe(365);
+      expect(logGroup.DeletionPolicy).toBe("Retain");
+      expect(logGroup.UpdateReplacePolicy).toBe("Retain");
+    }
+
+    platform.hasResourceProperties("AWS::SNS::Topic", {
+      TopicName: "archon-staging-alarms",
+      KmsMasterKeyId: Match.anyValue(),
+      DeliveryStatusLogging: [
+        {
+          FailureFeedbackRoleArn: {
+            "Fn::GetAtt": [roleLogicalId, "Arn"]
+          },
+          Protocol: "http/s",
+          SuccessFeedbackRoleArn: {
+            "Fn::GetAtt": [roleLogicalId, "Arn"]
+          },
+          SuccessFeedbackSampleRate: "100"
+        }
+      ]
+    });
+    platform.hasOutput("ArchonAlarmDeliveryFeedbackRoleArn", {
+      Value: { "Fn::GetAtt": [roleLogicalId, "Arn"] }
+    });
+    const alarmTopic = Object.values(
+      platform.findResources("AWS::SNS::Topic")
+    ).find(
+      (resource: any) =>
+        resource.Properties.TopicName === "archon-staging-alarms"
+    ) as any;
+    expect(alarmTopic).toBeDefined();
+    platform.hasOutput("ArchonAlarmTopicKmsKeyArn", {
+      Value: alarmTopic.Properties.KmsMasterKeyId
+    });
+    const logsKeyLogicalId =
+      alarmTopic.Properties.KmsMasterKeyId["Fn::GetAtt"][0];
+    const logsKey = platform.findResources("AWS::KMS::Key")[
+      logsKeyLogicalId
+    ] as any;
+    const cloudWatchPublisherStatement =
+      logsKey.Properties.KeyPolicy.Statement.find(
+        (statement: any) =>
+          statement.Sid ===
+          "AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts"
+      );
+    expect(cloudWatchPublisherStatement).toBeDefined();
+    expect(cloudWatchPublisherStatement.Action).toEqual([
+      "kms:GenerateDataKey*",
+      "kms:Decrypt"
+    ]);
+    expect(
+      JSON.stringify(cloudWatchPublisherStatement.Principal)
+    ).toContain("cloudwatch.amazonaws.com");
+    expect(
+      JSON.stringify(cloudWatchPublisherStatement.Condition)
+    ).toContain("archon-staging-alarms");
+    const topicPolicies = Object.values(
+      platform.findResources("AWS::SNS::TopicPolicy")
+    ) as any[];
+    const cloudWatchTopicStatement = topicPolicies
+      .flatMap(
+        (policy) =>
+          policy.Properties.PolicyDocument.Statement ?? []
+      )
+      .find(
+        (statement: any) =>
+          statement.Sid ===
+          "AllowAccountCloudWatchAlarmsToPublishAlerts"
+      );
+    expect(cloudWatchTopicStatement).toBeDefined();
+    expect(cloudWatchTopicStatement.Action).toBe("sns:Publish");
+    expect(
+      JSON.stringify(cloudWatchTopicStatement.Principal)
+    ).toContain("cloudwatch.amazonaws.com");
+    expect(
+      JSON.stringify(cloudWatchTopicStatement.Condition)
+    ).toContain("aws:SourceAccount");
+    expect(
+      JSON.stringify(cloudWatchTopicStatement.Condition)
+    ).toContain("archon-staging-alarms");
+    platform.hasOutput("ArchonAlarmDeliveryLogGroupName", {});
   });
 
   test("applies production capacity, availability, and edge hardening", () => {

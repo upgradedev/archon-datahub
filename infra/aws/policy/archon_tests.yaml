@@ -675,6 +675,1427 @@
     rules:
       retained_logs_are_encrypted: FAIL
 
+- name: exact Archon alarm HTTP/S delivery feedback passes
+  input:
+    Resources:
+      LogsKey: &validAlarmLogsKey
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement:
+              - &validAlarmKmsCloudWatchPublishStatement
+                Sid: AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action:
+                  - kms:GenerateDataKey*
+                  - kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                    kms:EncryptionContext:aws:sns:topicArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":sns:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":archon-production-alarms"
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":alarm:*"
+      AlarmDeliveryStatusRole: &validAlarmDeliveryStatusRole
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - &validAlarmTrustStatement
+                Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":sns:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":archon-production-alarms"
+      AlarmDeliveryStatusPolicy: &validAlarmDeliveryStatusPolicy
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - &validAlarmCreateLogGroupStatement
+                Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":logs:"
+                      - Ref: AWS::Region
+                      - ":"
+                      - Ref: AWS::AccountId
+                      - ":log-group:sns/"
+                      - Ref: AWS::Region
+                      - "/"
+                      - Ref: AWS::AccountId
+                      - "/archon-production-alarms"
+              - &validAlarmWriteLogStreamStatement
+                Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":logs:"
+                      - Ref: AWS::Region
+                      - ":"
+                      - Ref: AWS::AccountId
+                      - ":log-group:sns/"
+                      - Ref: AWS::Region
+                      - "/"
+                      - Ref: AWS::AccountId
+                      - "/archon-production-alarms:log-stream:*"
+              - &validAlarmFeedbackKmsStatement
+                Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource:
+                  Fn::GetAtt:
+                    - LogsKey
+                    - Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      Fn::Join:
+                        - ""
+                        - - logs.
+                          - Ref: AWS::Region
+                          - "."
+                          - Ref: AWS::URLSuffix
+      AlarmDeliveryLogGroup: &validAlarmDeliveryLogGroup
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-production-alarms
+          KmsKeyId:
+            Fn::GetAtt:
+              - LogsKey
+              - Arn
+          RetentionInDays: 365
+      AlarmTopicPolicy: &validAlarmTopicPolicy
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - &validAlarmTopicCloudWatchPublishStatement
+                Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":alarm:*"
+      AlarmTopic: &validAlarmTopic
+        Type: AWS::SNS::Topic
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          TopicName: archon-production-alarms
+          KmsMasterKeyId:
+            Fn::GetAtt:
+              - LogsKey
+              - Arn
+          DeliveryStatusLogging:
+            - Protocol: http/s
+              FailureFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackSampleRate: "100"
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: PASS
+
+- name: an alarm TopicPolicy attached to a different topic is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      OtherTopic:
+        Type: AWS::SNS::Topic
+        Properties:
+          TopicName: archon-decoy-alarms
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: OtherTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: OtherTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":alarm:*"
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an additional unrecognized SNS topic in the platform is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+      UnrecognizedTopic:
+        Type: AWS::SNS::Topic
+        Properties:
+          TopicName: unrelated-notification-topic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an SNS feedback-role trust bound to the wrong topic is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":sns:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":archon-staging-alarms"
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an IAM CreateLogGroup grant for a different log group is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":logs:"
+                      - Ref: AWS::Region
+                      - ":"
+                      - Ref: AWS::AccountId
+                      - ":log-group:sns/"
+                      - Ref: AWS::Region
+                      - "/"
+                      - Ref: AWS::AccountId
+                      - "/archon-staging-alarms"
+              - *validAlarmWriteLogStreamStatement
+              - *validAlarmFeedbackKmsStatement
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an IAM log-stream grant for a different log group is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmCreateLogGroupStatement
+              - Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:"
+                      - Ref: AWS::Partition
+                      - ":logs:"
+                      - Ref: AWS::Region
+                      - ":"
+                      - Ref: AWS::AccountId
+                      - ":log-group:sns/"
+                      - Ref: AWS::Region
+                      - "/"
+                      - Ref: AWS::AccountId
+                      - "/archon-staging-alarms:log-stream:*"
+              - *validAlarmFeedbackKmsStatement
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an alarm delivery log group from a different stage is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-staging-alarms
+          KmsKeyId:
+            Fn::GetAtt:
+              - LogsKey
+              - Arn
+          RetentionInDays: 365
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an IAM feedback grant using a different KMS key is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      OtherLogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmCreateLogGroupStatement
+              - *validAlarmWriteLogStreamStatement
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource:
+                  Fn::GetAtt:
+                    - OtherLogsKey
+                    - Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      Fn::Join:
+                        - ""
+                        - - logs.
+                          - Ref: AWS::Region
+                          - "."
+                          - Ref: AWS::URLSuffix
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an alarm delivery log group encrypted by a different key is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      OtherLogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-production-alarms
+          KmsKeyId:
+            Fn::GetAtt:
+              - OtherLogsKey
+              - Arn
+          RetentionInDays: 365
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an IAM feedback KMS grant with the wrong ViaService is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmCreateLogGroupStatement
+              - *validAlarmWriteLogStreamStatement
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource:
+                  Fn::GetAtt:
+                    - LogsKey
+                    - Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService:
+                      Fn::Join:
+                        - ""
+                        - - logs.
+                          - Ref: AWS::Region
+                          - "."
+                          - Ref: AWS::Partition
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a CloudWatch topic grant with a broader SourceArn is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":*"
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a KMS encrypted-publish grant bound to the wrong topic is rejected
+  input:
+    Resources:
+      LogsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action:
+                  - kms:GenerateDataKey*
+                  - kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                    kms:EncryptionContext:aws:sns:topicArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":sns:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":archon-staging-alarms"
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":alarm:*"
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a KMS encrypted-publish grant with a broader SourceArn is rejected
+  input:
+    Resources:
+      LogsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action:
+                  - kms:GenerateDataKey*
+                  - kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                    kms:EncryptionContext:aws:sns:topicArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":sns:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":archon-production-alarms"
+                  ArnLike:
+                    aws:SourceArn:
+                      Fn::Join:
+                        - ""
+                        - - "arn:"
+                          - Ref: AWS::Partition
+                          - ":cloudwatch:"
+                          - Ref: AWS::Region
+                          - ":"
+                          - Ref: AWS::AccountId
+                          - ":*"
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a logs key without the CloudWatch encrypted-publish grant is rejected
+  input:
+    Resources:
+      LogsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an additional broad CloudWatch Allow on the logs key is rejected
+  input:
+    Resources:
+      LogsKey:
+        Type: AWS::KMS::Key
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          EnableKeyRotation: true
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmKmsCloudWatchPublishStatement
+              - Sid: AllowCloudWatchAnyUse
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: kms:*
+                Resource: "*"
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an additional broad feedback-role trust principal is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmTrustStatement
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  AWS: "*"
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: an additional broad Allow in the alarm TopicPolicy is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmTopicCloudWatchPublishStatement
+              - Sid: AllowAnyPublisher
+                Effect: Allow
+                Principal:
+                  AWS: "*"
+                Action: sns:Publish
+                Resource: "*"
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a second TopicPolicy targeting the alarm topic is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      ShadowAlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAnyPublisher
+                Effect: Allow
+                Principal:
+                  AWS: "*"
+                Action: sns:Publish
+                Resource: "*"
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a feedback role with an additional managed policy is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AdministratorAccess
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmTrustStatement
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a separate managed policy attached to the feedback role is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      BroadFeedbackManagedPolicy:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a separate IAM policy attached by literal feedback role name is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      LiteralRoleFeedbackPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          Roles:
+            - archon-production-sns-delivery-status
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a managed policy attached by literal feedback role name is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      LiteralRoleFeedbackManagedPolicy:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+          Roles:
+            - archon-production-sns-delivery-status
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+      AlarmDeliveryStatusPolicy: *validAlarmDeliveryStatusPolicy
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: a feedback policy attached to an additional principal is rejected
+  input:
+    Resources:
+      LogsKey: *validAlarmLogsKey
+      AlarmDeliveryStatusRole: *validAlarmDeliveryStatusRole
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          Groups:
+            - Operators
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - *validAlarmCreateLogGroupStatement
+              - *validAlarmWriteLogStreamStatement
+              - *validAlarmFeedbackKmsStatement
+      AlarmDeliveryLogGroup: *validAlarmDeliveryLogGroup
+      AlarmTopicPolicy: *validAlarmTopicPolicy
+      AlarmTopic: *validAlarmTopic
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: partial Archon alarm delivery success sampling is rejected
+  input:
+    Resources:
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn: arn:aws:sns:eu-west-1:111111111111:archon-production-alarms
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms
+              - Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms:log-stream:*
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource: arn:aws:kms:eu-west-1:111111111111:key/logs
+                Condition:
+                  StringEquals:
+                    kms:ViaService: logs.eu-west-1.amazonaws.com
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-production-alarms
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn: arn:aws:cloudwatch:eu-west-1:111111111111:alarm:*
+      AlarmTopic:
+        Type: AWS::SNS::Topic
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          TopicName: archon-production-alarms
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          DeliveryStatusLogging:
+            - Protocol: http/s
+              FailureFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackSampleRate: "50"
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: Archon alarm delivery feedback without the HTTP/S protocol is rejected
+  input:
+    Resources:
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn: arn:aws:sns:eu-west-1:111111111111:archon-production-alarms
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms
+              - Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms:log-stream:*
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource: arn:aws:kms:eu-west-1:111111111111:key/logs
+                Condition:
+                  StringEquals:
+                    kms:ViaService: logs.eu-west-1.amazonaws.com
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-production-alarms
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn: arn:aws:cloudwatch:eu-west-1:111111111111:alarm:*
+      AlarmTopic:
+        Type: AWS::SNS::Topic
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          TopicName: archon-production-alarms
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          DeliveryStatusLogging:
+            - Protocol: sqs
+              FailureFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackSampleRate: "100"
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: Archon alarm success and failure feedback cannot use different roles
+  input:
+    Resources:
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn: arn:aws:sns:eu-west-1:111111111111:archon-production-alarms
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms
+              - Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms:log-stream:*
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource: arn:aws:kms:eu-west-1:111111111111:key/logs
+                Condition:
+                  StringEquals:
+                    kms:ViaService: logs.eu-west-1.amazonaws.com
+      OtherDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-other-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-production-alarms
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn: arn:aws:cloudwatch:eu-west-1:111111111111:alarm:*
+      AlarmTopic:
+        Type: AWS::SNS::Topic
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          TopicName: archon-production-alarms
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          DeliveryStatusLogging:
+            - Protocol: http/s
+              FailureFeedbackRoleArn:
+                Fn::GetAtt:
+                  - OtherDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackSampleRate: "100"
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: Archon alarm delivery feedback cannot cross deployment stages
+  input:
+    Resources:
+      AlarmDeliveryStatusRole:
+        Type: AWS::IAM::Role
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          RoleName: archon-production-sns-delivery-status
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Principal:
+                  Service: sns.amazonaws.com
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnEqualsIfExists:
+                    aws:SourceArn: arn:aws:sns:eu-west-1:111111111111:archon-production-alarms
+      AlarmDeliveryStatusPolicy:
+        Type: AWS::IAM::Policy
+        Properties:
+          PolicyName: archon-production-sns-delivery-status
+          Roles:
+            - Ref: AlarmDeliveryStatusRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateOnlyArchonAlarmDeliveryLogGroups
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms
+              - Sid: WriteOnlyArchonAlarmDeliveryLogStreams
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:eu-west-1:111111111111:log-group:sns/eu-west-1/111111111111/archon-production-alarms:log-stream:*
+              - Sid: UseExactLogsKeyOnlyThroughCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:Decrypt
+                  - kms:GenerateDataKey*
+                  - kms:Describe*
+                Resource: arn:aws:kms:eu-west-1:111111111111:key/logs
+                Condition:
+                  StringEquals:
+                    kms:ViaService: logs.eu-west-1.amazonaws.com
+      AlarmDeliveryLogGroup:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName:
+            Fn::Join:
+              - ""
+              - - sns/
+                - Ref: AWS::Region
+                - /
+                - Ref: AWS::AccountId
+                - /archon-staging-alarms
+          KmsKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          RetentionInDays: 365
+      AlarmTopicPolicy:
+        Type: AWS::SNS::TopicPolicy
+        Properties:
+          Topics:
+            - Ref: AlarmTopic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowAccountCloudWatchAlarmsToPublishAlerts
+                Effect: Allow
+                Principal:
+                  Service: cloudwatch.amazonaws.com
+                Action: sns:Publish
+                Resource:
+                  Ref: AlarmTopic
+                Condition:
+                  StringEquals:
+                    aws:SourceAccount:
+                      Ref: AWS::AccountId
+                  ArnLike:
+                    aws:SourceArn: arn:aws:cloudwatch:eu-west-1:111111111111:alarm:*
+      AlarmTopic:
+        Type: AWS::SNS::Topic
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          TopicName: archon-production-alarms
+          KmsMasterKeyId: arn:aws:kms:eu-west-1:111111111111:key/logs
+          DeliveryStatusLogging:
+            - Protocol: http/s
+              FailureFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackRoleArn:
+                Fn::GetAtt:
+                  - AlarmDeliveryStatusRole
+                  - Arn
+              SuccessFeedbackSampleRate: "100"
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
+- name: platform templates cannot omit the Archon alarm delivery boundary
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+  expectations:
+    rules:
+      archon_alarm_topics_have_exact_http_s_delivery_feedback: FAIL
+
 - name: DynamoDB without PITR deletion protection and KMS is rejected
   input:
     Resources:

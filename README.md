@@ -137,9 +137,9 @@ Important trust boundaries:
 More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
 [temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
 pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
-[production availability](docs/AVAILABILITY.md), and [protected judge
-access](docs/JUDGE_ACCESS.md), plus [evidence-based
-readiness](docs/READINESS.md).
+[production availability](docs/AVAILABILITY.md), [production paging delivery
+proof](docs/PRODUCTION_PAGING_TEST.md), and [protected judge
+access](docs/JUDGE_ACCESS.md), plus [evidence-based readiness](docs/READINESS.md).
 
 ## Run locally without external services
 
@@ -300,7 +300,9 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 - a least-privilege control Lambda for public durable start/status, with immutable-evidence
   and receipt-chain verification plus a sanitized terminal proof panel, with no exposure
   of callback tokens or raw orchestration data;
-- alarms, dashboards, retained encrypted logs, VPC flow logs, and private AWS endpoints.
+- alarms, dashboards, retained encrypted logs, VPC flow logs, and private AWS endpoints;
+  the production alarm topic records 100% of HTTP/S success feedback plus failures through
+  one least-privilege SNS role into one dedicated KMS-encrypted retained log group.
 
 The deployment workflow requires a **successful default-branch CI run ID**, its matching
 full commit SHA, and the exact run ID, run attempt, artifact ID, artifact digest, and inner
@@ -368,6 +370,7 @@ output is not accepted as release evidence:
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
 | Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/network plus dual API-stage/Cognito regional-WAF contracts |
 | Production availability | Six-hour read-only public-path probe with strict TLS/header/schema checks, exact CI/deployment/runtime-byte provenance, TOCTOU revalidation, and checksum-sealed 90-day evidence |
+| External paging delivery | Protected, release-bound SNS publish correlated to one unique 2xx external HTTPS delivery-status record; no publish-only or human-acknowledgement claim |
 
 Workflows:
 
@@ -396,6 +399,13 @@ Workflows:
 - [Production availability](.github/workflows/availability.yml) — scheduled/manual,
   credentialless observation of the public UI, runtime config, and one bounded read-only
   audit, bound to the newest successful production promotion and exact runtime bytes.
+- [Production paging delivery](.github/workflows/production-paging-test.yml) —
+  twice weekly (`17 3 * * 1,4`) and manually dispatchable protected, release-bound SNS
+  test whose returned message ID must remain bound to one unique external HTTPS 2xx
+  delivery-status event across a delayed second complete lookup;
+  retained evidence excludes the endpoint, payload, provider response, raw log event, and
+  AWS identifiers. Its exact OIDC/IAM and evidence boundary is documented in
+  [docs/PRODUCTION_PAGING_TEST.md](docs/PRODUCTION_PAGING_TEST.md).
 - [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
   a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then an
   exact-run governed write/rollback canary whose signed evidence is required before the
@@ -445,10 +455,10 @@ reference infrastructure, and CI/CD definitions. The authoritative remaining pro
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
-- GitHub `staging`, `production`, `production-observer`, `datahub-demo`,
-  `datahub-demo-seed`, `judge-access-staging`, `judge-access-production`,
-  `governed-canary`, `governed-canary-rollback`, and `governed-canary-recovery`
-  environments and `master` protection must be configured;
+- GitHub `staging`, `production`, `production-observer`, `production-paging-test`,
+  `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
+  `judge-access-production`, `governed-canary`, `governed-canary-rollback`, and
+  `governed-canary-recovery` environments and `master` protection must be configured;
 - production, demo-seed, judge-access, and the three governed-canary approval
   environments require a trusted second collaborator so self-review can remain disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are

@@ -215,18 +215,19 @@ Availability evidence now also has an isolated, checksum-bound
 `production-availability/v1` attestation, but it is only one input to later operational
 proof and cannot alone satisfy `SQ3` or `SQ10`.
 
-The registry deliberately reserves required standard producers that do **not** yet exist:
-`.github/workflows/submission-project-access.yml` for `SQ3`–`SQ5`,
-`.github/workflows/submission-content-review.yml` for `SQ6`–`SQ8`, and
+The protected `.github/workflows/submission-project-access.yml` and its dedicated
+`.github/workflows/submission-judge-journey.yml` support producer now exist for `SQ3`–`SQ5`
+and fail closed until the hosted production application and judge identity are configured.
+The registry still reserves two required standard producers that do **not** yet exist:
+`.github/workflows/submission-content-review.yml` for `SQ6`–`SQ8` and
 `.github/workflows/submission-operations.yml` for `SQ10`. Optional registered producers
-for `SQ9`, post-submit `SQ11`, `BONUS-OSS`, and `BONUS-FEEDBACK` are also absent, as is
-the dedicated fresh judge-journey producer required by `SQ4`. Consequently the aggregate
-workflow fails closed when any required run is missing or comes from another workflow; it
-does not reinterpret the existing judge-user, CI fixture, availability, posture, or local
-OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and paging,
-fresh judge access, license detection, disclosure approval, credential rotation, public
-upstream acceptance, and feedback confirmation must come from those real dedicated
-pipelines rather than manual JSON or synthetic passes.
+for `SQ9`, post-submit `SQ11`, `BONUS-OSS`, and `BONUS-FEEDBACK` are also absent.
+Consequently the aggregate workflow fails closed when any required run is missing or comes
+from another workflow; it does not reinterpret CI fixtures, availability, posture, paging,
+or local OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and
+live paging, hosted judge access, license detection, disclosure approval, public upstream
+acceptance, and feedback confirmation must come from the real dedicated pipelines rather
+than manual JSON or synthetic passes.
 
 These blockers cannot be cleared by fixture output, source inspection, or a green offline
 CI gate. **Current ready-to-submit status: BLOCKED / NOT READY.**

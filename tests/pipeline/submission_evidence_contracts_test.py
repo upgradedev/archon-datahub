@@ -402,10 +402,10 @@ def valid_facts() -> dict[str, dict]:
             "applicationUrl": application,
             "availability": {
                 "workflowPath": ".github/workflows/availability.yml",
-                "runId": 401,
-                "runAttempt": 4,
-                "artifactId": 402,
-                "artifactName": f"production-availability-{RELEASE}-4",
+                "runId": 203,
+                "runAttempt": 3,
+                "artifactId": 204,
+                "artifactName": f"production-availability-{RELEASE}-3",
                 "artifactDigest": DIGEST,
                 "predicateType": (
                     "https://github.com/upgradedev/archon-datahub/"
@@ -429,22 +429,94 @@ def valid_facts() -> dict[str, dict]:
                 "predicateDigest": DIGEST,
                 "observedAt": iso(),
                 "result": "passed",
+                "topicArnSha256": DIGEST,
+                "subscriptionArnSha256": ALT_DIGEST,
+                "alarmInventory": {
+                    "observedAt": iso(),
+                    "alarmCount": 10,
+                    "allActionsEnabled": True,
+                    "alarmActionsBoundToTopic": True,
+                    "okActionsBoundToTopic": True,
+                    "insufficientDataActionsEmpty": True,
+                    "inventoryDigest": DIGEST,
+                },
             },
             "alerting": {
                 "alarmsActive": True,
                 "snsSubscriptionConfirmed": True,
                 "externalPagingDeliveryTested": True,
                 "lastPagingTestAt": iso(),
+                "pagingDelivery": {
+                    "workflowPath": (
+                        ".github/workflows/production-paging-test.yml"
+                    ),
+                    "runId": 405,
+                    "runAttempt": 6,
+                    "artifactId": 406,
+                    "artifactName": (
+                        f"production-paging-delivery-{RELEASE}-6"
+                    ),
+                    "artifactDigest": DIGEST,
+                    "predicateType": (
+                        "https://archon.datahub.dev/attestations/"
+                        "production-paging-delivery/v1"
+                    ),
+                    "predicateDigest": DIGEST,
+                    "observedAt": iso(),
+                    "topicArnSha256": DIGEST,
+                    "subscriptionArnSha256": ALT_DIGEST,
+                },
             },
             "recovery": {
                 "rollbackPathTested": True,
                 "credentialRotationTested": True,
-                "lastRecoveryTestAt": iso(),
+                "lastRollbackTestAt": iso(),
+                "lastCredentialRotationTestAt": (
+                    lifecycle_operations[1]["performedAt"]
+                ),
+                "governedCanary": {
+                    "workflowPath": ".github/workflows/governed-canary.yml",
+                    "runId": 101,
+                    "runAttempt": 1,
+                    "artifactId": 408,
+                    "artifactName": "governed-canary-rollback-101-1",
+                    "artifactDigest": DIGEST,
+                    "predicateType": (
+                        "https://github.com/upgradedev/archon-datahub/"
+                        "attestations/governed-canary/v1"
+                    ),
+                    "predicateDigest": DIGEST,
+                    "verifiedAt": iso(),
+                    "subjectDigest": DIGEST,
+                    "rollbackEvidenceDigest": DIGEST,
+                    "attestationVerificationDigest": DIGEST,
+                },
             },
             "access": {
                 "freeJudgeAccess": True,
                 "confirmedCredentialOrPublicNoAuth": True,
                 "validThrough": "2026-08-31T21:00:00Z",
+                "projectAccess": {
+                    "workflowPath": (
+                        ".github/workflows/submission-project-access.yml"
+                    ),
+                    "runId": 903,
+                    "runAttempt": 1,
+                    "artifactId": 1003,
+                    "artifactName": (
+                        f"submission-project-access-{RELEASE}-1"
+                    ),
+                    "artifactDigest": DIGEST,
+                    "predicateType": (
+                        "https://archon.datahub.dev/attestations/"
+                        "submission-project-access/v1"
+                    ),
+                    "predicateDigest": DIGEST,
+                    "observedAt": iso(),
+                    "credentialRotationPerformedAt": (
+                        lifecycle_operations[1]["performedAt"]
+                    ),
+                },
             },
             "monitoringWindow": {
                 "schedule": "17 */6 * * *",
@@ -659,6 +731,42 @@ assert (
     sq4_rotation_support["judgeUserLifecycle"]["cognitoSubjectDigest"]
     == ALT_DIGEST
 )
+sq10_paging_support = validator.expected_support_bindings(
+    "SQ10",
+    "paging-delivery",
+    facts_by_id["SQ10"],
+)
+assert (
+    sq10_paging_support["alerting"]["pagingDelivery"]["workflowPath"]
+    == ".github/workflows/production-paging-test.yml"
+)
+sq10_rollback_support = validator.expected_support_bindings(
+    "SQ10",
+    "rollback-recovery",
+    facts_by_id["SQ10"],
+)
+assert (
+    sq10_rollback_support["recovery"]["governedCanary"]["workflowPath"]
+    == ".github/workflows/governed-canary.yml"
+)
+sq10_rotation_support = validator.expected_support_bindings(
+    "SQ10",
+    "credential-rotation",
+    facts_by_id["SQ10"],
+)
+assert set(sq10_rotation_support) == {"access", "recovery"}
+assert (
+    sq10_rotation_support["access"]["projectAccess"]["workflowPath"]
+    == ".github/workflows/submission-project-access.yml"
+)
+validator.cross_validate(
+    {
+        "D4": make_receipt("D4", facts_by_id["D4"]),
+        "SQ3": make_receipt("SQ3", facts_by_id["SQ3"]),
+        "SQ4": make_receipt("SQ4", facts_by_id["SQ4"]),
+        "SQ10": make_receipt("SQ10", facts_by_id["SQ10"]),
+    }
+)
 
 
 def rejects_mutation(
@@ -669,6 +777,28 @@ def rejects_mutation(
     expect_rejected(
         lambda: validator.validate_facts(
             proof_id, changed, RELEASE, notice_path=NOTICE_PATH
+        ),
+        description,
+    )
+
+
+def rejects_sq10_cross_mutation(mutate, description: str) -> None:
+    changed = copy.deepcopy(facts_by_id["SQ10"])
+    mutate(changed)
+    validator.validate_facts(
+        "SQ10",
+        changed,
+        RELEASE,
+        notice_path=NOTICE_PATH,
+    )
+    expect_rejected(
+        lambda: validator.cross_validate(
+            {
+                "D4": make_receipt("D4", facts_by_id["D4"]),
+                "SQ3": make_receipt("SQ3", facts_by_id["SQ3"]),
+                "SQ4": make_receipt("SQ4", facts_by_id["SQ4"]),
+                "SQ10": make_receipt("SQ10", changed),
+            }
         ),
         description,
     )
@@ -860,10 +990,150 @@ rejects_mutation(
 )
 rejects_mutation(
     "SQ10",
+    lambda value: value["alerting"]["pagingDelivery"].update(
+        workflowPath=".github/workflows/production-posture.yml"
+    ),
+    "SQ10 accepted paging provenance from the posture workflow",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"]["pagingDelivery"].pop(
+        "predicateDigest"
+    ),
+    "SQ10 accepted paging provenance without an exact predicate digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"]["pagingDelivery"].update(
+        artifactName=f"production-paging-delivery-{RELEASE}-5"
+    ),
+    "SQ10 accepted paging provenance for a different producer attempt",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"].update(
+        lastPagingTestAt=iso(NOW - dt.timedelta(hours=1))
+    ),
+    "SQ10 accepted a paging timestamp not bound to paging evidence",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"]["pagingDelivery"].update(
+        topicArnSha256=ALT_DIGEST
+    ),
+    "SQ10 accepted paging and posture evidence for different topics",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"]["alarmInventory"].update(
+        allActionsEnabled=False
+    ),
+    "SQ10 accepted disabled production alarm actions",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["recovery"]["governedCanary"].update(
+        artifactName=f"governed-canary-rollback-{RELEASE}-1"
+    ),
+    "SQ10 accepted a governed-canary artifact not bound to its run ID",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["recovery"]["governedCanary"].update(
+        predicateType=(
+            "https://github.com/upgradedev/archon-datahub/"
+            "attestations/governed-canary-recovery/v1"
+        )
+    ),
+    "SQ10 accepted the independent-recovery predicate as governed-canary proof",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["recovery"].update(
+        lastRollbackTestAt=iso(NOW - dt.timedelta(hours=1))
+    ),
+    "SQ10 accepted rollback freshness not bound to canary evidence",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["recovery"].update(
+        lastCredentialRotationTestAt=iso(NOW - dt.timedelta(hours=1))
+    ),
+    "SQ10 accepted rotation freshness not bound to project-access evidence",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["access"]["projectAccess"].update(
+        artifactName=f"submission-project-access-{RELEASE}-2"
+    ),
+    "SQ10 accepted project-access evidence for a different producer attempt",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["access"]["projectAccess"].update(
+        artifactId=value["access"]["projectAccess"]["runId"]
+    ),
+    "SQ10 accepted aliased project-access run and artifact IDs",
+)
+rejects_mutation(
+    "SQ10",
     lambda value: value["availability"].update(
         observedAt=iso(NOW - dt.timedelta(hours=8))
     ),
     "SQ10 accepted a stale availability observation",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["recovery"]["governedCanary"].update(
+        runId=102,
+        artifactName="governed-canary-rollback-102-1",
+    ),
+    "SQ10 accepted a governed-canary run different from its D4 evidence",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["recovery"]["governedCanary"].update(
+        predicateDigest=ALT_DIGEST
+    ),
+    "SQ10 accepted a governed-canary predicate different from its D4 evidence",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["recovery"]["governedCanary"].update(
+        subjectDigest=ALT_DIGEST
+    ),
+    "SQ10 accepted a governed-canary subject different from its D4 evidence",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["availability"].update(
+        runId=205,
+        artifactName=f"production-availability-{RELEASE}-3",
+    ),
+    "SQ10 accepted availability evidence different from SQ3",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["access"]["projectAccess"].update(
+        predicateDigest=ALT_DIGEST
+    ),
+    "SQ10 accepted a project-access source different from its SQ4 receipt",
+)
+rejects_sq10_cross_mutation(
+    lambda value: (
+        value["access"]["projectAccess"].update(
+            credentialRotationPerformedAt=iso(
+                NOW - dt.timedelta(hours=2)
+            )
+        ),
+        value["recovery"].update(
+            lastCredentialRotationTestAt=iso(
+                NOW - dt.timedelta(hours=2)
+            )
+        ),
+    ),
+    "SQ10 accepted a rotation time different from its SQ4 lifecycle",
+)
+rejects_sq10_cross_mutation(
+    lambda value: value["access"].update(
+        validThrough="2026-09-01T21:00:00Z"
+    ),
+    "SQ10 accepted judge-access validity different from its SQ4 evidence",
 )
 rejects_mutation(
     "SQ11",
@@ -1980,6 +2250,23 @@ with tempfile.TemporaryDirectory(prefix="submission-registry-contracts-") as raw
         lambda: validator.load_registry(weakened_registry_path),
         "registry accepted a missing required proof-support role",
     )
+    operations = next(
+        item
+        for item in registry["sources"]
+        if item["key"] == "operations"
+    )
+    assert {
+        subject["role"]
+        for subject in operations["supportSubjects"]["SQ10"]
+    } == {
+        "availability-attestation",
+        "posture-attestation",
+        "paging-delivery",
+        "rollback-recovery",
+        "credential-rotation",
+        "judge-access-validity",
+        "monitor-configuration",
+    }
 
 
 def artifact_fixture(

@@ -136,5 +136,8 @@ exercise.
 
 Those concerns remain covered by their purpose-built pipelines: immutable deployment,
 production posture, production supply-chain rescan, live DataHub proof, and the governed
-canary/recovery workflows. GitHub marks a failed scheduled probe in Actions; external
-paging requires a separately configured notification integration.
+canary/recovery workflows. GitHub marks a failed scheduled probe in Actions. The protected
+[production paging delivery workflow](PRODUCTION_PAGING_TEST.md) separately publishes one
+release-bound SNS test and proves external HTTPS 2xx acceptance from delivery-status logs;
+it still requires a confirmed provider subscription and does not claim human
+acknowledgement.

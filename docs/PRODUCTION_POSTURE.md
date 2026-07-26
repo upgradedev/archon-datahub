@@ -42,6 +42,12 @@ Configure these environment variables:
 `PendingConfirmation=false`, and must expose a concrete SNS protocol. The workflow never
 copies or uploads the subscription endpoint.
 
+This posture check proves that the configured subscription exists and remains confirmed;
+it does not publish a notification or claim successful delivery. The separate
+[production paging delivery proof](PRODUCTION_PAGING_TEST.md) reuses the exact
+`ALARM_SUBSCRIPTION_ARN`, requires its protocol to be `https`, and correlates one real
+publish with a unique 2xx SNS delivery-status record.
+
 ## OIDC and IAM
 
 Both observer-role trust policies should accept only this repository, the
@@ -79,7 +85,7 @@ At minimum, the role needs:
       "Sid": "ReadExactAlarmSubscription",
       "Effect": "Allow",
       "Action": "sns:GetSubscriptionAttributes",
-      "Resource": "ALARM_SUBSCRIPTION_ARN"
+      "Resource": "ARCHON_ALARM_TOPIC_ARN"
     }
   ]
 }
@@ -90,6 +96,8 @@ Replace every uppercase placeholder with the protected environment's exact value
 `cloudformation:DescribeStackDriftDetectionStatus` does not support resource-level IAM
 permissions, so its narrowly scoped statement must use `Resource: "*"`; it can only read
 the opaque drift-operation IDs created by this run.
+SNS authorizes `GetSubscriptionAttributes` against the owning topic resource even though
+the API request itself names the exact subscription ARN.
 
 CloudFormation must also be able to read the deployed resource types during drift
 detection. Prefer an existing, dedicated CloudFormation service role on each stack with
@@ -233,7 +241,9 @@ The artifact includes the exact workflow gate receipts, sanitized posture JSON, 
 the attestation predicate, and strict SHA-256 checksums. It records hashes of the observer
 role, stack drift-detection identifiers, alarm topic ARN, and subscription ARN instead of
 the original values. It records the SNS owner and protocol needed to prove that the
-subscription is concrete, but never stores its endpoint or message-delivery data.
+subscription is concrete, but never stores its endpoint or message-delivery data. SQ10
+accepts external-paging status only when separately attested paging evidence has the same
+topic/subscription hashes; a posture boolean or successful SNS publish is insufficient.
 
 The workflow is evidence, not remediation. A failure must be investigated and corrected
 through the normal reviewed infrastructure/deployment pipeline before rerunning it.

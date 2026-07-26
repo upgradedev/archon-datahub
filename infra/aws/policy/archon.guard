@@ -51,6 +51,170 @@ let log_groups = Resources.*[
   Type == 'AWS::Logs::LogGroup'
 ]
 
+let archon_alarm_topics = Resources.*[
+  Type == 'AWS::SNS::Topic'
+  Properties.TopicName == /^archon-(staging|production)-alarms$/
+]
+
+let sns_topics = Resources.*[
+  Type == 'AWS::SNS::Topic'
+]
+
+let staging_archon_alarm_topics = %archon_alarm_topics[
+  Properties.TopicName == 'archon-staging-alarms'
+]
+
+let production_archon_alarm_topics = %archon_alarm_topics[
+  Properties.TopicName == 'archon-production-alarms'
+]
+
+let archon_alarm_delivery_log_groups = Resources.*[
+  Type == 'AWS::Logs::LogGroup'
+  Properties.LogGroupName.'Fn::Join'[0] == ''
+  Properties.LogGroupName.'Fn::Join'[1][0] == 'sns/'
+  Properties.LogGroupName.'Fn::Join'[1][1].Ref == 'AWS::Region'
+  Properties.LogGroupName.'Fn::Join'[1][2] == '/'
+  Properties.LogGroupName.'Fn::Join'[1][3].Ref == 'AWS::AccountId'
+  Properties.LogGroupName.'Fn::Join'[1][4] == /^\/archon-(staging|production)-alarms$/
+]
+
+let staging_archon_alarm_delivery_log_groups =
+  %archon_alarm_delivery_log_groups[
+    Properties.LogGroupName.'Fn::Join'[1][4] == '/archon-staging-alarms'
+  ]
+
+let production_archon_alarm_delivery_log_groups =
+  %archon_alarm_delivery_log_groups[
+    Properties.LogGroupName.'Fn::Join'[1][4] == '/archon-production-alarms'
+  ]
+
+let archon_alarm_delivery_status_logging =
+  %archon_alarm_topics.Properties.DeliveryStatusLogging.*
+
+let archon_alarm_http_delivery_status_logging =
+  %archon_alarm_topics.Properties.DeliveryStatusLogging[
+    Protocol == 'http/s'
+  ]
+
+let archon_alarm_success_feedback_role_refs =
+  %archon_alarm_http_delivery_status_logging.SuccessFeedbackRoleArn.'Fn::GetAtt'[0]
+
+let archon_alarm_failure_feedback_role_refs =
+  %archon_alarm_http_delivery_status_logging.FailureFeedbackRoleArn.'Fn::GetAtt'[0]
+
+# Guard 3.2 map-key filters cannot be followed by a predicate filter without an
+# engine panic. Resolve the exact referenced role by key and assert its type and
+# trust policy in the rule instead.
+let referenced_archon_alarm_feedback_roles =
+  Resources[
+    KEYS IN %archon_alarm_success_feedback_role_refs
+  ]
+
+let archon_alarm_feedback_policies = Resources.*[
+  Type == 'AWS::IAM::Policy'
+  some Properties.Roles[*].Ref ==
+    %archon_alarm_success_feedback_role_refs
+]
+
+let archon_alarm_feedback_literal_role_policies = Resources.*[
+  Type == 'AWS::IAM::Policy'
+  some Properties.Roles[*] ==
+    /^archon-(staging|production)-sns-delivery-status$/
+]
+
+let archon_alarm_feedback_managed_policies = Resources.*[
+  Type == 'AWS::IAM::ManagedPolicy'
+  some Properties.Roles[*].Ref ==
+    %archon_alarm_success_feedback_role_refs
+]
+
+let archon_alarm_feedback_literal_role_managed_policies = Resources.*[
+  Type == 'AWS::IAM::ManagedPolicy'
+  some Properties.Roles[*] ==
+    /^archon-(staging|production)-sns-delivery-status$/
+]
+
+let archon_alarm_feedback_create_group_statements =
+  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
+    Sid == 'CreateOnlyArchonAlarmDeliveryLogGroups'
+  ]
+
+let archon_alarm_feedback_policy_role_refs =
+  %archon_alarm_feedback_policies.Properties.Roles[*].Ref
+
+let archon_alarm_feedback_write_stream_statements =
+  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
+    Sid == 'WriteOnlyArchonAlarmDeliveryLogStreams'
+  ]
+
+let archon_alarm_feedback_kms_statements =
+  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
+    Sid == 'UseExactLogsKeyOnlyThroughCloudWatchLogs'
+  ]
+
+let archon_alarm_feedback_trust_statements =
+  %referenced_archon_alarm_feedback_roles.Properties.AssumeRolePolicyDocument.Statement[
+    Effect == 'Allow'
+    Action == 'sts:AssumeRole'
+    Principal.Service == 'sns.amazonaws.com'
+  ]
+
+let archon_alarm_topic_kms_key_refs =
+  %archon_alarm_topics.Properties.KmsMasterKeyId.'Fn::GetAtt'[0]
+
+let archon_alarm_delivery_log_kms_key_refs =
+  %archon_alarm_delivery_log_groups.Properties.KmsKeyId.'Fn::GetAtt'[0]
+
+let archon_alarm_feedback_kms_key_refs =
+  %archon_alarm_feedback_kms_statements.Resource.'Fn::GetAtt'[0]
+
+let referenced_archon_alarm_kms_keys =
+  Resources[
+    KEYS IN %archon_alarm_topic_kms_key_refs
+  ]
+
+let archon_alarm_kms_cloudwatch_publish_statements =
+  %referenced_archon_alarm_kms_keys.Properties.KeyPolicy.Statement[
+    Sid == 'AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts'
+  ]
+
+let archon_alarm_kms_cloudwatch_allow_statements =
+  %referenced_archon_alarm_kms_keys.Properties.KeyPolicy.Statement[
+    Effect == 'Allow'
+    Principal.Service == 'cloudwatch.amazonaws.com'
+  ]
+
+let sns_topic_policies = Resources.*[
+  Type == 'AWS::SNS::TopicPolicy'
+]
+
+let archon_alarm_topic_policies = %sns_topic_policies[
+  some Properties.PolicyDocument.Statement[*] {
+    Sid == 'AllowAccountCloudWatchAlarmsToPublishAlerts'
+  }
+]
+
+let archon_alarm_cloudwatch_publish_statements =
+  %archon_alarm_topic_policies.Properties.PolicyDocument.Statement[
+    Sid == 'AllowAccountCloudWatchAlarmsToPublishAlerts'
+  ]
+
+let archon_alarm_topic_policy_allow_statements =
+  %archon_alarm_topic_policies.Properties.PolicyDocument.Statement[
+    Effect == 'Allow'
+  ]
+
+let archon_alarm_topic_policy_topic_refs =
+  %archon_alarm_topic_policies.Properties.Topics[*].Ref
+
+let referenced_archon_alarm_topic_policy_topics =
+  Resources[
+    KEYS IN %archon_alarm_topic_policy_topic_refs
+  ]
+
+let archon_alarm_topic_policy_resource_refs =
+  %archon_alarm_cloudwatch_publish_statements.Resource.Ref
+
 let waf_data_protections = Resources.*[
   Type == 'AWS::WAFv2::WebACL'
 ].Properties.DataProtectionConfig.DataProtections.*
@@ -441,6 +605,370 @@ rule retained_logs_are_encrypted when %log_groups !empty {
     KmsKeyId exists
     RetentionInDays >= 365
   }
+}
+
+rule archon_alarm_topics_have_exact_http_s_delivery_feedback
+  when %platform_markers !empty OR %archon_alarm_topics !empty {
+  let alarm_topic_count = count(%archon_alarm_topics)
+  let sns_topic_count = count(%sns_topics)
+  let delivery_status_logging_count =
+    count(%archon_alarm_delivery_status_logging)
+  let http_delivery_status_logging_count =
+    count(%archon_alarm_http_delivery_status_logging)
+  let success_feedback_role_ref_count =
+    count(%archon_alarm_success_feedback_role_refs)
+  let failure_feedback_role_ref_count =
+    count(%archon_alarm_failure_feedback_role_refs)
+  let referenced_feedback_role_count =
+    count(%referenced_archon_alarm_feedback_roles)
+  let feedback_policy_count =
+    count(%archon_alarm_feedback_policies)
+  let feedback_literal_role_policy_count =
+    count(%archon_alarm_feedback_literal_role_policies)
+  let feedback_managed_policy_count =
+    count(%archon_alarm_feedback_managed_policies)
+  let feedback_literal_role_managed_policy_count =
+    count(%archon_alarm_feedback_literal_role_managed_policies)
+  let feedback_policy_statement_count =
+    count(%archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[*])
+  let feedback_policy_role_ref_count =
+    count(%archon_alarm_feedback_policy_role_refs)
+  let feedback_role_trust_statement_count =
+    count(%referenced_archon_alarm_feedback_roles.Properties.AssumeRolePolicyDocument.Statement[*])
+  let feedback_trust_statement_count =
+    count(%archon_alarm_feedback_trust_statements)
+  let feedback_create_group_statement_count =
+    count(%archon_alarm_feedback_create_group_statements)
+  let feedback_create_group_resource_part_count =
+    count(%archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][*])
+  let feedback_write_stream_statement_count =
+    count(%archon_alarm_feedback_write_stream_statements)
+  let feedback_write_stream_resource_part_count =
+    count(%archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][*])
+  let feedback_kms_statement_count =
+    count(%archon_alarm_feedback_kms_statements)
+  let feedback_kms_via_service_part_count =
+    count(%archon_alarm_feedback_kms_statements.Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][*])
+  let topic_kms_key_ref_count =
+    count(%archon_alarm_topic_kms_key_refs)
+  let delivery_log_kms_key_ref_count =
+    count(%archon_alarm_delivery_log_kms_key_refs)
+  let feedback_kms_key_ref_count =
+    count(%archon_alarm_feedback_kms_key_refs)
+  let referenced_alarm_kms_key_count =
+    count(%referenced_archon_alarm_kms_keys)
+  let kms_cloudwatch_publish_statement_count =
+    count(%archon_alarm_kms_cloudwatch_publish_statements)
+  let kms_cloudwatch_allow_statement_count =
+    count(%archon_alarm_kms_cloudwatch_allow_statements)
+  let kms_cloudwatch_source_arn_part_count =
+    count(%archon_alarm_kms_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*])
+  let kms_topic_context_arn_part_count =
+    count(%archon_alarm_kms_cloudwatch_publish_statements.Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][*])
+  let alarm_topic_policy_count =
+    count(%archon_alarm_topic_policies)
+  let sns_topic_policy_count =
+    count(%sns_topic_policies)
+  let alarm_topic_policy_allow_statement_count =
+    count(%archon_alarm_topic_policy_allow_statements)
+  let alarm_topic_policy_topic_count =
+    count(%archon_alarm_topic_policies.Properties.Topics[*])
+  let alarm_topic_policy_topic_ref_count =
+    count(%archon_alarm_topic_policy_topic_refs)
+  let referenced_alarm_topic_policy_topic_count =
+    count(%referenced_archon_alarm_topic_policy_topics)
+  let alarm_topic_policy_resource_ref_count =
+    count(%archon_alarm_topic_policy_resource_refs)
+  let cloudwatch_publish_statement_count =
+    count(%archon_alarm_cloudwatch_publish_statements)
+  let topic_policy_cloudwatch_source_arn_part_count =
+    count(%archon_alarm_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*])
+  let feedback_trust_source_arn_part_count =
+    count(%archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][*])
+  let delivery_log_group_count =
+    count(%archon_alarm_delivery_log_groups)
+  let staging_alarm_topic_count =
+    count(%staging_archon_alarm_topics)
+  let production_alarm_topic_count =
+    count(%production_archon_alarm_topics)
+  let staging_delivery_log_group_count =
+    count(%staging_archon_alarm_delivery_log_groups)
+  let production_delivery_log_group_count =
+    count(%production_archon_alarm_delivery_log_groups)
+
+  %alarm_topic_count == 1
+  %sns_topic_count == 1
+  %delivery_status_logging_count == 1
+  %http_delivery_status_logging_count == 1
+  %success_feedback_role_ref_count == 1
+  %failure_feedback_role_ref_count == 1
+  %referenced_feedback_role_count == 1
+  %feedback_policy_count == 1
+  %feedback_literal_role_policy_count == 0
+  %feedback_managed_policy_count == 0
+  %feedback_literal_role_managed_policy_count == 0
+  %feedback_policy_statement_count == 3
+  %feedback_policy_role_ref_count == 1
+  %feedback_role_trust_statement_count == 1
+  %feedback_trust_statement_count == 1
+  %feedback_create_group_statement_count == 1
+  %feedback_create_group_resource_part_count == 11
+  %feedback_write_stream_statement_count == 1
+  %feedback_write_stream_resource_part_count == 11
+  %feedback_kms_statement_count == 1
+  %feedback_kms_via_service_part_count == 4
+  %topic_kms_key_ref_count == 1
+  %delivery_log_kms_key_ref_count == 1
+  %feedback_kms_key_ref_count == 1
+  %referenced_alarm_kms_key_count == 1
+  %kms_cloudwatch_publish_statement_count == 1
+  %kms_cloudwatch_allow_statement_count == 1
+  %kms_cloudwatch_source_arn_part_count == 7
+  %kms_topic_context_arn_part_count == 7
+  %alarm_topic_policy_count == 1
+  %sns_topic_policy_count == 1
+  %alarm_topic_policy_allow_statement_count == 1
+  %alarm_topic_policy_topic_count == 1
+  %alarm_topic_policy_topic_ref_count == 1
+  %referenced_alarm_topic_policy_topic_count == 1
+  %alarm_topic_policy_resource_ref_count == 1
+  %cloudwatch_publish_statement_count == 1
+  %topic_policy_cloudwatch_source_arn_part_count == 7
+  %feedback_trust_source_arn_part_count == 7
+  %delivery_log_group_count == 1
+  %staging_alarm_topic_count == 0 OR
+  %staging_delivery_log_group_count == 1
+  %staging_alarm_topic_count == 0 OR
+  %referenced_archon_alarm_feedback_roles.Properties.RoleName ==
+    'archon-staging-sns-delivery-status'
+  %staging_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
+    ':archon-staging-alarms'
+  %staging_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][10] ==
+    '/archon-staging-alarms'
+  %staging_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][10] ==
+    '/archon-staging-alarms:log-stream:*'
+  %production_alarm_topic_count == 0 OR
+  %production_delivery_log_group_count == 1
+  %production_alarm_topic_count == 0 OR
+  %referenced_archon_alarm_feedback_roles.Properties.RoleName ==
+    'archon-production-sns-delivery-status'
+  %production_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
+    ':archon-production-alarms'
+  %production_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][10] ==
+    '/archon-production-alarms'
+  %production_alarm_topic_count == 0 OR
+  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][10] ==
+    '/archon-production-alarms:log-stream:*'
+  %archon_alarm_topics {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      KmsMasterKeyId.'Fn::GetAtt'[0] exists
+      KmsMasterKeyId.'Fn::GetAtt'[1] == 'Arn'
+      DeliveryStatusLogging !empty
+    }
+  }
+  %archon_alarm_http_delivery_status_logging {
+    Protocol == 'http/s'
+    FailureFeedbackRoleArn.'Fn::GetAtt'[0] exists
+    FailureFeedbackRoleArn.'Fn::GetAtt'[1] == 'Arn'
+    SuccessFeedbackRoleArn.'Fn::GetAtt'[0] exists
+    SuccessFeedbackRoleArn.'Fn::GetAtt'[1] == 'Arn'
+    SuccessFeedbackSampleRate == '100'
+  }
+  %archon_alarm_failure_feedback_role_refs == %archon_alarm_success_feedback_role_refs
+  %archon_alarm_feedback_policy_role_refs ==
+    %archon_alarm_success_feedback_role_refs
+  %archon_alarm_feedback_policies.Properties {
+    Groups not exists
+    Users not exists
+  }
+  %archon_alarm_delivery_log_groups {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      KmsKeyId.'Fn::GetAtt'[0] exists
+      KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
+      RetentionInDays >= 365
+    }
+  }
+  %referenced_archon_alarm_feedback_roles {
+    Type == 'AWS::IAM::Role'
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      RoleName == /^archon-(staging|production)-sns-delivery-status$/
+      ManagedPolicyArns not exists
+      Policies not exists
+      some AssumeRolePolicyDocument.Statement[*] {
+        Effect == 'Allow'
+        Action == 'sts:AssumeRole'
+        Principal.Service == 'sns.amazonaws.com'
+        Condition.StringEquals.'aws:SourceAccount'.Ref ==
+          'AWS::AccountId'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[0] == ''
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][0] ==
+          'arn:'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
+          'AWS::Partition'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][2] ==
+          ':sns:'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
+          'AWS::Region'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][4] ==
+          ':'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
+          'AWS::AccountId'
+        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
+          /^:archon-(staging|production)-alarms$/
+      }
+    }
+  }
+  %archon_alarm_feedback_create_group_statements {
+    Effect == 'Allow'
+    Action == 'logs:CreateLogGroup'
+    Resource.'Fn::Join'[0] == ''
+    Resource.'Fn::Join'[1][0] == 'arn:'
+    Resource.'Fn::Join'[1][1].Ref == 'AWS::Partition'
+    Resource.'Fn::Join'[1][2] == ':logs:'
+    Resource.'Fn::Join'[1][3].Ref == 'AWS::Region'
+    Resource.'Fn::Join'[1][4] == ':'
+    Resource.'Fn::Join'[1][5].Ref == 'AWS::AccountId'
+    Resource.'Fn::Join'[1][6] == ':log-group:sns/'
+    Resource.'Fn::Join'[1][7].Ref == 'AWS::Region'
+    Resource.'Fn::Join'[1][8] == '/'
+    Resource.'Fn::Join'[1][9].Ref == 'AWS::AccountId'
+    Resource.'Fn::Join'[1][10] ==
+      /^\/archon-(staging|production)-alarms$/
+  }
+  %archon_alarm_feedback_write_stream_statements {
+    Effect == 'Allow'
+    Action == [
+      'logs:CreateLogStream',
+      'logs:PutLogEvents'
+    ]
+    Resource.'Fn::Join'[0] == ''
+    Resource.'Fn::Join'[1][0] == 'arn:'
+    Resource.'Fn::Join'[1][1].Ref == 'AWS::Partition'
+    Resource.'Fn::Join'[1][2] == ':logs:'
+    Resource.'Fn::Join'[1][3].Ref == 'AWS::Region'
+    Resource.'Fn::Join'[1][4] == ':'
+    Resource.'Fn::Join'[1][5].Ref == 'AWS::AccountId'
+    Resource.'Fn::Join'[1][6] == ':log-group:sns/'
+    Resource.'Fn::Join'[1][7].Ref == 'AWS::Region'
+    Resource.'Fn::Join'[1][8] == '/'
+    Resource.'Fn::Join'[1][9].Ref == 'AWS::AccountId'
+    Resource.'Fn::Join'[1][10] ==
+      /^\/archon-(staging|production)-alarms:log-stream:\*$/
+  }
+  %archon_alarm_feedback_kms_statements {
+    Effect == 'Allow'
+    Action == [
+      'kms:Encrypt',
+      'kms:ReEncrypt*',
+      'kms:Decrypt',
+      'kms:GenerateDataKey*',
+      'kms:Describe*'
+    ]
+    Resource.'Fn::GetAtt'[0] exists
+    Resource.'Fn::GetAtt'[1] == 'Arn'
+    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[0] == ''
+    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][0] == 'logs.'
+    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][1].Ref ==
+      'AWS::Region'
+    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][2] == '.'
+    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][3].Ref ==
+      'AWS::URLSuffix'
+  }
+  %referenced_archon_alarm_kms_keys {
+    Type == 'AWS::KMS::Key'
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      EnableKeyRotation == true
+      KeyPolicy exists
+    }
+  }
+  %archon_alarm_kms_cloudwatch_publish_statements {
+    Effect == 'Allow'
+    Action == [
+      'kms:GenerateDataKey*',
+      'kms:Decrypt'
+    ]
+    Principal.Service == 'cloudwatch.amazonaws.com'
+    Resource == '*'
+    Condition.StringEquals.'aws:SourceAccount'.Ref ==
+      'AWS::AccountId'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[0] ==
+      ''
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][0] ==
+      'arn:'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][1].Ref ==
+      'AWS::Partition'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][2] ==
+      ':sns:'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][3].Ref ==
+      'AWS::Region'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][4] ==
+      ':'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][5].Ref ==
+      'AWS::AccountId'
+    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][6] ==
+      /^:archon-(staging|production)-alarms$/
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[0] == ''
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][0] == 'arn:'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
+      'AWS::Partition'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][2] ==
+      ':cloudwatch:'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
+      'AWS::Region'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][4] == ':'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
+      'AWS::AccountId'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][6] == ':alarm:*'
+  }
+  %referenced_archon_alarm_topic_policy_topics {
+    Type == 'AWS::SNS::Topic'
+    Properties.TopicName == /^archon-(staging|production)-alarms$/
+  }
+  %archon_alarm_cloudwatch_publish_statements {
+    Effect == 'Allow'
+    Action == 'sns:Publish'
+    Principal.Service == 'cloudwatch.amazonaws.com'
+    Resource.Ref exists
+    Condition.StringEquals.'aws:SourceAccount'.Ref ==
+      'AWS::AccountId'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[0] == ''
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][0] == 'arn:'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
+      'AWS::Partition'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][2] ==
+      ':cloudwatch:'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
+      'AWS::Region'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][4] == ':'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
+      'AWS::AccountId'
+    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][6] == ':alarm:*'
+  }
+  %archon_alarm_topic_kms_key_refs ==
+    %archon_alarm_delivery_log_kms_key_refs
+  %archon_alarm_topic_kms_key_refs ==
+    %archon_alarm_feedback_kms_key_refs
+  %archon_alarm_topic_policy_topic_refs ==
+    %archon_alarm_topic_policy_resource_refs
+  %referenced_archon_alarm_topic_policy_topics.Properties.TopicName ==
+    %archon_alarm_topics.Properties.TopicName
+  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][*] ==
+    %archon_alarm_kms_cloudwatch_publish_statements.Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][*]
+  %archon_alarm_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*] ==
+    %archon_alarm_kms_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*]
 }
 
 rule dynamodb_tables_are_resilient_and_encrypted

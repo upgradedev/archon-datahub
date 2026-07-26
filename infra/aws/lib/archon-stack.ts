@@ -345,7 +345,8 @@ export class ArchonPlatformStack extends Stack {
     const logsKey = retainedKey(this, "LogsKey", `alias/archon/${stage}/logs`);
     grantCloudWatchLogsKeyAccess(this, logsKey, [
       `/archon/${stage}/*`,
-      `aws-waf-logs-archon-${stage}-api`
+      `aws-waf-logs-archon-${stage}-api`,
+      `sns/${Aws.REGION}/${Aws.ACCOUNT_ID}/archon-${stage}-alarms`
     ]);
     const queueKey = retainedKey(this, "QueueKey", `alias/archon/${stage}/queues`);
     const secretsKey = retainedKey(this, "SecretsKey", `alias/archon/${stage}/secrets`);
@@ -2070,12 +2071,128 @@ export class ArchonPlatformStack extends Stack {
       })
     );
 
-    const alarmTopic = new sns.Topic(this, "AlarmTopic", {
-      topicName: `archon-${stage}-alarms`,
-      masterKey: logsKey,
-      enforceSSL: true
+    const alarmTopicName = `archon-${stage}-alarms`;
+    const alarmTopicArn =
+      `arn:${Aws.PARTITION}:sns:${Aws.REGION}:${Aws.ACCOUNT_ID}:${alarmTopicName}`;
+    const alarmDeliveryLogGroupName =
+      `sns/${Aws.REGION}/${Aws.ACCOUNT_ID}/${alarmTopicName}`;
+    const alarmDeliveryLogGroupArn = this.formatArn({
+      service: "logs",
+      resource: "log-group",
+      resourceName: alarmDeliveryLogGroupName,
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME
     });
+    const alarmDeliveryLogGroup = retainedLogGroup(
+      this,
+      "AlarmDeliveryLogGroup",
+      alarmDeliveryLogGroupName,
+      logsKey
+    );
+    const alarmDeliveryStatusRole = new iam.Role(
+      this,
+      "AlarmDeliveryStatusRole",
+      {
+        roleName: `archon-${stage}-sns-delivery-status`,
+        description:
+          "Lets Amazon SNS write only Archon alarm delivery status to CloudWatch Logs",
+        assumedBy: new iam.ServicePrincipal("sns.amazonaws.com", {
+          conditions: {
+            StringEquals: {
+              "aws:SourceAccount": Aws.ACCOUNT_ID
+            },
+            ArnEqualsIfExists: {
+              "aws:SourceArn": alarmTopicArn
+            }
+          }
+        })
+      }
+    );
+    alarmDeliveryStatusRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "CreateOnlyArchonAlarmDeliveryLogGroups",
+        actions: ["logs:CreateLogGroup"],
+        resources: [alarmDeliveryLogGroupArn]
+      })
+    );
+    alarmDeliveryStatusRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "WriteOnlyArchonAlarmDeliveryLogStreams",
+        actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources: [`${alarmDeliveryLogGroupArn}:log-stream:*`]
+      })
+    );
+    alarmDeliveryStatusRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "UseExactLogsKeyOnlyThroughCloudWatchLogs",
+        actions: [
+          "kms:Encrypt",
+          "kms:ReEncrypt*",
+          "kms:Decrypt",
+          "kms:GenerateDataKey*",
+          "kms:Describe*"
+        ],
+        resources: [logsKey.keyArn],
+        conditions: {
+          StringEquals: {
+            "kms:ViaService":
+              `logs.${Aws.REGION}.${Aws.URL_SUFFIX}`
+          }
+        }
+      })
+    );
+    alarmDeliveryStatusRole.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    logsKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts",
+        principals: [new iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+        actions: ["kms:GenerateDataKey*", "kms:Decrypt"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "aws:SourceAccount": Aws.ACCOUNT_ID,
+            "kms:EncryptionContext:aws:sns:topicArn":
+              alarmTopicArn
+          },
+          ArnLike: {
+            "aws:SourceArn":
+              `arn:${Aws.PARTITION}:cloudwatch:${Aws.REGION}:${Aws.ACCOUNT_ID}:alarm:*`
+          }
+        }
+      })
+    );
+
+    const alarmTopic = new sns.Topic(this, "AlarmTopic", {
+      topicName: alarmTopicName,
+      masterKey: logsKey,
+      enforceSSL: true,
+      loggingConfigs: [
+        {
+          protocol: sns.LoggingProtocol.HTTP,
+          failureFeedbackRole: alarmDeliveryStatusRole,
+          successFeedbackRole: alarmDeliveryStatusRole,
+          successFeedbackSampleRate: 100
+        }
+      ]
+    });
+    alarmTopic.node.addDependency(alarmDeliveryLogGroup);
     alarmTopic.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    alarmTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowAccountCloudWatchAlarmsToPublishAlerts",
+        principals: [new iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+        actions: ["sns:Publish"],
+        resources: [alarmTopic.topicArn],
+        conditions: {
+          StringEquals: {
+            "aws:SourceAccount": Aws.ACCOUNT_ID
+          },
+          ArnLike: {
+            "aws:SourceArn":
+              `arn:${Aws.PARTITION}:cloudwatch:${Aws.REGION}:${Aws.ACCOUNT_ID}:alarm:*`
+          }
+        }
+      })
+    );
     const alarmAction = new cloudwatchActions.SnsAction(alarmTopic);
     const alarms = [
       new cloudwatch.Alarm(this, "Api5xxAlarm", {
@@ -2312,6 +2429,17 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonWriteSecretArn", writeSecret.secretArn);
     output(this, "ArchonLlmSecretArn", llmSecret.secretArn);
     output(this, "ArchonAlarmTopicArn", alarmTopic.topicArn);
+    output(this, "ArchonAlarmTopicKmsKeyArn", logsKey.keyArn);
+    output(
+      this,
+      "ArchonAlarmDeliveryFeedbackRoleArn",
+      alarmDeliveryStatusRole.roleArn
+    );
+    output(
+      this,
+      "ArchonAlarmDeliveryLogGroupName",
+      alarmDeliveryLogGroup.logGroupName
+    );
     output(this, "ArchonContainerImageDigest", imageDigest.valueAsString);
     output(this, "ArchonSpaArtifactSha256", spaArtifactSha256.valueAsString);
     output(

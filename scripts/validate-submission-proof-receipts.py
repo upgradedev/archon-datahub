@@ -287,7 +287,7 @@ SUPPORT_BINDING_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("SQ10", "posture-attestation"): ("applicationUrl", "posture"),
     ("SQ10", "paging-delivery"): ("alerting",),
     ("SQ10", "rollback-recovery"): ("recovery",),
-    ("SQ10", "credential-rotation"): ("recovery",),
+    ("SQ10", "credential-rotation"): ("recovery", "access"),
     ("SQ10", "judge-access-validity"): ("access", "monitoringWindow"),
     ("SQ10", "monitor-configuration"): (
         "applicationUrl",
@@ -1008,6 +1008,52 @@ def validate_deployment_binding(value: Any, label: str, release: str) -> None:
     sha256_digest(deployment["predicateDigest"], f"{label}.predicateDigest")
     if run_id == deployment["artifactId"]:
         fail(f"{label} run and artifact IDs must be independently bound values")
+
+
+def validate_exact_provenance_binding(
+    value: Any,
+    label: str,
+    release: str,
+    *,
+    workflow_path: str,
+    artifact_name_template: str,
+    predicate_type: str,
+    extra_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    binding = exact_keys(
+        value,
+        {
+            "workflowPath",
+            "runId",
+            "runAttempt",
+            "artifactId",
+            "artifactName",
+            "artifactDigest",
+            "predicateType",
+            "predicateDigest",
+        }
+        | extra_fields,
+        label,
+    )
+    exact(binding["workflowPath"], workflow_path, f"{label}.workflowPath")
+    run_id = positive_int(binding["runId"], f"{label}.runId")
+    run_attempt = positive_int(binding["runAttempt"], f"{label}.runAttempt")
+    artifact_id = positive_int(binding["artifactId"], f"{label}.artifactId")
+    exact(
+        binding["artifactName"],
+        artifact_name_template.format(
+            releaseSha=release,
+            runId=run_id,
+            runAttempt=run_attempt,
+        ),
+        f"{label}.artifactName",
+    )
+    sha256_digest(binding["artifactDigest"], f"{label}.artifactDigest")
+    exact(binding["predicateType"], predicate_type, f"{label}.predicateType")
+    sha256_digest(binding["predicateDigest"], f"{label}.predicateDigest")
+    if run_id == artifact_id:
+        fail(f"{label} run and artifact IDs must be independently bound values")
+    return binding
 
 
 def validate_facts(
@@ -2122,11 +2168,22 @@ def validate_facts(
             ".github/workflows/availability.yml",
             f"{label}.availability.workflowPath",
         )
-        positive_int(availability["runId"], f"{label}.availability.runId")
+        availability_run_id = positive_int(
+            availability["runId"],
+            f"{label}.availability.runId",
+        )
         availability_attempt = positive_int(
             availability["runAttempt"], f"{label}.availability.runAttempt"
         )
-        positive_int(availability["artifactId"], f"{label}.availability.artifactId")
+        availability_artifact_id = positive_int(
+            availability["artifactId"],
+            f"{label}.availability.artifactId",
+        )
+        if availability_run_id == availability_artifact_id:
+            fail(
+                f"{label}.availability run and artifact IDs must be "
+                "independently bound values"
+            )
         exact(
             availability["artifactName"],
             f"production-availability-{release}-{availability_attempt}",
@@ -2158,6 +2215,9 @@ def validate_facts(
                 "predicateDigest",
                 "observedAt",
                 "result",
+                "topicArnSha256",
+                "subscriptionArnSha256",
+                "alarmInventory",
             },
             f"{label}.posture",
         )
@@ -2166,9 +2226,20 @@ def validate_facts(
             ".github/workflows/production-posture.yml",
             f"{label}.posture.workflowPath",
         )
-        positive_int(posture["runId"], f"{label}.posture.runId")
+        posture_run_id = positive_int(
+            posture["runId"],
+            f"{label}.posture.runId",
+        )
         posture_attempt = positive_int(posture["runAttempt"], f"{label}.posture.runAttempt")
-        positive_int(posture["artifactId"], f"{label}.posture.artifactId")
+        posture_artifact_id = positive_int(
+            posture["artifactId"],
+            f"{label}.posture.artifactId",
+        )
+        if posture_run_id == posture_artifact_id:
+            fail(
+                f"{label}.posture run and artifact IDs must be "
+                "independently bound values"
+            )
         exact(
             posture["artifactName"],
             f"production-posture-{release}-{posture_attempt}",
@@ -2183,6 +2254,52 @@ def validate_facts(
         sha256_digest(posture["predicateDigest"], f"{label}.posture.predicateDigest")
         fresh(posture["observedAt"], f"{label}.posture.observedAt", dt.timedelta(hours=30))
         exact(posture["result"], "passed", f"{label}.posture.result")
+        sha256_digest(
+            posture["topicArnSha256"],
+            f"{label}.posture.topicArnSha256",
+        )
+        sha256_digest(
+            posture["subscriptionArnSha256"],
+            f"{label}.posture.subscriptionArnSha256",
+        )
+        alarm_inventory = exact_keys(
+            posture["alarmInventory"],
+            {
+                "observedAt",
+                "alarmCount",
+                "allActionsEnabled",
+                "alarmActionsBoundToTopic",
+                "okActionsBoundToTopic",
+                "insufficientDataActionsEmpty",
+                "inventoryDigest",
+            },
+            f"{label}.posture.alarmInventory",
+        )
+        exact(
+            alarm_inventory["observedAt"],
+            posture["observedAt"],
+            f"{label}.posture.alarmInventory.observedAt",
+        )
+        exact(
+            alarm_inventory["alarmCount"],
+            10,
+            f"{label}.posture.alarmInventory.alarmCount",
+        )
+        for key in (
+            "allActionsEnabled",
+            "alarmActionsBoundToTopic",
+            "okActionsBoundToTopic",
+            "insufficientDataActionsEmpty",
+        ):
+            exact(
+                alarm_inventory[key],
+                True,
+                f"{label}.posture.alarmInventory.{key}",
+            )
+        sha256_digest(
+            alarm_inventory["inventoryDigest"],
+            f"{label}.posture.alarmInventory.inventoryDigest",
+        )
         alerting = exact_keys(
             facts["alerting"],
             {
@@ -2190,18 +2307,65 @@ def validate_facts(
                 "snsSubscriptionConfirmed",
                 "externalPagingDeliveryTested",
                 "lastPagingTestAt",
+                "pagingDelivery",
             },
             f"{label}.alerting",
         )
         for key in ("alarmsActive", "snsSubscriptionConfirmed", "externalPagingDeliveryTested"):
             exact(alerting[key], True, f"{label}.alerting.{key}")
-        fresh(alerting["lastPagingTestAt"], f"{label}.alerting.lastPagingTestAt", dt.timedelta(days=7))
+        paging_delivery = validate_exact_provenance_binding(
+            alerting["pagingDelivery"],
+            f"{label}.alerting.pagingDelivery",
+            release,
+            workflow_path=".github/workflows/production-paging-test.yml",
+            artifact_name_template=(
+                "production-paging-delivery-{releaseSha}-{runAttempt}"
+            ),
+            predicate_type=(
+                "https://archon.datahub.dev/attestations/"
+                "production-paging-delivery/v1"
+            ),
+            extra_fields=frozenset(
+                {
+                    "observedAt",
+                    "topicArnSha256",
+                    "subscriptionArnSha256",
+                }
+            ),
+        )
+        fresh(
+            paging_delivery["observedAt"],
+            f"{label}.alerting.pagingDelivery.observedAt",
+            dt.timedelta(days=7),
+        )
+        exact(
+            alerting["lastPagingTestAt"],
+            paging_delivery["observedAt"],
+            f"{label}.alerting.lastPagingTestAt",
+        )
+        exact(
+            paging_delivery["topicArnSha256"],
+            posture["topicArnSha256"],
+            f"{label}.alerting.pagingDelivery.topicArnSha256",
+        )
+        exact(
+            paging_delivery["subscriptionArnSha256"],
+            posture["subscriptionArnSha256"],
+            f"{label}.alerting.pagingDelivery.subscriptionArnSha256",
+        )
+        for key in ("topicArnSha256", "subscriptionArnSha256"):
+            sha256_digest(
+                paging_delivery[key],
+                f"{label}.alerting.pagingDelivery.{key}",
+            )
         recovery = exact_keys(
             facts["recovery"],
             {
                 "rollbackPathTested",
                 "credentialRotationTested",
-                "lastRecoveryTestAt",
+                "lastRollbackTestAt",
+                "lastCredentialRotationTestAt",
+                "governedCanary",
             },
             f"{label}.recovery",
         )
@@ -2211,10 +2375,54 @@ def validate_facts(
             True,
             f"{label}.recovery.credentialRotationTested",
         )
-        fresh(recovery["lastRecoveryTestAt"], f"{label}.recovery.lastRecoveryTestAt", dt.timedelta(days=7))
+        governed_canary = validate_exact_provenance_binding(
+            recovery["governedCanary"],
+            f"{label}.recovery.governedCanary",
+            release,
+            workflow_path=".github/workflows/governed-canary.yml",
+            artifact_name_template=(
+                "governed-canary-rollback-{runId}-{runAttempt}"
+            ),
+            predicate_type=(
+                "https://github.com/upgradedev/archon-datahub/"
+                "attestations/governed-canary/v1"
+            ),
+            extra_fields=frozenset(
+                {
+                    "verifiedAt",
+                    "subjectDigest",
+                    "rollbackEvidenceDigest",
+                    "attestationVerificationDigest",
+                }
+            ),
+        )
+        fresh(
+            governed_canary["verifiedAt"],
+            f"{label}.recovery.governedCanary.verifiedAt",
+            dt.timedelta(days=7),
+        )
+        exact(
+            recovery["lastRollbackTestAt"],
+            governed_canary["verifiedAt"],
+            f"{label}.recovery.lastRollbackTestAt",
+        )
+        for key in (
+            "subjectDigest",
+            "rollbackEvidenceDigest",
+            "attestationVerificationDigest",
+        ):
+            sha256_digest(
+                governed_canary[key],
+                f"{label}.recovery.governedCanary.{key}",
+            )
         access = exact_keys(
             facts["access"],
-            {"freeJudgeAccess", "confirmedCredentialOrPublicNoAuth", "validThrough"},
+            {
+                "freeJudgeAccess",
+                "confirmedCredentialOrPublicNoAuth",
+                "validThrough",
+                "projectAccess",
+            },
             f"{label}.access",
         )
         exact(access["freeJudgeAccess"], True, f"{label}.access.freeJudgeAccess")
@@ -2225,6 +2433,40 @@ def validate_facts(
         )
         if timestamp(access["validThrough"], f"{label}.access.validThrough") < JUDGING_END:
             fail(f"{label}.access.validThrough ends before the judging window")
+        project_access = validate_exact_provenance_binding(
+            access["projectAccess"],
+            f"{label}.access.projectAccess",
+            release,
+            workflow_path=".github/workflows/submission-project-access.yml",
+            artifact_name_template=(
+                "submission-project-access-{releaseSha}-{runAttempt}"
+            ),
+            predicate_type=(
+                "https://archon.datahub.dev/attestations/"
+                "submission-project-access/v1"
+            ),
+            extra_fields=frozenset(
+                {
+                    "observedAt",
+                    "credentialRotationPerformedAt",
+                }
+            ),
+        )
+        fresh(
+            project_access["observedAt"],
+            f"{label}.access.projectAccess.observedAt",
+            dt.timedelta(hours=24),
+        )
+        fresh(
+            project_access["credentialRotationPerformedAt"],
+            f"{label}.access.projectAccess.credentialRotationPerformedAt",
+            dt.timedelta(days=7),
+        )
+        exact(
+            recovery["lastCredentialRotationTestAt"],
+            project_access["credentialRotationPerformedAt"],
+            f"{label}.recovery.lastCredentialRotationTestAt",
+        )
         window = exact_keys(
             facts["monitoringWindow"],
             {"schedule", "active", "through"},
@@ -2902,6 +3144,44 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
             receipts["SQ3"]["facts"]["applicationUrl"],
             "D4/SQ3 applicationUrl",
         )
+    if "D4" in receipts and "SQ10" in receipts:
+        governed_write = receipts["D4"]["facts"]["governedWrite"]
+        governed_canary = receipts["SQ10"]["facts"]["recovery"][
+            "governedCanary"
+        ]
+        exact(
+            governed_canary["runId"],
+            governed_write["workflowRunId"],
+            "D4/SQ10 governed-canary run ID",
+        )
+        exact(
+            governed_canary["predicateDigest"],
+            governed_write["attestationPredicateDigest"],
+            "D4/SQ10 governed-canary predicate digest",
+        )
+        exact(
+            governed_canary["subjectDigest"],
+            governed_write["rollbackSubjectDigest"],
+            "D4/SQ10 governed-canary subject digest",
+        )
+        exact(
+            governed_canary["rollbackEvidenceDigest"],
+            governed_write["rollbackEvidenceDigest"],
+            "D4/SQ10 governed-canary rollback evidence digest",
+        )
+        exact(
+            governed_canary["attestationVerificationDigest"],
+            governed_write["attestationVerificationDigest"],
+            "D4/SQ10 governed-canary verification digest",
+        )
+        if timestamp(
+            governed_canary["verifiedAt"],
+            "D4/SQ10 governed-canary verifiedAt",
+        ) > timestamp(
+            receipts["D4"]["facts"]["provenAt"],
+            "D4/SQ10 live proof provenAt",
+        ):
+            fail("D4/SQ10 live proof predates governed-canary rollback verification")
     if "SQ3" in receipts and "SQ4" in receipts:
         exact(
             receipts["SQ4"]["facts"]["applicationUrl"],
@@ -2931,6 +3211,78 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
             receipts["SQ10"]["facts"]["applicationUrl"],
             receipts["SQ3"]["facts"]["applicationUrl"],
             "SQ3/SQ10 applicationUrl",
+        )
+        sq3_observation = receipts["SQ3"]["facts"]["observation"]
+        sq10_availability = receipts["SQ10"]["facts"]["availability"]
+        exact(
+            sq10_availability,
+            {
+                "workflowPath": ".github/workflows/availability.yml",
+                "runId": sq3_observation["availabilityRunId"],
+                "runAttempt": sq3_observation["availabilityRunAttempt"],
+                "artifactId": sq3_observation["availabilityArtifactId"],
+                "artifactName": sq3_observation["availabilityArtifactName"],
+                "artifactDigest": sq3_observation[
+                    "availabilityArtifactDigest"
+                ],
+                "predicateType": sq3_observation[
+                    "availabilityPredicateType"
+                ],
+                "predicateDigest": sq3_observation[
+                    "availabilityPredicateDigest"
+                ],
+                "observedAt": sq3_observation["observedAt"],
+                "result": "passed",
+            },
+            "SQ3/SQ10 availability source binding",
+        )
+    if "SQ4" in receipts and "SQ10" in receipts:
+        sq4 = receipts["SQ4"]
+        sq10 = receipts["SQ10"]["facts"]
+        sq4_source = sq4["source"]
+        rotations = [
+            operation
+            for operation in sq4["facts"]["judgeUserLifecycle"]["operations"]
+            if operation["operation"] == "rotate"
+        ]
+        if len(rotations) != 1:
+            fail("SQ4/SQ10 requires exactly one credential-rotation operation")
+        rotation = rotations[0]
+        exact(
+            sq10["access"]["projectAccess"],
+            {
+                "workflowPath": sq4_source["workflowPath"],
+                "runId": sq4_source["runId"],
+                "runAttempt": sq4_source["runAttempt"],
+                "artifactId": sq4_source["artifact"]["id"],
+                "artifactName": sq4_source["artifact"]["name"],
+                "artifactDigest": sq4_source["artifact"]["digest"],
+                "predicateType": sq4_source["attestation"]["predicateType"],
+                "predicateDigest": sq4_source["attestation"]["predicateDigest"],
+                "observedAt": sq4["facts"]["observedAt"],
+                "credentialRotationPerformedAt": rotation["performedAt"],
+            },
+            "SQ4/SQ10 project-access source binding",
+        )
+        exact(
+            sq10["access"]["freeJudgeAccess"],
+            sq4["facts"]["freeAccess"],
+            "SQ4/SQ10 free judge access",
+        )
+        exact(
+            sq10["access"]["validThrough"],
+            sq4["facts"]["accessValidThrough"],
+            "SQ4/SQ10 judge access validity",
+        )
+        exact(
+            sq10["recovery"]["credentialRotationTested"],
+            sq4["facts"]["credentialRotation"]["rotationTested"],
+            "SQ4/SQ10 credential rotation",
+        )
+        exact(
+            sq10["recovery"]["lastCredentialRotationTestAt"],
+            rotation["performedAt"],
+            "SQ4/SQ10 credential-rotation timestamp",
         )
     if {"SQ6", "SQ7", "SQ8"}.issubset(receipts):
         exact(
