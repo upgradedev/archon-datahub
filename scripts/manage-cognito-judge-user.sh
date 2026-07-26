@@ -847,7 +847,7 @@ get_user() {
   fail "Unable to read the exact Cognito judge user"
 }
 
-user_identity_matches() {
+user_binding_matches() {
   jq -e \
     --arg binding "${JUDGE_ACCOUNT_ID}" \
     --arg email "${judge_username}" '
@@ -867,7 +867,12 @@ user_identity_matches() {
       ] as $binding_attributes |
       ($binding_attributes | length) == 1 and
       $binding_attributes[0].Value == $binding
-    ) and
+    )
+  ' "${user_document}" >/dev/null
+}
+
+user_subject_matches() {
+  jq -e '
     (
       [
         (.UserAttributes // [])[] |
@@ -883,6 +888,10 @@ user_identity_matches() {
       )
     )
   ' "${user_document}" >/dev/null
+}
+
+user_identity_matches() {
+  user_binding_matches && user_subject_matches
 }
 
 user_access_state_matches() {
@@ -913,6 +922,32 @@ user_identity_matches_binding() {
   local expected_binding="$1"
 
   user_identity_matches &&
+    jq -e --arg binding "${expected_binding}" '
+      (
+        [
+          (.UserAttributes // [])[] |
+          select(
+            .Name == "custom:archon_judge_binding" and
+            .Value == $binding
+          )
+        ] |
+        length
+      ) == 1
+    ' "${user_document}" >/dev/null
+}
+
+containment_identity_matches_canonical() {
+  local expected_canonical="$1"
+
+  user_binding_matches &&
+    jq -e --arg canonical "${expected_canonical}" \
+      '.Username == $canonical' "${user_document}" >/dev/null
+}
+
+containment_identity_matches_binding() {
+  local expected_binding="$1"
+
+  user_binding_matches &&
     jq -e --arg binding "${expected_binding}" '
       (
         [
@@ -1101,13 +1136,13 @@ exact_contained_state_proved() {
   # Treat them as one proof cycle and finish with a second disabled-user read,
   # so observations from different retries can never be combined.
   read_user_exact "${username}" &&
-    user_identity_matches_canonical "${username}" &&
+    containment_identity_matches_canonical "${username}" &&
     jq -e '.Enabled == false' "${user_document}" >/dev/null &&
     read_groups_exact "${username}" &&
     jq -e '((.Groups // []) | length) == 0' \
       "${groups_document}" >/dev/null &&
     read_user_exact "${username}" &&
-    user_identity_matches_canonical "${username}" &&
+    containment_identity_matches_canonical "${username}" &&
     jq -e '.Enabled == false' "${user_document}" >/dev/null
 }
 
@@ -1133,7 +1168,7 @@ automatic_containment() {
     case "${containment_mode}" in
       provision)
         if read_user_exact "${judge_username}"; then
-          if ! user_identity_matches_binding "${operation_binding}"; then
+          if ! containment_identity_matches_binding "${operation_binding}"; then
             printf '%s\n' \
               "::error::Automatic containment refused an identity not bound to this provision attempt" \
               >&2
@@ -1145,7 +1180,7 @@ automatic_containment() {
         ;;
       existing)
         if read_user_exact "${containment_canonical}"; then
-          if ! user_identity_matches_canonical "${containment_canonical}"; then
+          if ! containment_identity_matches_canonical "${containment_canonical}"; then
             printf '%s\n' \
               "::error::Automatic containment refused a changed canonical identity" \
               >&2
@@ -1304,10 +1339,15 @@ case "${JUDGE_USER_OPERATION}" in
   rotate)
     get_user ||
       fail "The judge identity does not exist; select provision explicitly"
+    user_binding_matches ||
+      fail "Cognito did not resolve the exact requested judge identity"
+    canonical="$(canonical_username)"
+    containment_mode="existing"
+    containment_canonical="${canonical}"
+    contain_on_failure=true
     require_enabled_user
     jq -e '.UserStatus == "CONFIRMED"' "${user_document}" >/dev/null ||
       fail "The exact judge identity is not in the stable confirmed state"
-    canonical="$(canonical_username)"
     read_groups "${canonical}"
     require_only_approver_group
     prior_identity_state="exact-bound"
@@ -1328,9 +1368,6 @@ case "${JUDGE_USER_OPERATION}" in
             }
           '
     )"
-    containment_mode="existing"
-    containment_canonical="${canonical}"
-    contain_on_failure=true
     if ! printf '%s' "${password_request}" |
       aws cognito-idp admin-set-user-password \
         --region "${AWS_REGION}" \
@@ -1451,7 +1488,7 @@ case "${JUDGE_USER_OPERATION}" in
     # A verified recovery attribute or configured MFA factor is invalid for
     # shared access, but must not prevent this exact immutable binding from
     # being disabled, signed out, and removed from its authorization group.
-    user_identity_matches ||
+    user_binding_matches ||
       fail "Cognito did not resolve the exact requested judge identity"
     canonical="$(canonical_username)"
     prior_identity_state="exact-bound"

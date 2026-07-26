@@ -1908,21 +1908,32 @@ reset_state confirmed archon-approvers
 FAKE_COGNITO_SUB="12345678-1234-4ABC-8DEF-1234567890AB" \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
+grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
 reset_state confirmed archon-approvers
 FAKE_COGNITO_SUB="not-a-canonical-uuid" \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
 
 reset_state confirmed archon-approvers
 FAKE_DUPLICATE_SUB_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
 
 reset_state confirmed archon-approvers
 FAKE_OMIT_SUB_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
 
 reset_state confirmed archon-approvers
 FAKE_PASSWORD_APPLIED_ERROR=1 \
@@ -2116,6 +2127,16 @@ reset_state confirmed archon-approvers
 FAKE_MFA_DRIFT=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
+
+reset_state confirmed archon-approvers
+FAKE_COGNITO_SUB="not-a-canonical-uuid" \
+  expect_failure run_apply deactivate
+test "$(<"${state_dir}/status")" = "disabled"
+test ! -s "${state_dir}/groups"
+test ! -e "${operation_state_receipt}"
+grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
+grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
 reset_state confirmed archon-approvers
 run_apply deactivate >"${result_log}" 2>&1
