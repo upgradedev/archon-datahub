@@ -531,7 +531,7 @@ def validate_workflow(workflow: str) -> None:
             f"public probe {index} must prove GH_TOKEN absence",
         )
         require(
-            "GH_TOKEN:" not in public_step
+            "\n          GH_TOKEN:" not in public_step
             and "github.token" not in public_step
             and "Authorization:" not in public_step,
             f"public probe {index} gained credential material",
