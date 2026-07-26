@@ -992,8 +992,8 @@ async function inspectTokenResponse(
           value.refresh_token.length <= 32_768)),
     "The Cognito token response violates the bounded OAuth contract.",
   );
-  let idToken = value.id_token;
-  let accessToken = value.access_token;
+  const idToken = value.id_token;
+  const accessToken = value.access_token;
   try {
     const verifiedIdToken = verifyCognitoJwt(idToken, jwks, "ID token");
     const verifiedAccessToken = verifyCognitoJwt(
@@ -1016,8 +1016,6 @@ async function inspectTokenResponse(
     for (const key of ["access_token", "id_token", "refresh_token"]) {
       if (Object.prototype.hasOwnProperty.call(value, key)) value[key] = "";
     }
-    idToken = "";
-    accessToken = "";
   }
 }
 
