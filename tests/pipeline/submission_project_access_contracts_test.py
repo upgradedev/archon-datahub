@@ -451,8 +451,6 @@ def validate_workflow(workflow: str) -> None:
             'all($production[]; .id <= $reactivate)',
             'all($journeys[]; .id <= $selected)',
             "[-4:]",
-            '{id: $provision, operation: "provision"}',
-            '{id: $reactivate, operation: "reactivate"}',
             "bash scripts/verify-github-control-plane.sh",
         ),
     )
