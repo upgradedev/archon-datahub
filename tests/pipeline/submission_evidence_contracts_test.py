@@ -2012,7 +2012,7 @@ def select_artifact(
     maximum_attempt: int,
 ) -> dict:
     return validator.select_run_artifact(
-        [{"artifacts": artifacts}],
+        [{"total_count": len(artifacts), "artifacts": artifacts}],
         policy=policy,
         artifact_prefix=f"submission-project-access-{RELEASE}-",
         run_id=901,
@@ -2133,6 +2133,50 @@ for rejected_artifacts, rejected_policy, rejected_maximum, rejected_label in (
         f"artifact selection accepted {rejected_label}",
     )
 
+expect_rejected(
+    lambda: validator.select_run_artifact(
+        [{"total_count": 2, "artifacts": [artifact_fixture(2)]}],
+        policy="latest-retained",
+        artifact_prefix=f"submission-project-access-{RELEASE}-",
+        run_id=901,
+        release_sha=RELEASE,
+        maximum_attempt=3,
+    ),
+    "artifact selection accepted an incomplete paginated response",
+)
+expect_rejected(
+    lambda: validator.select_run_artifact(
+        [
+            {"total_count": 2, "artifacts": [artifact_fixture(1)]},
+            {"total_count": 3, "artifacts": [artifact_fixture(2)]},
+        ],
+        policy="latest-retained",
+        artifact_prefix=f"submission-project-access-{RELEASE}-",
+        run_id=901,
+        release_sha=RELEASE,
+        maximum_attempt=3,
+    ),
+    "artifact selection accepted pagination total-count drift",
+)
+expect_rejected(
+    lambda: validator.select_run_artifact(
+        [
+            {"total_count": 2, "artifacts": [artifact_fixture(1)]},
+            {"total_count": 2, "artifacts": [artifact_fixture(1)]},
+        ],
+        policy="latest-retained",
+        artifact_prefix=f"submission-project-access-{RELEASE}-",
+        run_id=901,
+        release_sha=RELEASE,
+        maximum_attempt=3,
+    ),
+    "artifact selection accepted a duplicate artifact across pages",
+)
+expect_rejected(
+    lambda: validator.parse_json_text('{"value":1e999}', "overflow fixture"),
+    "strict JSON parser accepted numeric overflow",
+)
+
 producer = (ROOT / ".github/workflows/submission-evidence.yml").read_text(
     encoding="utf-8"
 )
@@ -2192,7 +2236,7 @@ def assert_availability_retry_contract(workflow: str) -> None:
     assert "attestations: write" in attest_job
     assert "id-token: write" in attest_job
     assert "GH_TOKEN: ${{ github.token }}" in attest_job
-    assert "\n    environment:" not in attest_job
+    assert "    environment:" not in attest_job
     assert "secrets." not in attest_job
 
 
@@ -2294,6 +2338,7 @@ for required_binding in (
     ".run_attempt == $runAttempt",
     "source run changed during evidence collection",
     "master changed during",
+    "artifact selection changed during collection",
     "artifact changed during evidence collection",
     "unique_by(.statement)",
 ):
@@ -2301,6 +2346,7 @@ for required_binding in (
         f"collector lost exact binding {required_binding}"
     )
 assert '--run-attempt "${attestation_run_attempt}"' not in collector
+assert collector.count('python3 "${validator}" select-run-artifact') == 2
 assert (
     'semantic_validator="scripts/validate-submission-proof-receipts.py"'
     in consumer

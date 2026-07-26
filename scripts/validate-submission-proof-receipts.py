@@ -15,6 +15,7 @@ import datetime as dt
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import shutil
 import sys
@@ -362,11 +363,18 @@ def parse_json_text(raw: str, label: str) -> Any:
     def reject_non_finite(value: str) -> NoReturn:
         fail(f"{label} contains non-finite JSON number {value}")
 
+    def parse_finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            fail(f"{label} contains non-finite JSON number {value}")
+        return parsed
+
     try:
         return json.loads(
             raw,
             object_pairs_hook=reject_duplicate_pairs,
             parse_constant=reject_non_finite,
+            parse_float=parse_finite_float,
         )
     except json.JSONDecodeError as error:
         fail(f"{label} is not strict JSON: {error}")
@@ -414,15 +422,32 @@ def select_run_artifact(
     if not pages:
         fail("artifact response must contain at least one page")
     candidates: list[tuple[int, dict[str, Any]]] = []
+    expected_total_count: int | None = None
+    collected_count = 0
+    observed_artifact_ids: set[int] = set()
     for page_index, page in enumerate(pages):
         if not isinstance(page, dict) or not isinstance(page.get("artifacts"), list):
             fail(f"artifact response page {page_index} is malformed")
+        total_count = page.get("total_count")
+        if type(total_count) is not int or total_count < 0:
+            fail(f"artifact response page {page_index} has an invalid total count")
+        if expected_total_count is None:
+            expected_total_count = total_count
+        elif total_count != expected_total_count:
+            fail("artifact response total count changed during pagination")
+        collected_count += len(page["artifacts"])
         for artifact_index, artifact in enumerate(page["artifacts"]):
             if not isinstance(artifact, dict):
                 fail(
                     f"artifact response page {page_index} item "
                     f"{artifact_index} is malformed"
                 )
+            observed_id = artifact.get("id")
+            if type(observed_id) is not int or observed_id <= 0:
+                fail("artifact response contains an invalid artifact ID")
+            if observed_id in observed_artifact_ids:
+                fail("artifact response contains a duplicate artifact ID")
+            observed_artifact_ids.add(observed_id)
             name = artifact.get("name")
             if not isinstance(name, str) or not name.startswith(artifact_prefix):
                 continue
@@ -435,6 +460,8 @@ def select_run_artifact(
             if attempt > maximum_attempt:
                 fail("registered artifact has a future producer attempt")
             candidates.append((attempt, artifact))
+    if expected_total_count != collected_count:
+        fail("artifact response is incomplete")
 
     if policy == "exact-current":
         selected = [
@@ -511,7 +538,14 @@ def select_run_artifact_command(args: argparse.Namespace) -> None:
         release_sha=args.release_sha,
         maximum_attempt=args.maximum_attempt,
     )
-    print(json.dumps(selected, separators=(",", ":"), sort_keys=True))
+    print(
+        json.dumps(
+            selected,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
 
 
 def write_json(path: Path, value: Any) -> None:

@@ -529,6 +529,43 @@ test "${final_default_sha}" = "${RELEASE_SHA}" || {
   echo "::error::master changed during ${SOURCE_KEY} evidence collection"
   exit 1
 }
+if test "${source_mode}" = "standard-v1"; then
+  final_artifacts_json="$(
+    api \
+      --paginate \
+      --slurp \
+      "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100"
+  )"
+else
+  final_artifacts_json="$(
+    api \
+      "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100&name=${expected_artifact_name}"
+  )"
+fi
+final_selected_artifact="$(
+  printf '%s' "${final_artifacts_json}" |
+    python3 "${validator}" select-run-artifact \
+      --policy "${selection_policy}" \
+      --artifact-prefix "${artifact_prefix}" \
+      --run-id "${SOURCE_RUN_ID}" \
+      --release-sha "${RELEASE_SHA}" \
+      --maximum-attempt "${attestation_run_attempt}"
+)"
+jq -e \
+  --arg digest "${artifact_digest}" \
+  --arg name "${artifact_name}" \
+  --argjson artifactId "${artifact_id}" \
+  --argjson producerAttempt "${producer_run_attempt}" \
+  --argjson size "${artifact_size}" '
+    .producerAttempt == $producerAttempt and
+    .metadata.id == $artifactId and
+    .metadata.name == $name and
+    .metadata.digest == $digest and
+    .metadata.size_in_bytes == $size
+  ' <<<"${final_selected_artifact}" >/dev/null || {
+  echo "::error::${SOURCE_KEY} artifact selection changed during collection"
+  exit 1
+}
 final_artifact_json="$(
   api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
 )"
