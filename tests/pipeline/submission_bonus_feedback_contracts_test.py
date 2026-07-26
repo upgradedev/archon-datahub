@@ -200,6 +200,7 @@ def require_all(text: str, values: tuple[str, ...], label: str) -> None:
 
 
 def validate_contract(workflow: str, documentation: str) -> None:
+    normalized_documentation = re.sub(r"\s+", " ", documentation)
     require(
         dispatch_inputs(workflow) == EXPECTED_INPUTS,
         "workflow inputs must remain release_sha only",
@@ -565,7 +566,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
     )
 
     require_all(
-        documentation,
+        normalized_documentation,
         (
             "Do not create",
             "`docs/SUBMISSION_FEEDBACK_CONFIRMATION.json`",
