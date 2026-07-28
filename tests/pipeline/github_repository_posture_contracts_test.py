@@ -392,8 +392,20 @@ def validate_workflow(workflow: str) -> None:
         "posture evidence must not overwrite an earlier artifact",
     )
 
-    uses = re.findall(r"(?m)^\s*-\s+uses:\s+([^\s#]+)", workflow)
-    require(len(uses) == 2, "workflow action inventory must be exact")
+    uses = re.findall(
+        r"(?m)^\s*(?:-\s+)?uses:\s+([^\s#]+)",
+        workflow,
+    )
+    require(
+        uses
+        == [
+            "actions/checkout@"
+            "3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/upload-artifact@"
+            "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        ],
+        "workflow action inventory must be exact",
+    )
     require(
         all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", item) for item in uses),
         "every external action must be pinned to a full commit SHA",
