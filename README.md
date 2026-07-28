@@ -350,7 +350,8 @@ promotion. For a clean account, first configure and run the staging prerequisite
 `CANARY_*` non-secret values plus the separately protected canary credentials and reviewer
 rules, and then run `promote`. The handoff never contains or replaces AWS, DataHub, model,
 or reviewer credentials. These mode and handoff changes remain source-complete but are not
-called remotely validated until their GitHub Actions runs succeed.
+deployment-complete: their static/source contracts passed remote CI, while neither
+`staging-bootstrap` nor `promote` has been dispatched against AWS.
 
 AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
 DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
@@ -530,11 +531,16 @@ The repository contains the application, UI, security boundaries, locked package
 reference infrastructure, and CI/CD definitions. The authoritative remaining proof matrix
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
-- remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
-- the new two-mode deployment bootstrap and secretless GitHub-posture workflow are
-  source-complete but still require their own successful remote runs; the posture receipt
-  must continue to label administration-only controls as unverified unless a separately
-  reviewed least-privilege elevated tier is configured;
+- ordinary CI, CodeQL, and workflow-security runs are successful for the reviewed source
+  revision; the retained CI evidence includes readiness, web/browser and coverage,
+  infrastructure/Lambda, DataHub benchmark, judge-pack, OSS-candidate, MCP security/SBOM,
+  container, and security artifacts;
+- the two-mode deployment bootstrap is source CI-validated, but its actual
+  `staging-bootstrap` and `promote` dispatches remain user-gated;
+- the secretless GitHub-posture workflow and contracts are source CI-validated, but a live
+  scheduled/manual `master` receipt is still pending and must label administration-only
+  controls as unverified unless a separately reviewed least-privilege elevated tier is
+  configured;
 - all 15 named GitHub environments now exist with one exact `master` deployment
   policy, administrator bypass disabled, no environment secrets, and `master`
   protection enabled; production, demo-seed, judge-access, the three governed-canary

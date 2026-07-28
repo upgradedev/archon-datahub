@@ -1,6 +1,6 @@
 # Submission Readiness — Archon DataHub
 
-Current source review: **2026-07-26**. Submission deadline: **2026-08-10,
+Current source review: **2026-07-28**. Submission deadline: **2026-08-10,
 17:00 EDT**.
 
 This document is deliberately evidence-based. It does not assign a predicted judge score,
@@ -8,10 +8,22 @@ green-CI state, live-DataHub state, or deployment state without the correspondin
 run or public endpoint. The machine report's percentage is only equal-weight evidence
 coverage, as defined below.
 
+Remote source validation for this review is successful: [CI run
+30335616309](https://github.com/upgradedev/archon-datahub/actions/runs/30335616309),
+[CodeQL run
+30335616310](https://github.com/upgradedev/archon-datahub/actions/runs/30335616310), and
+[Workflow Security run
+30335616369](https://github.com/upgradedev/archon-datahub/actions/runs/30335616369).
+This validates the source and static contracts plus the retained CI artifacts; it does not
+claim a live AWS deployment, live DataHub result, GitHub-posture receipt, reviewer gate,
+public URL, upstream merge, feedback submission, video, or Devpost entry.
+
 ## Status vocabulary
 
 - **Implemented / source-complete:** the implementation and its tests or configuration are
   present in this branch. This does not mean CI has accepted the commit.
+- **Source CI-validated:** the reviewed implementation revision passed its remote source
+  gates. This does not mean a manual, protected, credentialed, or deployment workflow ran.
 - **CI-unverified:** the relevant workflow exists, but this branch still needs a remote run
   and retained run URL/artifacts.
 - **User-gated:** completion requires credentials, a cloud account, an external service,
@@ -257,8 +269,9 @@ prepare job revalidates the exact pre-submit seal and reviewed final content; it
 `submission-devpost-confirmation` protected job requires an independent individual
 reviewer to verify the private submission confirmation and salted commitment out of band;
 and its attester repeats the full source, approval, rules, and public-URL checks before
-signing and verifying all six subjects offline and through persisted lookup. It is
-source-complete and CI-unverified, but externally blocked until the real entry is submitted,
+signing and verifying all six subjects offline and through persisted lookup. Its source
+contract is CI-validated, but its protected workflow has not run and remains externally
+blocked until the real entry is submitted,
 the exact public Devpost URL and authoritative private submission time/commitment exist,
 all judging URLs are live, the protected environment is configured, and the independent
 review occurs.
@@ -269,8 +282,9 @@ merged four-path pull request to the immutable CI validation receipt, reconstruc
 complete candidate head tree from both receipt bytes and staged source, verifies merged path
 modes/bytes plus the signed CI release predicate, and signs the exact registered four-subject
 inventory. Its contract is documented in
-[`SUBMISSION_BONUS_OSS.md`](SUBMISSION_BONUS_OSS.md). It is source-complete and CI-unverified
-but intentionally blocked: no upstream PR has been opened or changed, no matching merged PR
+[`SUBMISSION_BONUS_OSS.md`](SUBMISSION_BONUS_OSS.md). Its source and exact upstream
+candidate validation are CI-validated, but it is intentionally blocked: no upstream PR has
+been opened or changed, no matching merged PR
 exists, and the contribution manifest/README truthfully remain in the staged phase.
 
 The optional
@@ -278,8 +292,8 @@ The optional
 retains only public rules metadata, privacy-preserving commitments, and independently
 reviewed GitHub approval provenance; signs the exact registered three-subject inventory;
 and is documented in
-[`SUBMISSION_BONUS_FEEDBACK.md`](SUBMISSION_BONUS_FEEDBACK.md). It is source-complete and
-CI-unverified, but deliberately cannot pass before the real feedback, authoritative
+[`SUBMISSION_BONUS_FEEDBACK.md`](SUBMISSION_BONUS_FEEDBACK.md). Its source contract is
+CI-validated, but it deliberately cannot pass before the real feedback, authoritative
 confirmation timestamp/reference, canonical confirmation file, protected environment,
 and independent private reviewer exist.
 Consequently the aggregate workflow fails closed when any required run is missing or comes
@@ -333,29 +347,29 @@ The five official Stage Two criteria are equally weighted.
 
 | Official criterion | Present in source | Current status | Proof still required |
 |---|---|---|---|
-| **1. Use of DataHub** | Official MCP read adapter; direct GMS aspect-version read; stable-source provenance handling; lineage blast radius; separate official `add_tags`/`remove_tags` write adapter; G6 governed writeback loop; frozen seven-case current-view-vs-retained-history benchmark. | **Implemented / source-complete; CI-unverified; live path user-gated.** | Obtain the exact benchmark artifact, then run against a real DataHub with retained aspect versions and stable pipeline identities; plant both a cross-source contradiction and a G6 gap; retain sanitized evidence of MCP reads, version recovery, blast radius, approval-bound canary tag write, read-after-write verification, and separately approved rollback. |
-| **2. Technical Execution** | Deterministic audit/remediation code; strict fixture-vs-live model-runtime provenance with no prompt/credential/raw-response fields; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, lifecycle polling, terminal proof, WebCrypto evidence export, and passive judge tour; global plus decision-critical web coverage ratchets; exact-pinned Playwright/Axe CI journey over built Vite preview on desktop, Pixel 7, and 320×568 with fail-closed auth, zero-authority, keyboard, overflow, screenshot, and accessibility evidence; reproducible judge pack; deployment-generated no-store auth runtime config; self-contained `us-east-1` certificate/CloudFront-WAF edge stack; regional API WAF; default-deny prefix-list-scoped workload networking with no Fargate public IP; versioned S3 access logging; encrypted two-second status cache; active X-Ray; CI, CodeQL, availability, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; CI/CD execution unverified.** | Obtain branch CI, CodeQL, benchmark, judge-pack, browser, coverage, container, web, worker, infra, security, load, SBOM, scan, and attestation evidence. Add independent reviewer rules to the 11 pre-created, `master`-only privileged environment skeletons; configure separate hosted DataHub read/write MCP endpoints, distinct tokens, the three external endpoint prefix lists, and AWS OIDC. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
-| **3. Originality** | “Audit the catalog itself” positioning; temporal/provenance contradictions rather than generic catalog chat; lineage-aware blast radius; evidence dossier, human approval, exact-action catalog, verified writeback, hash-chained receipt; frozen positive and false-positive-control cases. | **Implemented / source-complete; benchmark CI-unverified.** | Retain the exact benchmark artifact and live proof. Do not describe the current-view boundary as a competitor-product benchmark or claim hosted statistical superiority. |
+| **1. Use of DataHub** | Official MCP read adapter; direct GMS aspect-version read; stable-source provenance handling; lineage blast radius; separate official `add_tags`/`remove_tags` write adapter; G6 governed writeback loop; frozen seven-case current-view-vs-retained-history benchmark. | **Implemented / source-complete; benchmark CI-validated; live path user-gated.** | Use the retained exact benchmark artifact, then run against a real DataHub with retained aspect versions and stable pipeline identities; plant both a cross-source contradiction and a G6 gap; retain sanitized evidence of MCP reads, version recovery, blast radius, approval-bound canary tag write, read-after-write verification, and separately approved rollback. |
+| **2. Technical Execution** | Deterministic audit/remediation code; strict fixture-vs-live model-runtime provenance with no prompt/credential/raw-response fields; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, lifecycle polling, terminal proof, WebCrypto evidence export, and passive judge tour; global plus decision-critical web coverage ratchets; exact-pinned Playwright/Axe CI journey over built Vite preview on desktop, Pixel 7, and 320×568 with fail-closed auth, zero-authority, keyboard, overflow, screenshot, and accessibility evidence; reproducible judge pack; deployment-generated no-store auth runtime config; self-contained `us-east-1` certificate/CloudFront-WAF edge stack; regional API WAF; default-deny prefix-list-scoped workload networking with no Fargate public IP; versioned S3 access logging; encrypted two-second status cache; active X-Ray; CI, CodeQL, availability, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; source CI, CodeQL, and workflow-security validated; live CD execution user-gated.** | Link the retained source evidence for judges. Add independent reviewer rules to the 11 pre-created, `master`-only privileged environment skeletons; configure separate hosted DataHub read/write MCP endpoints, distinct tokens, the three external endpoint prefix lists, and AWS OIDC. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
+| **3. Originality** | “Audit the catalog itself” positioning; temporal/provenance contradictions rather than generic catalog chat; lineage-aware blast radius; evidence dossier, human approval, exact-action catalog, verified writeback, hash-chained receipt; frozen positive and false-positive-control cases. | **Implemented / source-complete; benchmark CI-validated.** | Link the retained benchmark artifact and obtain live proof. Do not describe the current-view boundary as a competitor-product benchmark or claim hosted statistical superiority. |
 | **4. Real-World Usefulness** | Governance checks, current-view drift, version-history conflict detection, blast radius, JSON/Markdown/SARIF exporters, browser and CI judge packs, safe remediation contracts, dashboard, scheduled public-path availability proof, and production-oriented AWS topology. | **Implemented / source-complete; operational value user-gated.** | Complete one realistic catalog incident end-to-end on live infrastructure; show a practitioner-readable report and verified remediation receipt; prove authentication, least-privilege read/write separation, failure behavior, audit retention, rollback, and sustained availability. |
-| **5. Submission Quality** | Public-facing README and design/research documents; guided UI; deterministic sample-output generator/verifier; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Source-complete except final/live media; CI-unverified.** | Retain the verified judge pack, then add the public working-project URL, final screenshots, concise English testing instructions, sub-three-minute public demo video, required Devpost text, and claim consistency review. |
-| **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, CI validation receipt, and a source-complete [merged-upstream evidence producer](SUBMISSION_BONUS_OSS.md). The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source-complete; CI-unverified; externally blocked; no PR opened and no bonus claimed.** | Obtain green remote candidate CI, recheck overlap, open one public PR limited to the exact four paths, and obtain an independent upstream maintainer merge within the submission period. Then update only the manifest status and contribution README status paragraph to their exact merged phase in a normal CI-reviewed release and dispatch the evidence workflow. A local folder, CI result, or merely open PR does not earn the bonus. |
-| **Most Valuable Feedback prize** | The [official rules](https://datahub.devpost.com/rules) define an optional, one-per-entrant Feedback Submission and award its prize to individuals rather than Projects; the public challenge overview instructs entrants to complete the feedback section during submission. The [privacy-preserving evidence producer](SUBMISSION_BONUS_FEEDBACK.md) is source-complete. | **Source-complete; CI-unverified; user-gated; completion unverified.** | While registered for the hackathon, opt in and submit at most one complete, actionable feedback response before **2026-08-10, 17:00 EDT**. Retain only the documented salted commitments and protected independent review; do not treat the feedback as a Project feature or substitute for the OSS contribution. |
+| **5. Submission Quality** | Public-facing README and design/research documents; guided UI; deterministic sample-output generator/verifier; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Source CI-validated except final/live media; final deliverables user-gated.** | Link the retained verified judge pack, then add the public working-project URL, final screenshots, concise English testing instructions, sub-three-minute public demo video, required Devpost text, and claim consistency review. |
+| **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, CI validation receipt, and a source-complete [merged-upstream evidence producer](SUBMISSION_BONUS_OSS.md). The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source and candidate CI-validated; externally blocked; no PR opened and no bonus claimed.** | Use the retained remote candidate validation receipt, recheck overlap, open one public PR limited to the exact four paths, and obtain an independent upstream maintainer merge within the submission period. Then update only the manifest status and contribution README status paragraph to their exact merged phase in a normal CI-reviewed release and dispatch the evidence workflow. A local folder, CI result, or merely open PR does not earn the bonus. |
+| **Most Valuable Feedback prize** | The [official rules](https://datahub.devpost.com/rules) define an optional, one-per-entrant Feedback Submission and award its prize to individuals rather than Projects; the public challenge overview instructs entrants to complete the feedback section during submission. The [privacy-preserving evidence producer](SUBMISSION_BONUS_FEEDBACK.md) is source-complete. | **Source contract CI-validated; user-gated; completion unverified.** | While registered for the hackathon, opt in and submit at most one complete, actionable feedback response before **2026-08-10, 17:00 EDT**. Retain only the documented salted commitments and protected independent review; do not treat the feedback as a Project feature or substitute for the OSS contribution. |
 
 ## Required deliverables
 
 | Official requirement | State | Exact remaining action |
 |---|---|---|
-| Working application using open-source DataHub plus MCP Server, Agent Context Kit, DataHub Skills, or Analytics Agent | Implementation is present; **CI and live behavior are unverified; submission-blocking.** | Complete CI and retain live DataHub plus deployed-application proof. Ensure behavior shown in the submission exactly matches the deployed build. |
+| Working application using open-source DataHub plus MCP Server, Agent Context Kit, DataHub Skills, or Analytics Agent | Implementation is **source CI-validated; live behavior remains unverified and submission-blocking.** | Retain live DataHub plus deployed-application proof. Ensure behavior shown in the submission exactly matches the deployed build. |
 | Easy-access public project URL for judges | **User-gated; absent; submission-blocking.** | Deploy the exact CI-approved artifacts and verify a free, stable URL from an unauthenticated browser. |
 | Functioning judge access | **User-gated; unproven; submission-blocking.** | Exercise the complete journey as a fresh judge. If authentication is required, provide the pipeline-managed `CONFIRMED` credential, concise testing instructions, and a tested rotation path for the full judging period. |
 | Public source repository with all source, assets, instructions, and visible Apache 2.0 license | Local repository and license material exist; **public completeness and license detection are unverified and submission-blocking.** | Merge/publish the accepted commit, verify logged-out access to the complete repository, verify the repository About panel detects Apache 2.0, and verify a clean judge can follow setup instructions. |
 | Text description | **Deferred-to-end; required.** | Write the final English Devpost description only after the live claims and URLs are fixed. A separate blog post is not listed as a required deliverable. |
 | Demonstration video | **Deferred-to-end; required; submission-blocking.** | Publish a public video shorter than three minutes on YouTube, Vimeo, or Youku; show the functioning deployed project; provide English narration/subtitles or a complete English translation; use only authorized marks/music; provide the public URL. |
-| Sample outputs (recommended, not an official required deliverable) | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source-complete; CI-unverified; nonblocking in `SQ9`**. | Retain the exact remote `judge-evidence-<sha>-<run-attempt>` artifact and link or project its sanitized files for judges; never label the synthetic pack as live proof. |
+| Sample outputs (recommended, not an official required deliverable) | Deterministic JSON, Markdown, SARIF, dossier, plan, approval, verified receipt, and rollback pack is **source CI-validated and retained; nonblocking in `SQ9`**. | Link or project the sanitized files from the exact remote `judge-evidence-<sha>-<run-attempt>` artifact for judges; never label the synthetic pack as live proof. |
 | Testing access through the judging period | **User-gated operational requirement.** | Before submission, activate free judge access, scheduled monitoring/alerting, rollback, recovery, and protected credential rotation. Keep those controls active through **2026-08-31, 17:00 Eastern Time**; the readiness projection records active controls, not fictional proof of future uptime. |
 | English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
 | New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
-| Completed Devpost entry | `SQ11` producer is **source-complete; CI-unverified; deferred-to-end and externally blocked.** | Seal an aggregate that excludes `SQ11`; submit every required field before the deadline; dispatch `submission-devpost-confirmation.yml` with the exact seal identity, public project URL, authoritative private UTC timestamp, and salted commitment; obtain independent protected approval; require persisted verification of all six subjects; only then build a new reporting aggregate that may include `SQ11`. The unsigned projection itself never sets `readyToSubmit`. |
+| Completed Devpost entry | `SQ11` producer is **source CI-validated; unexecuted, deferred-to-end, and externally blocked.** | Seal an aggregate that excludes `SQ11`; submit every required field before the deadline; dispatch `submission-devpost-confirmation.yml` with the exact seal identity, public project URL, authoritative private UTC timestamp, and salted commitment; obtain independent protected approval; require persisted verification of all six subjects; only then build a new reporting aggregate that may include `SQ11`. The unsigned projection itself never sets `readyToSubmit`. |
 
 A separate blog post is not listed as a required deliverable. The optional Most Valuable
 Feedback action is a rules-defined Feedback Submission and the public overview places its
@@ -367,8 +381,9 @@ UI layout.
 
 ### 1. Remote CI evidence
 
-- Push the final branch and retain the exact commit and run URLs.
-- Require the ordinary CI, CodeQL, and supply-chain workflows to finish for that commit.
+- The reviewed implementation revision has successful ordinary CI, CodeQL, and
+  workflow-security runs linked above. Retain matching runs for every later source revision
+  before promotion.
 - Retain the automatic v4 supply-chain attestation; the daily path resolves the exact live
   `Archon-production` deployment through the protected `production-observer` environment
   and dedicated `AWS_RUNTIME_READ_ROLE_ARN`. It verifies the exact deployment artifact,
@@ -384,13 +399,16 @@ UI layout.
   [`docs/PRODUCTION_POSTURE.md`](PRODUCTION_POSTURE.md); all three stacks must have
   termination protection, be `IN_SYNC`, retain the exact confirmed alarm subscription,
   and remain unchanged across the bounded check.
-- Retain only CI-generated coverage/readiness, container, deterministic web archive, CDK
-  assembly/templates, Guard results, benchmark, replay-verified judge pack,
-  Trivy/CodeQL SARIF, SBOM, CVE scan, availability, and attestation evidence.
+- The successful CI run retained coverage/readiness, container/security, deterministic web
+  archive and browser evidence, CDK assembly/templates, Lambda packages, Guard results,
+  DataHub benchmark, replay-verified judge pack, OSS validation receipt, MCP security/SBOM,
+  and scan evidence. Availability, deployment, and live attestations remain separate,
+  unexecuted proof gates.
 - Treat every security result as a pipeline result. Security verification and release
   evidence are produced exclusively by CI/CD; workstation builds, local synths, manual
   scanners, and copied reports must not substitute for or supplement a CI/CD gate.
-- Run `.github/workflows/github-repository-posture.yml` on `master` and retain its
+- The GitHub-posture workflow and source contracts are CI-validated; run
+  `.github/workflows/github-repository-posture.yml` on `master` and retain its first live
   normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks only the
   repository/merge lifecycle values, public `master` protection signal, Apache-2.0
   detection, private vulnerability reporting, exact 15-environment inventory,
@@ -446,8 +464,8 @@ UI layout.
   `deployment_mode=promote` for the selected immutable release; it repeats staging
   verification, requires the signed governed write/rollback canary, and only then permits
   protected production promotion. The bootstrap artifact is a bound configuration handoff,
-  never a credential carrier, and this sequence remains CI-unverified until the remote
-  runs succeed.
+  never a credential carrier. Its static/source contract is CI-validated; the actual
+  `staging-bootstrap` and `promote` dispatches remain externally blocked and unexecuted.
 - Configure the dedicated `judge-access-staging` and `judge-access-production`
   environments, narrow Cognito lifecycle roles, and protected password delivery described
   in [`docs/JUDGE_ACCESS.md`](JUDGE_ACCESS.md). Provision, rotate, reactivate, and deactivate judge
@@ -541,7 +559,9 @@ the frozen DataHub benchmark, replay-verified judge evidence, CDK
 typecheck/assertions/coverage/synth, nested Lambda packaging, dependency audits,
 project-owned CloudFormation Guard policy tests, Trivy IaC SARIF, container checks, CodeQL,
 load/SLO, exact-artifact daily/manual SBOM/CVE rescans, and freshness-bound v4 attestations.
-**None is declared green for this branch until the corresponding remote run completes.**
+For the reviewed implementation revision, ordinary CI, CodeQL, and workflow-security are
+green and the retained CI artifacts cover the source-level evidence listed above. This does
+not mark scheduled, manual, protected, credentialed, or deployment workflows as executed.
 
 The CD definition now covers a successful-default-branch source gate, artifact-envelope and
 inner-digest verification, short-lived AWS OIDC credentials, account allow-listing,
