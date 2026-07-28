@@ -3666,7 +3666,6 @@ jobs:
           mkdir --mode=0700 "${bootstrap_dir}"
           manifest="${bootstrap_dir}/staging-bootstrap-manifest.json"
           predicate="${bootstrap_dir}/attestation-predicate.json"
-          inventory="${bootstrap_dir}/SHA256SUMS"
           staging_evidence_name="staging-deployment-evidence-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
           deployment_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
