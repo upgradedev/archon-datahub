@@ -1,0 +1,133 @@
+{
+  "administrationOnly": {
+    "actions": {
+      "allowedActions": "selected",
+      "githubOwnedAllowed": false,
+      "patternsAllowed": [
+        "actions/attest@*",
+        "actions/cache/*@*",
+        "actions/cache@*",
+        "actions/checkout@*",
+        "actions/dependency-review-action@*",
+        "actions/download-artifact@*",
+        "actions/setup-node@*",
+        "actions/upload-artifact@*",
+        "aquasecurity/setup-trivy@*",
+        "aquasecurity/trivy-action@*",
+        "astral-sh/setup-uv@*",
+        "aws-actions/configure-aws-credentials@*",
+        "docker/build-push-action@*",
+        "docker/setup-buildx-action@*",
+        "github/codeql-action/*@*",
+        "zizmorcore/zizmor-action@*"
+      ],
+      "shaPinningRequired": true,
+      "verifiedAllowed": false
+    },
+    "environmentSecrets": {
+      "expectedEmptyEnvironmentNames": [
+        "datahub-demo-seed",
+        "governed-canary",
+        "governed-canary-recovery",
+        "governed-canary-rollback",
+        "judge-access-production",
+        "judge-access-staging",
+        "production",
+        "submission-bonus-feedback",
+        "submission-content-review",
+        "submission-devpost-confirmation",
+        "submission-readiness"
+      ],
+      "requiredFineGrainedPermissions": [
+        "Actions:read",
+        "Administration:read",
+        "Environments:read",
+        "Metadata:read"
+      ],
+      "status": "unverified-requires-environments-read"
+    },
+    "status": {
+      "reason": "The automatic GitHub Actions token cannot request repository Administration:read or Environments:read; detailed branch protection, Actions policy, and environment secret-name inventories remain unverified.",
+      "value": "unverified-requires-administration-and-environments-read"
+    }
+  },
+  "environments": {
+    "branchPolicy": {
+      "branchName": "master",
+      "branchType": "branch",
+      "customBranchPolicies": true,
+      "protectedBranches": false
+    },
+    "canAdminsBypass": false,
+    "exactNames": [
+      "datahub-demo",
+      "datahub-demo-seed",
+      "governed-canary",
+      "governed-canary-recovery",
+      "governed-canary-rollback",
+      "judge-access-production",
+      "judge-access-staging",
+      "production",
+      "production-observer",
+      "production-paging-test",
+      "staging",
+      "submission-bonus-feedback",
+      "submission-content-review",
+      "submission-devpost-confirmation",
+      "submission-readiness"
+    ],
+    "pendingIndependentReviewer": {
+      "exactNames": [
+        "datahub-demo-seed",
+        "governed-canary",
+        "governed-canary-recovery",
+        "governed-canary-rollback",
+        "judge-access-production",
+        "judge-access-staging",
+        "production",
+        "submission-bonus-feedback",
+        "submission-content-review",
+        "submission-devpost-confirmation",
+        "submission-readiness"
+      ],
+      "expectedProtectionRuleTypes": [
+        "branch_policy"
+      ],
+      "state": "pending-independent-reviewer"
+    },
+    "reviewerlessByDesign": {
+      "exactNames": [
+        "datahub-demo",
+        "production-observer",
+        "production-paging-test",
+        "staging"
+      ],
+      "expectedProtectionRuleTypes": [
+        "branch_policy"
+      ],
+      "state": "reviewerless-by-design"
+    }
+  },
+  "repository": {
+    "allowAutoMerge": false,
+    "allowMergeCommit": false,
+    "allowRebaseMerge": false,
+    "allowSquashMerge": true,
+    "allowUpdateBranch": true,
+    "archived": false,
+    "branch": {
+      "name": "master",
+      "protected": true
+    },
+    "defaultBranch": "master",
+    "deleteBranchOnMerge": true,
+    "disabled": false,
+    "fullName": "upgradedev/archon-datahub",
+    "hasWiki": false,
+    "licenseSpdxId": "Apache-2.0",
+    "private": false,
+    "privateVulnerabilityReporting": true,
+    "visibility": "public"
+  },
+  "schemaVersion": "archon.github-repository-posture-policy/v1"
+}

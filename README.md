@@ -336,6 +336,22 @@ attestation-verify the exact `datahub-demo-receipt-<run>-<attempt>` artifact. Ea
 environment fingerprints its configured DataHub read endpoint without retaining the URL
 or token and requires equality with the sealed seed endpoint.
 
+Manual dispatch has two explicit modes. `staging-bootstrap` performs the same immutable
+source and control-plane gates, deploys and verifies staging, then stops before the governed
+canary and production. It prepares a secretless, checksum-sealed three-file handoff:
+`staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`. The
+manifest binds the release, deployment control plane, run, staging evidence, account,
+region, stack, image, application URL, evidence bucket, Cognito client ID, and Cognito
+Hosted UI origin; the workflow attests that inventory, reverifies it, and retains it for
+90 days. `promote` redeploys/verifies staging from the selected immutable release, requires
+the exact governed write/rollback canary, and only then enters the protected production
+promotion. For a clean account, first configure and run the staging prerequisites in
+`staging-bootstrap`, verify its attestation, configure the four emitted
+`CANARY_*` non-secret values plus the separately protected canary credentials and reviewer
+rules, and then run `promote`. The handoff never contains or replaces AWS, DataHub, model,
+or reviewer credentials. These mode and handoff changes remain source-complete but are not
+called remotely validated until their GitHub Actions runs succeed.
+
 AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
 DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
 external DataHub read, DataHub write, and LLM endpoints, and a narrow
@@ -390,6 +406,17 @@ Workflows:
   requests, `master`, and schedule.
 - [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
   validation of the workflows themselves.
+- [GitHub repository posture](.github/workflows/github-repository-posture.yml) —
+  scheduled/manual, secretless observation using only the automatic `GITHUB_TOKEN`.
+  This public tier verifies repository identity and merge/lifecycle settings, the public
+  `master` protection signal, Apache-2.0 detection, private vulnerability reporting, the
+  exact 15-environment inventory, administrator-bypass state, and exact `master`-only
+  deployment policies. Detailed branch-protection rules, the Actions allowlist/SHA-pinning
+  policy, and environment secret-name inventories remain explicitly
+  `unverified-requires-administration-and-environments-read`: the elevated tier is
+  deliberately unconfigured. Its future least-privilege boundary is
+  `Actions:read`, `Administration:read`, `Environments:read`, and `Metadata:read`.
+  A workstation `gh` token is never copied into CI.
 - [Production supply chain](.github/workflows/supply-chain.yml) — automatic and exact-run
   rescans plus a daily rescan of the original CI container, SPA, and Lambda bytes for the
   exact successful deployment currently identified by `Archon-production`; it verifies
@@ -504,6 +531,10 @@ reference infrastructure, and CI/CD definitions. The authoritative remaining pro
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
+- the new two-mode deployment bootstrap and secretless GitHub-posture workflow are
+  source-complete but still require their own successful remote runs; the posture receipt
+  must continue to label administration-only controls as unverified unless a separately
+  reviewed least-privilege elevated tier is configured;
 - all 15 named GitHub environments now exist with one exact `master` deployment
   policy, administrator bypass disabled, no environment secrets, and `master`
   protection enabled; production, demo-seed, judge-access, the three governed-canary

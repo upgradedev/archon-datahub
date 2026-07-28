@@ -1338,3 +1338,184 @@ test "$(
 )" -eq 2
 grep -Fq '`cognito-idp:GetWebACLForResource` on the exact' \
   "${repository_root}/infra/aws/README.md"
+
+deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
+deployment_mode_contract="$(
+  sed -n '/^      deployment_mode:/,/^      ci_run_id:/p' \
+    "${deploy_workflow}" |
+    sed '$d'
+)"
+expected_deployment_mode_contract="$(
+  cat <<'EOF'
+      deployment_mode:
+        description: Promote through governed canary and production, or stop after a sealed staging bootstrap
+        required: true
+        default: promote
+        type: choice
+        options:
+          - promote
+          - staging-bootstrap
+EOF
+)"
+test "${deployment_mode_contract}" = \
+  "${expected_deployment_mode_contract}"
+
+bootstrap_output_contract="$(
+  sed -n '/^      bootstrap_artifact_id:/,/^    steps:/p' \
+    "${deploy_workflow}" |
+    sed '$d'
+)"
+expected_bootstrap_output_contract="$(
+  cat <<'EOF'
+      bootstrap_artifact_id: ${{ steps.bootstrap_upload.outputs['artifact-id'] }}
+      bootstrap_artifact_digest: >-
+        ${{ steps.bootstrap_upload.outputs['artifact-digest'] &&
+            format('sha256:{0}', steps.bootstrap_upload.outputs['artifact-digest']) ||
+            '' }}
+EOF
+)"
+test "${bootstrap_output_contract}" = \
+  "${expected_bootstrap_output_contract}"
+
+staging_job_header="$(
+  sed -n '/^  staging:/,/^    steps:/p' "${deploy_workflow}"
+)"
+if grep -Eq '^    if:' <<<"${staging_job_header}"; then
+  echo "::error::staging must run in both deployment modes" >&2
+  exit 1
+fi
+preproduction_job_header="$(
+  sed -n '/^  preproduction_canary:/,/^    runs-on:/p' \
+    "${deploy_workflow}"
+)"
+production_job_header="$(
+  sed -n '/^  production:/,/^    runs-on:/p' "${deploy_workflow}"
+)"
+for required_boundary in \
+  "inputs.deployment_mode == 'promote'" \
+  "needs.staging.result == 'success'"; do
+  grep -Fq "${required_boundary}" <<<"${preproduction_job_header}"
+  grep -Fq "${required_boundary}" <<<"${production_job_header}"
+done
+grep -Fq "needs.preproduction_canary.result == 'success'" \
+  <<<"${production_job_header}"
+test "$(
+  grep -Fc "inputs.deployment_mode == 'promote'" \
+    "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'test "${DEPLOYMENT_MODE}" = "promote"' \
+    "${deploy_workflow}"
+)" -eq 2
+grep -Fq 'promote|staging-bootstrap) ;;' "${deploy_workflow}"
+
+bootstrap_contract="$(
+  sed -n \
+    '/- name: Prepare sealed staging bootstrap handoff/,/^  preproduction_canary:/p' \
+    "${deploy_workflow}" |
+    sed '$d'
+)"
+test "$(
+  grep -Fc "if: inputs.deployment_mode == 'staging-bootstrap'" \
+    <<<"${bootstrap_contract}"
+)" -eq 4
+if grep -Fq '${{ secrets.' <<<"${bootstrap_contract}"; then
+  echo "::error::staging bootstrap handoff must remain secretless" >&2
+  exit 1
+fi
+for required_bootstrap_contract in \
+  'test "${DEPLOYMENT_MODE}" = "staging-bootstrap"' \
+  'STAGING_EVIDENCE_ARTIFACT_DIGEST: "sha256:${{ steps.staging_artifact.outputs['"'"'artifact-digest'"'"'] }}"' \
+  'ArchonEvidenceBucketName' \
+  'ArchonUserPoolClientId' \
+  'ArchonCognitoHostedUiOrigin' \
+  'CANARY_APPLICATION_URL' \
+  'CANARY_EVIDENCE_BUCKET' \
+  'CANARY_COGNITO_CLIENT_ID' \
+  'CANARY_COGNITO_HOSTED_UI_ORIGIN' \
+  '.schemaVersion == "archon.staging-bootstrap/v1"' \
+  '"archon.staging-bootstrap-predicate/v1"' \
+  '(.deployment | keys | sort) == [' \
+  '.deployment == {' \
+  '(.canaryConfiguration | keys | sort) == [' \
+  'paths(scalars)' \
+  '(secret|token|password|credential|api[_-]?key)' \
+  'manifestSha256' \
+  'expected_inventory=' \
+  'staging-bootstrap-manifest.json' \
+  'attestation-predicate.json' \
+  'sha256sum --check --strict SHA256SUMS' \
+  'subject-checksums: ${{ steps.bootstrap.outputs.path }}/SHA256SUMS' \
+  'predicate-type: https://github.com/upgradedev/archon-datahub/attestations/staging-bootstrap/v1' \
+  'predicate-path: ${{ steps.bootstrap.outputs.path }}/attestation-predicate.json' \
+  'name: Reverify sealed staging bootstrap handoff before upload' \
+  'EXPECTED_MANIFEST_SHA256: ${{ steps.bootstrap.outputs.manifest_sha256 }}' \
+  'name: staging-bootstrap-${{ inputs.release_sha }}-${{ github.run_id }}-${{ github.run_attempt }}' \
+  'retention-days: 90'; do
+  grep -Fq "${required_bootstrap_contract}" \
+    <<<"${bootstrap_contract}"
+done
+test "$(
+  grep -Fc \
+    'uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0' \
+    <<<"${bootstrap_contract}"
+)" -eq 1
+test "$(
+  grep -Fc \
+    'uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1' \
+    <<<"${bootstrap_contract}"
+)" -eq 1
+test "$(
+  grep -Fc \
+    'find . -mindepth 1 -maxdepth 1 ! -type f -print -quit' \
+    <<<"${bootstrap_contract}"
+)" -eq 2
+for forbidden_bootstrap_binding in \
+  'DATAHUB_READ_GMS_TOKEN' \
+  'DATAHUB_WRITE_GMS_TOKEN' \
+  'LLM_API_KEY' \
+  'CANARY_COGNITO_PASSWORD' \
+  'CANARY_DATAHUB_READ_TOKEN' \
+  'CANARY_DATAHUB_WRITE_TOKEN'; do
+  if grep -Fq "${forbidden_bootstrap_binding}" \
+    <<<"${bootstrap_contract}"; then
+    echo "::error::staging bootstrap retained forbidden secret binding ${forbidden_bootstrap_binding}" >&2
+    exit 1
+  fi
+done
+
+clear_credentials_line="$(
+  grep -n -m1 'name: Clear staging credentials before artifact handling' \
+    "${deploy_workflow}" |
+    cut -d: -f1
+)"
+prepare_bootstrap_line="$(
+  grep -n -m1 'name: Prepare sealed staging bootstrap handoff' \
+    "${deploy_workflow}" |
+    cut -d: -f1
+)"
+attest_bootstrap_line="$(
+  grep -n -m1 'name: Attest sealed staging bootstrap handoff' \
+    "${deploy_workflow}" |
+    cut -d: -f1
+)"
+reverify_bootstrap_line="$(
+  grep -n -m1 \
+    'name: Reverify sealed staging bootstrap handoff before upload' \
+    "${deploy_workflow}" |
+    cut -d: -f1
+)"
+upload_bootstrap_line="$(
+  grep -n -m1 'name: Upload sealed staging bootstrap handoff' \
+    "${deploy_workflow}" |
+    cut -d: -f1
+)"
+preproduction_line="$(
+  grep -n -m1 '^  preproduction_canary:' "${deploy_workflow}" |
+    cut -d: -f1
+)"
+(( clear_credentials_line < prepare_bootstrap_line ))
+(( prepare_bootstrap_line < attest_bootstrap_line ))
+(( attest_bootstrap_line < reverify_bootstrap_line ))
+(( reverify_bootstrap_line < upload_bootstrap_line ))
+(( upload_bootstrap_line < preproduction_line ))

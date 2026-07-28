@@ -1,10 +1,18 @@
 name: Deploy immutable AWS release
 
-run-name: Deploy ${{ inputs.release_sha }} from CI run ${{ inputs.ci_run_id }}
+run-name: ${{ inputs.deployment_mode }} ${{ inputs.release_sha }} from CI run ${{ inputs.ci_run_id }}
 
 on:
   workflow_dispatch:
     inputs:
+      deployment_mode:
+        description: Promote through governed canary and production, or stop after a sealed staging bootstrap
+        required: true
+        default: promote
+        type: choice
+        options:
+          - promote
+          - staging-bootstrap
       ci_run_id:
         description: Successful default-branch CI run containing the immutable candidates
         required: true
@@ -116,6 +124,11 @@ jobs:
       demo_state_query_binding_sha: ${{ steps.demo_state.outputs.query_binding_sha }}
       demo_state_semantic_contract_sha: ${{ steps.demo_state.outputs.semantic_contract_sha }}
       semantic_proof_sha: ${{ steps.smoke.outputs.semantic_proof_sha }}
+      bootstrap_artifact_id: ${{ steps.bootstrap_upload.outputs['artifact-id'] }}
+      bootstrap_artifact_digest: >-
+        ${{ steps.bootstrap_upload.outputs['artifact-digest'] &&
+            format('sha256:{0}', steps.bootstrap_upload.outputs['artifact-digest']) ||
+            '' }}
     steps:
       - name: Validate immutable source run
         id: source
@@ -124,8 +137,16 @@ jobs:
           CI_RUN_ID: ${{ inputs.ci_run_id }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
         run: |
           set -euo pipefail
+          case "${DEPLOYMENT_MODE}" in
+            promote|staging-bootstrap) ;;
+            *)
+              echo "::error::deployment_mode must be exactly promote or staging-bootstrap"
+              exit 1
+              ;;
+          esac
           [[ "${CI_RUN_ID}" =~ ^[0-9]+$ ]] || {
             echo "::error::ci_run_id must be numeric"
             exit 1
@@ -3568,9 +3589,452 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Prepare sealed staging bootstrap handoff
+        if: inputs.deployment_mode == 'staging-bootstrap'
+        id: bootstrap
+        env:
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          CONTROL_PLANE_GATE_SHA256: ${{ steps.source.outputs.control_plane_gate_sha }}
+          STACK_NAME: ${{ steps.deploy.outputs.stack_name }}
+          STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          DEPLOY_REGION: ${{ vars.AWS_REGION }}
+          APPLICATION_URL: ${{ steps.deploy.outputs.application_url }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          IAC_ASSEMBLY_MANIFEST_SHA256: ${{ steps.deploy.outputs.iac_assembly_manifest_sha }}
+          RUNTIME_CONFIG_SHA256: ${{ steps.spa.outputs.runtime_config_sha }}
+          STAGING_EVIDENCE_ARTIFACT_ID: ${{ steps.staging_artifact.outputs['artifact-id'] }}
+          STAGING_EVIDENCE_ARTIFACT_DIGEST: "sha256:${{ steps.staging_artifact.outputs['artifact-digest'] }}"
+        run: |
+          set -euo pipefail
+          umask 077
+          test "${DEPLOYMENT_MODE}" = "staging-bootstrap"
+          [[ "${CI_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${STAGING_EVIDENCE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CONTROL_PLANE_GATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${IAC_ASSEMBLY_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${RUNTIME_CONFIG_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${STAGING_EVIDENCE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${DEPLOY_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]]
+          test "${STACK_NAME}" = "Archon-staging"
+          test -f "${STACK_OUTPUTS}"
+          test ! -L "${STACK_OUTPUTS}"
+          expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/deploy.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_workflow_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+
+          evidence_bucket="$(
+            jq -er --arg stack "${STACK_NAME}" \
+              '.[$stack].ArchonEvidenceBucketName |
+               select(type == "string")' \
+              "${STACK_OUTPUTS}"
+          )"
+          cognito_client_id="$(
+            jq -er --arg stack "${STACK_NAME}" \
+              '.[$stack].ArchonUserPoolClientId |
+               select(type == "string")' \
+              "${STACK_OUTPUTS}"
+          )"
+          cognito_hosted_ui_origin="$(
+            jq -er --arg stack "${STACK_NAME}" \
+              '.[$stack].ArchonCognitoHostedUiOrigin |
+               select(type == "string")' \
+              "${STACK_OUTPUTS}"
+          )"
+          [[ "${APPLICATION_URL}" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+          [[ "${APPLICATION_URL}" != *..* ]]
+          [[ "${evidence_bucket}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]
+          [[ "${evidence_bucket}" != *..* ]]
+          [[ "${cognito_client_id}" =~ ^[A-Za-z0-9]{8,128}$ ]]
+          [[ "${cognito_hosted_ui_origin}" =~ ^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]
+          [[ "${cognito_hosted_ui_origin}" != *..* ]]
+          test "$(jq -er --arg stack "${STACK_NAME}" \
+            '.[$stack].ArchonApplicationUrl' "${STACK_OUTPUTS}")" = \
+            "${APPLICATION_URL}"
+
+          bootstrap_dir="${RUNNER_TEMP}/staging-bootstrap-handoff"
+          test ! -e "${bootstrap_dir}"
+          mkdir --mode=0700 "${bootstrap_dir}"
+          manifest="${bootstrap_dir}/staging-bootstrap-manifest.json"
+          predicate="${bootstrap_dir}/attestation-predicate.json"
+          inventory="${bootstrap_dir}/SHA256SUMS"
+          staging_evidence_name="staging-deployment-evidence-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+          deployment_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          jq -cnS \
+            --arg schemaVersion "archon.staging-bootstrap/v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg mode "${DEPLOYMENT_MODE}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --argjson ciRunId "${CI_RUN_ID}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg controlPlaneGateSha256 "${CONTROL_PLANE_GATE_SHA256}" \
+            --arg workflowPath ".github/workflows/deploy.yml" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --argjson deploymentRunId "${GITHUB_RUN_ID}" \
+            --argjson deploymentRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg deploymentRunUrl "${deployment_run_url}" \
+            --arg stackName "${STACK_NAME}" \
+            --arg accountId "${EXPECTED_ACCOUNT_ID}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg applicationUrl "${APPLICATION_URL}" \
+            --arg imageDigest "${IMAGE_DIGEST}" \
+            --arg iacAssemblyManifestSha256 \
+              "${IAC_ASSEMBLY_MANIFEST_SHA256}" \
+            --arg runtimeConfigSha256 "${RUNTIME_CONFIG_SHA256}" \
+            --argjson evidenceArtifactId \
+              "${STAGING_EVIDENCE_ARTIFACT_ID}" \
+            --arg evidenceArtifactName "${staging_evidence_name}" \
+            --arg evidenceArtifactDigest \
+              "${STAGING_EVIDENCE_ARTIFACT_DIGEST}" \
+            --arg evidenceBucket "${evidence_bucket}" \
+            --arg cognitoClientId "${cognito_client_id}" \
+            --arg cognitoHostedUiOrigin "${cognito_hosted_ui_origin}" '
+              {
+                schemaVersion: $schemaVersion,
+                repository: $repository,
+                mode: $mode,
+                release: {
+                  sha: $releaseSha,
+                  ciRunId: $ciRunId
+                },
+                controlPlane: {
+                  sha: $controlPlaneSha,
+                  gateSha256: $controlPlaneGateSha256,
+                  workflowPath: $workflowPath,
+                  workflowRef: $workflowRef
+                },
+                deployment: {
+                  runId: $deploymentRunId,
+                  runAttempt: $deploymentRunAttempt,
+                  runUrl: $deploymentRunUrl,
+                  environment: "staging",
+                  stackName: $stackName,
+                  accountId: $accountId,
+                  region: $region,
+                  applicationUrl: $applicationUrl,
+                  imageDigest: $imageDigest,
+                  iacAssemblyManifestSha256:
+                    $iacAssemblyManifestSha256,
+                  runtimeConfigSha256: $runtimeConfigSha256,
+                  evidenceArtifact: {
+                    id: $evidenceArtifactId,
+                    name: $evidenceArtifactName,
+                    digest: $evidenceArtifactDigest
+                  }
+                },
+                canaryConfiguration: {
+                  CANARY_APPLICATION_URL: $applicationUrl,
+                  CANARY_EVIDENCE_BUCKET: $evidenceBucket,
+                  CANARY_COGNITO_CLIENT_ID: $cognitoClientId,
+                  CANARY_COGNITO_HOSTED_UI_ORIGIN:
+                    $cognitoHostedUiOrigin
+                },
+                result: "staging-bootstrap-complete"
+              }
+            ' >"${manifest}"
+          chmod 0600 "${manifest}"
+
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg controlPlaneGateSha256 \
+              "${CONTROL_PLANE_GATE_SHA256}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg applicationUrl "${APPLICATION_URL}" \
+            --arg deploymentRunUrl "${deployment_run_url}" \
+            --arg stackName "${STACK_NAME}" \
+            --arg accountId "${EXPECTED_ACCOUNT_ID}" \
+            --arg region "${DEPLOY_REGION}" \
+            --arg imageDigest "${IMAGE_DIGEST}" \
+            --arg iacAssemblyManifestSha256 \
+              "${IAC_ASSEMBLY_MANIFEST_SHA256}" \
+            --arg runtimeConfigSha256 "${RUNTIME_CONFIG_SHA256}" \
+            --argjson evidenceArtifactId \
+              "${STAGING_EVIDENCE_ARTIFACT_ID}" \
+            --arg evidenceArtifactName "${staging_evidence_name}" \
+            --arg evidenceArtifactDigest \
+              "${STAGING_EVIDENCE_ARTIFACT_DIGEST}" \
+            --arg evidenceBucket "${evidence_bucket}" \
+            --arg cognitoClientId "${cognito_client_id}" \
+            --arg cognitoHostedUiOrigin \
+              "${cognito_hosted_ui_origin}" \
+            --argjson ciRunId "${CI_RUN_ID}" \
+            --argjson deploymentRunId "${GITHUB_RUN_ID}" \
+            --argjson deploymentRunAttempt "${GITHUB_RUN_ATTEMPT}" '
+              (keys | sort) == [
+                "canaryConfiguration",
+                "controlPlane",
+                "deployment",
+                "mode",
+                "release",
+                "repository",
+                "result",
+                "schemaVersion"
+              ] and
+              (.release | keys | sort) == ["ciRunId", "sha"] and
+              (.controlPlane | keys | sort) == [
+                "gateSha256",
+                "sha",
+                "workflowPath",
+                "workflowRef"
+              ] and
+              (.deployment | keys | sort) == [
+                "accountId",
+                "applicationUrl",
+                "environment",
+                "evidenceArtifact",
+                "iacAssemblyManifestSha256",
+                "imageDigest",
+                "region",
+                "runAttempt",
+                "runId",
+                "runUrl",
+                "runtimeConfigSha256",
+                "stackName"
+              ] and
+              (.deployment.evidenceArtifact | keys | sort) ==
+                ["digest", "id", "name"] and
+              (.canaryConfiguration | keys | sort) == [
+                "CANARY_APPLICATION_URL",
+                "CANARY_COGNITO_CLIENT_ID",
+                "CANARY_COGNITO_HOSTED_UI_ORIGIN",
+                "CANARY_EVIDENCE_BUCKET"
+              ] and
+              .schemaVersion == "archon.staging-bootstrap/v1" and
+              .repository == $repository and
+              .mode == "staging-bootstrap" and
+              .release == {
+                ciRunId: $ciRunId,
+                sha: $releaseSha
+              } and
+              .controlPlane == {
+                gateSha256: $controlPlaneGateSha256,
+                sha: $controlPlaneSha,
+                workflowPath: ".github/workflows/deploy.yml",
+                workflowRef: $workflowRef
+              } and
+              .deployment == {
+                accountId: $accountId,
+                applicationUrl: $applicationUrl,
+                environment: "staging",
+                evidenceArtifact: {
+                  digest: $evidenceArtifactDigest,
+                  id: $evidenceArtifactId,
+                  name: $evidenceArtifactName
+                },
+                iacAssemblyManifestSha256:
+                  $iacAssemblyManifestSha256,
+                imageDigest: $imageDigest,
+                region: $region,
+                runAttempt: $deploymentRunAttempt,
+                runId: $deploymentRunId,
+                runUrl: $deploymentRunUrl,
+                runtimeConfigSha256: $runtimeConfigSha256,
+                stackName: $stackName
+              } and
+              .canaryConfiguration == {
+                CANARY_APPLICATION_URL: $applicationUrl,
+                CANARY_COGNITO_CLIENT_ID: $cognitoClientId,
+                CANARY_COGNITO_HOSTED_UI_ORIGIN:
+                  $cognitoHostedUiOrigin,
+                CANARY_EVIDENCE_BUCKET: $evidenceBucket
+              } and
+              .result == "staging-bootstrap-complete" and
+              (
+                [
+                  paths(scalars) |
+                  map(tostring) |
+                  join(".") |
+                  select(
+                    test(
+                      "(secret|token|password|credential|api[_-]?key)";
+                      "i"
+                    )
+                  )
+                ] |
+                length
+              ) == 0 and
+              all(
+                .. | strings;
+                (
+                  test(
+                    "(AKIA[0-9A-Z]{16}|Bearer[[:space:]]|gh[pousr]_[A-Za-z0-9_]{20,})"
+                  ) |
+                  not
+                )
+              )
+            ' "${manifest}" >/dev/null
+          canonical_manifest="${bootstrap_dir}/canonical-manifest.json"
+          jq -cS . "${manifest}" >"${canonical_manifest}"
+          cmp --silent "${manifest}" "${canonical_manifest}"
+          rm -- "${canonical_manifest}"
+          manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
+          [[ "${manifest_sha256}" =~ ^[0-9a-f]{64}$ ]]
+
+          jq -cnS \
+            --arg schemaVersion \
+              "archon.staging-bootstrap-predicate/v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg mode "${DEPLOYMENT_MODE}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --argjson deploymentRunId "${GITHUB_RUN_ID}" \
+            --argjson deploymentRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg manifestSha256 "${manifest_sha256}" '
+              {
+                schemaVersion: $schemaVersion,
+                repository: $repository,
+                mode: $mode,
+                releaseSha: $releaseSha,
+                controlPlaneSha: $controlPlaneSha,
+                deploymentRunId: $deploymentRunId,
+                deploymentRunAttempt: $deploymentRunAttempt,
+                manifestSha256: $manifestSha256,
+                result: "passed"
+              }
+            ' >"${predicate}"
+          chmod 0600 "${predicate}"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+            --arg manifestSha256 "${manifest_sha256}" \
+            --argjson deploymentRunId "${GITHUB_RUN_ID}" \
+            --argjson deploymentRunAttempt "${GITHUB_RUN_ATTEMPT}" '
+              (keys | sort) == [
+                "controlPlaneSha",
+                "deploymentRunAttempt",
+                "deploymentRunId",
+                "manifestSha256",
+                "mode",
+                "releaseSha",
+                "repository",
+                "result",
+                "schemaVersion"
+              ] and
+              .schemaVersion ==
+                "archon.staging-bootstrap-predicate/v1" and
+              .repository == $repository and
+              .mode == "staging-bootstrap" and
+              .releaseSha == $releaseSha and
+              .controlPlaneSha == $controlPlaneSha and
+              .deploymentRunId == $deploymentRunId and
+              .deploymentRunAttempt == $deploymentRunAttempt and
+              .manifestSha256 == $manifestSha256 and
+              .result == "passed"
+            ' "${predicate}" >/dev/null
+
+          (
+            cd "${bootstrap_dir}"
+            printf '%s\n' \
+              attestation-predicate.json \
+              staging-bootstrap-manifest.json |
+              LC_ALL=C sort |
+              xargs sha256sum >SHA256SUMS
+            chmod 0600 SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+            expected_inventory="$(
+              printf '%s\n' \
+                SHA256SUMS \
+                attestation-predicate.json \
+                staging-bootstrap-manifest.json |
+                LC_ALL=C sort
+            )"
+            actual_inventory="$(
+              find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+                LC_ALL=C sort
+            )"
+            test "${actual_inventory}" = "${expected_inventory}"
+            test -z "$(
+              find . -mindepth 1 -maxdepth 1 ! -type f -print -quit
+            )"
+            test -z "$(
+              find . -mindepth 1 -type l -print -quit
+            )"
+          )
+          {
+            echo "path=${bootstrap_dir}"
+            echo "manifest_sha256=${manifest_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Staging bootstrap handoff"
+            echo
+            echo "- Mode: \`staging-bootstrap\`"
+            echo "- Release: \`${RELEASE_SHA}\`"
+            echo "- Control plane: \`${CONTROL_PLANE_SHA}\`"
+            echo "- Manifest: \`sha256:${manifest_sha256}\`"
+            echo "- Result: \`staging-bootstrap-complete\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Attest sealed staging bootstrap handoff
+        if: inputs.deployment_mode == 'staging-bootstrap'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.bootstrap.outputs.path }}/SHA256SUMS
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/staging-bootstrap/v1
+          predicate-path: ${{ steps.bootstrap.outputs.path }}/attestation-predicate.json
+
+      - name: Reverify sealed staging bootstrap handoff before upload
+        if: inputs.deployment_mode == 'staging-bootstrap'
+        env:
+          BOOTSTRAP_PATH: ${{ steps.bootstrap.outputs.path }}
+          EXPECTED_MANIFEST_SHA256: ${{ steps.bootstrap.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test -d "${BOOTSTRAP_PATH}"
+          test ! -L "${BOOTSTRAP_PATH}"
+          cd "${BOOTSTRAP_PATH}"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              staging-bootstrap-manifest.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          test -z "$(
+            find . -mindepth 1 -maxdepth 1 ! -type f -print -quit
+          )"
+          test -z "$(find . -mindepth 1 -type l -print -quit)"
+          sha256sum --check --strict SHA256SUMS
+          test "$(sha256sum staging-bootstrap-manifest.json |
+            awk '{print $1}')" = "${EXPECTED_MANIFEST_SHA256}"
+          test "$(jq -er '.manifestSha256' \
+            attestation-predicate.json)" = \
+            "${EXPECTED_MANIFEST_SHA256}"
+
+      - name: Upload sealed staging bootstrap handoff
+        if: inputs.deployment_mode == 'staging-bootstrap'
+        id: bootstrap_upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-bootstrap-${{ inputs.release_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.bootstrap.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+
   preproduction_canary:
     name: Run and verify pre-production governed canary
     needs: staging
+    if: >-
+      inputs.deployment_mode == 'promote' &&
+      needs.staging.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     permissions:
@@ -3594,9 +4058,11 @@ jobs:
           DEPLOYMENT_RUN_ID: ${{ github.run_id }}
           DEPLOYMENT_RUN_ATTEMPT: ${{ github.run_attempt }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
         run: |
           set -euo pipefail
           umask 077
+          test "${DEPLOYMENT_MODE}" = "promote"
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
@@ -3929,6 +4395,10 @@ jobs:
     needs:
       - staging
       - preproduction_canary
+    if: >-
+      inputs.deployment_mode == 'promote' &&
+      needs.staging.result == 'success' &&
+      needs.preproduction_canary.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -3949,8 +4419,10 @@ jobs:
           CI_RUN_ID: ${{ inputs.ci_run_id }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
         run: |
           set -euo pipefail
+          test "${DEPLOYMENT_MODE}" = "promote"
           [[ "${CI_RUN_ID}" =~ ^[0-9]+$ ]]
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           default_branch="$(gh api \

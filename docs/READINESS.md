@@ -390,6 +390,16 @@ UI layout.
 - Treat every security result as a pipeline result. Security verification and release
   evidence are produced exclusively by CI/CD; workstation builds, local synths, manual
   scanners, and copied reports must not substitute for or supplement a CI/CD gate.
+- Run `.github/workflows/github-repository-posture.yml` on `master` and retain its
+  normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks only the
+  repository/merge lifecycle values, public `master` protection signal, Apache-2.0
+  detection, private vulnerability reporting, exact 15-environment inventory,
+  `can_admins_bypass=false`, and each environment's exact `master`-only deployment policy.
+  It must report detailed branch-protection rules, the Actions allowlist/SHA-pinning
+  controls, and all environment secret-name inventories as unverified. No elevated
+  credential is currently configured; a future tier would require the reviewed
+  least-privilege set `Actions:read`, `Administration:read`, `Environments:read`, and
+  `Metadata:read`. Never export or copy a workstation `gh` token into GitHub Actions.
 
 ### 2. Real DataHub evidence
 
@@ -423,6 +433,21 @@ UI layout.
 
 - Configure an AWS account, GitHub OIDC trust, protected environments, budgets, and
   deployment secrets.
+- Bootstrap a clean account in two pipeline phases. First dispatch
+  `.github/workflows/deploy.yml` with `deployment_mode=staging-bootstrap`, an exact
+  successful default-branch CI run/SHA, and the protected demo-state receipt. This runs the
+  immutable source and control-plane gates, deploys and verifies staging, stops before the
+  governed canary/production, and emits only
+  `staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`.
+  Verify the workflow attestation, then configure the four emitted non-secret values
+  `CANARY_APPLICATION_URL`, `CANARY_EVIDENCE_BUCKET`,
+  `CANARY_COGNITO_CLIENT_ID`, and `CANARY_COGNITO_HOSTED_UI_ORIGIN`, together with the
+  separately protected canary credentials and independent reviewer rules. Finally dispatch
+  `deployment_mode=promote` for the selected immutable release; it repeats staging
+  verification, requires the signed governed write/rollback canary, and only then permits
+  protected production promotion. The bootstrap artifact is a bound configuration handoff,
+  never a credential carrier, and this sequence remains CI-unverified until the remote
+  runs succeed.
 - Configure the dedicated `judge-access-staging` and `judge-access-production`
   environments, narrow Cognito lifecycle roles, and protected password delivery described
   in [`docs/JUDGE_ACCESS.md`](JUDGE_ACCESS.md). Provision, rotate, reactivate, and deactivate judge

@@ -65,6 +65,7 @@ jobs:
             scripts/observe-aws-live-runtime.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
+            scripts/verify-github-repository-posture.sh \
             scripts/verify-judge-emergency-control-plane.sh \
             scripts/verify-judge-environment-approval.sh \
             scripts/collect-submission-evidence-source.sh \
@@ -81,6 +82,8 @@ jobs:
           bash tests/pipeline/aws-security-contracts.test.sh
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/github_repository_posture_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_evidence_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
