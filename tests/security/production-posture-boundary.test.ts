@@ -1481,11 +1481,12 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeAccessDocumentation, /multi-network Hosted UI/iu);
 });
 
-test("example DataHub endpoint requires authenticated HTTPS and runner-reachable routing", () => {
+test("example DataHub template defaults offline and documents runner-reachable HTTPS", () => {
   assert.match(
     exampleEnvironment,
-    /DATAHUB_GMS_URL=https:\/\/datahub\.example\.com/u
+    /^DATAHUB_GMS_URL=$/mu
   );
+  assert.doesNotMatch(exampleEnvironment, /^DATAHUB_GMS_URL=.+$/mu);
   assert.match(exampleEnvironment, /Remote endpoints MUST use authenticated/u);
   assert.match(exampleEnvironment, /GitHub-hosted demo\/live/u);
   assert.match(exampleEnvironment, /public HTTPS endpoint/u);
