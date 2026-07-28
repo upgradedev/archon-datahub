@@ -508,8 +508,9 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
   `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
   `judge-access-production`, `governed-canary`, `governed-canary-rollback`,
   `governed-canary-recovery`, `submission-content-review`,
-  `submission-devpost-confirmation`, and `submission-bonus-feedback`
-  environments and `master` protection must be configured;
+  `submission-readiness`, `submission-devpost-confirmation`, and
+  `submission-bonus-feedback` environments and `master` protection must be
+  configured;
 - production, demo-seed, judge-access, and the three governed-canary approval
   environments plus all submission review environments require a trusted
   second collaborator so self-review can remain disabled;

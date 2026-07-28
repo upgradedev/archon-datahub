@@ -39,8 +39,9 @@ reviewer, and enable prevent-self-review. Use different reviewers where possible
 
 The read-only `prepare` job has no environment and therefore no human approval or
 environment secret. It uses repository variables for `AWS_CANARY_PREPARE_ROLE_ARN`,
-`AWS_ACCOUNT_ID`, `AWS_REGION`, `CANARY_APPLICATION_URL`, `CANARY_DATASET_URN`,
-`CANARY_ISOLATION_MARKER`, and the four `CANARY_DATAHUB_*_URL` bindings. It can start the
+`AWS_CANARY_ACCOUNT_ID`, `AWS_CANARY_REGION`, `CANARY_APPLICATION_URL`,
+`CANARY_DATASET_URN`, `CANARY_ISOLATION_MARKER`, and the four
+`CANARY_DATAHUB_*_URL` bindings. It can start the
 governed state machine and read immutable evidence, but it cannot authenticate an approval
 or call DataHub mutation tools. Its only handoff is the content-addressed recovery artifact
 and its `planDigest` / `recoveryDigest` job outputs. The artifact also seals an

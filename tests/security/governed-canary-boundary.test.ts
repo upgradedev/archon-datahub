@@ -517,6 +517,26 @@ test("a reviewer approves the sealed plan, not a generic pre-plan dispatch", () 
   assert.match(prepareJob, /AWS_CANARY_PREPARE_ROLE_ARN/u);
   assert.match(approvalJob, /AWS_CANARY_APPROVAL_ROLE_ARN/u);
   assert.doesNotMatch(prepareJob, /AWS_CANARY_APPROVAL_ROLE_ARN/u);
+  assert.match(
+    prepareJob,
+    /aws-region: \$\{\{ vars\.AWS_CANARY_REGION \}\}/u
+  );
+  assert.match(
+    prepareJob,
+    /allowed-account-ids: \$\{\{ vars\.AWS_CANARY_ACCOUNT_ID \}\}/u
+  );
+  assert.match(
+    prepareJob,
+    /AWS_ACCOUNT_ID: \$\{\{ vars\.AWS_CANARY_ACCOUNT_ID \}\}/u
+  );
+  assert.match(
+    prepareJob,
+    /AWS_REGION: \$\{\{ vars\.AWS_CANARY_REGION \}\}/u
+  );
+  assert.doesNotMatch(
+    prepareJob,
+    /\$\{\{ vars\.AWS_(?:ACCOUNT_ID|REGION) \}\}/u
+  );
 });
 
 test("governed canary cannot add an unreviewed auth or browser dependency", () => {
