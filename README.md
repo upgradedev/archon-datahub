@@ -504,16 +504,12 @@ reference infrastructure, and CI/CD definitions. The authoritative remaining pro
 is [docs/READINESS.md](docs/READINESS.md). In particular:
 
 - remote CI/CodeQL/supply-chain evidence must be generated for the current branch;
-- GitHub `staging`, `production`, `production-observer`, `production-paging-test`,
-  `datahub-demo`, `datahub-demo-seed`, `judge-access-staging`,
-  `judge-access-production`, `governed-canary`, `governed-canary-rollback`,
-  `governed-canary-recovery`, `submission-content-review`,
-  `submission-readiness`, `submission-devpost-confirmation`, and
-  `submission-bonus-feedback` environments and `master` protection must be
-  configured;
-- production, demo-seed, judge-access, and the three governed-canary approval
-  environments plus all submission review environments require a trusted
-  second collaborator so self-review can remain disabled;
+- all 15 named GitHub environments now exist with one exact `master` deployment
+  policy, administrator bypass disabled, no environment secrets, and `master`
+  protection enabled; production, demo-seed, judge-access, the three governed-canary
+  approval environments, and all submission review environments still require a
+  trusted second collaborator before their reviewer rules and protected credentials
+  can be configured with self-review disabled;
 - AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
   user-gated;
 - a real retained-history contradiction and governed canary write/rollback need sanitized

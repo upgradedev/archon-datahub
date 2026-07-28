@@ -407,8 +407,8 @@ gates are tracked in [READINESS.md](READINESS.md):
 
 - accept the current commit through remote CI, CodeQL, workflow-security, benchmark, judge
   evidence, and supply-chain workflows;
-- configure GitHub environments and `master` protection, including a non-approving
-  `production-observer` and a trusted second collaborator for protected approvals;
+- add a trusted second collaborator to the pre-created GitHub environment skeletons and
+  enable their independent reviewer rules plus code-owner enforcement;
 - configure AWS OIDC/account/secrets and retain deployment smoke evidence;
 - capture a real retained-history contradiction;
 - configure and run the source-complete

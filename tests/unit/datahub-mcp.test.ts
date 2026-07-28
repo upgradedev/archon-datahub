@@ -8,6 +8,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   FakeDataHubMcpClient,
   mergeLatest,
@@ -242,6 +244,43 @@ test("hasDataHubCreds is false when no DataHub env is set", () => {
     assert.equal(hasDataHubCreds(), false);
     process.env.DATAHUB_GMS_URL = "http://localhost:8080";
     assert.equal(hasDataHubCreds(), true);
+  } finally {
+    if (saved.mcp === undefined) delete process.env.DATAHUB_MCP_URL;
+    else process.env.DATAHUB_MCP_URL = saved.mcp;
+    if (saved.gms === undefined) delete process.env.DATAHUB_GMS_URL;
+    else process.env.DATAHUB_GMS_URL = saved.gms;
+  }
+});
+
+test("an untouched .env.example keeps the documented Fake DataHub mode", () => {
+  const template = readFileSync(resolve(process.cwd(), ".env.example"), "utf8");
+  const assignments = new Map<string, string>();
+  for (const raw of template.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const equals = line.indexOf("=");
+    if (equals <= 0) continue;
+    assignments.set(
+      line.slice(0, equals).trim(),
+      line.slice(equals + 1).trim()
+    );
+  }
+
+  assert.equal(assignments.get("DATAHUB_GMS_URL"), "");
+  assert.equal(assignments.get("DATAHUB_MCP_URL") ?? "", "");
+
+  const saved = {
+    mcp: process.env.DATAHUB_MCP_URL,
+    gms: process.env.DATAHUB_GMS_URL,
+  };
+  delete process.env.DATAHUB_MCP_URL;
+  delete process.env.DATAHUB_GMS_URL;
+  for (const key of ["DATAHUB_MCP_URL", "DATAHUB_GMS_URL"] as const) {
+    const value = assignments.get(key);
+    if (value !== undefined) process.env[key] = value;
+  }
+  try {
+    assert.equal(hasDataHubCreds(), false);
   } finally {
     if (saved.mcp === undefined) delete process.env.DATAHUB_MCP_URL;
     else process.env.DATAHUB_MCP_URL = saved.mcp;
