@@ -1054,10 +1054,21 @@ jobs:
 
       - name: Fail closed on staging DataHub credentials before AWS trust
         env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           DATAHUB_READ_GMS_TOKEN: ${{ secrets.DATAHUB_READ_GMS_TOKEN }}
           DATAHUB_WRITE_GMS_TOKEN: ${{ secrets.DATAHUB_WRITE_GMS_TOKEN }}
         run: |
           set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+            echo "::error::staging AWS_ACCOUNT_ID must be exactly 12 digits before AWS trust"
+            exit 1
+          }
+          expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-staging-deploy"
+          test "${AWS_DEPLOY_ROLE_ARN}" = "${expected_deploy_role_arn}" || {
+            echo "::error::staging AWS_DEPLOY_ROLE_ARN is not the exact foundation-owned role"
+            exit 1
+          }
           : "${DATAHUB_READ_GMS_TOKEN:?staging read token is required before AWS mutation}"
           : "${DATAHUB_WRITE_GMS_TOKEN:?staging write token is required before AWS mutation}"
           for token in "${DATAHUB_READ_GMS_TOKEN}" "${DATAHUB_WRITE_GMS_TOKEN}"; do
@@ -5288,10 +5299,21 @@ jobs:
 
       - name: Fail closed on production DataHub credentials before AWS trust
         env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           DATAHUB_READ_GMS_TOKEN: ${{ secrets.DATAHUB_READ_GMS_TOKEN }}
           DATAHUB_WRITE_GMS_TOKEN: ${{ secrets.DATAHUB_WRITE_GMS_TOKEN }}
         run: |
           set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+            echo "::error::production AWS_ACCOUNT_ID must be exactly 12 digits before AWS trust"
+            exit 1
+          }
+          expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-production-deploy"
+          test "${AWS_DEPLOY_ROLE_ARN}" = "${expected_deploy_role_arn}" || {
+            echo "::error::production AWS_DEPLOY_ROLE_ARN is not the exact foundation-owned role"
+            exit 1
+          }
           : "${DATAHUB_READ_GMS_TOKEN:?production read token is required before AWS mutation}"
           : "${DATAHUB_WRITE_GMS_TOKEN:?production write token is required before AWS mutation}"
           for token in "${DATAHUB_READ_GMS_TOKEN}" "${DATAHUB_WRITE_GMS_TOKEN}"; do
