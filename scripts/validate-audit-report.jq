@@ -57,7 +57,7 @@ def has_credential_substring:
     false
   else
     test(
-      "(sk-(ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
+      "(bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|sk-(ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})"
     )
   end;
 
@@ -179,7 +179,10 @@ def valid_model_provenance:
     $provenance.latencyMs == null
   elif $provenance.source == "live-provider" then
     $provenance.modelCall == true and
-    ($provenance.provider | IN("custom", "qwen", "gemini", "openai", "anthropic")) and
+    (
+      $provenance.provider |
+      IN("bedrock-mantle", "custom", "qwen", "gemini", "openai", "anthropic")
+    ) and
     ($provenance.returnedModel | safe_model_id) and
     ($provenance.providerResponseId | safe_response_id) and
     ($provenance.tokenUsage | valid_token_usage) and

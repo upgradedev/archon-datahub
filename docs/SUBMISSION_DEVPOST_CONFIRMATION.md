@@ -2,8 +2,8 @@
 
 This is the post-submit evidence procedure for the DataHub Agent
 Hackathon. It does not submit the project to Devpost. It turns a real,
-privately verified Devpost submission into a privacy-safe, independently
-reviewed, six-subject GitHub attestation.
+privately verified Devpost submission into a privacy-safe, explicitly
+solo-owner-approved, six-subject GitHub attestation.
 
 The required order is:
 
@@ -29,17 +29,17 @@ release:
 - the exact public Devpost project URL;
 - the authoritative private submission time supplied by the operator;
 - a salted commitment to the private Devpost confirmation;
-- the independently reviewed final description and submission claims;
+- the reviewed final description and submission claims;
 - fresh logged-out observations of the Devpost entry, application,
   repository, and video;
-- one independent protected-environment approval with an exact,
+- one solo-owner protected-environment approval with an exact,
   digest-bound comment; and
 - the final `SQ11` predicate, proof, and four support subjects.
 
 The evidence deliberately does not claim that a public Devpost page can
 prove the authoritative submission time or every private required field.
 Those facts require the authenticated confirmation and are checked out of
-band by the independent reviewer. GitHub's approvals API does not expose
+band by the solo owner. GitHub's approvals API does not expose
 an authoritative approval timestamp, so the receipt records the protected
 review job start as a conservative time bound.
 
@@ -53,15 +53,15 @@ evidence.
 Create the GitHub Actions environment
 `submission-devpost-confirmation` with all of these controls:
 
-- at least one named individual `User` reviewer;
-- prevent self-review enabled;
+- exactly one named individual `User` reviewer, `upgradedev`;
+- `prevent_self_review` disabled so the owner may approve;
 - custom deployment branch policies enabled;
 - exactly one allowed branch policy, `master`; and
 - no team-only or wildcard reviewer substitution.
 
 The workflow checks this posture in the prepare, protected-review, and
-final signing phases. The reviewer must be different from both the
-workflow actor and triggering actor.
+final signing phases. The reviewer must equal both the workflow actor and
+triggering actor.
 
 The repository's normal GitHub-hosted runner and artifact-attestation
 configuration must also remain enabled. No Devpost secret belongs in the
@@ -94,7 +94,7 @@ only `sha256:<64 lowercase hexadecimal characters>` as
 `confirmation_digest`.
 
 The digest is a salted privacy-preserving commitment, not a Devpost
-signature and not independent proof by itself. Give the reviewer the
+signature and not proof by itself. Give the solo owner the
 private preimage and salt through an approved channel outside GitHub so
 they can recompute it. Never put either value in an issue, approval
 comment, workflow input, artifact, log, or step summary.
@@ -138,7 +138,7 @@ candidate, and probes all four public judging URLs without redirects. It
 then uploads an immutable, privacy-safe candidate artifact and prints one
 exact approval comment in the job summary.
 
-The protected reviewer must:
+The protected solo owner must:
 
 1. Open the authenticated Devpost submission outside GitHub Actions.
 2. Confirm that its project URL, submitted state, authoritative UTC time,
@@ -195,7 +195,7 @@ No raw rules response, URL response, Devpost confirmation, approval
 preimage, salt, credential, cookie, screenshot, or private Devpost entrant
 data is retained in the producer artifact. The signed `SQ11` proof retains
 the workflow actor, triggering actor, and reviewer as public GitHub numeric
-account IDs solely to prove reviewer independence. It retains no GitHub
+account IDs solely to prove solo-owner approval. It retains no GitHub
 login names.
 
 ## Failure and retry policy
@@ -232,7 +232,7 @@ all external actions below have happened:
 - the pre-submit readiness seal is successful;
 - the real Devpost entry is submitted rather than saved as a draft;
 - the operator supplies the exact private confirmation inputs;
-- the independent protected reviewer approves the exact binding; and
+- the protected solo owner approves the exact binding; and
 - the workflow completes with persisted verification of all six subjects.
 
 Only after that successful run may the reporting aggregate include

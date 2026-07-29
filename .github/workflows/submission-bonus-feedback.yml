@@ -2,7 +2,7 @@ name: Submission bonus feedback evidence
 
 # Privacy-preserving, fail-closed producer for the optional Most Valuable
 # Feedback prize. The authenticated Devpost form and its answers never enter
-# GitHub Actions. A protected, independent reviewer verifies the private
+# GitHub Actions. The protected solo owner verifies the private
 # confirmation/reference out of band and approves an immutable digest-bound
 # candidate. The workflow only retains public rules metadata, salted digests,
 # GitHub approval provenance, and explicit non-sensitive assertions.
@@ -124,19 +124,19 @@ jobs:
             any(
               .protection_rules[]?;
               .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1 and
+              .prevent_self_review == false and
+              (.reviewers | length) == 1 and
               all(
                 .reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
           ' <<<"${environment_json}" >/dev/null || {
-            echo "::error::submission-bonus-feedback requires individual User reviewers, prevent-self-review, and a custom master-only branch policy"
+            echo "::error::submission-bonus-feedback requires the sole owner reviewer, self-review enabled, and a custom master-only branch policy"
             exit 1
           }
           policies="$(
@@ -565,9 +565,9 @@ jobs:
           [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           approval="APPROVE ARCHON DATAHUB FEEDBACK run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} canonical_evidence_digest=${CANONICAL_EVIDENCE_DIGEST} confirmation_digest=${CONFIRMATION_DIGEST} entrant_binding_digest=${ENTRANT_BINDING_DIGEST} submitted_at=${SUBMITTED_AT}"
           {
-            echo "### Independent private feedback confirmation required"
+            echo "### Solo-owner private feedback confirmation required"
             echo
-            echo "A configured reviewer must privately verify the authenticated Devpost confirmation, registration, one-entry limit, and complete/actionable/viable/potentially impactful feedback."
+            echo "The configured owner must privately verify the authenticated Devpost confirmation, registration, one-entry limit, and complete/actionable/viable/potentially impactful feedback."
             echo "No answers, raw entrant identifiers, cookies, credentials, screenshots, or private confirmation bytes may be placed in the approval comment or workflow."
             echo
             echo "Approve the protected environment with this exact comment:"
@@ -576,7 +576,7 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
 
   review:
-    name: Independently approve and seal feedback evidence
+    name: Approve and seal feedback evidence as solo owner
     needs: prepare
     if: needs.prepare.result == 'success'
     runs-on: ubuntu-24.04
@@ -591,7 +591,7 @@ jobs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
       producer_attempt: ${{ steps.package.outputs.producer_attempt }}
     steps:
-      - name: Verify exact independent protected-environment approval
+      - name: Verify exact solo-owner protected-environment approval
         id: approval
         env:
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
@@ -644,15 +644,15 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -660,7 +660,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           policies="$(
@@ -727,15 +727,16 @@ jobs:
                   (.user.id | type) == "number" and
                   (.user.login | type) == "string" and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
                 )
               ] |
               if length == 1 then .[0]
-              else error("expected exactly one matching independent approval")
+              else error("expected exactly one matching solo-owner approval")
               end
             ' <<<"${approvals}")" || {
-            echo "::error::Missing one exact independent feedback approval"
+            echo "::error::Missing one exact solo-owner feedback approval"
             exit 1
           }
           review_job_started_at=""
@@ -754,7 +755,7 @@ jobs:
                   .[].jobs[] |
                   select(
                     .name ==
-                      "Independently approve and seal feedback evidence" and
+                      "Approve and seal feedback evidence as solo owner" and
                     .run_attempt == $attempt and
                     .status == "in_progress" and
                     .conclusion == null and
@@ -839,6 +840,8 @@ jobs:
                   id: $environmentId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   reviewer: {
                     id: $reviewerId,
                     login: $reviewerLogin
@@ -966,7 +969,7 @@ jobs:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: ${{ runner.temp }}/submission-bonus-feedback-candidate-reviewed
 
-      - name: Independently revalidate private-reference candidate and public rules
+      - name: Revalidate private-reference candidate and public rules
         env:
           CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
           CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
@@ -1283,6 +1286,7 @@ jobs:
                   reviewJobStartedAt: $reviewJobStartedAt
                 },
                 reviewApproval: {
+                  approvalMode: "solo-owner",
                   environment: $environment,
                   workflowPath: $workflowPath,
                   runId: $runId,
@@ -1393,8 +1397,8 @@ jobs:
             "${ENVIRONMENT_ID}"; do
             [[ "${identifier}" =~ ^[1-9][0-9]*$ ]]
           done
-          test "${REVIEWER_ID}" != "${ACTOR_ID}"
-          test "${REVIEWER_ID}" != "${TRIGGERING_ACTOR_ID}"
+          test "${REVIEWER_ID}" = "${ACTOR_ID}"
+          test "${REVIEWER_ID}" = "${TRIGGERING_ACTOR_ID}"
           test "sha256:$(
             printf '%s' "${expected_approval}" | sha256sum | awk '{print $1}'
           )" = "${APPROVAL_COMMENT_DIGEST}"
@@ -1460,6 +1464,7 @@ jobs:
           )"
           jq -e \
             --arg expected "${expected_approval}" \
+            --arg owner "upgradedev" \
             --argjson actorId "${ACTOR_ID}" \
             --argjson environmentId "${ENVIRONMENT_ID}" \
             --argjson reviewerId "${REVIEWER_ID}" \
@@ -1473,8 +1478,9 @@ jobs:
                   .environments[0].name == "submission-bonus-feedback" and
                   .environments[0].id == $environmentId and
                   .user.id == $reviewerId and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId and
+                  (.user.login | ascii_downcase) == $owner
                 )
               ] |
               length == 1
@@ -1496,7 +1502,7 @@ jobs:
           compression-level: 0
 
   attest:
-    name: Independently revalidate and attest feedback evidence
+    name: Revalidate and attest feedback evidence
     needs:
       - prepare
       - review
@@ -1679,7 +1685,7 @@ jobs:
           artifact-ids: ${{ steps.artifacts.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/submission-bonus-feedback-candidate-attester
 
-      - name: Independently rederive candidate rules approval and retained facts
+      - name: Rederive candidate rules approval and retained facts
         env:
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
           CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
@@ -1918,17 +1924,18 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
-                .reviewer.id > 0
+                .reviewer.id > 0 and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then ([$rules[0].reviewers[].reviewer.id] | sort | unique)
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           policies="$(
@@ -1960,11 +1967,13 @@ jobs:
               .id == $runId and
               .run_attempt == $attempt and
               .path == $path and
-              .event == "workflow_dispatch" and
-              .head_sha == $release and
-              .head_branch == "master" and
-              .head_repository.full_name == $repository and
-              .repository.full_name == $repository
+               .event == "workflow_dispatch" and
+               .head_sha == $release and
+               .head_branch == "master" and
+               .head_repository.full_name == $repository and
+               .repository.full_name == $repository and
+               (.actor.login | ascii_downcase) == "upgradedev" and
+               (.triggering_actor.login | ascii_downcase) == "upgradedev"
             ' <<<"${producer_run}" >/dev/null
           actor_id="$(jq -er '.actor.id' <<<"${producer_run}")"
           triggering_actor_id="$(
@@ -1984,7 +1993,7 @@ jobs:
                 .[].jobs[] |
                 select(
                   .name ==
-                    "Independently approve and seal feedback evidence" and
+                    "Approve and seal feedback evidence as solo owner" and
                   .run_attempt == $attempt and
                   .status == "completed" and
                   .conclusion == "success" and
@@ -2005,6 +2014,7 @@ jobs:
           )"
           matched="$(jq -ce \
             --arg expected "${expected_approval}" \
+            --arg owner "upgradedev" \
             --argjson actorId "${actor_id}" \
             --argjson environmentId "${environment_id}" \
             --argjson reviewerIds "${reviewer_ids}" \
@@ -2018,12 +2028,13 @@ jobs:
                   .environments[0].name == "submission-bonus-feedback" and
                   .environments[0].id == $environmentId and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId and
+                  (.user.login | ascii_downcase) == $owner
                 )
               ] |
               if length == 1 then .[0]
-              else error("exact independent approval is missing or ambiguous")
+              else error("exact solo-owner approval is missing or ambiguous")
               end
             ' <<<"${approvals}")"
           python3 - \
@@ -2086,6 +2097,8 @@ jobs:
                   id: $environmentId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   reviewer: {
                     id: $reviewerId,
                     login: $reviewerLogin
@@ -2181,6 +2194,7 @@ jobs:
                   reviewJobStartedAt: $reviewJobStartedAt
                 },
                 reviewApproval: {
+                  approvalMode: "solo-owner",
                   environment: "submission-bonus-feedback",
                   workflowPath:
                     ".github/workflows/submission-bonus-feedback.yml",
@@ -2272,8 +2286,8 @@ jobs:
             "${environment_id}"; do
             [[ "${identifier}" =~ ^[1-9][0-9]*$ ]]
           done
-          test "${reviewer_id}" != "${actor_id}"
-          test "${reviewer_id}" != "${triggering_actor_id}"
+          test "${reviewer_id}" = "${actor_id}"
+          test "${reviewer_id}" = "${triggering_actor_id}"
           test "sha256:$(
             printf '%s' "${expected_approval}" | sha256sum | awk '{print $1}'
           )" = "$(
@@ -2308,6 +2322,7 @@ jobs:
           )"
           jq -e \
             --arg expected "${expected_approval}" \
+            --arg owner "upgradedev" \
             --argjson actorId "${actor_id}" \
             --argjson environmentId "${environment_id}" \
             --argjson reviewerId "${reviewer_id}" \
@@ -2321,8 +2336,9 @@ jobs:
                   .environments[0].name == "submission-bonus-feedback" and
                   .environments[0].id == $environmentId and
                   .user.id == $reviewerId and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId and
+                  (.user.login | ascii_downcase) == $owner
                 )
               ] |
               length == 1
@@ -2572,5 +2588,5 @@ jobs:
             echo "- Artifact: \`${{ needs.review.outputs.artifact_name }}\`"
             echo "- Subjects: 3 plus \`SHA256SUMS\`"
             echo "- Attestation: ${ATTESTATION_URL}"
-            echo "- Privacy: no feedback answers, raw entrant identifiers, Devpost credentials, cookies, or private confirmation bytes retained; the salted entrant commitment and public reviewer numeric ID are disclosed"
+            echo "- Privacy: no feedback answers, raw entrant identifiers, Devpost credentials, cookies, or private confirmation bytes retained; the salted entrant commitment and solo-owner numeric ID are disclosed"
           } >>"${GITHUB_STEP_SUMMARY}"

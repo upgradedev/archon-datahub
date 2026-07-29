@@ -1,0 +1,1810 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${EXPECTED_ACCOUNT_ID:?EXPECTED_ACCOUNT_ID is required}"
+: "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
+: "${GH_TOKEN:?GH_TOKEN is required}"
+: "${BOOTSTRAP_TEMPLATE:?BOOTSTRAP_TEMPLATE is required}"
+: "${BOOTSTRAP_TEMPLATE_SHA:?BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${STAGING_PRIMARY_BOOTSTRAP_TEMPLATE:?STAGING_PRIMARY_BOOTSTRAP_TEMPLATE is required}"
+: "${STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA:?STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${STAGING_EDGE_BOOTSTRAP_TEMPLATE:?STAGING_EDGE_BOOTSTRAP_TEMPLATE is required}"
+: "${STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA:?STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE:?PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE is required}"
+: "${PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA:?PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE:?PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE is required}"
+: "${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA:?PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${PINNED_BOOTSTRAP_VERSION:?PINNED_BOOTSTRAP_VERSION is required}"
+: "${FOUNDATION_POLICY_ACTUAL_SHA:?FOUNDATION_POLICY_ACTUAL_SHA is required}"
+: "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
+: "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+
+[[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+[[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+[[ "${BOOTSTRAP_TEMPLATE_SHA}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${FOUNDATION_POLICY_ACTUAL_SHA}" =~ ^[0-9a-f]{64}$ ]]
+test "${PINNED_BOOTSTRAP_VERSION}" = "32"
+
+readonly PRIMARY_REGION="eu-west-1"
+readonly EDGE_REGION="us-east-1"
+readonly SHARED_API_STACK="Archon-Shared-ApiGateway-Logging"
+readonly SHARED_API_ROLE="archon-datahub-apigateway-cloudwatch-logs"
+readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"
+readonly LEGACY_DEPLOY_ROLE="archon-datahub-github-deploy"
+readonly EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-evidence"
+
+declare -A BOOTSTRAP_STACK=(
+  [staging]="CDKToolkit-archonstg"
+  [production]="CDKToolkit-archonprd"
+)
+declare -A BOOTSTRAP_TEMPLATE_BY_TARGET=(
+  [staging:eu-west-1]="${STAGING_PRIMARY_BOOTSTRAP_TEMPLATE}"
+  [staging:us-east-1]="${STAGING_EDGE_BOOTSTRAP_TEMPLATE}"
+  [production:eu-west-1]="${PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE}"
+  [production:us-east-1]="${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE}"
+)
+declare -A BOOTSTRAP_TEMPLATE_SHA_BY_TARGET=(
+  [staging:eu-west-1]="${STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA}"
+  [staging:us-east-1]="${STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA}"
+  [production:eu-west-1]="${PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA}"
+  [production:us-east-1]="${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA}"
+)
+declare -A QUALIFIER=(
+  [staging]="archonstg"
+  [production]="archonprd"
+)
+declare -A IAM_STACK=(
+  [staging]="Archon-Staging-IAM-Foundation"
+  [production]="Archon-Production-IAM-Foundation"
+)
+readonly -a EXECUTION_POLICY_FAMILIES=(
+  guard
+  identity
+  data
+  state
+  observability
+  compute
+  network
+  endpoint
+  delivery
+  edge
+)
+declare -A BOUNDARY_NAME=(
+  [staging]="archon-datahub-runtime-boundary-staging"
+  [production]="archon-datahub-runtime-boundary-production"
+)
+declare -A DEPLOY_STACK=(
+  [staging]="Archon-GitHub-Staging-Deploy-Role"
+  [production]="Archon-GitHub-Production-Deploy-Role"
+)
+declare -A DEPLOY_ROLE=(
+  [staging]="archon-datahub-github-staging-deploy"
+  [production]="archon-datahub-github-production-deploy"
+)
+readonly -a CANARY_ROLE_KINDS=(
+  prepare
+  approval
+  recovery
+)
+declare -A CANARY_ROLE=(
+  [prepare]="archon-datahub-github-governed-canary-prepare"
+  [approval]="archon-datahub-github-governed-canary-approval"
+  [recovery]="archon-datahub-github-governed-canary-recovery"
+)
+declare -A CANARY_ENVIRONMENT=(
+  [prepare]="governed-canary-prepare"
+  [approval]="governed-canary"
+  [recovery]="governed-canary-recovery"
+)
+declare -A CANARY_POLICY=(
+  [prepare]="archon-staging-stack-read"
+  [approval]="archon-staging-approval-read"
+  [recovery]="archon-staging-stack-read"
+)
+declare -A EXECUTION_POLICY_ARN
+declare -A EXECUTION_POLICY_ARNS_BY_TARGET
+declare -A BOUNDARY_ARN
+declare -A EXECUTION_POLICY_SHA
+declare -A BOUNDARY_SHA
+declare -A DEPLOY_POLICY_SHA
+declare -A DEPLOY_ROLE_BINDING_SHA
+declare -A IAM_TEMPLATE_SHA
+declare -A DEPLOY_TEMPLATE_SHA
+declare -A CANARY_POLICY_SHA
+declare -A CANARY_ROLE_BINDING_SHA
+application_stack_roles_json='[]'
+application_stack_role_transition_json=''
+
+revalidate_master() {
+  local remote_sha
+  local region
+  local stage
+  local target
+  remote_sha="$(
+    gh api \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2026-03-10" \
+      "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" |
+      jq -er '.object.sha'
+  )"
+  test "${remote_sha}" = "${CONTROL_PLANE_SHA}"
+  test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+  test -z "$(git status --porcelain --untracked-files=all)"
+  test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
+    "${BOOTSTRAP_TEMPLATE_SHA}"
+  for stage in staging production; do
+    for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+      target="${stage}:${region}"
+      test "$(
+        sha256sum "${BOOTSTRAP_TEMPLATE_BY_TARGET[${target}]}" |
+          awk '{print $1}'
+      )" = "${BOOTSTRAP_TEMPLATE_SHA_BY_TARGET[${target}]}"
+    done
+  done
+}
+
+assert_stack_role_is_null_if_present() {
+  local region="$1"
+  local stack_name="$2"
+  local output="${RUNNER_TEMP}/stack-role-${region}-${stack_name}.json"
+  local error="${output}.error"
+  if aws cloudformation describe-stacks \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --output json >"${output}" 2>"${error}"; then
+    jq -e '
+      (.Stacks | length) == 1 and
+      ((.Stacks[0].RoleARN // "") == "")
+    ' "${output}" >/dev/null
+  else
+    grep -Eq 'does not exist|ValidationError' "${error}"
+  fi
+}
+
+assert_stack_complete_without_service_role() {
+  local region="$1"
+  local stack_name="$2"
+  local output="$3"
+  aws cloudformation describe-stacks \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --output json >"${output}"
+  jq -e --arg stack "${stack_name}" '
+    (.Stacks | length) == 1 and
+    .Stacks[0].StackName == $stack and
+    ((.Stacks[0].RoleARN // "") == "") and
+    .Stacks[0].EnableTerminationProtection == true and
+    (
+      .Stacks[0].StackStatus == "CREATE_COMPLETE" or
+      .Stacks[0].StackStatus == "UPDATE_COMPLETE"
+    )
+  ' "${output}" >/dev/null
+}
+
+assert_application_stack_role_exact_if_present() {
+  local stage="$1"
+  local region="$2"
+  local stack_name="$3"
+  local expected_role="$4"
+  local output="${RUNNER_TEMP}/application-role-${region}-${stack_name}.json"
+  local error="${output}.error"
+  local status
+  local validation
+  if aws cloudformation describe-stacks \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --output json >"${output}" 2>"${error}"; then
+    jq -e --arg stack "${stack_name}" '
+      (.Stacks | length) == 1 and
+      .Stacks[0].StackName == $stack and
+      (
+        .Stacks[0].StackStatus == "CREATE_COMPLETE" or
+        .Stacks[0].StackStatus == "UPDATE_COMPLETE" or
+        .Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE" or
+        .Stacks[0].StackStatus == "IMPORT_COMPLETE" or
+        .Stacks[0].StackStatus == "IMPORT_ROLLBACK_COMPLETE"
+      )
+    ' "${output}" >/dev/null
+    if jq -e --arg stack "${stack_name}" --arg role "${expected_role}" '
+      (.Stacks | length) == 1 and
+      .Stacks[0].StackName == $stack and
+      .Stacks[0].RoleARN == $role
+    ' "${output}" >/dev/null; then
+      status="exact-stage-cfn-exec-role"
+      validation="passed"
+    else
+      status="migration-required"
+      validation="requires-explicit-deploy-migration"
+    fi
+  else
+    grep -Eq 'does not exist|ValidationError' "${error}"
+    status="not-yet-created"
+    validation="passed"
+  fi
+  application_stack_roles_json="$(
+    jq -cnS \
+      --argjson current "${application_stack_roles_json}" \
+      --arg stage "${stage}" \
+      --arg region "${region}" \
+      --arg stackName "${stack_name}" \
+      --arg status "${status}" \
+      --arg validation "${validation}" '
+        $current + [{
+          region: $region,
+          stackName: $stackName,
+          stage: $stage,
+          status: $status,
+          validation: $validation
+        }]
+      '
+  )"
+}
+
+assert_api_gateway_no_clobber() {
+  local account_json="${RUNNER_TEMP}/api-gateway-account-preflight.json"
+  local expected_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${SHARED_API_ROLE}"
+  aws apigateway get-account \
+    --region "${PRIMARY_REGION}" \
+    --output json >"${account_json}"
+  jq -e --arg expected "${expected_arn}" '
+    ((.cloudwatchRoleArn // "") == "") or
+    .cloudwatchRoleArn == $expected
+  ' "${account_json}" >/dev/null
+}
+
+get_managed_policy_document() {
+  local policy_arn="$1"
+  local output="$2"
+  local metadata="${output}.metadata"
+  aws iam get-policy --policy-arn "${policy_arn}" --output json >"${metadata}"
+  aws iam get-policy-version \
+    --policy-arn "${policy_arn}" \
+    --version-id "$(jq -er '.Policy.DefaultVersionId' "${metadata}")" \
+    --output json >"${output}"
+}
+
+canonical_policy_sha() {
+  local document="$1"
+  jq -cS '.PolicyVersion.Document // .PolicyDocument' "${document}" |
+    sha256sum |
+    awk '{print $1}'
+}
+
+expected_execution_policy_arns() {
+  local stage="$1"
+  local region="$2"
+  local -a families
+  local family
+  local rendered=()
+  if [[ "${region}" == "${PRIMARY_REGION}" ]]; then
+    families=(
+      guard
+      identity
+      data
+      state
+      observability
+      compute
+      network
+      endpoint
+      delivery
+    )
+  else
+    families=(guard edge)
+  fi
+  for family in "${families[@]}"; do
+    rendered+=(
+      "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:policy/archon-datahub-cdk-${family}-${stage}"
+    )
+  done
+  local IFS=,
+  printf '%s' "${rendered[*]}"
+}
+
+deployed_template_sha() {
+  local region="$1"
+  local stack_name="$2"
+  aws cloudformation get-template \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --template-stage Original \
+    --output json |
+    jq -cS '.TemplateBody' |
+    sha256sum |
+    awk '{print $1}'
+}
+
+echo "::group::Fail-closed AWS foundation preflight"
+revalidate_master
+for template in \
+  infra/aws/foundation/api-gateway-account.yml \
+  infra/aws/foundation/cdk-execution-policy.yml \
+  infra/aws/foundation/github-actions-deploy-role.yml \
+  infra/aws/foundation/github-actions-foundation-role.yml \
+  infra/aws/foundation/governed-canary-roles.yml \
+  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:eu-west-1]}" \
+  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:us-east-1]}" \
+  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:eu-west-1]}" \
+  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:us-east-1]}"; do
+  aws cloudformation validate-template \
+    --region "${PRIMARY_REGION}" \
+    --template-body "file://${template}" >/dev/null
+done
+
+legacy_error="${RUNNER_TEMP}/legacy-deploy-role.error"
+if aws iam get-role \
+  --role-name "${LEGACY_DEPLOY_ROLE}" \
+  --output json >/dev/null 2>"${legacy_error}"; then
+  echo "::error::Legacy dual-environment GitHub deploy role still exists"
+  exit 1
+fi
+grep -q 'NoSuchEntity' "${legacy_error}"
+
+legacy_stacks="$(
+  aws cloudformation list-stacks \
+    --region "${PRIMARY_REGION}" \
+    --stack-status-filter \
+      CREATE_COMPLETE \
+      UPDATE_COMPLETE \
+      UPDATE_ROLLBACK_COMPLETE \
+      IMPORT_COMPLETE \
+      IMPORT_ROLLBACK_COMPLETE \
+    --output json
+)"
+jq -e '
+  [
+    .StackSummaries[]?.StackName |
+    select(
+      . == "Archon-GitHub-Deploy-Role" or
+      . == "Archon-CDK-Execution-Policy"
+    )
+  ] |
+  length == 0
+' <<<"${legacy_stacks}" >/dev/null
+
+for stage in staging production; do
+  assert_stack_role_is_null_if_present \
+    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  assert_stack_role_is_null_if_present \
+    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+    assert_stack_role_is_null_if_present \
+      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+  done
+done
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+assert_api_gateway_no_clobber
+staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
+staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
+production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
+production_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
+assert_application_stack_role_exact_if_present \
+  staging "${PRIMARY_REGION}" Archon-Registry "${staging_cfn_eu}"
+assert_application_stack_role_exact_if_present \
+  staging "${PRIMARY_REGION}" Archon-staging "${staging_cfn_eu}"
+assert_application_stack_role_exact_if_present \
+  staging "${EDGE_REGION}" Archon-staging-Edge "${staging_cfn_us}"
+assert_application_stack_role_exact_if_present \
+  production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
+assert_application_stack_role_exact_if_present \
+  production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
+application_stack_role_transition_json="$(
+  jq -cnS \
+    --argjson entries "${application_stack_roles_json}" '
+      ($entries |
+        map(select(
+          .validation == "requires-explicit-deploy-migration"
+        )) |
+        length) as $migrationRequiredCount |
+      if ($entries | length) != 5 then
+        error("application stack role preflight inventory must contain five entries")
+      elif (
+        all($entries[];
+          .validation == "passed" or
+          .validation == "requires-explicit-deploy-migration"
+        ) |
+        not
+      ) then
+        error("application stack role preflight contains an unsupported result")
+      elif $migrationRequiredCount > 0 then
+        {
+          deployRequirement: "explicit-role-migration",
+          foundationOutcome: "passed",
+          migrationRequiredCount: $migrationRequiredCount,
+          state: "foundation-complete-deploy-migration-required"
+        }
+      else
+        {
+          deployRequirement: "exact-role-postcheck",
+          foundationOutcome: "passed",
+          migrationRequiredCount: 0,
+          state: "ready-for-deploy"
+        }
+      end
+    '
+)"
+application_stack_role_transition_state="$(
+  jq -er '.state' <<<"${application_stack_role_transition_json}"
+)"
+if [[ "${application_stack_role_transition_state}" ==
+  "foundation-complete-deploy-migration-required" ]]; then
+  migration_required_count="$(
+    jq -er '.migrationRequiredCount' \
+      <<<"${application_stack_role_transition_json}"
+  )"
+  echo \
+    "::warning::Foundation may complete; ${migration_required_count} application stack RoleARN binding(s) require the explicit deploy migration and exact final deploy postcheck"
+fi
+echo "::endgroup::"
+
+echo "::group::Reconcile stage IAM foundations"
+for stage in staging production; do
+  revalidate_master
+  assert_stack_role_is_null_if_present \
+    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  aws cloudformation deploy \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${IAM_STACK[${stage}]}" \
+    --template-file infra/aws/foundation/cdk-execution-policy.yml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --no-fail-on-empty-changeset \
+    --parameter-overrides DeploymentEnvironment="${stage}" \
+    --tags \
+      Application=archon-datahub \
+      Environment="${stage}" \
+      ManagedBy=github-actions \
+      Purpose=stage-iam-foundation >/dev/null
+  aws cloudformation update-termination-protection \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${IAM_STACK[${stage}]}" \
+    --enable-termination-protection
+
+  iam_stack_json="${RUNNER_TEMP}/${stage}-iam-foundation-stack.json"
+  assert_stack_complete_without_service_role \
+    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}" "${iam_stack_json}"
+  EXECUTION_POLICY_ARNS_BY_TARGET["${stage}:${PRIMARY_REGION}"]="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "ArchonCdkEuWest1ExecutionPolicyArns") |
+      .OutputValue
+    ' "${iam_stack_json}"
+  )"
+  EXECUTION_POLICY_ARNS_BY_TARGET["${stage}:${EDGE_REGION}"]="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "ArchonCdkUsEast1ExecutionPolicyArns") |
+      .OutputValue
+    ' "${iam_stack_json}"
+  )"
+  BOUNDARY_ARN["${stage}"]="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "ArchonRuntimeBoundaryArn") |
+      .OutputValue
+    ' "${iam_stack_json}"
+  )"
+  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+    target="${stage}:${region}"
+    test "${EXECUTION_POLICY_ARNS_BY_TARGET[${target}]}" = \
+      "$(expected_execution_policy_arns "${stage}" "${region}")"
+  done
+  test "${BOUNDARY_ARN[${stage}]}" = \
+    "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:policy/${BOUNDARY_NAME[${stage}]}"
+  echo "::add-mask::${BOUNDARY_ARN[${stage}]}"
+
+  execution_policy_bundle="${RUNNER_TEMP}/${stage}-execution-policy-bundle.jsonl"
+  : >"${execution_policy_bundle}"
+  for family in "${EXECUTION_POLICY_FAMILIES[@]}"; do
+    policy_arn="$(
+      printf 'arn:aws:iam::%s:policy/archon-datahub-cdk-%s-%s' \
+        "${EXPECTED_ACCOUNT_ID}" "${family}" "${stage}"
+    )"
+    EXECUTION_POLICY_ARN["${stage}:${family}"]="${policy_arn}"
+    echo "::add-mask::${policy_arn}"
+    execution_document="$(
+      printf '%s/%s-execution-policy-%s.json' \
+        "${RUNNER_TEMP}" "${stage}" "${family}"
+    )"
+    get_managed_policy_document "${policy_arn}" "${execution_document}"
+    compact_policy_size="$(
+      jq -c '.PolicyVersion.Document' "${execution_document}" |
+        wc -c |
+        awk '{print $1 - 1}'
+    )"
+    test "${compact_policy_size}" -le 6144
+    jq -e '
+      (
+        [.PolicyVersion.Document.Statement[] |
+          select(.Effect == "Allow") |
+          .Action] |
+        flatten |
+        all(
+          . != "*" and
+          (endswith(":*") | not)
+        )
+      ) and
+      (
+        .PolicyVersion.Document |
+        tostring |
+        contains("AdministratorAccess") |
+        not
+      )
+    ' "${execution_document}" >/dev/null
+    jq -cS '.PolicyVersion.Document' "${execution_document}" \
+      >>"${execution_policy_bundle}"
+  done
+  jq -e '
+    (
+      [.PolicyVersion.Document.Statement[] |
+        select(.Sid == "DenySharedApiGatewayAccountMutation")] |
+      length
+    ) == 1 and
+    (
+      [.PolicyVersion.Document.Statement[] |
+        select(.Sid == "DenyRuntimeBoundaryRemoval")] |
+      length
+    ) == 1
+  ' "${RUNNER_TEMP}/${stage}-execution-policy-guard.json" >/dev/null
+
+  boundary_document="${RUNNER_TEMP}/${stage}-runtime-boundary.json"
+  get_managed_policy_document \
+    "${BOUNDARY_ARN[${stage}]}" "${boundary_document}"
+  boundary_compact_size="$(
+    jq -c '.PolicyVersion.Document' "${boundary_document}" |
+      wc -c |
+      awk '{print $1 - 1}'
+  )"
+  test "${boundary_compact_size}" -le 6144
+  boundary_actions="${RUNNER_TEMP}/${stage}-runtime-boundary-actions.json"
+  jq -cS '
+    [.PolicyVersion.Document.Statement[] |
+      select(.Effect == "Allow") |
+      .Action] |
+    flatten |
+    unique
+  ' "${boundary_document}" >"${boundary_actions}"
+  jq -cS '.aws.runtimeBoundary.allowedActions | sort' \
+    contracts/aws-foundation-v1.json |
+    cmp -s - "${boundary_actions}"
+  jq -e '
+    (
+      [.PolicyVersion.Document.Statement[] |
+        select(.Sid == "DenyIdentityEscalation")] |
+      length
+    ) == 1 and
+    (
+      [.PolicyVersion.Document.Statement[] |
+        select(.Sid == "DenyLongTermBedrockMantleTokens")] |
+      length
+    ) == 1
+  ' "${boundary_document}" >/dev/null
+  EXECUTION_POLICY_SHA["${stage}"]="$(
+    sha256sum "${execution_policy_bundle}" |
+      awk '{print $1}'
+  )"
+  BOUNDARY_SHA["${stage}"]="$(canonical_policy_sha "${boundary_document}")"
+  IAM_TEMPLATE_SHA["${stage}"]="$(
+    deployed_template_sha "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  )"
+done
+echo "::endgroup::"
+
+echo "::group::Reconcile the shared API Gateway logging account"
+revalidate_master
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+assert_api_gateway_no_clobber
+aws cloudformation deploy \
+  --region "${PRIMARY_REGION}" \
+  --stack-name "${SHARED_API_STACK}" \
+  --template-file infra/aws/foundation/api-gateway-account.yml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
+  --tags \
+    Application=archon-datahub \
+    Environment=shared \
+    ManagedBy=github-actions \
+    Purpose=shared-apigateway-logging >/dev/null
+aws cloudformation update-termination-protection \
+  --region "${PRIMARY_REGION}" \
+  --stack-name "${SHARED_API_STACK}" \
+  --enable-termination-protection
+shared_stack_json="${RUNNER_TEMP}/shared-api-gateway-stack.json"
+assert_stack_complete_without_service_role \
+  "${PRIMARY_REGION}" "${SHARED_API_STACK}" "${shared_stack_json}"
+shared_role_arn="$(
+  jq -er '
+    .Stacks[0].Outputs[] |
+    select(.OutputKey == "ApiGatewayCloudWatchLogsRoleArn") |
+    .OutputValue
+  ' "${shared_stack_json}"
+)"
+test "${shared_role_arn}" = \
+  "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${SHARED_API_ROLE}"
+echo "::add-mask::${shared_role_arn}"
+api_account_json="${RUNNER_TEMP}/api-gateway-account-final.json"
+aws apigateway get-account \
+  --region "${PRIMARY_REGION}" \
+  --output json >"${api_account_json}"
+jq -e --arg expected "${shared_role_arn}" '
+  .cloudwatchRoleArn == $expected
+' "${api_account_json}" >/dev/null
+shared_role_json="${RUNNER_TEMP}/shared-api-gateway-role.json"
+aws iam get-role \
+  --role-name "${SHARED_API_ROLE}" \
+  --output json >"${shared_role_json}"
+jq -e '
+  .Role.RoleName == "archon-datahub-apigateway-cloudwatch-logs" and
+  (.Role.PermissionsBoundary == null) and
+  (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+  .Role.AssumeRolePolicyDocument.Statement[0] == {
+    Action: "sts:AssumeRole",
+    Effect: "Allow",
+    Principal: {Service: "apigateway.amazonaws.com"},
+    Sid: "ApiGatewayServiceOnly"
+  }
+' "${shared_role_json}" >/dev/null
+aws iam list-attached-role-policies \
+  --role-name "${SHARED_API_ROLE}" \
+  --output json |
+  jq -e '.AttachedPolicies == []' >/dev/null
+aws iam list-role-policies \
+  --role-name "${SHARED_API_ROLE}" \
+  --output json |
+  jq -e '.PolicyNames == ["archon-apigateway-cloudwatch-logs"]' >/dev/null
+shared_inline_json="${RUNNER_TEMP}/shared-api-gateway-inline-policy.json"
+aws iam get-role-policy \
+  --role-name "${SHARED_API_ROLE}" \
+  --policy-name archon-apigateway-cloudwatch-logs \
+  --output json >"${shared_inline_json}"
+jq -e '
+  ([.PolicyDocument.Statement[].Action] | flatten | index("*") | not) and
+  (
+    .PolicyDocument |
+    tostring |
+    contains("AdministratorAccess") |
+    not
+  ) and
+  (
+    .PolicyDocument |
+    tostring |
+    contains("API-Gateway-Execution-Logs_")
+  ) and
+  (
+    .PolicyDocument |
+    tostring |
+    contains("/archon/staging/api-gateway")
+  ) and
+  (
+    .PolicyDocument |
+    tostring |
+    contains("/archon/production/api-gateway")
+  )
+' "${shared_inline_json}" >/dev/null
+shared_policy_sha="$(canonical_policy_sha "${shared_inline_json}")"
+shared_template_sha="$(
+  deployed_template_sha "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+)"
+shared_role_binding_sha="$(
+  printf '%s' "${shared_role_arn}" | sha256sum | awk '{print $1}'
+)"
+echo "::endgroup::"
+
+echo "::group::Reconcile the three governed-canary read roles"
+revalidate_master
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+aws cloudformation deploy \
+  --region "${PRIMARY_REGION}" \
+  --stack-name "${CANARY_ROLE_STACK}" \
+  --template-file infra/aws/foundation/governed-canary-roles.yml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --no-fail-on-empty-changeset \
+  --parameter-overrides \
+    GitHubOrganization=upgradedev \
+    GitHubRepository=archon-datahub >/dev/null
+aws cloudformation update-termination-protection \
+  --region "${PRIMARY_REGION}" \
+  --stack-name "${CANARY_ROLE_STACK}" \
+  --enable-termination-protection
+canary_stack_json="${RUNNER_TEMP}/governed-canary-role-stack.json"
+assert_stack_complete_without_service_role \
+  "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}" "${canary_stack_json}"
+canary_roles_json='[]'
+for kind in "${CANARY_ROLE_KINDS[@]}"; do
+  role_name="${CANARY_ROLE[${kind}]}"
+  environment="${CANARY_ENVIRONMENT[${kind}]}"
+  policy_name="${CANARY_POLICY[${kind}]}"
+  case "${kind}" in
+    prepare)
+      output_key="GovernedCanaryPrepareRoleArn"
+      ;;
+    approval)
+      output_key="GovernedCanaryApprovalRoleArn"
+      ;;
+    recovery)
+      output_key="GovernedCanaryRecoveryRoleArn"
+      ;;
+  esac
+  role_arn="$(
+    jq -er \
+      --arg key "${output_key}" '
+        .Stacks[0].Outputs[] |
+        select(.OutputKey == $key) |
+        .OutputValue
+      ' "${canary_stack_json}"
+  )"
+  test "${role_arn}" = \
+    "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${role_name}"
+  echo "::add-mask::${role_arn}"
+  role_json="${RUNNER_TEMP}/governed-canary-${kind}-role.json"
+  aws iam get-role \
+    --role-name "${role_name}" \
+    --output json >"${role_json}"
+  jq -e \
+    --arg account "${EXPECTED_ACCOUNT_ID}" \
+    --arg role "${role_name}" \
+    --arg environment "${environment}" \
+    --arg subject \
+      "repo:upgradedev/archon-datahub:environment:${environment}" '
+      .Role.RoleName == $role and
+      .Role.MaxSessionDuration == 3600 and
+      (.Role.PermissionsBoundary == null) and
+      (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+      .Role.AssumeRolePolicyDocument.Statement[0] == {
+        Action: "sts:AssumeRoleWithWebIdentity",
+        Condition: {
+          StringEquals: {
+            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            "token.actions.githubusercontent.com:sub": $subject
+          }
+        },
+        Effect: "Allow",
+        Principal: {
+          Federated: (
+            "arn:aws:iam::" + $account +
+            ":oidc-provider/token.actions.githubusercontent.com"
+          )
+        },
+        Sid: "GitHubEnvironmentOidcOnly"
+      } and
+      (
+        .Role.Tags |
+        map(select(.Key | startswith("aws:") | not)) |
+        sort_by(.Key)
+      ) == (
+        [
+          {Key: "Application", Value: "archon-datahub"},
+          {Key: "Environment", Value: $environment},
+          {Key: "ManagedBy", Value: "github-actions"}
+        ] |
+        sort_by(.Key)
+      )
+    ' "${role_json}" >/dev/null
+  aws iam list-attached-role-policies \
+    --role-name "${role_name}" \
+    --output json |
+    jq -e '.AttachedPolicies == []' >/dev/null
+  aws iam list-role-policies \
+    --role-name "${role_name}" \
+    --output json |
+    jq -e --arg policy "${policy_name}" \
+      '.PolicyNames == [$policy]' >/dev/null
+  policy_json="${RUNNER_TEMP}/governed-canary-${kind}-policy.json"
+  aws iam get-role-policy \
+    --role-name "${role_name}" \
+    --policy-name "${policy_name}" \
+    --output json >"${policy_json}"
+  compact_policy_size="$(
+    jq -c '.PolicyDocument' "${policy_json}" |
+      wc -c |
+      awk '{print $1 - 1}'
+  )"
+  test "${compact_policy_size}" -le 2048
+  jq -e \
+    --arg account "${EXPECTED_ACCOUNT_ID}" \
+    --arg region "${PRIMARY_REGION}" \
+    --arg kind "${kind}" '
+      .PolicyDocument.Version == "2012-10-17" and
+      (
+        [.PolicyDocument.Statement[] |
+          select(.Sid == "ReadExactStagingStack")] |
+        length
+      ) == 1 and
+      (
+        .PolicyDocument.Statement[] |
+        select(.Sid == "ReadExactStagingStack") |
+        .Effect == "Allow" and
+        .Action == "cloudformation:DescribeStacks" and
+        .Resource == (
+          "arn:aws:cloudformation:" + $region + ":" + $account +
+          ":stack/Archon-staging/*"
+        ) and
+        (.Condition == null)
+      ) and
+      (
+        if $kind == "approval" then
+          (.PolicyDocument.Statement | length) == 2 and
+          (
+            .PolicyDocument.Statement[] |
+            select(.Sid == "ReadExactStagingApproverMembership") |
+            .Effect == "Allow" and
+            (.Action | sort) == (
+              [
+                "cognito-idp:AdminGetUser",
+                "cognito-idp:AdminListGroupsForUser"
+              ] |
+              sort
+            ) and
+            .Resource == (
+              "arn:aws:cognito-idp:" + $region + ":" + $account +
+              ":userpool/" + $region + "_*"
+            ) and
+            .Condition == {
+              StringEquals: {
+                "aws:ResourceTag/Application": "archon-datahub",
+                "aws:ResourceTag/Environment": "staging",
+                "aws:ResourceTag/ManagedBy": "aws-cdk"
+              }
+            }
+          )
+        else
+          (.PolicyDocument.Statement | length) == 1
+        end
+      ) and
+      (
+        [.PolicyDocument.Statement[] |
+          select(.Effect == "Allow") |
+          .Action] |
+        flatten |
+        all(
+          . != "*" and
+          (endswith(":*") | not)
+        )
+      )
+    ' "${policy_json}" >/dev/null
+  CANARY_POLICY_SHA["${kind}"]="$(canonical_policy_sha "${policy_json}")"
+  CANARY_ROLE_BINDING_SHA["${kind}"]="$(
+    printf '%s' "${role_arn}" | sha256sum | awk '{print $1}'
+  )"
+  role_evidence="$(
+    jq -cnS \
+      --arg kind "${kind}" \
+      --arg environment "${environment}" \
+      --arg policySha256 "${CANARY_POLICY_SHA[${kind}]}" \
+      --arg roleBindingSha256 "${CANARY_ROLE_BINDING_SHA[${kind}]}" '
+        {
+          environment: $environment,
+          kind: $kind,
+          policySha256: $policySha256,
+          roleArnTemplate: (
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/" +
+            "archon-datahub-github-governed-canary-" + $kind
+          ),
+          roleBindingSha256: $roleBindingSha256,
+          validation: "passed"
+        }
+      '
+  )"
+  canary_roles_json="$(
+    jq -cnS \
+      --argjson current "${canary_roles_json}" \
+      --argjson addition "${role_evidence}" \
+      '$current + [$addition]'
+  )"
+done
+canary_template_sha="$(
+  deployed_template_sha "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+)"
+echo "::endgroup::"
+
+echo "::group::Bootstrap both isolated stages in both regions"
+for stage in staging production; do
+  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+    target="${stage}:${region}"
+    revalidate_master
+    assert_stack_role_is_null_if_present \
+      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+    infra/aws/node_modules/.bin/cdk bootstrap \
+      "aws://${EXPECTED_ACCOUNT_ID}/${region}" \
+      --template "${BOOTSTRAP_TEMPLATE_BY_TARGET[${target}]}" \
+      --toolkit-stack-name "${BOOTSTRAP_STACK[${stage}]}" \
+      --qualifier "${QUALIFIER[${stage}]}" \
+      --cloudformation-execution-policies \
+        "${EXECUTION_POLICY_ARNS_BY_TARGET[${target}]}" \
+      --termination-protection \
+      --no-bootstrap-customer-key \
+      --no-previous-parameters \
+      --tags Application=archon-datahub \
+      --tags Environment="${stage}" \
+      --tags ManagedBy=github-actions \
+      --tags Purpose=cdk-bootstrap \
+      --no-notices
+  done
+done
+echo "::endgroup::"
+
+echo "::group::Reconcile the two environment-bound deploy roles"
+for stage in staging production; do
+  revalidate_master
+  assert_stack_role_is_null_if_present \
+    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  aws cloudformation deploy \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${DEPLOY_STACK[${stage}]}" \
+    --template-file infra/aws/foundation/github-actions-deploy-role.yml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --no-fail-on-empty-changeset \
+    --parameter-overrides \
+      GitHubOrganization=upgradedev \
+      GitHubRepository=archon-datahub \
+      DeploymentEnvironment="${stage}" \
+      BootstrapQualifier="${QUALIFIER[${stage}]}" \
+      BootstrapStackName="${BOOTSTRAP_STACK[${stage}]}" \
+      IamFoundationStackName="${IAM_STACK[${stage}]}" \
+    --tags \
+      Application=archon-datahub \
+      Environment="${stage}" \
+      ManagedBy=github-actions \
+      Purpose=github-deployment-role >/dev/null
+  aws cloudformation update-termination-protection \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${DEPLOY_STACK[${stage}]}" \
+    --enable-termination-protection
+done
+echo "::endgroup::"
+
+echo "::group::Require all ten foundation stacks to be IN_SYNC"
+revalidate_master
+drift_file="${RUNNER_TEMP}/aws-foundation-drift.json"
+printf '[]' >"${drift_file}"
+check_drift() {
+  local stage="$1"
+  local kind="$2"
+  local region="$3"
+  local stack_name="$4"
+  local detection_id
+  local status_json="${RUNNER_TEMP}/drift-${region}-${stack_name}.json"
+  local resource_json="${RUNNER_TEMP}/resource-drift-${region}-${stack_name}.json"
+  detection_id="$(
+    aws cloudformation detect-stack-drift \
+      --region "${region}" \
+      --stack-name "${stack_name}" \
+      --query StackDriftDetectionId \
+      --output text
+  )"
+  aws cloudformation wait stack-drift-detection-complete \
+    --region "${region}" \
+    --stack-drift-detection-id "${detection_id}"
+  aws cloudformation describe-stack-drift-detection-status \
+    --region "${region}" \
+    --stack-drift-detection-id "${detection_id}" \
+    --output json >"${status_json}"
+  jq -e '
+    .DetectionStatus == "DETECTION_COMPLETE" and
+    .StackDriftStatus == "IN_SYNC" and
+    (.DriftedStackResourceCount // 0) == 0
+  ' "${status_json}" >/dev/null
+  aws cloudformation describe-stack-resource-drifts \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --output json >"${resource_json}"
+  jq -e '
+    [
+      .StackResourceDrifts[]? |
+      select(
+        .StackResourceDriftStatus != "IN_SYNC" and
+        .StackResourceDriftStatus != "NOT_CHECKED"
+      )
+    ] |
+    length == 0
+  ' "${resource_json}" >/dev/null
+  jq \
+    --arg stage "${stage}" \
+    --arg kind "${kind}" \
+    --arg region "${region}" \
+    --arg stackName "${stack_name}" '
+      . + [{
+        driftedResourceCount: 0,
+        kind: $kind,
+        region: $region,
+        stackDriftStatus: "IN_SYNC",
+        stackName: $stackName,
+        stage: $stage,
+        validation: "passed"
+      }]
+    ' "${drift_file}" >"${drift_file}.next"
+  mv "${drift_file}.next" "${drift_file}"
+}
+for stage in staging production; do
+  check_drift "${stage}" iam "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  check_drift "${stage}" deploy-role "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+    check_drift \
+      "${stage}" bootstrap "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+  done
+done
+check_drift shared api-gateway "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+check_drift shared governed-canary-roles \
+  "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+jq -e 'length == 10 and all(.[]; .stackDriftStatus == "IN_SYNC")' \
+  "${drift_file}" >/dev/null
+drift_sha="$(sha256sum "${drift_file}" | awk '{print $1}')"
+echo "::endgroup::"
+
+echo "::group::Verify live stage bindings and author sanitized evidence"
+rm -rf -- "${EVIDENCE_DIR}"
+mkdir -p "${EVIDENCE_DIR}"
+stages_json='[]'
+expected_bootstrap_logical_ids='[
+  "CdkBootstrapVersion",
+  "CloudFormationExecutionRole",
+  "ContainerAssetsRepository",
+  "DeploymentActionRole",
+  "FilePublishingRole",
+  "FilePublishingRoleDefaultPolicy",
+  "ImagePublishingRole",
+  "ImagePublishingRoleDefaultPolicy",
+  "LookupRole",
+  "StagingBucket",
+  "StagingBucketPolicy"
+]'
+
+for stage in staging production; do
+  regions_json='[]'
+  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
+    stack_json="${RUNNER_TEMP}/${stage}-bootstrap-${region}.json"
+    assert_stack_complete_without_service_role \
+      "${region}" "${BOOTSTRAP_STACK[${stage}]}" "${stack_json}"
+    parameters="$(
+      jq -c '
+        .Stacks[0].Parameters |
+        map({key: .ParameterKey, value: .ParameterValue}) |
+        from_entries
+      ' "${stack_json}"
+    )"
+    jq -e \
+      --arg qualifier "${QUALIFIER[${stage}]}" \
+      --arg policies "${EXECUTION_POLICY_ARNS_BY_TARGET[${stage}:${region}]}" \
+      --arg qualifierStage "${stage}" \
+      --arg region "${region}" '
+        .Qualifier == $qualifier and
+        .TrustedAccounts == "" and
+        .TrustedAccountsForLookup == "" and
+        .CloudFormationExecutionPolicies == $policies and
+        .FileAssetsBucketName == "" and
+        .FileAssetsBucketKmsKeyId == "AWS_MANAGED_KEY" and
+        .ContainerAssetsRepositoryName == "" and
+        .InputPermissionsBoundary == "" and
+        .UseExamplePermissionsBoundary == "false" and
+        .BootstrapVariant ==
+          (
+            "Archon DataHub " + $qualifierStage + " " +
+            $region + " isolated bootstrap v1"
+          ) and
+        .PublicAccessBlockConfiguration == "true" and
+        .DenyExternalId == "true"
+      ' <<<"${parameters}" >/dev/null
+    bootstrap_version="$(
+      jq -er '
+        .Stacks[0].Outputs[] |
+        select(.OutputKey == "BootstrapVersion") |
+        .OutputValue
+      ' "${stack_json}"
+    )"
+    test "${bootstrap_version}" = "${PINNED_BOOTSTRAP_VERSION}"
+    ssm_version="$(
+      aws ssm get-parameter \
+        --region "${region}" \
+        --name "/cdk-bootstrap/${QUALIFIER[${stage}]}/version" \
+        --query Parameter.Value \
+        --output text
+    )"
+    test "${ssm_version}" = "${bootstrap_version}"
+    resources="${RUNNER_TEMP}/${stage}-bootstrap-resources-${region}.json"
+    aws cloudformation list-stack-resources \
+      --region "${region}" \
+      --stack-name "${BOOTSTRAP_STACK[${stage}]}" \
+      --output json >"${resources}"
+    jq -e \
+      --argjson expected "${expected_bootstrap_logical_ids}" '
+        ([.StackResourceSummaries[].LogicalResourceId] | sort) ==
+          ($expected | sort) and
+        all(
+          .StackResourceSummaries[];
+          .ResourceStatus == "CREATE_COMPLETE" or
+          .ResourceStatus == "UPDATE_COMPLETE"
+        )
+      ' "${resources}" >/dev/null
+
+    cfn_role="cdk-${QUALIFIER[${stage}]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${region}"
+    cfn_attached="${RUNNER_TEMP}/${stage}-cfn-attached-${region}.json"
+    aws iam list-attached-role-policies \
+      --role-name "${cfn_role}" \
+      --output json >"${cfn_attached}"
+    jq -e \
+      --arg policies "${EXECUTION_POLICY_ARNS_BY_TARGET[${stage}:${region}]}" '
+      (.AttachedPolicies | sort_by(.PolicyArn)) ==
+        (
+          $policies |
+          split(",") |
+          map({
+            PolicyArn: .,
+            PolicyName: (split("/")[-1])
+          }) |
+          sort_by(.PolicyArn)
+        )
+    ' "${cfn_attached}" >/dev/null
+    aws iam list-role-policies \
+      --role-name "${cfn_role}" \
+      --output json |
+      jq -e '.PolicyNames == []' >/dev/null
+    aws iam get-role \
+      --role-name "${cfn_role}" \
+      --output json |
+      jq -e '.Role.PermissionsBoundary == null' >/dev/null
+
+    lookup_role="cdk-${QUALIFIER[${stage}]}-lookup-role-${EXPECTED_ACCOUNT_ID}-${region}"
+    aws iam list-attached-role-policies \
+      --role-name "${lookup_role}" \
+      --output json |
+      jq -e '
+        .AttachedPolicies == [{
+          PolicyArn: "arn:aws:iam::aws:policy/ReadOnlyAccess",
+          PolicyName: "ReadOnlyAccess"
+        }]
+      ' >/dev/null
+
+    bootstrap_deploy_role="cdk-${QUALIFIER[${stage}]}-deploy-role-${EXPECTED_ACCOUNT_ID}-${region}"
+    aws iam list-attached-role-policies \
+      --role-name "${bootstrap_deploy_role}" \
+      --output json |
+      jq -e '.AttachedPolicies == []' >/dev/null
+    aws iam list-role-policies \
+      --role-name "${bootstrap_deploy_role}" \
+      --output json |
+      jq -e '.PolicyNames == ["default"]' >/dev/null
+    bootstrap_deploy_policy="${RUNNER_TEMP}/${stage}-bootstrap-deploy-policy-${region}.json"
+    aws iam get-role-policy \
+      --role-name "${bootstrap_deploy_role}" \
+      --policy-name default \
+      --output json >"${bootstrap_deploy_policy}"
+    if [[ "${region}" == "${EDGE_REGION}" ]]; then
+      stack_names="[\"Archon-${stage}-Edge\"]"
+    elif [[ "${stage}" == "staging" ]]; then
+      stack_names='["Archon-staging","Archon-Registry"]'
+    else
+      stack_names='["Archon-production"]'
+    fi
+    expected_bootstrap_deploy_policy="${RUNNER_TEMP}/${stage}-expected-bootstrap-deploy-policy-${region}.json"
+    jq -cnS \
+      --arg account "${EXPECTED_ACCOUNT_ID}" \
+      --arg region "${region}" \
+      --arg qualifier "${QUALIFIER[${stage}]}" \
+      --argjson stackNames "${stack_names}" '
+        def stack_arn($name):
+          "arn:aws:cloudformation:" + $region + ":" + $account +
+          ":stack/" + $name + "/*";
+        {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Sid: "InspectOnlyStageStacks",
+              Effect: "Allow",
+              Action: [
+                "cloudformation:DescribeStackEvents",
+                "cloudformation:DescribeStackResource",
+                "cloudformation:DescribeStackResources",
+                "cloudformation:DescribeStacks",
+                "cloudformation:GetTemplate",
+                "cloudformation:ListStackResources",
+                "cloudformation:UpdateTerminationProtection"
+              ],
+              Resource: ($stackNames | map(stack_arn(.)))
+            },
+            {
+              Sid: "CreateOrUpdateOnlyWithBootstrapExecutionRole",
+              Effect: "Allow",
+              Action: [
+                "cloudformation:CreateStack",
+                "cloudformation:UpdateStack"
+              ],
+              Resource: ($stackNames | map(stack_arn(.))),
+              Condition: {
+                ArnEquals: {
+                  "cloudformation:RoleArn": (
+                    "arn:aws:iam::" + $account + ":role/cdk-" + $qualifier +
+                    "-cfn-exec-role-" + $account + "-" + $region
+                  )
+                }
+              }
+            },
+            {
+              Sid: "CreateOnlyCdkDeployChangeSet",
+              Effect: "Allow",
+              Action: "cloudformation:CreateChangeSet",
+              Resource: ($stackNames | map(stack_arn(.))),
+              Condition: {
+                ArnEquals: {
+                  "cloudformation:RoleArn": (
+                    "arn:aws:iam::" + $account + ":role/cdk-" + $qualifier +
+                    "-cfn-exec-role-" + $account + "-" + $region
+                  )
+                },
+                StringEquals: {
+                  "cloudformation:ChangeSetName": "cdk-deploy-change-set"
+                }
+              }
+            },
+            {
+              Sid: "UseOnlyCdkDeployChangeSets",
+              Effect: "Allow",
+              Action: [
+                "cloudformation:DeleteChangeSet",
+                "cloudformation:DescribeChangeSet",
+                "cloudformation:ExecuteChangeSet"
+              ],
+              Resource: ($stackNames | map(stack_arn(.))),
+              Condition: {
+                StringEquals: {
+                  "cloudformation:ChangeSetName": "cdk-deploy-change-set"
+                }
+              }
+            },
+            {
+              Sid: "InspectTemplatesWithoutStackMutation",
+              Effect: "Allow",
+              Action: [
+                "cloudformation:GetTemplateSummary",
+                "cloudformation:ValidateTemplate"
+              ],
+              Resource: "*"
+            },
+            {
+              Sid: "PassOnlyThisBootstrapExecutionRole",
+              Effect: "Allow",
+              Action: "iam:PassRole",
+              Resource: (
+                "arn:aws:iam::" + $account + ":role/cdk-" + $qualifier +
+                "-cfn-exec-role-" + $account + "-" + $region
+              ),
+              Condition: {
+                StringEquals: {
+                  "iam:PassedToService": "cloudformation.amazonaws.com"
+                }
+              }
+            },
+            {
+              Sid: "VerifyCaller",
+              Effect: "Allow",
+              Action: "sts:GetCallerIdentity",
+              Resource: "*"
+            },
+            {
+              Sid: "ReadOnlyThisBootstrapStagingBucket",
+              Effect: "Allow",
+              Action: [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*"
+              ],
+              Resource: [
+                (
+                  "arn:aws:s3:::cdk-" + $qualifier + "-assets-" +
+                  $account + "-" + $region
+                ),
+                (
+                  "arn:aws:s3:::cdk-" + $qualifier + "-assets-" +
+                  $account + "-" + $region + "/*"
+                )
+              ]
+            },
+            {
+              Sid: "ReadOnlyThisBootstrapVersion",
+              Effect: "Allow",
+              Action: [
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+              ],
+              Resource: (
+                "arn:aws:ssm:" + $region + ":" + $account +
+                ":parameter/cdk-bootstrap/" + $qualifier + "/version"
+              )
+            }
+          ]
+        }
+      ' >"${expected_bootstrap_deploy_policy}"
+    bootstrap_policy_canonical='
+      def sorted_array:
+        if type == "array" then sort else [.] end;
+      .Statement |= (
+        map(
+          .Action |= sorted_array |
+          .Resource |= sorted_array
+        ) |
+        sort_by(.Sid)
+      )
+    '
+    jq -S "${bootstrap_policy_canonical}" \
+      "${expected_bootstrap_deploy_policy}" \
+      >"${expected_bootstrap_deploy_policy}.canonical"
+    jq '.PolicyDocument' "${bootstrap_deploy_policy}" |
+      jq -S "${bootstrap_policy_canonical}" \
+        >"${bootstrap_deploy_policy}.canonical"
+    cmp -s \
+      "${expected_bootstrap_deploy_policy}.canonical" \
+      "${bootstrap_deploy_policy}.canonical"
+    bootstrap_deploy_policy_sha="$(
+      sha256sum "${bootstrap_deploy_policy}.canonical" |
+        awk '{print $1}'
+    )"
+
+    resource_contract_sha="$(
+      jq -cS '
+        [.StackResourceSummaries[] |
+          {
+            logicalId: .LogicalResourceId,
+            resourceStatus: .ResourceStatus,
+            resourceType: .ResourceType
+          }] |
+        sort_by(.logicalId)
+      ' "${resources}" |
+      sha256sum |
+      awk '{print $1}'
+    )"
+    bootstrap_deployed_template_sha="$(
+      deployed_template_sha "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+    )"
+    region_evidence="$(
+      jq -cnS \
+        --arg region "${region}" \
+        --argjson version "${bootstrap_version}" \
+        --arg sourceTemplateSha256 \
+          "${BOOTSTRAP_TEMPLATE_SHA_BY_TARGET[${stage}:${region}]}" \
+        --arg resourceContractSha256 "${resource_contract_sha}" \
+        --arg deployRolePolicySha256 "${bootstrap_deploy_policy_sha}" \
+        --arg deployedTemplateSha256 "${bootstrap_deployed_template_sha}" '
+          {
+            bootstrapVersion: $version,
+            deployRolePolicySha256: $deployRolePolicySha256,
+            deployedTemplateSha256: $deployedTemplateSha256,
+            region: $region,
+            resourceContractSha256: $resourceContractSha256,
+            sourceTemplateSha256: $sourceTemplateSha256,
+            ssmVersion: $version,
+            terminationProtection: true,
+            validation: "passed"
+          }
+        '
+    )"
+    regions_json="$(
+      jq -cnS \
+        --argjson current "${regions_json}" \
+        --argjson addition "${region_evidence}" \
+        '$current + [$addition]'
+    )"
+  done
+
+  deploy_stack_json="${RUNNER_TEMP}/${stage}-deploy-stack.json"
+  assert_stack_complete_without_service_role \
+    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}" "${deploy_stack_json}"
+  deploy_role_arn="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "GitHubDeployRoleArn") |
+      .OutputValue
+    ' "${deploy_stack_json}"
+  )"
+  test "${deploy_role_arn}" = \
+    "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${DEPLOY_ROLE[${stage}]}"
+  echo "::add-mask::${deploy_role_arn}"
+  deploy_role_json="${RUNNER_TEMP}/${stage}-deploy-role.json"
+  aws iam get-role \
+    --role-name "${DEPLOY_ROLE[${stage}]}" \
+    --output json >"${deploy_role_json}"
+  jq -e \
+    --arg account "${EXPECTED_ACCOUNT_ID}" \
+    --arg role "${DEPLOY_ROLE[${stage}]}" \
+    --arg subject \
+      "repo:upgradedev/archon-datahub:environment:${stage}" '
+      .Role.RoleName == $role and
+      .Role.MaxSessionDuration == 7200 and
+      (.Role.PermissionsBoundary == null) and
+      (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+      .Role.AssumeRolePolicyDocument.Statement[0].Action ==
+        "sts:AssumeRoleWithWebIdentity" and
+      .Role.AssumeRolePolicyDocument.Statement[0].Principal.Federated ==
+        ("arn:aws:iam::" + $account +
+          ":oidc-provider/token.actions.githubusercontent.com") and
+      .Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals[
+        "token.actions.githubusercontent.com:aud"
+      ] == "sts.amazonaws.com" and
+      .Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals[
+        "token.actions.githubusercontent.com:sub"
+      ] == $subject
+    ' "${deploy_role_json}" >/dev/null
+  aws iam list-attached-role-policies \
+    --role-name "${DEPLOY_ROLE[${stage}]}" \
+    --output json |
+    jq -e '.AttachedPolicies == []' >/dev/null
+  aws iam list-role-policies \
+    --role-name "${DEPLOY_ROLE[${stage}]}" \
+    --output json |
+    jq -e '.PolicyNames == ["archon-immutable-deployment"]' >/dev/null
+  deploy_inline="${RUNNER_TEMP}/${stage}-deploy-inline-policy.json"
+  aws iam get-role-policy \
+    --role-name "${DEPLOY_ROLE[${stage}]}" \
+    --policy-name archon-immutable-deployment \
+    --output json >"${deploy_inline}"
+  jq -e '
+    (
+      [.PolicyDocument.Statement[] |
+        select(.Effect == "Allow") |
+        .Action] |
+      flatten |
+      index("*") |
+      not
+    ) and
+    (
+      [.PolicyDocument.Statement[].Action] |
+      flatten |
+      index("iam:PassRole") |
+      not
+    ) and
+    (
+      .PolicyDocument |
+      tostring |
+      contains("AdministratorAccess") |
+      not
+    ) and
+    (
+      .PolicyDocument |
+      tostring |
+      contains("lookup-role") |
+      not
+    ) and
+    (
+      .PolicyDocument |
+      tostring |
+      contains("hnb659fds") |
+      not
+    )
+  ' "${deploy_inline}" >/dev/null
+  if [[ "${stage}" == "production" ]]; then
+    jq -e '
+      (
+        [.PolicyDocument.Statement[].Action] |
+        flatten |
+        map(select(
+          . == "ecr:GetAuthorizationToken" or
+          . == "ecr:BatchDeleteImage" or
+          . == "ecr:PutImage" or
+          . == "ecr:InitiateLayerUpload" or
+          . == "ecr:UploadLayerPart" or
+          . == "ecr:CompleteLayerUpload"
+        )) |
+        length
+      ) == 0
+    ' "${deploy_inline}" >/dev/null
+  fi
+  DEPLOY_POLICY_SHA["${stage}"]="$(canonical_policy_sha "${deploy_inline}")"
+  DEPLOY_ROLE_BINDING_SHA["${stage}"]="$(
+    printf '%s' "${deploy_role_arn}" | sha256sum | awk '{print $1}'
+  )"
+  DEPLOY_TEMPLATE_SHA["${stage}"]="$(
+    deployed_template_sha "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  )"
+  stage_evidence="$(
+    jq -cnS \
+      --arg stage "${stage}" \
+      --arg qualifier "${QUALIFIER[${stage}]}" \
+      --arg bootstrapStackName "${BOOTSTRAP_STACK[${stage}]}" \
+      --arg executionPolicySha256 "${EXECUTION_POLICY_SHA[${stage}]}" \
+      --arg runtimeBoundarySha256 "${BOUNDARY_SHA[${stage}]}" \
+      --arg deployPolicySha256 "${DEPLOY_POLICY_SHA[${stage}]}" \
+      --arg deployRoleBindingSha256 "${DEPLOY_ROLE_BINDING_SHA[${stage}]}" \
+      --arg iamDeployedTemplateSha256 "${IAM_TEMPLATE_SHA[${stage}]}" \
+      --arg deployDeployedTemplateSha256 "${DEPLOY_TEMPLATE_SHA[${stage}]}" \
+      --argjson regions "${regions_json}" '
+        {
+          bootstrapStackName: $bootstrapStackName,
+          deployDeployedTemplateSha256: $deployDeployedTemplateSha256,
+          deployPolicySha256: $deployPolicySha256,
+          deployRoleArnTemplate:
+            ("arn:aws:iam::<AWS_ACCOUNT_ID>:role/archon-datahub-github-" +
+              $stage + "-deploy"),
+          deployRoleBindingSha256: $deployRoleBindingSha256,
+          executionPolicySha256: $executionPolicySha256,
+          iamDeployedTemplateSha256: $iamDeployedTemplateSha256,
+          qualifier: $qualifier,
+          regions: $regions,
+          runtimeBoundarySha256: $runtimeBoundarySha256,
+          stage: $stage,
+          validation: "passed"
+        }
+      '
+  )"
+  stages_json="$(
+    jq -cnS \
+      --argjson current "${stages_json}" \
+      --argjson addition "${stage_evidence}" \
+      '$current + [$addition]'
+  )"
+done
+
+cp "${drift_file}" "${EVIDENCE_DIR}/drift.json"
+source_hashes="$(
+  for source_path in \
+    .github/workflows/aws-foundation.yml \
+    contracts/aws-foundation-v1.json \
+    infra/aws/foundation/api-gateway-account.yml \
+    infra/aws/foundation/cdk-execution-policy.yml \
+    infra/aws/foundation/github-actions-deploy-role.yml \
+    infra/aws/foundation/github-actions-foundation-policy.json \
+    infra/aws/foundation/github-actions-foundation-role.yml \
+    infra/aws/foundation/governed-canary-roles.yml \
+    scripts/bootstrap-aws-foundation-role.sh \
+    scripts/patch-cdk-bootstrap-template.mjs \
+    scripts/reconcile-aws-foundation.sh \
+    scripts/render-aws-foundation-policy.mjs \
+    scripts/verify-aws-runtime-boundary.mjs; do
+    jq -cn \
+      --arg path "${source_path}" \
+      --arg sha256 "$(sha256sum "${source_path}" | awk '{print $1}')" \
+      '{path: $path, sha256: $sha256}'
+  done |
+  jq -csS 'sort_by(.path)'
+)"
+runtime_inventory_sha="$(
+  jq -cS '.aws.runtimeBoundary' contracts/aws-foundation-v1.json |
+    sha256sum |
+    awk '{print $1}'
+)"
+foundation_json="${EVIDENCE_DIR}/foundation.json"
+jq -cnS \
+  --arg repository "${GITHUB_REPOSITORY}" \
+  --arg ref "${GITHUB_REF}" \
+  --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+  --arg workflowSha "${GITHUB_WORKFLOW_SHA}" \
+  --argjson runId "${GITHUB_RUN_ID}" \
+  --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+  --arg foundationPolicyActualSha256 "${FOUNDATION_POLICY_ACTUAL_SHA}" \
+  --arg bootstrapTemplateSha256 "${BOOTSTRAP_TEMPLATE_SHA}" \
+  --argjson pinnedBootstrapVersion "${PINNED_BOOTSTRAP_VERSION}" \
+  --arg driftSha256 "${drift_sha}" \
+  --arg runtimeInventorySha256 "${runtime_inventory_sha}" \
+  --arg sharedPolicySha256 "${shared_policy_sha}" \
+  --arg sharedRoleBindingSha256 "${shared_role_binding_sha}" \
+  --arg sharedDeployedTemplateSha256 "${shared_template_sha}" \
+  --arg governedCanaryDeployedTemplateSha256 "${canary_template_sha}" \
+  --argjson governedCanaryRoles "${canary_roles_json}" \
+  --argjson applicationStackRoles "${application_stack_roles_json}" \
+  --argjson applicationStackRoleTransition \
+    "${application_stack_role_transition_json}" \
+  --argjson sourceArtifacts "${source_hashes}" \
+  --argjson stages "${stages_json}" \
+  --arg completedAt "$(date --utc +'%Y-%m-%dT%H:%M:%SZ')" '
+    {
+      aws: {
+        foundationPolicyActualSha256: $foundationPolicyActualSha256,
+        applicationStackRolePreflight: $applicationStackRoles,
+        applicationStackRoleTransition: $applicationStackRoleTransition,
+        governedCanary: {
+          deployedTemplateSha256: $governedCanaryDeployedTemplateSha256,
+          roles: $governedCanaryRoles,
+          stackName: "Archon-Governed-Canary-Roles",
+          validation: "passed"
+        },
+        partition: "aws",
+        runtimeInventorySha256: $runtimeInventorySha256,
+        sharedApiGateway: {
+          deployedTemplateSha256: $sharedDeployedTemplateSha256,
+          inlinePolicySha256: $sharedPolicySha256,
+          roleArnTemplate:
+            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/archon-datahub-apigateway-cloudwatch-logs",
+          roleBindingSha256: $sharedRoleBindingSha256,
+          validation: "passed"
+        },
+        stages: $stages
+      },
+      bootstrapTemplate: {
+        minimumVersion: 6,
+        pinnedVersion: $pinnedBootstrapVersion,
+        sha256: $bootstrapTemplateSha256
+      },
+      completedAt: $completedAt,
+      drift: {
+        sha256: $driftSha256,
+        stackCount: 10,
+        status: "IN_SYNC"
+      },
+      schemaVersion: "archon.aws-foundation-evidence/v1",
+      source: {
+        artifacts: $sourceArtifacts,
+        controlPlaneSha: $controlPlaneSha,
+        ref: $ref,
+        repository: $repository,
+        runAttempt: $runAttempt,
+        runId: $runId,
+        workflowPath: ".github/workflows/aws-foundation.yml",
+        workflowSha: $workflowSha
+      },
+      validation: "passed"
+    }
+  ' >"${foundation_json}"
+jq -e '
+  .schemaVersion == "archon.aws-foundation-evidence/v1" and
+  .validation == "passed" and
+  (.aws.applicationStackRolePreflight | length) == 5 and
+  all(.aws.applicationStackRolePreflight[];
+    .validation == "passed" or
+    .validation == "requires-explicit-deploy-migration"
+  ) and
+  (
+    (
+      [
+        .aws.applicationStackRolePreflight[] |
+        select(.validation == "requires-explicit-deploy-migration")
+      ] |
+      length
+    ) as $migrationRequiredCount |
+    (
+      if $migrationRequiredCount == 0 then
+        all(.aws.applicationStackRolePreflight[];
+          .validation == "passed"
+        ) and
+        .aws.applicationStackRoleTransition == {
+          deployRequirement: "exact-role-postcheck",
+          foundationOutcome: "passed",
+          migrationRequiredCount: 0,
+          state: "ready-for-deploy"
+        }
+      else
+        .aws.applicationStackRoleTransition == {
+          deployRequirement: "explicit-role-migration",
+          foundationOutcome: "passed",
+          migrationRequiredCount: $migrationRequiredCount,
+          state: "foundation-complete-deploy-migration-required"
+        }
+      end
+    )
+  ) and
+  .drift == {
+    sha256: .drift.sha256,
+    stackCount: 10,
+    status: "IN_SYNC"
+  } and
+  (.aws.stages | map(.stage)) == ["staging", "production"] and
+  all(.aws.stages[];
+    .validation == "passed" and
+    (.regions | map(.region)) == ["eu-west-1", "us-east-1"] and
+    all(.regions[];
+      .bootstrapVersion == 32 and
+      .ssmVersion == 32 and
+      .terminationProtection == true and
+      .validation == "passed"
+    )
+  ) and
+  .aws.governedCanary.validation == "passed" and
+  (.aws.governedCanary.roles | map(.kind)) ==
+    ["prepare", "approval", "recovery"] and
+  all(.aws.governedCanary.roles[]; .validation == "passed") and
+  .aws.sharedApiGateway.validation == "passed"
+' "${foundation_json}" >/dev/null
+
+foundation_sha="$(sha256sum "${foundation_json}" | awk '{print $1}')"
+manifest="${EVIDENCE_DIR}/manifest.json"
+jq -cnS \
+  --arg foundationSha256 "${foundation_sha}" \
+  --arg driftSha256 "${drift_sha}" \
+  --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
+  --arg bootstrapTemplateSha256 "${BOOTSTRAP_TEMPLATE_SHA}" '
+    {
+      bootstrapTemplateSha256: $bootstrapTemplateSha256,
+      controlPlaneSha: $controlPlaneSha,
+      driftSha256: $driftSha256,
+      foundationSha256: $foundationSha256,
+      schemaVersion: "archon.aws-foundation-manifest/v1"
+    }
+  ' >"${manifest}"
+manifest_sha="$(sha256sum "${manifest}" | awk '{print $1}')"
+predicate="${EVIDENCE_DIR}/attestation-predicate.json"
+jq -cnS \
+  --arg foundationSha256 "${foundation_sha}" \
+  --arg manifestSha256 "${manifest_sha}" \
+  --arg driftSha256 "${drift_sha}" \
+  --arg controlPlaneSha "${CONTROL_PLANE_SHA}" '
+    {
+      controlPlaneSha: $controlPlaneSha,
+      driftSha256: $driftSha256,
+      foundationSha256: $foundationSha256,
+      manifestSha256: $manifestSha256,
+      predicateType:
+        "https://github.com/upgradedev/archon-datahub/attestations/aws-foundation/v1",
+      schemaVersion: "archon.aws-foundation-predicate/v1"
+    }
+  ' >"${predicate}"
+(
+  cd "${EVIDENCE_DIR}"
+  sha256sum drift.json foundation.json manifest.json \
+    >foundation-subject.sha256
+  sha256sum \
+    attestation-predicate.json \
+    drift.json \
+    foundation-subject.sha256 \
+    foundation.json \
+    manifest.json >SHA256SUMS
+  sha256sum --check --strict SHA256SUMS
+)
+expected_inventory="$(
+  printf '%s\n' \
+    SHA256SUMS \
+    attestation-predicate.json \
+    drift.json \
+    foundation-subject.sha256 \
+    foundation.json \
+    manifest.json
+)"
+test "$(
+  find "${EVIDENCE_DIR}" -mindepth 1 -maxdepth 1 \
+    -type f -printf '%f\n' |
+    LC_ALL=C sort
+)" = "${expected_inventory}"
+test -z "$(
+  find "${EVIDENCE_DIR}" -mindepth 1 \
+    \( -type l -o -type d \) \
+    -print -quit
+)"
+if grep -R -F "${EXPECTED_ACCOUNT_ID}" "${EVIDENCE_DIR}"; then
+  echo "::error::Foundation evidence contains the raw AWS account ID"
+  exit 1
+fi
+if grep -R -E \
+  'arn:aws:(iam|sts)::[0-9]{12}:|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}' \
+  "${EVIDENCE_DIR}"; then
+  echo "::error::Foundation evidence contains raw AWS identity material"
+  exit 1
+fi
+for json_document in \
+  "${EVIDENCE_DIR}/drift.json" \
+  "${foundation_json}" \
+  "${manifest}" \
+  "${predicate}"; do
+  jq -e '
+    [
+      paths(scalars) as $path |
+      ($path[-1] | tostring) |
+      select(test(
+        "(^|_)(secret|token|password|credential|api[_-]?key)($|_)";
+        "i"
+      ))
+    ] |
+    length == 0
+  ' "${json_document}" >/dev/null
+done
+
+combined_deploy_binding_sha="$(
+  printf '%s\n' \
+    "${DEPLOY_ROLE_BINDING_SHA[staging]}" \
+    "${DEPLOY_ROLE_BINDING_SHA[production]}" |
+    sha256sum |
+    awk '{print $1}'
+)"
+combined_canary_binding_sha="$(
+  printf '%s\n' \
+    "${CANARY_ROLE_BINDING_SHA[prepare]}" \
+    "${CANARY_ROLE_BINDING_SHA[approval]}" \
+    "${CANARY_ROLE_BINDING_SHA[recovery]}" |
+    sha256sum |
+    awk '{print $1}'
+)"
+{
+  echo "path=${EVIDENCE_DIR}"
+  echo "subject=${EVIDENCE_DIR}/foundation-subject.sha256"
+  echo "predicate=${predicate}"
+  echo "foundation_sha=${foundation_sha}"
+  echo "manifest_sha=${manifest_sha}"
+  echo "drift_sha=${drift_sha}"
+  echo "deploy_role_binding_sha=${combined_deploy_binding_sha}"
+  echo "canary_role_binding_sha=${combined_canary_binding_sha}"
+  echo "application_stack_role_transition=${application_stack_role_transition_state}"
+} >>"${GITHUB_OUTPUT}"
+echo "::endgroup::"

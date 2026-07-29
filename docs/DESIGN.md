@@ -247,11 +247,12 @@ The AWS CDK app separates a retained shared registry, an environment-specific gl
 stack, and an environment-specific regional platform stack:
 
 - `Archon-Registry`: immutable KMS ECR repository;
-- `Archon-<stage>-Edge` in `us-east-1`: DNS-validated ACM certificate,
-  CloudFront-scope WAF, and KMS-encrypted retained WAF logs;
+- `Archon-<stage>-Edge` in `us-east-1`: CloudFront-scope WAF and KMS-encrypted retained
+  WAF logs;
 - `Archon-<stage>` in the selected platform region: private versioned KMS S3 SPA with
-  CloudFront OAC, Route 53 A/AAAA aliases, the certificate/WAF handoff from the edge stack,
-  access logging, and `TLSv1.3_2025`;
+  CloudFront OAC, the edge-stack WAF handoff, the distribution's provider-managed
+  `*.cloudfront.net` hostname and default certificate, HTTPS enforcement, and access
+  logging;
 - same-origin API Gateway and the exact Cognito user pool with one shared regional WAF,
   strict request models, throttling, access logs, active X-Ray, a CloudFront-only origin
   gate whose credential never reaches a backend, and an encrypted two-second cache
@@ -281,34 +282,34 @@ is served by a caching-disabled behavior with `no-store`, and is smoke-verified 
 byte. The SPA pre-fills that scope; both the runtime-config proof and the live audit smoke
 bind it to the same protected-environment value.
 
-The distribution has no default-certificate fallback: AWS fixes the generated
-`*.cloudfront.net` certificate to the legacy `TLSv1` policy. Each environment therefore
-provides its exact hostname and owning Route 53 public hosted-zone ID. The edge stack
-requests the viewer certificate in `us-east-1`, completes DNS validation in that zone,
-creates the CloudFront-scope WAF, and exports both ARNs. The deployment workflow validates
-and hands those outputs to the regional platform stack; no operator-provisioned
-certificate ARN is required. The account must be CDK-bootstrapped in both `us-east-1` and
-the selected workload region. CDK then creates both IPv4 and IPv6 aliases. Every cache
-behavior also runs the same viewer-request function, which returns `421` for a
-non-canonical Host before CloudFront can expose an origin response through its generated
-distribution hostname. The CloudFront WAF protects every cache behavior, while the
-separate regional WAF remains bound to both API Gateway for direct callers and the exact
-Cognito user pool for managed-login and unauthenticated Cognito endpoints. The live
-deployment contract rejects promotion unless both resources resolve to that same ACL.
+The regional stack creates a distribution without aliases and uses CloudFront's generated
+`*.cloudfront.net` hostname and default viewer certificate. It requires no custom domain,
+Route 53 hosted-zone input, ACM certificate input or resource, or viewer-request
+CloudFront Function. The default SPA behavior redirects HTTP to HTTPS; the API and runtime
+configuration behaviors are HTTPS-only. CloudFront OAC restricts the private SPA origin,
+and CloudFront plus S3 server-access logs are retained. The Cognito callback and logout
+URLs are derived from that exact distribution hostname. The `us-east-1` edge stack creates
+only the CloudFront-scope WAF and its retained KMS-encrypted logs, and the deployment
+workflow passes the validated Web ACL ARN to the regional platform. The account remains
+CDK-bootstrapped in both `us-east-1` and the selected workload region. The CloudFront WAF
+protects every cache behavior, while the separate regional WAF remains bound to both API
+Gateway for direct callers and the exact Cognito user pool for managed-login and
+unauthenticated Cognito endpoints. The live deployment contract rejects promotion unless
+both regional resources resolve to that same ACL.
 
 Network egress is capability-specific. Public subnets disable automatic public-IP
 assignment and all three Fargate services explicitly disable public IPs. Workload security
 groups begin with IPv4/IPv6 outbound disabled. The API target accepts TCP 8080 only by
 security-group reference from the internal NLB; inbound evaluation is bypassed only for
-the API Gateway PrivateLink path. The API and audit worker receive only the
-customer-managed DataHub-read and LLM prefix lists; the remediation worker receives only
-the customer-managed DataHub-write prefix list. PrivateLink, S3, and worker-only DynamoDB
-paths use dedicated TCP 443 rules. The deployment pipeline validates the three
-account-owned external lists and independently resolves the AWS-owned regional
-`com.amazonaws.<region>.s3` and `com.amazonaws.<region>.dynamodb` lists, so cloud-service
-identity is never confused with an operator-maintained endpoint allowlist. Prefix-list
-`MaxEntries` weights are included in a fail-closed 60-rule security-group quota check
-before either environment is deployed.
+the API Gateway PrivateLink path. API, audit, and remediation tasks reach DataHub only
+through one dedicated interface endpoint security group on TCP 443. That endpoint accepts
+443 only from those exact workload groups, uses verified provider private DNS, and has no
+public-IP or CIDR fallback. Before mutation, the pipeline validates the external provider
+service, tenant DNS origin, caller account/region, and two supported AZs; those exact AZs
+drive VPC creation. Separate read/write tokens and provider RBAC preserve authorization
+even when all four configured GMS/MCP URLs share one tenant origin. MCP paths remain
+explicit environment configuration. S3 and worker-only DynamoDB paths retain separately
+resolved AWS-managed regional prefix lists.
 
 The SPA, evidence, and CloudFront log buckets are versioned and retained. SPA and evidence
 requests are server-access-logged to the log bucket, while CloudFront delivery uses a
@@ -328,15 +329,26 @@ CI creates:
 
 The deploy workflow accepts a successful default-branch CI run ID and its exact full source
 SHA. It verifies GitHub's artifact-envelope digest and each inner artifact digest. For each
-stage it deploys the edge stack first, validates the certificate/WAF outputs, and deploys
-the regional platform with those outputs and the five resolved prefix-list IDs. Staging
+stage it deploys the edge stack first, validates the WAF/logging outputs, and deploys
+the regional platform with the Web ACL ARN, two AWS-managed prefix-list IDs, and the
+preflighted DataHub PrivateLink service/AZ pair. Staging
 receives the exact image, SPA, and Lambda code; production receives the same ECR digest,
 SPA archive, and Lambda archive after a protected-environment approval. Selecting an older
 retained CI run is rollback. Application artifacts are never rebuilt during deployment.
+Before any stage mutation, the workflow rejects every existing registry, edge, or platform
+stack whose persisted `RoleARN` is not the exact qualifier-, account-, and region-bound
+CloudFormation execution role. A protected manual dispatch may explicitly enable the
+one-time `migrate_legacy_cloudformation_roles` path. That opt-in relaxes only the
+preflight binding check: the bootstrap deployment role still permits each change set only
+when it names the exact new execution role. After deployment all three bindings must
+exist and match even when migration was selected; the sanitized binding receipt is merged
+into the retained runtime-boundary contract. This proves migration away from a legacy
+administrator execution role instead of relying only on the role passed to the current
+change set.
 The IaC control plane is not rolled back with those application bytes: deployment checks
 out the current default-branch workflow commit only after successful CI, CodeQL, and
 workflow-security push runs for that exact commit. It repeats current-ref and latest-run
-validation after the production reviewer gate, immediately before AWS trust acquisition,
+validation after the explicit solo-owner production gate, immediately before AWS trust acquisition,
 immediately before mutation, and again after the live production byte observation just
 before promotion evidence is sealed. The final check must reproduce the original canonical
 receipt digest, so a branch move or newer queued, failed, cancelled, or successful rerun
@@ -408,9 +420,12 @@ gates are tracked in [READINESS.md](READINESS.md):
 - retain matching remote CI, CodeQL, workflow-security, benchmark, judge-evidence, and
   supply-chain receipts for the exact promotion SHA; the current feature revision has
   passed its source gates, while default-branch signing and promotion remain gated;
-- add a trusted second collaborator to the pre-created GitHub environment skeletons and
-  enable their independent reviewer rules plus code-owner enforcement;
-- configure AWS OIDC/account/secrets and retain deployment smoke evidence;
+- maintain repository owner `upgradedev` as the sole User reviewer, with self-review
+  enabled, `master`-only deployment policy, and administrator bypass disabled, on all 12
+  protected mutation/approval environments; the approval receipts provide an explicit
+  attributable second action but do not claim separation of duties;
+- run the protected AWS foundation pipeline, configure only the required DataHub
+  environment inputs, and retain deployment smoke evidence;
 - capture a real retained-history contradiction;
 - configure and run the source-complete
   [`governed-canary`](../.github/workflows/governed-canary.yml) proof for one isolated G6

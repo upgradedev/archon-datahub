@@ -6,7 +6,8 @@
     "slack": ["xo", "xb-", "12345678", "90ABCDEF"],
     "github": ["gh", "p_", "12345678", "90ABCDEFGHIJ"],
     "google": ["AI", "za", "12345678901234567", "890123456789012345"],
-    "jwt": ["ey", "Jabcdefghijk", ".", "abcdefghijkl", ".", "abcdefghijk"]
+    "jwt": ["ey", "Jabcdefghijk", ".", "abcdefghijkl", ".", "abcdefghijk"],
+    "bedrock": ["bed", "rock-api-key-", "12345678", "90abcdefghijklmnopqrstuv"]
   },
   "cases": [
     {
@@ -56,6 +57,25 @@
         "providerResponseId": "resp_123456",
         "tokenUsage": null,
         "latencyMs": 0
+      }
+    },
+    {
+      "id": "bedrock-mantle-live-valid-without-project-or-token-leakage",
+      "valid": true,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "bedrock-mantle",
+        "requestedModel": "qwen.qwen3-235b-a22b-2507",
+        "returnedModel": "qwen.qwen3-235b-a22b-2507",
+        "providerResponseId": "chatcmpl_bedrock_123456",
+        "tokenUsage": {
+          "inputTokens": 21,
+          "outputTokens": 13,
+          "totalTokens": 34
+        },
+        "latencyMs": 42
       }
     },
     {
@@ -429,6 +449,51 @@
         "requestedModel": "model-v1",
         "returnedModel": "model-v1",
         "providerResponseId": "resp_{{credential:google}}",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "requested-model-embedded-bedrock-token",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "bedrock-mantle",
+        "requestedModel": "model_{{credential:bedrock}}",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "returned-model-embedded-bedrock-token",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "bedrock-mantle",
+        "requestedModel": "model-v1",
+        "returnedModel": "model_{{credential:bedrock}}",
+        "providerResponseId": "resp_123456",
+        "tokenUsage": null,
+        "latencyMs": 10
+      }
+    },
+    {
+      "id": "response-id-embedded-bedrock-token",
+      "valid": false,
+      "value": {
+        "schemaVersion": "archon.model-runtime-provenance/v1",
+        "source": "live-provider",
+        "modelCall": true,
+        "provider": "bedrock-mantle",
+        "requestedModel": "model-v1",
+        "returnedModel": "model-v1",
+        "providerResponseId": "resp_{{credential:bedrock}}",
         "tokenUsage": null,
         "latencyMs": 10
       }

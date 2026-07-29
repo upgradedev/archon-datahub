@@ -2,8 +2,6 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { ArchonEdgeStack } from "../lib/archon-edge-stack";
 
-const P256_CERTIFICATE_ALGORITHM = ["EC", "prime256v1"].join("_");
-
 function edgeTemplate(
   stage = "staging"
 ): { stack: ArchonEdgeStack; template: Template } {
@@ -24,26 +22,10 @@ function webAclRules(template: Template): any[] {
 }
 
 describe("Archon CloudFront edge stack", () => {
-  test("is fixed to us-east-1 and requires bounded deployment parameters", () => {
+  test("is fixed to us-east-1 and accepts only declared stages", () => {
     const { stack, template } = edgeTemplate();
     expect(stack.region).toBe("us-east-1");
-
-    const parameters = template.toJSON().Parameters;
-    expect(parameters.CloudFrontDomainName).toEqual(
-      expect.objectContaining({
-        MinLength: 4,
-        MaxLength: 253,
-        AllowedPattern:
-          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
-      })
-    );
-    expect(parameters.CloudFrontDomainName.Default).toBeUndefined();
-    expect(parameters.CloudFrontHostedZoneId).toEqual(
-      expect.objectContaining({
-        AllowedPattern: "^Z[A-Z0-9]{1,31}$"
-      })
-    );
-    expect(parameters.CloudFrontHostedZoneId.Default).toBeUndefined();
+    expect(template.toJSON().Parameters).toBeUndefined();
 
     const implicitRegionStack = new ArchonEdgeStack(
       new App(),
@@ -64,34 +46,20 @@ describe("Archon CloudFront edge stack", () => {
           stage: "Production"
         })
     ).toThrow("ArchonEdgeStack stage must match");
+    expect(
+      () =>
+        new ArchonEdgeStack(new App(), "UndeclaredStageEdge", {
+          stage: "development"
+        })
+    ).toThrow("ArchonEdgeStack stage must be exactly staging or production");
   });
 
-  test("issues a retained DNS-validated ECDSA CloudFront certificate", () => {
+  test("uses the provider-managed CloudFront hostname without certificate state", () => {
     const { template } = edgeTemplate();
-    template.hasResourceProperties("AWS::CertificateManager::Certificate", {
-      DomainName: { Ref: "CloudFrontDomainName" },
-      DomainValidationOptions: [
-        {
-          DomainName: { Ref: "CloudFrontDomainName" },
-          HostedZoneId: { Ref: "CloudFrontHostedZoneId" }
-        }
-      ],
-      CertificateExport: "DISABLED",
-      CertificateTransparencyLoggingPreference: "ENABLED",
-      KeyAlgorithm: P256_CERTIFICATE_ALGORITHM,
-      ValidationMethod: "DNS"
-    });
-    template.hasResource("AWS::CertificateManager::Certificate", {
-      DeletionPolicy: "Retain",
-      UpdateReplacePolicy: "Retain"
-    });
-
-    const certificateLogicalId = Object.keys(
-      template.findResources("AWS::CertificateManager::Certificate")
-    )[0]!;
-    template.hasOutput("ArchonCloudFrontCertificateArn", {
-      Value: { Ref: certificateLogicalId }
-    });
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+    expect(
+      template.toJSON().Outputs.ArchonCloudFrontCertificateArn
+    ).toBeUndefined();
   });
 
   test("uses the three managed protections and an environment-aware IP rate limit", () => {

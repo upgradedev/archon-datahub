@@ -51,6 +51,10 @@ let log_groups = Resources.*[
   Type == 'AWS::Logs::LogGroup'
 ]
 
+let iam_roles = Resources.*[
+  Type == 'AWS::IAM::Role'
+]
+
 let archon_alarm_topics = Resources.*[
   Type == 'AWS::SNS::Topic'
   Properties.TopicName == /^archon-(staging|production)-alarms$/
@@ -300,6 +304,179 @@ let dead_letter_queues = Resources.*[
 let ecs_task_definitions = Resources.*[
   Type == 'AWS::ECS::TaskDefinition'
 ]
+
+let forbidden_static_llm_secrets =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Secrets[
+    Name IN [
+      'LLM_API_KEY',
+      'AWS_BEARER_TOKEN_BEDROCK',
+      'DASHSCOPE_API_KEY',
+      'GEMINI_API_KEY',
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY'
+    ]
+  ]
+
+let forbidden_static_llm_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name IN [
+      'LLM_API_KEY',
+      'AWS_BEARER_TOKEN_BEDROCK',
+      'DASHSCOPE_API_KEY',
+      'GEMINI_API_KEY',
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY'
+    ]
+  ]
+
+let forbidden_task_role_credential_secrets =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Secrets[
+    Name IN [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'AWS_DEFAULT_PROFILE',
+      'AWS_SHARED_CREDENTIALS_FILE',
+      'AWS_CONFIG_FILE',
+      'AWS_WEB_IDENTITY_TOKEN_FILE',
+      'AWS_ROLE_ARN',
+      'AWS_ROLE_SESSION_NAME',
+      'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+      'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE'
+    ]
+  ]
+
+let forbidden_task_role_credential_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name IN [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'AWS_DEFAULT_PROFILE',
+      'AWS_SHARED_CREDENTIALS_FILE',
+      'AWS_CONFIG_FILE',
+      'AWS_WEB_IDENTITY_TOKEN_FILE',
+      'AWS_ROLE_ARN',
+      'AWS_ROLE_SESSION_NAME',
+      'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+      'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+      'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE'
+    ]
+  ]
+
+let bedrock_mantle_endpoints = Resources.*[
+  Type == 'AWS::EC2::VPCEndpoint'
+  some Properties.PolicyDocument.Statement[*] {
+    Sid == 'OnlyInferenceRolesMayInvokeApprovedModel'
+  }
+]
+
+let datahub_private_link_endpoints = Resources.*[
+  Type == 'AWS::EC2::VPCEndpoint'
+  Properties.ServiceName.Ref == 'DataHubPrivateLinkServiceName'
+]
+
+let datahub_private_link_endpoint_security_groups =
+  %datahub_private_link_endpoints.Properties.SecurityGroupIds[*]
+
+let bedrock_mantle_endpoint_security_groups =
+  %bedrock_mantle_endpoints.Properties.SecurityGroupIds[*]
+
+let bedrock_mantle_endpoint_policy_statements =
+  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[*]
+
+let bedrock_mantle_inference_endpoint_statements =
+  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[
+    Sid == 'OnlyInferenceRolesMayInvokeApprovedModel'
+  ]
+
+let bedrock_mantle_token_endpoint_statements =
+  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[
+    Sid == 'OnlyInferenceRolesMayUseShortTermTokens'
+  ]
+
+let bedrock_mantle_projects = Resources.*[
+  Type == 'AWS::BedrockMantle::Project'
+]
+
+let bedrock_mantle_project_application_tags =
+  %bedrock_mantle_projects.Properties.Tags[
+    Key == 'Application'
+    Value == 'archon-datahub'
+  ]
+
+let bedrock_mantle_project_environment_tags =
+  %bedrock_mantle_projects.Properties.Tags[
+    Key == 'Environment'
+    Value IN ['staging', 'production']
+  ]
+
+let bedrock_mantle_project_managed_by_tags =
+  %bedrock_mantle_projects.Properties.Tags[
+    Key == 'ManagedBy'
+    Value == 'aws-cdk'
+  ]
+
+let bedrock_mantle_project_cost_center_tags =
+  %bedrock_mantle_projects.Properties.Tags[
+    Key == 'CostCenter'
+    Value == 'DataHub-Agent-Hackathon'
+  ]
+
+let bedrock_mantle_provider_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name == 'LLM_PROVIDER'
+    Value == 'bedrock-mantle'
+  ]
+
+let bedrock_mantle_region_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name == 'AWS_REGION'
+    Value == 'eu-west-1'
+  ]
+
+let bedrock_mantle_base_url_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name == 'LLM_BASE_URL'
+    Value == 'https://bedrock-mantle.eu-west-1.api.aws/v1'
+  ]
+
+let bedrock_mantle_model_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name == 'LLM_MODEL'
+    Value == 'qwen.qwen3-235b-a22b-2507'
+  ]
+
+let bedrock_mantle_project_environment =
+  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
+    Name == 'LLM_PROJECT_ID'
+  ]
+
+let bedrock_mantle_inference_role_statements =
+  Resources.*[
+    Type == 'AWS::IAM::Policy'
+  ].Properties.PolicyDocument.Statement[
+    Sid == 'InvokeOnlyApprovedBedrockMantleModel'
+  ]
+
+let bedrock_mantle_short_term_role_statements =
+  Resources.*[
+    Type == 'AWS::IAM::Policy'
+  ].Properties.PolicyDocument.Statement[
+    Sid == 'MintOnlyShortTermBedrockMantleBearerTokens'
+  ]
+
+let bedrock_mantle_long_term_deny_statements =
+  Resources.*[
+    Type == 'AWS::IAM::Policy'
+  ].Properties.PolicyDocument.Statement[
+    Sid == 'DenyLongTermBedrockMantleBearerTokens'
+  ]
 
 let approval_lambdas = Resources.*[
   Type == 'AWS::Lambda::Function'
@@ -597,6 +774,12 @@ rule kms_keys_rotate when %kms_keys !empty {
   %kms_keys.Properties {
     EnableKeyRotation == true
     KeyPolicy exists
+  }
+}
+
+rule iam_roles_require_a_permissions_boundary when %iam_roles !empty {
+  %iam_roles.Properties {
+    PermissionsBoundary exists
   }
 }
 
@@ -1012,6 +1195,157 @@ rule ecs_task_containers_are_hardened
   }
 }
 
+rule ecs_tasks_never_receive_static_llm_credentials
+  when %ecs_task_definitions !empty {
+  let forbidden_secret_count = count(%forbidden_static_llm_secrets)
+  let forbidden_environment_count = count(%forbidden_static_llm_environment)
+  %forbidden_secret_count == 0
+  %forbidden_environment_count == 0
+}
+
+rule ecs_tasks_do_not_override_aws_task_role_credentials
+  when %ecs_task_definitions !empty {
+  let forbidden_secret_count = count(%forbidden_task_role_credential_secrets)
+  let forbidden_environment_count =
+    count(%forbidden_task_role_credential_environment)
+  %forbidden_secret_count == 0
+  %forbidden_environment_count == 0
+}
+
+rule bedrock_mantle_projects_are_retained
+  when %bedrock_mantle_projects !empty {
+  %bedrock_mantle_projects {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+  }
+}
+
+rule platform_uses_one_private_dns_datahub_interface_endpoint
+  when %platform_markers !empty {
+  let endpoint_count = count(%datahub_private_link_endpoints)
+  let endpoint_security_group_count =
+    count(%datahub_private_link_endpoint_security_groups)
+  %endpoint_count == 1
+  %endpoint_security_group_count == 1
+  %datahub_private_link_endpoints.Properties {
+    VpcEndpointType == 'Interface'
+    PrivateDnsEnabled == true
+    SubnetIds !empty
+    PolicyDocument not exists
+    ServiceName.Ref == 'DataHubPrivateLinkServiceName'
+  }
+}
+
+rule bedrock_mantle_endpoint_is_private_and_least_privilege
+  when %bedrock_mantle_endpoints !empty {
+  let endpoint_count = count(%bedrock_mantle_endpoints)
+  let endpoint_security_group_count =
+    count(%bedrock_mantle_endpoint_security_groups)
+  let endpoint_statement_count =
+    count(%bedrock_mantle_endpoint_policy_statements)
+  let inference_statement_count =
+    count(%bedrock_mantle_inference_endpoint_statements)
+  let token_statement_count =
+    count(%bedrock_mantle_token_endpoint_statements)
+  let project_count = count(%bedrock_mantle_projects)
+  let application_tag_count =
+    count(%bedrock_mantle_project_application_tags)
+  let environment_tag_count =
+    count(%bedrock_mantle_project_environment_tags)
+  let managed_by_tag_count =
+    count(%bedrock_mantle_project_managed_by_tags)
+  let cost_center_tag_count =
+    count(%bedrock_mantle_project_cost_center_tags)
+  let provider_environment_count =
+    count(%bedrock_mantle_provider_environment)
+  let region_environment_count =
+    count(%bedrock_mantle_region_environment)
+  let base_url_environment_count =
+    count(%bedrock_mantle_base_url_environment)
+  let model_environment_count =
+    count(%bedrock_mantle_model_environment)
+  let project_environment_count =
+    count(%bedrock_mantle_project_environment)
+  let inference_role_statement_count =
+    count(%bedrock_mantle_inference_role_statements)
+  let short_term_role_statement_count =
+    count(%bedrock_mantle_short_term_role_statements)
+  let long_term_deny_statement_count =
+    count(%bedrock_mantle_long_term_deny_statements)
+
+  %endpoint_count == 1
+  %endpoint_security_group_count == 1
+  %endpoint_statement_count == 2
+  %inference_statement_count == 1
+  %token_statement_count == 1
+  %project_count == 1
+  %application_tag_count == 1
+  %environment_tag_count == 1
+  %managed_by_tag_count == 1
+  %cost_center_tag_count == 1
+  %provider_environment_count == 2
+  %region_environment_count == 2
+  %base_url_environment_count == 2
+  %model_environment_count == 2
+  %project_environment_count == 2
+  %inference_role_statement_count == 2
+  %short_term_role_statement_count == 2
+  %long_term_deny_statement_count == 2
+  %bedrock_mantle_projects.Properties {
+    Name == /^Archon-(staging|production)$/
+    Tags !empty
+  }
+  %bedrock_mantle_project_environment {
+    Value.'Fn::GetAtt'[1] == 'Id'
+  }
+  %bedrock_mantle_endpoints.Properties {
+    VpcEndpointType == 'Interface'
+    PrivateDnsEnabled == true
+    SubnetIds !empty
+    ServiceName.'Fn::Join'[0] == ''
+    ServiceName.'Fn::Join'[1][0] == 'com.amazonaws.'
+    ServiceName.'Fn::Join'[1][1].Ref == 'AWS::Region'
+    ServiceName.'Fn::Join'[1][2] == '.bedrock-mantle'
+  }
+  %bedrock_mantle_inference_endpoint_statements {
+    Effect == 'Allow'
+    Action == 'bedrock-mantle:CreateInference'
+    Principal.AWS exists
+    Resource.'Fn::GetAtt'[1] == 'Arn'
+    Condition.StringEquals.'bedrock-mantle:Model' ==
+      'qwen.qwen3-235b-a22b-2507'
+  }
+  %bedrock_mantle_token_endpoint_statements {
+    Effect == 'Allow'
+    Action == 'bedrock-mantle:CallWithBearerToken'
+    Principal.AWS exists
+    Resource == '*'
+    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
+      'SHORT_TERM'
+  }
+  %bedrock_mantle_inference_role_statements {
+    Effect == 'Allow'
+    Action == 'bedrock-mantle:CreateInference'
+    Resource.'Fn::GetAtt'[1] == 'Arn'
+    Condition.StringEquals.'bedrock-mantle:Model' ==
+      'qwen.qwen3-235b-a22b-2507'
+  }
+  %bedrock_mantle_short_term_role_statements {
+    Effect == 'Allow'
+    Action == 'bedrock-mantle:CallWithBearerToken'
+    Resource == '*'
+    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
+      'SHORT_TERM'
+  }
+  %bedrock_mantle_long_term_deny_statements {
+    Effect == 'Deny'
+    Action == 'bedrock-mantle:CallWithBearerToken'
+    Resource == '*'
+    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
+      'LONG_TERM'
+  }
+}
+
 rule platform_approval_lambda_is_hardened
   when %platform_markers !empty {
   %approval_lambdas !empty
@@ -1292,24 +1626,15 @@ rule cloudfront_distributions_enforce_tls_logging_and_oac
   %cloudfront_distributions.Properties.DistributionConfig {
     Enabled == true
     Logging.Bucket exists
-    Aliases exists
-    Aliases !empty
+    Aliases not exists
     WebACLId exists
-    ViewerCertificate.AcmCertificateArn exists
-    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.3_2025'
-    ViewerCertificate.SslSupportMethod == 'sni-only'
-    DefaultCacheBehavior.FunctionAssociations !empty
-    DefaultCacheBehavior.FunctionAssociations[*] {
-      EventType == 'viewer-request'
-      FunctionARN exists
-    }
+    ViewerCertificate.CloudFrontDefaultCertificate == true
+    ViewerCertificate.AcmCertificateArn not exists
+    ViewerCertificate.SslSupportMethod not exists
+    DefaultCacheBehavior.FunctionAssociations not exists
     CacheBehaviors[*] {
       ViewerProtocolPolicy == 'https-only'
-      FunctionAssociations !empty
-      FunctionAssociations[*] {
-        EventType == 'viewer-request'
-        FunctionARN exists
-      }
+      FunctionAssociations not exists
     }
     DefaultCacheBehavior.ViewerProtocolPolicy IN [
       'https-only',

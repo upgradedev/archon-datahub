@@ -28,6 +28,8 @@ import type { SourceReport } from "../../src/audit/harvest.js";
 import type { CatalogEntity } from "../../src/datahub/models.js";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 

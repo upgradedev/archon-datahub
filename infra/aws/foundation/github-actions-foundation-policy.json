@@ -1,0 +1,370 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VerifyCaller",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReconcileExactFoundationStacks",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateChangeSet",
+        "cloudformation:CreateStack",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:DetectStackDrift",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResource",
+        "cloudformation:DescribeStackResourceDrifts",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStacks",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:GetTemplate",
+        "cloudformation:ListStackResources",
+        "cloudformation:UpdateStack",
+        "cloudformation:UpdateTerminationProtection"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/CDKToolkit-archonstg/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/CDKToolkit-archonstg/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/CDKToolkit-archonprd/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/CDKToolkit-archonprd/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-GitHub-Staging-Deploy-Role/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-GitHub-Production-Deploy-Role/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Staging-IAM-Foundation/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Production-IAM-Foundation/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Shared-ApiGateway-Logging/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Governed-Canary-Roles/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:changeSet/cdk-deploy-change-set/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:changeSet/cdk-deploy-change-set/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:changeSet/awscli-cloudformation-package-*/*"
+      ]
+    },
+    {
+      "Sid": "InspectFoundationTemplates",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:GetTemplateSummary",
+        "cloudformation:ListStacks",
+        "cloudformation:DescribeStackDriftDetectionStatus",
+        "cloudformation:ValidateTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "InspectExistingApplicationStackRoles",
+      "Effect": "Allow",
+      "Action": "cloudformation:DescribeStacks",
+      "Resource": [
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Registry/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*"
+      ]
+    },
+    {
+      "Sid": "ReconcileExactBootstrapBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:GetBucketAcl",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:ListBucket",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutBucketAcl",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cdk-archonstg-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:s3:::cdk-archonstg-assets-${aws:PrincipalAccount}-us-east-1",
+        "arn:aws:s3:::cdk-archonprd-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:s3:::cdk-archonprd-assets-${aws:PrincipalAccount}-us-east-1"
+      ]
+    },
+    {
+      "Sid": "ReconcileExactBootstrapRepositories",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DeleteLifecyclePolicy",
+        "ecr:DeleteRepository",
+        "ecr:DeleteRepositoryPolicy",
+        "ecr:DescribeRepositories",
+        "ecr:GetLifecyclePolicy",
+        "ecr:GetRepositoryPolicy",
+        "ecr:ListTagsForResource",
+        "ecr:PutImageScanningConfiguration",
+        "ecr:PutImageTagMutability",
+        "ecr:PutLifecyclePolicy",
+        "ecr:SetRepositoryPolicy",
+        "ecr:TagResource",
+        "ecr:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:ecr:eu-west-1:${aws:PrincipalAccount}:repository/cdk-archonstg-container-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:ecr:us-east-1:${aws:PrincipalAccount}:repository/cdk-archonstg-container-assets-${aws:PrincipalAccount}-us-east-1",
+        "arn:aws:ecr:eu-west-1:${aws:PrincipalAccount}:repository/cdk-archonprd-container-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:ecr:us-east-1:${aws:PrincipalAccount}:repository/cdk-archonprd-container-assets-${aws:PrincipalAccount}-us-east-1"
+      ]
+    },
+    {
+      "Sid": "ReconcileExactBootstrapVersionParameters",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:AddTagsToResource",
+        "ssm:DeleteParameter",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:ListTagsForResource",
+        "ssm:PutParameter",
+        "ssm:RemoveTagsFromResource"
+      ],
+      "Resource": [
+        "arn:aws:ssm:eu-west-1:${aws:PrincipalAccount}:parameter/cdk-bootstrap/archonstg/version",
+        "arn:aws:ssm:us-east-1:${aws:PrincipalAccount}:parameter/cdk-bootstrap/archonstg/version",
+        "arn:aws:ssm:eu-west-1:${aws:PrincipalAccount}:parameter/cdk-bootstrap/archonprd/version",
+        "arn:aws:ssm:us-east-1:${aws:PrincipalAccount}:parameter/cdk-bootstrap/archonprd/version"
+      ]
+    },
+    {
+      "Sid": "ReadFoundationRoleConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-foundation"
+    },
+    {
+      "Sid": "ReadFoundationManagedPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyTags",
+        "iam:ListPolicyVersions"
+      ],
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-aws-foundation-control",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-aws-foundation-assets",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-aws-foundation-identity",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-aws-foundation-attachments"
+      ]
+    },
+    {
+      "Sid": "RejectLegacySharedDeployRole",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-deploy"
+    },
+    {
+      "Sid": "ReconcileExactBootstrapAndDeployRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-staging-deploy",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-production-deploy",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-prepare",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-approval",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-recovery",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-apigateway-cloudwatch-logs",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-*-${aws:PrincipalAccount}-*",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-*-${aws:PrincipalAccount}-*"
+      ]
+    },
+    {
+      "Sid": "ConfigureSharedApiGatewayLogging",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:PATCH"
+      ],
+      "Resource": "arn:aws:apigateway:eu-west-1::/account"
+    },
+    {
+      "Sid": "PassSharedApiGatewayLoggingRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-apigateway-cloudwatch-logs",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "apigateway.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AttachExactStagingPrimaryExecutionPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-cfn-exec-role-${aws:PrincipalAccount}-eu-west-1",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-guard-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-identity-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-data-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-state-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-observability-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-compute-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-network-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-endpoint-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-delivery-staging"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AttachExactStagingEdgeExecutionPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-cfn-exec-role-${aws:PrincipalAccount}-us-east-1",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-guard-staging",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-edge-staging"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AttachExactProductionPrimaryExecutionPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-cfn-exec-role-${aws:PrincipalAccount}-eu-west-1",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-guard-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-identity-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-data-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-state-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-observability-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-compute-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-network-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-endpoint-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-delivery-production"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AttachExactProductionEdgeExecutionPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-cfn-exec-role-${aws:PrincipalAccount}-us-east-1",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-guard-production",
+            "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-edge-production"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AttachReadOnlyLookupPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-lookup-role-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-lookup-role-${aws:PrincipalAccount}-us-east-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-lookup-role-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-lookup-role-${aws:PrincipalAccount}-us-east-1"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        }
+      }
+    },
+    {
+      "Sid": "DetachLegacyDeploymentReadOnlyPolicy",
+      "Effect": "Allow",
+      "Action": "iam:DetachRolePolicy",
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-deploy-role-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonstg-deploy-role-${aws:PrincipalAccount}-us-east-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-deploy-role-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/cdk-archonprd-deploy-role-${aws:PrincipalAccount}-us-east-1"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess"
+        }
+      }
+    },
+    {
+      "Sid": "ReconcileExactStagePolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyTags",
+        "iam:ListPolicyVersions",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-staging",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-production",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-staging",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-production"
+      ]
+    }
+  ]
+}

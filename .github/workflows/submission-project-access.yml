@@ -2151,7 +2151,7 @@ jobs:
               wc -l
           )" = "15"
           if grep -R -E -q \
-            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-' \
+            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-' \
             "${output}"; then
             echo "::error::Project-access artifact contains credential material"
             exit 1
@@ -2926,7 +2926,7 @@ jobs:
               .result == "verified"
             ' "${validation}" >/dev/null
           if grep -R -E -q \
-            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-' \
+            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-' \
             "${root}"; then
             echo "::error::Project-access artifact contains credential material"
             exit 1

@@ -6,7 +6,10 @@
 // not import this file, so `npm run audit:demo` can still use configured providers/DataHub.
 
 const OFFLINE_SECRET_VARS = [
+  "LLM_PROVIDER",
   "LLM_API_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "LLM_PROJECT_ID",
   "DASHSCOPE_API_KEY",
   "GEMINI_API_KEY",
   "OPENAI_API_KEY",

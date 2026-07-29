@@ -3,6 +3,11 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { pathToFileURL } from "node:url";
 import { createDataHubClient } from "./datahub/mcp-client.js";
 import { DirectGmsTagProjectionReader } from "./datahub/tag-projection-reader-live.js";
+import {
+  BEDROCK_MANTLE_PROVIDER,
+  assertEcsTaskRoleCredentialEnvironment,
+  resolveLlmProvider,
+} from "./llm/client.js";
 import { canonicalize } from "./remediation/integrity.js";
 import {
   AwsQueueWorker,
@@ -40,8 +45,17 @@ export function loadAuditWorkerConfiguration(): AuditWorkerConfiguration {
   ]);
   const readGmsUrl = httpsUrl("DATAHUB_GMS_URL");
   httpsUrl("DATAHUB_MCP_URL");
-  httpsUrl("LLM_BASE_URL");
-  required("LLM_API_KEY", 16_384);
+  const llmProvider = resolveLlmProvider();
+  if (
+    !llmProvider ||
+    llmProvider.auth !== "aws-short-term" ||
+    llmProvider.name !== BEDROCK_MANTLE_PROVIDER
+  ) {
+    throw new Error(
+      "The hosted audit worker requires Bedrock Mantle task-role authentication."
+    );
+  }
+  assertEcsTaskRoleCredentialEnvironment();
   return {
     queueUrl: httpsUrl("ARCHON_AUDIT_QUEUE_URL"),
     quarantineQueueUrl: httpsUrl("ARCHON_AUDIT_DLQ_URL"),

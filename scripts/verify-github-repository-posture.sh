@@ -125,7 +125,7 @@ jq -e '
   (
     .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames |
     length
-  ) == 11 and
+  ) == 13 and
   .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames ==
     (
       .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames |
@@ -175,8 +175,8 @@ jq -e '
     "branchPolicy",
     "canAdminsBypass",
     "exactNames",
-    "pendingIndependentReviewer",
-    "reviewerlessByDesign"
+    "reviewerlessByDesign",
+    "soloOwnerApproval"
   ] and
   .environments.canAdminsBypass == false and
   (.environments.branchPolicy | keys | sort) == [
@@ -191,37 +191,46 @@ jq -e '
     customBranchPolicies: true,
     protectedBranches: false
   } and
-  (.environments.pendingIndependentReviewer | keys | sort) == [
-    "exactNames",
-    "expectedProtectionRuleTypes",
-    "state"
-  ] and
   (.environments.reviewerlessByDesign | keys | sort) == [
     "exactNames",
     "expectedProtectionRuleTypes",
     "state"
   ] and
-  .environments.pendingIndependentReviewer.state ==
-    "pending-independent-reviewer" and
+  (.environments.soloOwnerApproval | keys | sort) == [
+    "exactNames",
+    "expectedProtectionRuleTypes",
+    "ownerLogin",
+    "preventSelfReview",
+    "state"
+  ] and
   .environments.reviewerlessByDesign.state ==
     "reviewerless-by-design" and
-  .environments.pendingIndependentReviewer.expectedProtectionRuleTypes ==
-    ["branch_policy"] and
+  .environments.soloOwnerApproval.state ==
+    "solo-owner-approval" and
   .environments.reviewerlessByDesign.expectedProtectionRuleTypes ==
     ["branch_policy"] and
-  (.environments.exactNames | length) == 15 and
-  (.environments.pendingIndependentReviewer.exactNames | length) == 11 and
-  (.environments.reviewerlessByDesign.exactNames | length) == 4 and
+  .environments.soloOwnerApproval.expectedProtectionRuleTypes ==
+    ["branch_policy", "required_reviewers"] and
+  .environments.soloOwnerApproval.ownerLogin == "upgradedev" and
+  .environments.soloOwnerApproval.preventSelfReview == false and
+  (.environments.exactNames | length) == 17 and
+  (.environments.soloOwnerApproval.exactNames | length) == 12 and
+  (.environments.reviewerlessByDesign.exactNames | length) == 5 and
   .environments.exactNames == (.environments.exactNames | sort | unique) and
-  .environments.pendingIndependentReviewer.exactNames ==
-    (.environments.pendingIndependentReviewer.exactNames | sort | unique) and
   .environments.reviewerlessByDesign.exactNames ==
     (.environments.reviewerlessByDesign.exactNames | sort | unique) and
+  .environments.soloOwnerApproval.exactNames ==
+    (.environments.soloOwnerApproval.exactNames | sort | unique) and
   .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames ==
-    .environments.pendingIndependentReviewer.exactNames and
+    (
+      (
+        .environments.soloOwnerApproval.exactNames +
+        ["governed-canary-prepare"]
+      ) | sort
+    ) and
   (
     (
-      .environments.pendingIndependentReviewer.exactNames +
+      .environments.soloOwnerApproval.exactNames +
       .environments.reviewerlessByDesign.exactNames
     ) | sort
   ) == .environments.exactNames and
@@ -376,17 +385,21 @@ observed_environments="[]"
 while IFS= read -r environment_name; do
   expected_rule_types=""
   environment_mode=""
+  owner_login=""
 
   if jq -e \
     --arg name "${environment_name}" '
-      .environments.pendingIndependentReviewer.exactNames |
+      .environments.soloOwnerApproval.exactNames |
       index($name) != null
     ' "${POLICY_PATH}" >/dev/null; then
-    environment_mode="pending-independent-reviewer"
+    environment_mode="solo-owner-approval"
     expected_rule_types="$(
       jq -c \
-        '.environments.pendingIndependentReviewer.expectedProtectionRuleTypes' \
+        '.environments.soloOwnerApproval.expectedProtectionRuleTypes' \
         "${POLICY_PATH}"
+    )"
+    owner_login="$(
+      jq -er '.environments.soloOwnerApproval.ownerLogin' "${POLICY_PATH}"
     )"
   else
     environment_mode="reviewerless-by-design"
@@ -403,7 +416,9 @@ while IFS= read -r environment_name; do
       "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}"
   )"
   jq -e \
+    --arg mode "${environment_mode}" \
     --arg name "${environment_name}" \
+    --arg owner "${owner_login}" \
     --argjson expectedRuleTypes "${expected_rule_types}" '
       .name == $name and
       .can_admins_bypass == false and
@@ -411,7 +426,22 @@ while IFS= read -r environment_name; do
         protected_branches: false,
         custom_branch_policies: true
       } and
-      ([.protection_rules[].type] | sort) == $expectedRuleTypes
+      ([.protection_rules[].type] | sort) == $expectedRuleTypes and
+      (
+        $mode != "solo-owner-approval" or
+        (
+          [
+            .protection_rules[] |
+            select(.type == "required_reviewers")
+          ] as $reviewRules |
+          ($reviewRules | length) == 1 and
+          $reviewRules[0].prevent_self_review == false and
+          ($reviewRules[0].reviewers | length) == 1 and
+          $reviewRules[0].reviewers[0].type == "User" and
+          ($reviewRules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+            ($owner | ascii_downcase)
+        )
+      )
     ' <<<"${environment_json}" >/dev/null || {
     echo "::error::${environment_name} protection rules drifted"
     exit 1
@@ -468,7 +498,7 @@ done < <(jq -r '.environments.exactNames[]' "${POLICY_PATH}")
 
 test "$(
   jq -r 'length' <<<"${observed_environments}"
-)" = "15"
+)" = "17"
 
 readonly observed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 temporary_output="${work_dir}/github-repository-posture.json"

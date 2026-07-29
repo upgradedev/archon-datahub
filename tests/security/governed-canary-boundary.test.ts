@@ -22,14 +22,18 @@ const recoveryWorkflow = readFileSync(
   "utf8"
 );
 
-test("governed canary is dispatch-only, staging-only, and independently approved", () => {
+test("governed canary is dispatch-only, staging-only, and explicitly solo-owner approved", () => {
   assert.match(workflow, /^on:\n  workflow_dispatch:/mu);
   assert.doesNotMatch(workflow, /^\s{2}(?:push|pull_request|schedule):/mu);
   assert.match(workflow, /CANARY_STACK_NAME: Archon-staging/u);
   assert.doesNotMatch(workflow, /CANARY_STACK_NAME: Archon-production/u);
   assert.match(workflow, /name: governed-canary\n/u);
   assert.match(workflow, /name: governed-canary-rollback\n/u);
-  assert.match(workflow, /prevent_self_review == true/u);
+  assert.match(workflow, /prevent_self_review == false/u);
+  assert.match(
+    workflow,
+    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+  );
   assert.match(workflow, /RUN ISOLATED GOVERNED CANARY/u);
   assert.match(workflow, /\.path == "\.github\/workflows\/deploy\.yml"/u);
   assert.match(workflow, /\.head_repository\.full_name == \$repository/u);
@@ -90,6 +94,10 @@ test("production requires a fail-closed exact-run governed canary gate", () => {
     gate,
     /result == "write-verified-and-rollback-proven"/u
   );
+  assert.match(
+    gate,
+    /APPROVE ARCHON PRODUCTION run_id=\$\{DEPLOYMENT_RUN_ID\} run_attempt=\$\{DEPLOYMENT_RUN_ATTEMPT\} release_sha=\$\{RELEASE_SHA\} canary_rollback_subject_sha256=\$\{rollback_subject_sha256\}/u
+  );
 
   assert.match(
     production,
@@ -103,6 +111,16 @@ test("production requires a fail-closed exact-run governed canary gate", () => {
     production,
     /preProductionGovernedCanary: \{[\s\S]+rollbackSubjectSha256:[\s\S]+attestationVerificationSha256:[\s\S]+result: "write-verified-and-rollback-proven"/u
   );
+  assert.match(
+    production,
+    /EXPECTED_APPROVAL_COMMENT: \$\{\{ needs\.preproduction_canary\.outputs\.approval_comment \}\}/u
+  );
+  assert.match(production, /\.comment == \$expected/u);
+  assert.match(
+    production,
+    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+  );
+  assert.match(production, /mode: "explicit-solo-owner"/u);
   assert.match(
     production,
     /deploymentWorkflowRunId:\s+\(\$deploymentRunId \| tonumber\)/u
@@ -139,7 +157,7 @@ test("an active parent deployment is accepted only after same-attempt staging an
   assert.match(workflow, /\$staging\[0\]\.conclusion == "success"/u);
   assert.match(
     workflow,
-    /select\(\.name == "Approve and promote identical artifacts"\)/u
+    /select\(\.name == "Explicit solo-owner approval and promote identical artifacts"\)/u
   );
   assert.match(
     workflow,
@@ -497,7 +515,15 @@ test("a reviewer approves the sealed plan, not a generic pre-plan dispatch", () 
 
   const prepareJob = workflow.slice(prepare, approval);
   const approvalJob = workflow.slice(approval, rollback);
-  assert.doesNotMatch(prepareJob, /^\s{4}environment:/mu);
+  assert.match(
+    prepareJob,
+    /environment:\n      name: governed-canary-prepare\n      url: \$\{\{ vars\.CANARY_APPLICATION_URL \}\}/u
+  );
+  assert.match(prepareJob, /deployments: write/u);
+  assert.match(
+    prepareJob,
+    /\(\[\.protection_rules\[\]\?\.type\] \| sort\) == \["branch_policy"\]/u
+  );
   assert.doesNotMatch(prepareJob, /CANARY_COGNITO_PASSWORD/u);
   assert.doesNotMatch(prepareJob, /governed-canary\.ts approve/u);
   assert.match(
@@ -688,7 +714,11 @@ test("failed or cancelled parents have automatic and idempotent manual recovery"
     /actions\/runs\/\$\{CANARY_SOURCE_WORKFLOW_RUN_ID\}\/attempts\/\$\{CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT\}/u
   );
   assert.match(recoveryWorkflow, /name: governed-canary-recovery\n/u);
-  assert.match(recoveryWorkflow, /prevent_self_review == true/u);
+  assert.match(recoveryWorkflow, /prevent_self_review == false/u);
+  assert.match(
+    recoveryWorkflow,
+    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+  );
   assert.match(
     recoveryWorkflow,
     /\.branch_policies\[0\]\.name == "master"/u
@@ -719,7 +749,7 @@ test("failed or cancelled parents have automatic and idempotent manual recovery"
   );
   assert.match(
     recoveryWorkflow,
-    /select\(\.name == "Approve and promote identical artifacts"\)[\s\S]+Active-parent recovery is forbidden after production starts/u
+    /select\(\.name == "Explicit solo-owner approval and promote identical artifacts"\)[\s\S]+Active-parent recovery is forbidden after production starts/u
   );
   assert.match(
     recoveryWorkflow,

@@ -34,11 +34,15 @@ the workflow from approving a production or caller-selected dataset.
 
 ## Protected environment contract
 
-Create three GitHub environments. All allow only the default branch, require at least one
-reviewer, and enable prevent-self-review. Use different reviewers where possible.
+Create four GitHub environments. All allow only the default branch and disable admin
+bypass. `governed-canary-prepare` is reviewerless because it has only read-only AWS
+authority and no secrets. The other three require exactly one individual User reviewer:
+repository owner `upgradedev`. Keep prevent-self-review disabled so the solo owner can
+perform the deliberate second approval action. This is an explicit approval boundary
+with attributable receipts, not a claim of separation of duties.
 
-The read-only `prepare` job has no environment and therefore no human approval or
-environment secret. It uses repository variables for `AWS_CANARY_PREPARE_ROLE_ARN`,
+The read-only `prepare` job uses the `governed-canary-prepare` environment without a
+human approval or environment secret. It uses environment variables for `AWS_CANARY_PREPARE_ROLE_ARN`,
 `AWS_CANARY_ACCOUNT_ID`, `AWS_CANARY_REGION`, `CANARY_APPLICATION_URL`,
 `CANARY_DATASET_URN`, `CANARY_ISOLATION_MARKER`, and the four
 `CANARY_DATAHUB_*_URL` bindings. It can start the
@@ -63,7 +67,7 @@ default-branch recovery format; no legacy v1 canary was deployed.
 - secrets: `CANARY_COGNITO_USERNAME` and `CANARY_COGNITO_PASSWORD`.
 
 Both OIDC roles are read-only for this proof. The prepare role trusts only
-`repo:upgradedev/archon-datahub:ref:refs/heads/master`; the approval role trusts only
+`repo:upgradedev/archon-datahub:environment:governed-canary-prepare`; the approval role trusts only
 `repo:upgradedev/archon-datahub:environment:governed-canary`.
 The prepare role needs `cloudformation:DescribeStacks` on `Archon-staging` and
 `s3:GetObject` on that stack's `v1/audit/sha256/*` keys. The protected approval role needs
@@ -81,13 +85,15 @@ canonical receipt sealed before mutation and its exact successful attempts immed
 before exposing either DataHub token. That preserves compensation after routine branch
 movement without accepting a different control plane.
 
-`governed-canary-rollback` owns the separately approved inverse and contains:
+`governed-canary-rollback` owns the separately approved inverse; the same solo owner must
+approve its exact sealed digest in a separate environment action. It contains:
 
 - the same application, release-independent fixture, isolation, endpoint, and
   `CANARY_EVIDENCE_BUCKET` variables;
 - secrets `CANARY_DATAHUB_READ_TOKEN` and `CANARY_DATAHUB_WRITE_TOKEN`.
 
-`governed-canary-recovery` is the independent compensator boundary. It contains the same
+`governed-canary-recovery` is the independent compensator boundary. Its mutation still
+requires a separate explicit solo-owner approval. It contains the same
 application, evidence bucket, fixture, Cognito, isolation, and endpoint variables; a
 read-only `AWS_CANARY_RECOVERY_ROLE_ARN`, `AWS_ACCOUNT_ID`, and `AWS_REGION`; and dedicated
 least-privilege `CANARY_DATAHUB_READ_TOKEN` / `CANARY_DATAHUB_WRITE_TOKEN` secrets. Its
@@ -103,8 +109,11 @@ bindings still fail closed in the workflow.
 
 `CANARY_CHROME_VERSION` and `CANARY_CHROME_BINARY_SHA256` pin the preinstalled GitHub
 runner Chrome payload. The workflow downloads no browser or browser automation package.
-When the hosted runner image changes, update both values only after reviewing the new
-runner inventory and binary digest.
+The protected `staging-bootstrap` deployment derives both values from its pinned
+`ubuntu-24.04` runner and seals them in the attested bootstrap handoff. Adopt only those
+remotely produced values into the canary environment. When the hosted runner image
+changes between bootstrap and canary, the exact check fails and a new bootstrap handoff
+must be reviewed; values are never guessed locally.
 
 The Cognito client ID and Hosted UI origin are never accepted from `runtime-config.json`
 alone. Preparation derives them from the live `Archon-staging` CloudFormation outputs and
@@ -127,7 +136,7 @@ to match before it reads the password or starts Chrome.
    the manifest and therefore inside `recoveryDigest`. The completed prepare-job summary
    shows the fixed target, tag, inverse, and pre/post-state digests.
 4. The first environment gate is created only after preparation. Its pending job name
-   includes the exact `planDigest` and `recoveryDigest`; the reviewer therefore approves
+   includes the exact `planDigest` and `recoveryDigest`; the solo owner therefore approves
    the sealed plan, not an earlier generic workflow dispatch. After approval, the job
    re-downloads and re-verifies that artifact, both environment-protection policies, the
    exact current control-plane receipt, the live release/endpoints, and the Cognito user's
@@ -139,10 +148,10 @@ to match before it reads the password or starts Chrome.
 6. The scoped access token approves the exact plan. The workflow accepts only terminal
    `VERIFIED`, five ordered passing checks, a seven-event receipt chain, and an eligible
    content-addressed rollback proposal.
-7. The second environment reviewer sees the proposal digest (or the pre-mutation recovery
-   digest after a failed write job) in the rollback job name and separately authorizes it;
-   its required-reviewer, self-review, branch policy, and exact sealed control-plane receipt
-   are checked again before the DataHub tokens or recovery mutation are exposed.
+7. The solo owner sees the proposal digest (or the pre-mutation recovery digest after a
+   failed write job) in the second environment job name and separately authorizes it; its
+   required-reviewer, self-review-enabled, branch policy, and exact sealed control-plane
+   receipt are checked again before the DataHub tokens or recovery mutation are exposed.
 8. The rollback driver accepts only the exact expected post-state, calls `remove_tags` for
    the sealed inverse, and performs a direct read-after-rollback. The restored digest and
    tags must equal the original pre-state. A successful full write/rollback run signs the
@@ -165,7 +174,7 @@ ephemeral profile under `RUNNER_TEMP` is deleted in `finally`. Retained artifact
 digests, fixed target coordinates, mutation response digests, and the restoration proof.
 
 If the write job fails after its recovery manifest was sealed, the rollback job still
-requires its own reviewer. It removes the tag only when the observed state equals the
+requires its own explicit solo-owner approval. It removes the tag only when the observed state equals the
 sealed expected post-state; it performs a no-op only when the exact pre-state is already
 present, and rejects every divergent state.
 

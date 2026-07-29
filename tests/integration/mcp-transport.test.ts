@@ -17,6 +17,8 @@ import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
 import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 delete process.env.ARCHON_DEMO_QUERY;

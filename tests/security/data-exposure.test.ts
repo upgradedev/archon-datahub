@@ -24,6 +24,8 @@ import type { LlmClient } from "../../src/llm/client.js";
 const SENTINEL = "SENTINEL_PAT_a1b2c3d4e5f6_do_not_leak";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL; // keep offline — token-only sentinel does NOT flip the client
 delete process.env.DATAHUB_GMS_URL;
 process.env.DATAHUB_GMS_TOKEN = SENTINEL;

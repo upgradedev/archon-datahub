@@ -23,9 +23,10 @@ const RESPONSE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u;
 const RFC3339_INSTANT =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const CREDENTIAL_SHAPED_IDENTIFIER =
-  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+  /(?:bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
 const MAX_MODEL_LATENCY_MS = 3_600_000;
 const LIVE_MODEL_PROVIDERS = new Set<LiveModelProvider>([
+  "bedrock-mantle",
   "custom",
   "qwen",
   "gemini",
@@ -104,6 +105,7 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
   "tokens",
 ]);
 const PUBLIC_CREDENTIAL_PATTERNS = [
+  /bedrock-api-key-[A-Za-z0-9_+/=-]{16,}/u,
   /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
   /gh[pousr]_[A-Za-z0-9_]{20,}/u,
   /github_pat_[A-Za-z0-9_]{20,}/u,

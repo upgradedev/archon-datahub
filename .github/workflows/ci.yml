@@ -63,6 +63,8 @@ jobs:
             scripts/npm-audit-retry.sh \
             scripts/patch-cdk-brace-expansion.sh \
             scripts/observe-aws-live-runtime.sh \
+            scripts/bootstrap-aws-foundation-role.sh \
+            scripts/reconcile-aws-foundation.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
             scripts/verify-github-repository-posture.sh \
@@ -73,13 +75,24 @@ jobs:
             scripts/validate-model-provenance-corpus.sh \
             scripts/validate-aws-api-origin-contract.sh \
             scripts/validate-aws-network-contract.sh \
+            scripts/validate-datahub-private-link-service.sh \
+            scripts/validate-aws-runtime-boundaries.sh \
             scripts/validate-aws-waf-contract.sh \
+            scripts/validate-cloudformation-role-bindings.sh \
             tests/pipeline/judge-user-contracts.test.sh \
             tests/pipeline/openvex-maintenance-contracts.test.sh \
+            tests/pipeline/aws-foundation-contracts.test.sh \
             tests/pipeline/aws-security-contracts.test.sh; do
             bash -n "${script}"
           done
+          for script in \
+            scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-aws-foundation-policy.mjs \
+            scripts/verify-aws-runtime-boundary.mjs; do
+            node --check "${script}"
+          done
           bash tests/pipeline/aws-security-contracts.test.sh
+          bash tests/pipeline/aws-foundation-contracts.test.sh
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
@@ -774,12 +787,27 @@ jobs:
             mapfile -d '' templates < <(
               find "${assembly}" -maxdepth 1 -name '*.template.json' -print0
             )
-            test "${#templates[@]}" -ge 3
+            case "${stage}" in
+              staging) expected_template_count=3 ;;
+              production) expected_template_count=2 ;;
+              *) exit 1 ;;
+            esac
+            test "${#templates[@]}" -eq "${expected_template_count}"
             for template in "${templates[@]}"; do
               jq --exit-status \
                 'type == "object" and (.Resources | type == "object")' \
                 "${template}" >/dev/null
             done
+          done
+      - name: Prove runtime permissions boundaries cover only synthesized role actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for stage in staging production; do
+            node scripts/verify-aws-runtime-boundary.mjs \
+              --contract contracts/aws-foundation-v1.json \
+              --stage "${stage}" \
+              --templates "${RUNNER_TEMP}/cdk.out/${stage}"
           done
       - name: Install checksum-pinned CloudFormation Guard
         id: guard

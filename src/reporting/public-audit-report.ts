@@ -59,6 +59,7 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
 ]);
 
 const CREDENTIAL_PATTERNS = [
+  /bedrock-api-key-[A-Za-z0-9_+/=-]{16,}/u,
   /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
   /gh[pousr]_[A-Za-z0-9_]{20,}/u,
   /github_pat_[A-Za-z0-9_]{20,}/u,

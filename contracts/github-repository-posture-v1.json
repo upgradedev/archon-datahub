@@ -26,8 +26,10 @@
     },
     "environmentSecrets": {
       "expectedEmptyEnvironmentNames": [
+        "aws-foundation",
         "datahub-demo-seed",
         "governed-canary",
+        "governed-canary-prepare",
         "governed-canary-recovery",
         "governed-canary-rollback",
         "judge-access-production",
@@ -60,9 +62,11 @@
     },
     "canAdminsBypass": false,
     "exactNames": [
+      "aws-foundation",
       "datahub-demo",
       "datahub-demo-seed",
       "governed-canary",
+      "governed-canary-prepare",
       "governed-canary-recovery",
       "governed-canary-rollback",
       "judge-access-production",
@@ -76,8 +80,22 @@
       "submission-devpost-confirmation",
       "submission-readiness"
     ],
-    "pendingIndependentReviewer": {
+    "reviewerlessByDesign": {
       "exactNames": [
+        "datahub-demo",
+        "governed-canary-prepare",
+        "production-observer",
+        "production-paging-test",
+        "staging"
+      ],
+      "expectedProtectionRuleTypes": [
+        "branch_policy"
+      ],
+      "state": "reviewerless-by-design"
+    },
+    "soloOwnerApproval": {
+      "exactNames": [
+        "aws-foundation",
         "datahub-demo-seed",
         "governed-canary",
         "governed-canary-recovery",
@@ -91,21 +109,12 @@
         "submission-readiness"
       ],
       "expectedProtectionRuleTypes": [
-        "branch_policy"
+        "branch_policy",
+        "required_reviewers"
       ],
-      "state": "pending-independent-reviewer"
-    },
-    "reviewerlessByDesign": {
-      "exactNames": [
-        "datahub-demo",
-        "production-observer",
-        "production-paging-test",
-        "staging"
-      ],
-      "expectedProtectionRuleTypes": [
-        "branch_policy"
-      ],
-      "state": "reviewerless-by-design"
+      "ownerLogin": "upgradedev",
+      "preventSelfReview": false,
+      "state": "solo-owner-approval"
     }
   },
   "repository": {

@@ -3,11 +3,12 @@
 This CDK app implements a secure hosted-demo baseline without coupling release
 artifacts to an environment:
 
-- a self-contained edge stack in `us-east-1` that creates a DNS-validated ACM
-  certificate and a CloudFront-scope WAF with KMS-encrypted retained logs;
-- a private, versioned S3 SPA behind CloudFront Origin Access Control, Route 53
-  IPv4/IPv6 aliases, the edge certificate, the edge WAF, access logging, and the
-  `TLSv1.3_2025` viewer policy;
+- a self-contained edge stack in `us-east-1` that creates a CloudFront-scope WAF
+  with KMS-encrypted retained logs;
+- a private, versioned S3 SPA behind CloudFront Origin Access Control, served from the
+  distribution's provider-managed `*.cloudfront.net` hostname and default certificate
+  with HTTPS enforcement, the edge WAF, CloudFront access logging, and S3
+  server-access logging;
 - same-origin `/api/*` routing to a separately regional-WAF-protected API Gateway;
 - a public, bounded durable audit start/status API plus an explicitly read-only synchronous
   preview route and a scope-protected approval route;
@@ -20,7 +21,7 @@ artifacts to an environment:
 - a separate no-secret control Lambda that starts only the Archon state machine and
   returns digest-verified, capability-scoped status projections;
 - private Fargate API and worker services with no public IP behind an internal NLB/VPC
-  Link, using default-deny security groups and prefix-list-scoped HTTPS egress;
+  Link, using default-deny security groups and security-group-scoped DataHub PrivateLink;
 - Standard Step Functions, KMS-encrypted SQS/DLQs, and callback task tokens;
 - separate KMS-encrypted DataHub read/write secrets;
 - DynamoDB approval and idempotency/CAS stores with PITR and deletion protection;
@@ -189,9 +190,10 @@ own terminal state and every stale, indeterminate, or unverified write fails the
 
 `Archon-Registry` is shared and contains the immutable ECR repository.
 `Archon-<stage>-Edge` is the environment's global control-plane stack and is always
-deployed in `us-east-1`. It owns the DNS-validated viewer certificate, CloudFront-scope
-WAF, encrypted WAF log group, and their output contract. `Archon-<stage>` is the regional
-platform stack. `stage` is supplied as CDK context, for example `-c stage=staging`.
+deployed in `us-east-1`. It owns the CloudFront-scope WAF, encrypted retained WAF log
+group, and their output contract. `Archon-<stage>` is the regional platform stack and owns
+the CloudFront distribution. `stage` is supplied as CDK context, for example
+`-c stage=staging`.
 Both WAFs use the moving AWS-managed default rule-group versions (no stale version pin),
 an explicit 300-second IP rate window, sampled-field substitution, filtered/redacted
 logging, and an exact enabled, rotating, single-Region customer KMS key binding.
@@ -213,46 +215,48 @@ The environment stack has nine mandatory promotion parameters:
 The platform also requires `DataHubReadGmsUrl`, hosted `DataHubReadMcpUrl`,
 `DataHubWriteGmsUrl`, and hosted `DataHubWriteMcpUrl`. The Fargate image intentionally
 contains no `uvx`, so separate read-only and mutation-enabled Streamable HTTP MCP endpoints
-are mandatory. `LlmBaseUrl`, `LlmModel`, and `WorkerDesiredCount` are configurable.
+are mandatory. `WorkerDesiredCount` is configurable.
 `WorkerDesiredCount` accepts zero or one and defaults to zero. The exact image contains
 `dist/audit-worker.js` and `dist/remediation-worker.js`, which CI checks without starting
 either process. Set the parameter to one only after all live endpoint values and distinct
 tokens are installed. The isolated services autoscale from their own queues.
 
-Each protected GitHub environment supplies only these two non-secret edge inputs; the
-pipeline passes the same values to both the edge and platform stacks:
-
-| Environment variable | CDK parameter | Contract |
-| --- | --- | --- |
-| `ARCHON_CLOUDFRONT_DOMAIN_NAME` | `CloudFrontDomainName` | Concrete lowercase public DNS name for that environment |
-| `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` | `CloudFrontHostedZoneId` | Owning Route 53 public hosted-zone ID, without the `/hostedzone/` prefix |
-
-There is no operator-supplied certificate ARN. The edge stack requests the certificate,
-performs Route 53 DNS validation, and exports `ArchonCloudFrontCertificateArn` and
-`ArchonCloudFrontWebAclArn`. The deployment pipeline validates those outputs and passes
-them to the regional platform as `CloudFrontCertificateArn` and `CloudFrontWebAclArn`.
-That handoff keeps CloudFront's `us-east-1` control-plane resources explicit without
-requiring a certificate or WAF to be provisioned out of band.
+Protected GitHub environments supply no custom CloudFront hostname, Route 53 hosted-zone
+ID, or ACM certificate input. The edge stack exports `ArchonCloudFrontWebAclArn`; the
+deployment pipeline validates that output and passes it to the regional platform as
+`CloudFrontWebAclArn`. The regional stack creates the distribution with no aliases, uses
+its generated `*.cloudfront.net` hostname and default certificate, and derives the
+Cognito callback and logout URLs from that hostname.
+This handoff keeps the CloudFront-scope WAF in its required `us-east-1` control plane
+without requiring a certificate, custom DNS resource, or WAF to be provisioned out of
+band.
 The Web ACL parameter carries an obvious, non-deployable default solely so the exact
 CloudFormation assembly remains resolvable by IaC scanners. An unconditional
 CloudFormation Rule rejects that sentinel before create/update; the pipeline must supply
 the independently validated live edge-stack ARN. No scanner ignore or transformed
 deployment template is used.
 
-The same protected environments provide three customer-managed egress boundaries:
+The same protected environments provide one provider-issued DataHub Cloud service:
 
 | Environment variable | Platform parameter | Permitted HTTPS destination |
 | --- | --- | --- |
-| `ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID` | `DataHubReadEgressPrefixListId` | Read-only DataHub GMS/MCP endpoints for the API and audit worker |
-| `ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID` | `DataHubWriteEgressPrefixListId` | Mutation-enabled DataHub GMS/MCP endpoints for the remediation worker |
-| `ARCHON_LLM_EGRESS_PREFIX_LIST_ID` | `LlmEgressPrefixListId` | Configured inference endpoint for the API and audit worker |
+| `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME` | `DataHubPrivateLinkServiceName` | One same-region DataHub interface endpoint with verified provider private DNS |
 
-These are account-owned, customer-managed IPv4 prefix lists, not security-group IDs and
-not AWS service prefix lists. The deployment gate requires each list to be complete,
-non-empty, no broader than `/8` per entry, and tagged with the exact
-`ArchonEgressScope` value `datahub-read`, `datahub-write`, or `llm`. It also validates
-each list's `MaxEntries` weight and rejects any combination that would exceed the
-conservative 60-rule outbound security-group quota.
+The preflight requires the service to be discoverable from the authenticated deployment
+account in `eu-west-1`, externally owned, Interface-capable, backed by verified provider
+private DNS, auto-accepted, and available in two usable account AZs. Those exact AZs become
+`DataHubPrivateLinkAzOne` and `DataHubPrivateLinkAzTwo`, so VPC subnet placement cannot
+diverge from provider coverage. All four configured GMS/MCP URLs must be HTTPS on the
+service's exact tenant origin; their paths remain explicit configuration.
+
+Inference does not use a public-IP allowlist or a static provider secret. The stack creates
+one tagged `AWS::BedrockMantle::Project` per stage and a dedicated
+`com.amazonaws.eu-west-1.bedrock-mantle` interface endpoint with private DNS. Only the API
+and audit-worker security groups can reach that endpoint; the write-capable remediation
+worker cannot. Their task roles can invoke only `qwen.qwen3-235b-a22b-2507` on the exact
+stage project and can mint only short-term bearer tokens. The OpenAI-compatible client
+sets the project ID on every request for access isolation, CloudWatch visibility, and
+cost attribution. No `LLM_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK` is stored.
 
 The pipeline separately resolves the AWS-owned
 `com.amazonaws.${AWS_REGION}.s3` and
@@ -260,11 +264,12 @@ The pipeline separately resolves the AWS-owned
 passes them as `S3PrefixListId` and `DynamoDbPrefixListId`; operators do not configure
 GitHub variables for these regional AWS service identities.
 
-The stack creates both A and AAAA aliases to CloudFront and enforces SNI with
-`TLSv1.3_2025`. It intentionally has no legacy `*.cloudfront.net` fallback because AWS
-fixes that default certificate to the legacy `TLSv1` security policy. A viewer-request
-CloudFront Function on every cache behavior rejects any non-canonical `Host` with `421`
-before a static object or API response can be returned.
+The regional stack uses the generated `*.cloudfront.net` hostname and CloudFront default
+certificate directly. It creates no Route 53 aliases, ACM certificate, custom hostname,
+or viewer-request CloudFront Function. The default SPA behavior redirects HTTP to HTTPS;
+the API and runtime-configuration behaviors are HTTPS-only. CloudFront OAC binds private
+SPA reads to the exact distribution, and the generated hostname is the sole public origin
+used for application, API, and Cognito redirect/logout outputs.
 
 The platform WAF remains attached directly to the regional API Gateway, including for
 callers that bypass CloudFront. The edge WAF protects every CloudFront behavior and keeps
@@ -275,9 +280,11 @@ the state machine, all application Lambdas, and the CDK default-security-group r
 provider use active X-Ray tracing.
 
 Every workload security group starts with IPv4 and IPv6 outbound disabled. Workloads may
-reach PrivateLink endpoints on TCP 443 and S3 through the pipeline-resolved AWS prefix
-list; workers may additionally reach DynamoDB. Only the API/audit side receives read
-DataHub and LLM egress, while only the remediation worker receives write DataHub egress.
+reach shared AWS PrivateLink endpoints on TCP 443 and S3 through the pipeline-resolved AWS
+prefix list; workers may additionally reach DynamoDB. API, audit, and remediation reach
+DataHub only through a dedicated endpoint security group on TCP 443. Read/write authority
+remains separated by Secrets Manager credentials and provider RBAC. Only API/audit can
+reach the dedicated Bedrock Mantle PrivateLink path.
 The API's sole ingress is a TCP 8080 security-group reference from the internal NLB.
 The NLB has its own default-deny security group, permits only API-target/health-check
 egress, and bypasses inbound evaluation only for the API Gateway PrivateLink path.
@@ -296,8 +303,10 @@ after the live production byte observation immediately before promotion evidence
 That final check must reproduce the original receipt digest; the canonical receipt is
 included in deployment evidence. Application rollback never reverts newer IaC protections.
 The staging and production receipts retain compact edge-security and network-egress
-contracts. They bind the exact certificate/WAF identities and edge-output digest to the
-validated prefix-list identities, weights, and calculated security-group quota use.
+contracts. They bind the exact provider-managed viewer hostname/default-certificate mode,
+WAF identity, and edge-output digest to the AWS-managed prefix-list identities and the
+preflighted plus live-verified DataHub service, provider private DNS, AZs, endpoint, and
+security-group rules.
 
 ## CI deployment sequence
 
@@ -382,9 +391,9 @@ Do not pipe an unpinned installer from the default branch into a shell.
 
 4. Deploy a stage using only the verified identities. `SPA_ARTIFACT_SHA256` is the
    inner deterministic `archon-web.tar.gz` digest, not the GitHub ZIP envelope. The
-   pipeline resolves the two AWS service prefix lists, deploys the edge stack first,
-   validates its outputs, and passes those outputs plus the three customer-managed
-   allowlists to the platform stack. Normal releases must use
+   pipeline resolves the two AWS service prefix lists, preflights the configured DataHub
+   PrivateLink service and selects its exact supported AZ pair, deploys the edge stack
+   first, and passes those validated values to the platform stack. Normal releases must use
    `.github/workflows/deploy.yml`; the following is the pipeline contract, not a manual
    operator bypass. `CONTAINER_ARCHIVE_SHA256`, `LAMBDA_ARCHIVE_SHA256`,
    `DEPLOYMENT_WORKFLOW_RUN_ID`, `DEPLOYMENT_WORKFLOW_RUN_ATTEMPT`, and `CI_RUN_ID` must
@@ -412,13 +421,8 @@ Do not pipe an unpinned installer from the default branch into a shell.
        -c "stage=${ARCHON_STAGE}" \
        --exclusively \
        --require-approval never \
-       --parameters "${EDGE_STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-       --parameters "${EDGE_STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
        --outputs-file "${RUNNER_TEMP}/${ARCHON_STAGE}-edge-outputs.json"
    )
-   EDGE_CERTIFICATE_ARN="$(jq -er --arg stack "${EDGE_STACK_NAME}" \
-     '.[$stack].ArchonCloudFrontCertificateArn' \
-     "${RUNNER_TEMP}/${ARCHON_STAGE}-edge-outputs.json")"
    EDGE_WEB_ACL_ARN="$(jq -er --arg stack "${EDGE_STACK_NAME}" \
      '.[$stack].ArchonCloudFrontWebAclArn' \
      "${RUNNER_TEMP}/${ARCHON_STAGE}-edge-outputs.json")"
@@ -437,15 +441,12 @@ Do not pipe an unpinned installer from the default branch into a shell.
         --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
         --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
        --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
-       --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
-       --parameters "${STACK_NAME}:CloudFrontCertificateArn=${EDGE_CERTIFICATE_ARN}" \
-       --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
        --parameters "${STACK_NAME}:CloudFrontWebAclArn=${EDGE_WEB_ACL_ARN}" \
        --parameters "${STACK_NAME}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
        --parameters "${STACK_NAME}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
-       --parameters "${STACK_NAME}:DataHubReadEgressPrefixListId=${ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID}" \
-       --parameters "${STACK_NAME}:DataHubWriteEgressPrefixListId=${ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID}" \
-       --parameters "${STACK_NAME}:LlmEgressPrefixListId=${ARCHON_LLM_EGRESS_PREFIX_LIST_ID}" \
+       --parameters "${STACK_NAME}:DataHubPrivateLinkServiceName=${ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME}" \
+       --parameters "${STACK_NAME}:DataHubPrivateLinkAzOne=${DATAHUB_PRIVATE_LINK_AZ_ONE}" \
+       --parameters "${STACK_NAME}:DataHubPrivateLinkAzTwo=${DATAHUB_PRIVATE_LINK_AZ_TWO}" \
        --parameters "${STACK_NAME}:DataHubReadGmsUrl=${DATAHUB_READ_GMS_URL}" \
        --parameters "${STACK_NAME}:DataHubReadMcpUrl=${DATAHUB_READ_MCP_URL}" \
        --parameters "${STACK_NAME}:DataHubWriteGmsUrl=${DATAHUB_WRITE_GMS_URL}" \
@@ -455,9 +456,9 @@ Do not pipe an unpinned installer from the default branch into a shell.
    )
    ```
 
-5. Replace the bootstrap values in the three Secrets Manager resources, repeat the exact
-   parameterized platform deployment—including the same two validated edge outputs and
-   all five prefix-list IDs—with `WorkerDesiredCount=1`, force new API/audit-worker/
+5. Replace the bootstrap values in the two DataHub Secrets Manager resources, repeat the exact
+   parameterized platform deployment—including the same validated edge Web ACL output,
+   two AWS prefix-list IDs, and DataHub service/AZ tuple—with `WorkerDesiredCount=1`, force new API/audit-worker/
    remediation-worker deployments, and wait until all three services reach their required
    desired/running counts. Only after workload readiness, upload the exact extracted SPA
    artifact to `ArchonSpaBucketName`: hashed assets use
@@ -511,9 +512,21 @@ Do not pipe an unpinned installer from the default branch into a shell.
 The committed deployment workflow performs these checks, rotates environment-scoped
 secrets, reconciles CDK, restarts ECS after versioned secret refresh, and records
 sanitized evidence.
+Before mutation, an existing `Archon-Registry`, stage edge stack, or stage platform stack
+must already persist the exact `archonstg`/`archonprd` bootstrap CloudFormation execution
+role for its region; only a genuinely absent first-deploy stack is allowed by default.
+For a legacy stack, a protected manual dispatch can explicitly enable the one-time
+`migrate_legacy_cloudformation_roles` path. It relaxes only preflight: the bootstrap
+deployment role still requires the exact new role on every change set. After CDK
+reconciliation, all three stacks must exist with those exact `RoleARN` values regardless
+of that input. The account-free `archon.cloudformation-role-bindings/v1` projection is
+embedded in the runtime-boundary evidence so a previous administrator execution role
+cannot survive silently.
 The GitHub OIDC deployment roles must also allow the pipeline's read-only live-contract
 calls: `ec2:DescribeVpcs`, `ec2:DescribeSecurityGroups`,
-`ec2:DescribeSecurityGroupRules`, `elasticloadbalancing:DescribeLoadBalancers`, the
+`ec2:DescribeSecurityGroupRules`, `ec2:DescribeVpcEndpoints`,
+`cloudformation:GetResource`, `iam:SimulatePrincipalPolicy`,
+`elasticloadbalancing:DescribeLoadBalancers`, the
 exact-ACL `wafv2:GetWebACL`, `wafv2:GetLoggingConfiguration`, and
 `wafv2:GetWebACLForResource` calls, `cognito-idp:GetWebACLForResource` on the exact
 `ArchonUserPoolArn`, `logs:DescribeLogGroups`, `kms:DescribeKey`, and
@@ -555,13 +568,16 @@ This stack keeps environment-dependent claims explicit:
   before enabling a long-lived hosted environment;
 - the API stage enables the smallest `0.5` encrypted cache cluster only for the
   two-second status projection; include that hourly service cost in the same budget gate;
-- domain registration, an existing Route 53 public hosted zone, a branded Cognito custom
-  domain, cross-account ECR replication, and private DataHub connectivity remain explicit
-  environment prerequisites; the edge stack owns ACM creation and DNS validation, so a
-  pre-created certificate ARN is not a prerequisite;
-- account-owned, narrowly scoped DataHub-read, DataHub-write, and LLM prefix lists remain
-  environment prerequisites; the pipeline validates their ownership, state, entries, and
-  scope tags, while resolving the AWS-owned regional S3/DynamoDB lists itself;
+- custom domain registration, Route 53 hosted-zone configuration, ACM certificate
+  provisioning, and a branded Cognito custom domain are not deployment prerequisites; the
+  regional stack uses its generated CloudFront hostname/default certificate and the
+  standard Cognito managed-login domain, while cross-account ECR replication and private
+  DataHub connectivity remain explicit optional environment decisions;
+- a provider-issued DataHub Cloud interface service remains an environment prerequisite;
+  the pipeline validates its external ownership, verified private DNS, same-region
+  discovery, tenant URL binding, and exact two-AZ coverage, while resolving AWS-owned
+  regional S3/DynamoDB lists itself and using a separate stack-owned Bedrock Mantle
+  PrivateLink endpoint for inference;
 - CloudFront protects the static and same-origin API behaviors with its global WAF; the
   separate regional WAF remains attached to both API Gateway and the Cognito user pool,
   protecting direct API callers plus managed-login/public Cognito endpoints. Its fixed
@@ -577,7 +593,6 @@ The registry stack exports:
 
 Every edge stack exports:
 
-- `ArchonCloudFrontCertificateArn`
 - `ArchonCloudFrontWebAclArn`
 - `ArchonCloudFrontWafLogKeyArn`
 
@@ -600,8 +615,14 @@ Every environment stack exports:
   `ArchonRemediationWorkerServiceName`
 - `ArchonVpcId`, `ArchonPrivateNlbArn`, `ArchonNlbSecurityGroupId`
 - `ArchonApiSecurityGroupId`, `ArchonAuditWorkerSecurityGroupId`,
-  `ArchonRemediationWorkerSecurityGroupId`, `ArchonVpcEndpointSecurityGroupId`
-- `ArchonReadSecretArn`, `ArchonWriteSecretArn`, `ArchonLlmSecretArn`
+  `ArchonRemediationWorkerSecurityGroupId`, `ArchonVpcEndpointSecurityGroupId`,
+  `ArchonBedrockMantleEndpointSecurityGroupId`
+- `ArchonBedrockMantleEndpointId`, `ArchonBedrockMantleEndpointServiceName`,
+  `ArchonBedrockMantleModel`, `ArchonBedrockMantleProjectId`,
+  `ArchonBedrockMantleProjectArn`
+- `ArchonApiTaskRoleArn`, `ArchonAuditWorkerTaskRoleArn`,
+  `ArchonRemediationWorkerTaskRoleArn`
+- `ArchonReadSecretArn`, `ArchonWriteSecretArn`
 - `ArchonAlarmTopicArn`, `ArchonAlarmTopicKmsKeyArn`
 - `ArchonAlarmDeliveryFeedbackRoleArn`, `ArchonAlarmDeliveryLogGroupName`
 - `ArchonContainerImageDigest`, `ArchonSpaArtifactSha256`,
@@ -609,6 +630,6 @@ Every environment stack exports:
 - `ArchonDeploymentWorkflowRunId`, `ArchonDeploymentWorkflowRunAttempt`,
   `ArchonCiRunId`, `ArchonReleaseSha`
 
-Data and secrets use `RETAIN`; DynamoDB and Cognito deletion protection are
-enabled. Production also enables NLB deletion protection. Destruction therefore
-requires an explicit, audited break-glass procedure.
+Data, secrets, and each stage-scoped Bedrock Mantle project use `RETAIN`; DynamoDB and
+Cognito deletion protection are enabled. Production also enables NLB deletion protection.
+Destruction therefore requires an explicit, audited break-glass procedure.

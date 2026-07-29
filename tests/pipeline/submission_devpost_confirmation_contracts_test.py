@@ -40,7 +40,7 @@ EXPECTED_STEPS = {
         "Publish exact protected-review request",
     ),
     "review": (
-        "Verify exact independent protected-environment approval",
+        "Verify exact solo-owner protected-environment approval",
         "Check out the exact unprivileged evidence producer",
         "Validate exact candidate metadata before download",
         "Download exact approved post-submit candidate",
@@ -48,13 +48,13 @@ EXPECTED_STEPS = {
         "Reobserve rules and public judging URLs after approval",
         "Assemble exact existing SQ11 standard-v1 proof schema",
         "Recheck approval and immutable inputs before retention",
-        "Upload independently reviewed SQ11 evidence",
+        "Upload solo-owner approved SQ11 evidence",
     ),
     "attest": (
         "Validate exact attestation context and retained artifacts",
         "Check out the exact unprivileged attestation verifier",
         "Download exact approved candidate",
-        "Download exact independently reviewed SQ11 evidence",
+        "Download exact solo-owner approved SQ11 evidence",
         "Revalidate exact retained candidate and SQ11 evidence",
         "Independently reverify sealed readiness and reviewed content sources",
         "Independently reconstruct and verify protected approval receipt",
@@ -418,7 +418,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         and len(
             re.findall(
                 r"(?m)^    name: "
-                r"Independently approve and seal Devpost confirmation$",
+                r"Approve and seal Devpost confirmation as solo owner$",
                 jobs["review"],
             )
         )
@@ -434,7 +434,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
     )
     require(
         workflow.count(
-            "Independently approve and seal Devpost confirmation"
+            "Approve and seal Devpost confirmation as solo owner"
         )
         == 3,
         "review display name must match both approval job lookups",
@@ -450,13 +450,13 @@ def validate_contract(workflow: str, documentation: str) -> None:
             f"{name} least-privilege permissions changed",
         )
     quoted_review_name = (
-        '"Independently approve and seal Devpost confirmation"'
+        '"Approve and seal Devpost confirmation as solo owner"'
     )
     require(
         quoted_review_name
         in named_step(
             jobs["review"],
-            "Verify exact independent protected-environment approval",
+            "Verify exact solo-owner protected-environment approval",
         )
         and quoted_review_name
         in named_step(
@@ -622,7 +622,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
     )
     review_approval = named_step(
         jobs["review"],
-        "Verify exact independent protected-environment approval",
+        "Verify exact solo-owner protected-environment approval",
     )
     attester_approval = named_step(
         jobs["attest"],
@@ -633,7 +633,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         "Apply final fail-closed TOCTOU gate",
     )
     posture_tokens = (
-        "prevent_self_review == true",
+        "prevent_self_review == false",
         '.type == "User"',
         '[.[].branch_policies[].name] == ["master"]',
         '[.[].branch_policies[].type] == ["branch"]',
@@ -648,14 +648,14 @@ def validate_contract(workflow: str, documentation: str) -> None:
             boundary,
             posture_tokens
             + (
-                ".user.id != $actorId",
-                ".user.id != $triggeringActorId",
+                ".user.id == $actorId",
+                ".user.id == $triggeringActorId",
                 ".comment == $expected",
             ),
             label,
         )
     require(
-        workflow.count("prevent_self_review == true") == 4
+        workflow.count("prevent_self_review == false") == 4
         and workflow.count('.type == "User"') == 5
         and workflow.count(
             '[.[].branch_policies[].name] == ["master"]'
@@ -665,10 +665,10 @@ def validate_contract(workflow: str, documentation: str) -> None:
             '[.[].branch_policies[].type] == ["branch"]'
         )
         == 4
-        and workflow.count(".user.id != $actorId") == 3
-        and workflow.count(".user.id != $triggeringActorId") == 3
+        and workflow.count(".user.id == $actorId") == 3
+        and workflow.count(".user.id == $triggeringActorId") == 3
         and workflow.count(".comment == $expected") == 4,
-        "approval posture or independence check cardinality changed",
+        "solo-owner approval posture cardinality changed",
     )
     require_all(
         review_approval,
@@ -695,7 +695,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         ),
         (
             jobs["review"],
-            "Verify exact independent protected-environment approval",
+            "Verify exact solo-owner protected-environment approval",
         ),
         (
             jobs["review"],
@@ -950,7 +950,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "saltedConfirmationCommitmentIncluded: true",
             "archon.salted-private-devpost-confirmation/v1",
             "Private Devpost data: salted commitment only; no credentials, cookies, screenshots, confirmation bytes, or private entrant data retained",
-            "Approval identity: public GitHub numeric actor and reviewer IDs retained solely to prove reviewer independence; no GitHub login names retained",
+            "Approval identity: public GitHub numeric actor/owner IDs retain explicit solo-owner approval provenance; no dynamic GitHub login names retained",
         ),
         "privacy boundary",
     )
@@ -991,7 +991,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "GitHub's approvals API does not expose an authoritative approval timestamp",
             "An HTTP `200` response is only logged-out reachability evidence.",
             "`submission-devpost-confirmation`",
-            "prevent self-review enabled",
+            "`prevent_self_review` disabled so the owner may approve",
             "No Devpost secret belongs in the environment.",
             "at least 32 random bytes of salt",
             "keys sorted, no insignificant whitespace, and exactly one trailing line feed",
@@ -1002,7 +1002,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "calls `gh attestation verify` again, without the bundle, for every one of the six files",
             "Both passes require the same bundle identity, predicate bytes, predicate type, signer workflow, release provenance, and complete sorted six-subject set.",
             "Dynamic response bodies and headers may legitimately change between phases.",
-            "public GitHub numeric account IDs solely to prove reviewer independence",
+            "public GitHub numeric account IDs solely to prove solo-owner approval",
             "It retains no GitHub login names.",
             "Only after that successful run may the reporting aggregate include `SQ11`.",
             "actual Devpost form remain end-of-process operator actions",
@@ -1099,10 +1099,10 @@ mutations = {
         "        shell: bash {0} || true\n",
         "persisted verifier shell",
     ),
-    "self review allowed": replace_first(
+    "self review prevented": replace_first(
         workflow_text,
-        "prevent_self_review == true",
         "prevent_self_review == false",
+        "prevent_self_review == true",
         "prevent self review",
     ),
     "floating attest action": replace_first(
@@ -1157,19 +1157,19 @@ mutations = {
     ),
     "review job display renamed": replace_first(
         workflow_text,
-        "    name: Independently approve and seal Devpost confirmation\n",
+        "    name: Approve and seal Devpost confirmation as solo owner\n",
         "    name: Renamed protected Devpost reviewer\n",
         "review display name",
     ),
     "review API lookup renamed": replace_first(
         workflow_text,
-        '"Independently approve and seal Devpost confirmation"',
+        '"Approve and seal Devpost confirmation as solo owner"',
         '"Renamed protected Devpost reviewer"',
         "review approval lookup",
     ),
     "attester API lookup renamed": replace_last(
         workflow_text,
-        '"Independently approve and seal Devpost confirmation"',
+        '"Approve and seal Devpost confirmation as solo owner"',
         '"Renamed protected Devpost reviewer"',
         "attester approval lookup",
     ),

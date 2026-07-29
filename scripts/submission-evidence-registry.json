@@ -182,8 +182,8 @@
             "name": "support/SQ8/cross-medium-review.json"
           },
           {
-            "role": "independent-approval",
-            "name": "support/SQ8/independent-approval.json"
+            "role": "solo-owner-approval",
+            "name": "support/SQ8/solo-owner-approval.json"
           }
         ]
       }

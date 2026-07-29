@@ -156,8 +156,9 @@ const RULE_ID_PATTERN = /^ARCHON-[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
 const RESPONSE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u;
 const CREDENTIAL_SHAPED_IDENTIFIER =
-  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+  /(?:bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
 const LIVE_MODEL_PROVIDERS = new Set([
+  "bedrock-mantle",
   "custom",
   "qwen",
   "gemini",
@@ -227,6 +228,7 @@ const FORBIDDEN_EXPORT_KEYS = new Set([
   "tokens",
 ]);
 const CREDENTIAL_PATTERNS = [
+  /bedrock-api-key-[A-Za-z0-9_+/=-]{16,}/u,
   /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
   /gh[pousr]_[A-Za-z0-9_]{20,}/u,
   /github_pat_[A-Za-z0-9_]{20,}/u,

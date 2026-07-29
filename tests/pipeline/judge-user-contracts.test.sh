@@ -911,7 +911,7 @@ case "${endpoint}" in
       --arg name "judge-access-staging" \
       --arg reviewerType "${FAKE_REVIEWER_TYPE:-User}" \
       --arg reviewerLogin "${FAKE_REVIEWER_LOGIN}" \
-      --argjson preventSelfReview "${FAKE_PREVENT_SELF_REVIEW:-true}" \
+      --argjson preventSelfReview "${FAKE_PREVENT_SELF_REVIEW:-false}" \
       --argjson reviewerId "${FAKE_REVIEWER_ID}" '
         {
           name: $name,
@@ -1469,9 +1469,9 @@ run_approval_verify() {
     FAKE_APPROVAL_STATE="${FAKE_APPROVAL_STATE:-approved}" \
     FAKE_APPROVAL_USER_ID="${FAKE_APPROVAL_USER_ID:-24680}" \
     FAKE_APPROVAL_USER_TYPE="${FAKE_APPROVAL_USER_TYPE:-User}" \
-    FAKE_PREVENT_SELF_REVIEW="${FAKE_PREVENT_SELF_REVIEW:-true}" \
+    FAKE_PREVENT_SELF_REVIEW="${FAKE_PREVENT_SELF_REVIEW:-false}" \
     FAKE_REVIEWER_ID=24680 \
-    FAKE_REVIEWER_LOGIN="${FAKE_REVIEWER_LOGIN:-independent-reviewer}" \
+    FAKE_REVIEWER_LOGIN="${FAKE_REVIEWER_LOGIN:-upgradedev}" \
     FAKE_REVIEWER_TYPE="${FAKE_REVIEWER_TYPE:-User}" \
     ARCHON_STAGE=staging \
     JUDGE_USER_OPERATION=provision \
@@ -1485,8 +1485,8 @@ run_approval_verify() {
     CONTROL_PLANE_SHA="${release_sha}" \
     JUDGE_REVIEWER_USER_ID=24680 \
     GH_TOKEN=fake-token \
-    GITHUB_ACTOR=requester \
-    GITHUB_TRIGGERING_ACTOR=rerun-operator \
+    GITHUB_ACTOR=upgradedev \
+    GITHUB_TRIGGERING_ACTOR=upgradedev \
     GITHUB_REPOSITORY=upgradedev/archon-datahub \
     GITHUB_RUN_ID=123456 \
     GITHUB_RUN_ATTEMPT="${VERIFY_RUN_ATTEMPT:-2}" \
@@ -1529,11 +1529,11 @@ FAKE_APPROVAL_ENVIRONMENT=judge-access-production \
   expect_failure run_approval_verify
 FAKE_REVIEWER_TYPE=Team \
   expect_failure run_approval_verify
-FAKE_PREVENT_SELF_REVIEW=false \
+FAKE_PREVENT_SELF_REVIEW=true \
   expect_failure run_approval_verify
-FAKE_REVIEWER_LOGIN=Requester \
+FAKE_REVIEWER_LOGIN=other-reviewer \
   expect_failure run_approval_verify
-FAKE_REVIEWER_LOGIN=RERUN-OPERATOR \
+FAKE_APPROVAL_LOGIN=other-reviewer \
   expect_failure run_approval_verify
 
 run_request provision "${judge_account_id}" >"${result_log}" 2>&1

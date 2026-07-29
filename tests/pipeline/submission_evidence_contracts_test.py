@@ -398,14 +398,15 @@ def valid_facts() -> dict[str, dict]:
             "originalWorkOwnershipReviewed": True,
             "crossMediumConsistent": True,
             "reviewApproval": {
+                "approvalMode": "solo-owner",
                 "environment": "submission-content-review",
                 "workflowPath": ".github/workflows/submission-content-review.yml",
                 "runId": 903,
                 "runAttempt": 1,
                 "environmentId": 604,
                 "workflowActorId": 601,
-                "triggeringActorId": 602,
-                "reviewerId": 603,
+                "triggeringActorId": 601,
+                "reviewerId": 601,
                 "candidateRunAttempt": 1,
                 "candidateArtifactId": 2003,
                 "candidateArtifactDigest": ALT_DIGEST,
@@ -648,10 +649,11 @@ def valid_facts() -> dict[str, dict]:
                 "sealedAt": iso(NOW - dt.timedelta(minutes=1)),
             },
             "reviewApproval": {
+                "approvalMode": "solo-owner",
                 "environment": "submission-devpost-confirmation",
                 "workflowActorId": 703,
-                "triggeringActorId": 704,
-                "reviewerId": 705,
+                "triggeringActorId": 703,
+                "reviewerId": 703,
                 "approvalReceiptDigest": ALT_DIGEST,
             },
         },
@@ -748,6 +750,7 @@ def valid_facts() -> dict[str, dict]:
                 "reviewJobStartedAt": iso(feedback_review_job_started_at),
             },
             "reviewApproval": {
+                "approvalMode": "solo-owner",
                 "environment": "submission-bonus-feedback",
                 "workflowPath": (
                     ".github/workflows/submission-bonus-feedback.yml"
@@ -756,8 +759,8 @@ def valid_facts() -> dict[str, dict]:
                 "runAttempt": 1,
                 "environmentId": 802,
                 "workflowActorId": 803,
-                "triggeringActorId": 804,
-                "reviewerId": 805,
+                "triggeringActorId": 803,
+                "reviewerId": 803,
                 "candidateRunAttempt": 1,
                 "candidateArtifactId": 806,
                 "candidateArtifactDigest": DIGEST,
@@ -1581,8 +1584,8 @@ rejects_mutation(
 )
 rejects_mutation(
     "BONUS-FEEDBACK",
-    lambda value: value["reviewApproval"].update(reviewerId=803),
-    "BONUS-FEEDBACK accepted review by the workflow actor",
+    lambda value: value["reviewApproval"].update(reviewerId=805),
+    "BONUS-FEEDBACK accepted review detached from the workflow owner",
 )
 rejects_mutation(
     "BONUS-FEEDBACK",

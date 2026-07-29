@@ -179,10 +179,10 @@ def make_approval_receipt(
     plan_sha256: str,
     run_id: str = "4242",
     run_attempt: str = "1",
-    actor: str = "dispatch-user",
-    triggering_actor: str = "rerun-user",
+    actor: str = "upgradedev",
+    triggering_actor: str = "upgradedev",
     approver_id: int = 707,
-    approver_login: str = "independent-reviewer",
+    approver_login: str = "upgradedev",
 ) -> dict[str, Any]:
     receipt = {
         "schemaVersion": "archon.datahub-demo-approval/v1",
@@ -1336,8 +1336,8 @@ class DemoStateDriverContracts(TestCase):
                 release_sha=release_sha,
                 workflow_run_id="4242",
                 workflow_run_attempt="1",
-                actor="dispatch-user",
-                triggering_actor="rerun-user",
+                actor="upgradedev",
+                triggering_actor="upgradedev",
                 datahub_cli=str(cli),
                 receipt=str(receipt_path),
             )
@@ -1406,7 +1406,7 @@ class DemoStateDriverContracts(TestCase):
                 action="seed",
                 release_sha=release_sha,
                 plan_sha256=plan_sha256,
-                approver_login="DISPATCH-USER",
+                approver_login="different-user",
             )
             rejected_arguments = SimpleNamespace(
                 **{
@@ -1417,7 +1417,7 @@ class DemoStateDriverContracts(TestCase):
             )
             with self.assertRaisesRegex(
                 SystemExit,
-                "must differ from actor",
+                "must match the repository owner",
             ):
                 DRIVER.command_apply(rejected_arguments)
 
@@ -1490,8 +1490,8 @@ class DemoStateDriverContracts(TestCase):
                 release_sha=release_sha,
                 workflow_run_id="4242",
                 workflow_run_attempt="1",
-                actor="dispatch-user",
-                triggering_actor="rerun-user",
+                actor="upgradedev",
+                triggering_actor="upgradedev",
                 datahub_cli=str(cli),
                 receipt=str(receipt_path),
             )

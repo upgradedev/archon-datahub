@@ -79,6 +79,8 @@ jobs:
           test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
           test "${GITHUB_REF}" = "refs/heads/master"
           test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "${GITHUB_ACTOR,,}" = "upgradedev"
+          test "${GITHUB_TRIGGERING_ACTOR,,}" = "upgradedev"
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${SOURCE_WORKFLOW_PATH}" = \
             ".github/workflows/submission-evidence.yml"
@@ -116,18 +118,18 @@ jobs:
             any(
               .protection_rules[]?;
               .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1 and
+              .prevent_self_review == false and
+              (.reviewers | length) == 1 and
               all(
                 .reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
           ' <<<"${environment_json}" >/dev/null || {
-            echo "::error::submission-readiness requires individual reviewers, prevent-self-review, and a custom branch policy"
+            echo "::error::submission-readiness requires the sole owner reviewer, self-review enabled, and a custom branch policy"
             exit 1
           }
           policies="$(gh api \
@@ -193,7 +195,7 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
           approval="APPROVE ARCHON SUBMISSION READINESS run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} source_run_id=${SOURCE_RUN_ID} source_producer_run_attempt=${SOURCE_PRODUCER_RUN_ATTEMPT} source_attestation_run_attempt=${SOURCE_RUN_ATTEMPT} artifact_id=${SOURCE_ARTIFACT_ID} artifact_digest=${SOURCE_ARTIFACT_DIGEST} predicate_digest=${PREDICATE_DIGEST}"
           {
-            echo "### Independent readiness review required"
+            echo "### Solo-owner readiness approval required"
             echo
             echo "Approve the protected \`submission-readiness\` environment with this exact comment:"
             echo
@@ -210,7 +212,7 @@ jobs:
           retention-days: 90
 
   review:
-    name: Independently approve and revalidate
+    name: Approve and revalidate as solo owner
     needs: collect
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -225,7 +227,7 @@ jobs:
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
       producer_run_attempt: ${{ steps.bundle.outputs.producer_run_attempt }}
     steps:
-      - name: Verify exact independent environment approval
+      - name: Verify exact solo-owner environment approval
         id: approval
         env:
           GH_TOKEN: ${{ github.token }}
@@ -243,6 +245,8 @@ jobs:
           test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
           test "${GITHUB_REF}" = "refs/heads/master"
           test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "${GITHUB_ACTOR,,}" = "upgradedev"
+          test "${GITHUB_TRIGGERING_ACTOR,,}" = "upgradedev"
           expected_approval="APPROVE ARCHON SUBMISSION READINESS run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} source_run_id=${SOURCE_RUN_ID} source_producer_run_attempt=${SOURCE_PRODUCER_RUN_ATTEMPT} source_attestation_run_attempt=${SOURCE_RUN_ATTEMPT} artifact_id=${SOURCE_ARTIFACT_ID} artifact_digest=${SOURCE_ARTIFACT_DIGEST} predicate_digest=${PREDICATE_DIGEST}"
           environment_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -264,14 +268,14 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -279,7 +283,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")" || {
             echo "::error::submission-readiness reviewer posture changed"
@@ -317,18 +321,19 @@ jobs:
                   (.user.id | type) == "number" and
                   (.user.login | type) == "string" and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  (.user.login | ascii_downcase) != ($actor | ascii_downcase) and
-                  (.user.login | ascii_downcase) !=
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  (.user.login | ascii_downcase) == ($actor | ascii_downcase) and
+                  (.user.login | ascii_downcase) ==
                     ($triggeringActor | ascii_downcase)
                 )
               ] |
               if length == 1 then
                 .[0]
               else
-                error("expected exactly one matching independent approval")
+                error("expected exactly one matching solo-owner approval")
               end
             ' <<<"${approvals}")" || {
-            echo "::error::missing exact independent approval comment: ${expected_approval}"
+            echo "::error::missing exact solo-owner approval comment: ${expected_approval}"
             exit 1
           }
           approval_dir="${RUNNER_TEMP}/submission-readiness-approval"
@@ -368,6 +373,8 @@ jobs:
                   id: $environmentId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   reviewer: {
                     id: $reviewerId,
                     login: $reviewerLogin
@@ -496,7 +503,7 @@ jobs:
           test "sha256:$(sha256sum "${binding}" | awk '{print $1}')" = \
             "${COLLECTED_BINDING_DIGEST}"
 
-      - name: Independently fetch and reverify source after approval
+      - name: Refetch and reverify source after owner approval
         env:
           GH_TOKEN: ${{ github.token }}
           PREDICATE_DIGEST: ${{ inputs.predicate_digest }}
@@ -520,7 +527,7 @@ jobs:
           reviewed="${RUNNER_TEMP}/submission-readiness-reviewed-source/source-binding.json"
           collected="${RUNNER_TEMP}/submission-readiness-collected-download/source-binding.json"
           cmp --silent "${reviewed}" "${collected}" || {
-            echo "::error::independent source binding differs from collected binding"
+            echo "::error::post-approval source binding differs from collected binding"
             exit 1
           }
 
@@ -720,7 +727,7 @@ jobs:
             echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Upload independently reviewed evidence
+      - name: Upload solo-owner reviewed evidence
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -910,7 +917,11 @@ jobs:
               $binding[0].approval.runAttempt ==
                 $approval[0].workflow.runAttempt and
               $binding[0].approval.reviewerId ==
-                $approval[0].approval.reviewer.id
+                $approval[0].approval.reviewer.id and
+              $approval[0].approval.mode == "solo-owner" and
+              $approval[0].approval.selfApproved == true and
+              ($approval[0].approval.reviewer.login | ascii_downcase) ==
+                "upgradedev"
             ' >/dev/null
           jq -e \
             --arg release "${RELEASE_SHA}" \

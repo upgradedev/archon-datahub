@@ -34,7 +34,7 @@ const MAX_EXECUTION_OUTPUT_BYTES = 256 * 1024;
 const DECIDED_RETENTION_SECONDS = 90 * 24 * 60 * 60;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const CREDENTIAL_SHAPED_IDENTIFIER =
-  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+  /(?:bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
 const MANUAL_ONLY_REASONS = [
   "READ_ONLY_REQUEST",
   "NO_ACTIONABLE_G6_FINDING",
@@ -64,6 +64,7 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
   "tokens"
 ]);
 const PUBLIC_CREDENTIAL_PATTERNS = [
+  /bedrock-api-key-[A-Za-z0-9_+/=-]{16,}/u,
   /(?:AKIA|ASIA)[A-Z0-9]{16}/u,
   /gh[pousr]_[A-Za-z0-9_]{20,}/u,
   /github_pat_[A-Za-z0-9_]{20,}/u,
@@ -1071,9 +1072,14 @@ function validModelProvenance(value) {
   return (
     value.source === "live-provider" &&
     value.modelCall === true &&
-    ["custom", "qwen", "gemini", "openai", "anthropic"].includes(
-      value.provider
-    ) &&
+    [
+      "bedrock-mantle",
+      "custom",
+      "qwen",
+      "gemini",
+      "openai",
+      "anthropic"
+    ].includes(value.provider) &&
     validModelId(value.returnedModel) &&
     typeof value.providerResponseId === "string" &&
     /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u.test(value.providerResponseId) &&

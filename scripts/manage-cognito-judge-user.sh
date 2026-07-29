@@ -422,7 +422,7 @@ write_lifecycle_state_receipt() {
       .secretMaterialRetained == false and
       ([.. | strings] | all(
         test(
-          "(?i)(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-)"
+          "(?i)(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-)"
         ) | not
       ))
     ' "${temporary_output}" >/dev/null ||
@@ -547,7 +547,7 @@ regional_web_acl_arn="$(
 [[ "${application_url}" == https://* ]] ||
   fail "ArchonApplicationUrl must be an exact credential-free HTTPS origin"
 test "${application_url}" = "${EXPECTED_APPLICATION_URL}" ||
-  fail "ArchonApplicationUrl does not match the independently approved target"
+  fail "ArchonApplicationUrl does not match the solo-owner-approved target"
 application_host="${application_url#https://}"
 (( ${#application_host} >= 4 && ${#application_host} <= 253 )) ||
   fail "ArchonApplicationUrl has an invalid host length"

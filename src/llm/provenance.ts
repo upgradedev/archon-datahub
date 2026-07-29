@@ -9,6 +9,7 @@ export const MODEL_PROVENANCE_SCHEMA_VERSION =
   "archon.model-runtime-provenance/v1" as const;
 
 export type LiveLlmProvider =
+  | "bedrock-mantle"
   | "custom"
   | "qwen"
   | "gemini"
@@ -69,6 +70,7 @@ export interface ProviderResponseMetadata {
 }
 
 const LIVE_PROVIDERS = new Set<LiveLlmProvider>([
+  "bedrock-mantle",
   "custom",
   "qwen",
   "gemini",
@@ -93,7 +95,7 @@ const RESPONSE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{5,199}$/u;
 // `model_` or `resp_`. Anchoring this detector would let an embedded credential-shaped
 // value pass the otherwise strict identifier allowlist and reach exported evidence.
 const CREDENTIAL_SHAPED_IDENTIFIER =
-  /(?:sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
+  /(?:bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/u;
 const MAX_LATENCY_MS = 3_600_000;
 
 export class ModelProvenanceError extends Error {

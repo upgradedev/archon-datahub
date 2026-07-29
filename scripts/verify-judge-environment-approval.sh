@@ -163,6 +163,10 @@ test "${GITHUB_REPOSITORY:-}" = "upgradedev/archon-datahub" ||
   fail "GITHUB_ACTOR is invalid"
 [[ "${GITHUB_TRIGGERING_ACTOR:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] ||
   fail "GITHUB_TRIGGERING_ACTOR is invalid"
+test "${GITHUB_ACTOR,,}" = "upgradedev" ||
+  fail "The workflow actor must be the solo repository owner"
+test "${GITHUB_TRIGGERING_ACTOR,,}" = "upgradedev" ||
+  fail "The triggering actor must be the solo repository owner"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 computed_request_sha256="$(request_sha256)"
@@ -200,13 +204,14 @@ jq -e \
     .deployment_branch_policy.protected_branches == false and
     .deployment_branch_policy.custom_branch_policies == true and
     ($review_rules | length) == 1 and
-    $review_rules[0].prevent_self_review == true and
-    (($review_rules[0].reviewers // []) | length) >= 1 and
+    $review_rules[0].prevent_self_review == false and
+    (($review_rules[0].reviewers // []) | length) == 1 and
     all(
       ($review_rules[0].reviewers // [])[];
       .type == "User" and
       (.reviewer.id | type == "number") and
-      (.reviewer.login | type == "string")
+      (.reviewer.login | type == "string") and
+      (.reviewer.login | ascii_downcase) == "upgradedev"
     ) and
     (
       [
@@ -274,8 +279,8 @@ jq -e \
           .user.id == $reviewer_id and
           (.user.login | ascii_downcase) ==
             ($reviewer_login | ascii_downcase) and
-          (.user.login | ascii_downcase) != ($actor | ascii_downcase) and
-          (.user.login | ascii_downcase) !=
+          (.user.login | ascii_downcase) == ($actor | ascii_downcase) and
+          (.user.login | ascii_downcase) ==
             ($triggering_actor | ascii_downcase) and
           ((.environments // []) | length) == 1 and
           .environments[0].name == $environment
@@ -284,6 +289,6 @@ jq -e \
       length
     ) == 1
   ' <<<"${approvals_json}" >/dev/null ||
-  fail "No exact independent judge-access approval receipt exists for this attempt"
+  fail "No exact solo-owner judge-access approval receipt exists for this attempt"
 
-printf 'Verified the exact independent judge-access approval receipt.\n'
+printf 'Verified the exact solo-owner judge-access approval receipt.\n'

@@ -16,6 +16,8 @@ import {
   retryVisibilitySeconds,
   shouldFinalizePoisonDelivery,
 } from "../../src/worker/aws-adapters.js";
+import { loadAuditWorkerConfiguration } from "../../src/audit-worker.js";
+import { loadRemediationWorkerConfiguration } from "../../src/remediation-worker.js";
 
 const EXECUTION =
   "arn:aws:states:eu-west-1:111111111111:execution:archon-staging-control-loop:execution-0001";
@@ -39,6 +41,76 @@ const MANUAL_REPLAY = {
   evidenceDigest: DIGEST,
   manualOnlyReason: "NO_ACTIONABLE_G6_FINDING",
 } as const;
+
+const WORKER_ENVIRONMENT = [
+  "ARCHON_AUDIT_QUEUE_URL",
+  "ARCHON_AUDIT_DLQ_URL",
+  "ARCHON_REMEDIATION_QUEUE_URL",
+  "ARCHON_REMEDIATION_DLQ_URL",
+  "ARCHON_APPROVAL_TABLE",
+  "ARCHON_APPROVAL_QUEUE_URL",
+  "ARCHON_APPROVAL_DLQ_URL",
+  "ARCHON_IDEMPOTENCY_TABLE",
+  "ARCHON_EVIDENCE_BUCKET",
+  "ARCHON_RELEASE_SHA",
+  "DATAHUB_GMS_URL",
+  "DATAHUB_GMS_TOKEN",
+  "DATAHUB_MCP_URL",
+  "DATAHUB_WRITE_GMS_URL",
+  "DATAHUB_WRITE_GMS_TOKEN",
+  "DATAHUB_WRITE_MCP_URL",
+  "LLM_PROVIDER",
+  "LLM_API_KEY",
+  "LLM_BASE_URL",
+  "LLM_MODEL",
+  "LLM_PROJECT_ID",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_DEFAULT_PROFILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_CONFIG_FILE",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_ROLE_SESSION_NAME",
+  "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+  "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+  "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+  "DASHSCOPE_API_KEY",
+  "GEMINI_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "AWS_REGION",
+] as const;
+
+function withWorkerEnvironment<T>(
+  overrides: Record<string, string>,
+  fn: () => T
+): T {
+  const saved = new Map<string, string | undefined>();
+  for (const name of WORKER_ENVIRONMENT) {
+    saved.set(name, process.env[name]);
+    delete process.env[name];
+  }
+  try {
+    Object.assign(process.env, overrides);
+    return fn();
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+const COMMON_WORKER_ENVIRONMENT = {
+  ARCHON_IDEMPOTENCY_TABLE: "archon-idempotency",
+  ARCHON_EVIDENCE_BUCKET: "archon-evidence",
+  ARCHON_RELEASE_SHA: "abcdef1234567",
+};
 
 function auditCheckpoint(output: unknown): DynamoAuditResultCheckpoint {
   const client = {
@@ -79,6 +151,165 @@ function withoutKey(
   return Object.fromEntries(
     Object.entries(value).filter(([key]) => key !== omitted)
   );
+}
+
+test("hosted audit worker accepts only stage-scoped Bedrock task-role auth", () => {
+  withWorkerEnvironment(
+    {
+      ...COMMON_WORKER_ENVIRONMENT,
+      ARCHON_AUDIT_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/audit",
+      ARCHON_AUDIT_DLQ_URL: "https://sqs.eu-west-1.amazonaws.com/audit-dlq",
+      DATAHUB_GMS_URL: "https://datahub.example.test",
+      DATAHUB_GMS_TOKEN: "read-token",
+      DATAHUB_MCP_URL: "https://datahub.example.test/mcp",
+      LLM_PROVIDER: "bedrock-mantle",
+      AWS_REGION: "eu-west-1",
+      LLM_BASE_URL: "https://bedrock-mantle.eu-west-1.api.aws/v1",
+      LLM_MODEL: "qwen.qwen3-235b-a22b-2507",
+      LLM_PROJECT_ID: "proj_archonstaging001",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
+        "/v2/credentials/12345678-90ab-cdef-1234-567890abcdef",
+    },
+    () => {
+      const configuration = loadAuditWorkerConfiguration();
+      assert.equal(configuration.idempotencyTable, "archon-idempotency");
+      assert.equal(configuration.releaseSha, "abcdef1234567");
+    }
+  );
+});
+
+test("hosted audit worker rejects a static LLM key beside task-role auth", () => {
+  withWorkerEnvironment(
+    {
+      ...COMMON_WORKER_ENVIRONMENT,
+      ARCHON_AUDIT_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/audit",
+      ARCHON_AUDIT_DLQ_URL: "https://sqs.eu-west-1.amazonaws.com/audit-dlq",
+      DATAHUB_GMS_URL: "https://datahub.example.test",
+      DATAHUB_GMS_TOKEN: "read-token",
+      DATAHUB_MCP_URL: "https://datahub.example.test/mcp",
+      LLM_PROVIDER: "bedrock-mantle",
+      AWS_REGION: "eu-west-1",
+      LLM_BASE_URL: "https://bedrock-mantle.eu-west-1.api.aws/v1",
+      LLM_MODEL: "qwen.qwen3-235b-a22b-2507",
+      LLM_PROJECT_ID: "proj_archonstaging001",
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
+        "/v2/credentials/12345678-90ab-cdef-1234-567890abcdef",
+      LLM_API_KEY: "forbidden-static-key",
+    },
+    () => {
+      assert.throws(
+        loadAuditWorkerConfiguration,
+        /LLM_API_KEY is forbidden/u
+      );
+    }
+  );
+});
+
+for (const [credentialName, credentialValue] of [
+  ["AWS_ACCESS_KEY_ID", "AKIA1234567890ABCDEF"],
+  ["AWS_PROFILE", "default"],
+  ["AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/secrets/token"],
+  ["AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://127.0.0.1/credentials"],
+] as const) {
+  test(`hosted audit worker rejects ambient ${credentialName}`, () => {
+    withWorkerEnvironment(
+      {
+        ...COMMON_WORKER_ENVIRONMENT,
+        ARCHON_AUDIT_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/audit",
+        ARCHON_AUDIT_DLQ_URL:
+          "https://sqs.eu-west-1.amazonaws.com/audit-dlq",
+        DATAHUB_GMS_URL: "https://datahub.example.test",
+        DATAHUB_GMS_TOKEN: "read-token",
+        DATAHUB_MCP_URL: "https://datahub.example.test/mcp",
+        LLM_PROVIDER: "bedrock-mantle",
+        AWS_REGION: "eu-west-1",
+        LLM_BASE_URL: "https://bedrock-mantle.eu-west-1.api.aws/v1",
+        LLM_MODEL: "qwen.qwen3-235b-a22b-2507",
+        LLM_PROJECT_ID: "proj_archonstaging001",
+        AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:
+          "/v2/credentials/12345678-90ab-cdef-1234-567890abcdef",
+        [credentialName]: credentialValue,
+      },
+      () => {
+        assert.throws(
+          loadAuditWorkerConfiguration,
+          new RegExp(`${credentialName} is forbidden`, "u")
+        );
+      }
+    );
+  });
+}
+
+test("hosted audit worker rejects a missing ECS task-role credential endpoint", () => {
+  withWorkerEnvironment(
+    {
+      ...COMMON_WORKER_ENVIRONMENT,
+      ARCHON_AUDIT_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/audit",
+      ARCHON_AUDIT_DLQ_URL: "https://sqs.eu-west-1.amazonaws.com/audit-dlq",
+      DATAHUB_GMS_URL: "https://datahub.example.test",
+      DATAHUB_GMS_TOKEN: "read-token",
+      DATAHUB_MCP_URL: "https://datahub.example.test/mcp",
+      LLM_PROVIDER: "bedrock-mantle",
+      AWS_REGION: "eu-west-1",
+      LLM_BASE_URL: "https://bedrock-mantle.eu-west-1.api.aws/v1",
+      LLM_MODEL: "qwen.qwen3-235b-a22b-2507",
+      LLM_PROJECT_ID: "proj_archonstaging001",
+    },
+    () => {
+      assert.throws(
+        loadAuditWorkerConfiguration,
+        /must identify the ECS task-role credential endpoint/u
+      );
+    }
+  );
+});
+
+test("remediation worker rejects Bedrock project capability", () => {
+  withWorkerEnvironment(
+    {
+      ...COMMON_WORKER_ENVIRONMENT,
+      ARCHON_REMEDIATION_QUEUE_URL:
+        "https://sqs.eu-west-1.amazonaws.com/remediation",
+      ARCHON_REMEDIATION_DLQ_URL:
+        "https://sqs.eu-west-1.amazonaws.com/remediation-dlq",
+      DATAHUB_WRITE_GMS_URL: "https://datahub-write.example.test",
+      DATAHUB_WRITE_GMS_TOKEN: "write-token",
+      DATAHUB_WRITE_MCP_URL: "https://datahub-write.example.test/mcp",
+      LLM_PROJECT_ID: "proj_archonstaging001",
+    },
+    () => {
+      assert.throws(
+        loadRemediationWorkerConfiguration,
+        /LLM_PROJECT_ID/u
+      );
+    }
+  );
+});
+
+for (const credential of [
+  "DASHSCOPE_API_KEY",
+  "GEMINI_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+] as const) {
+  test(`remediation worker rejects ${credential} model capability`, () => {
+    withWorkerEnvironment(
+      {
+        ...COMMON_WORKER_ENVIRONMENT,
+        ARCHON_REMEDIATION_QUEUE_URL:
+          "https://sqs.eu-west-1.amazonaws.com/remediation",
+        ARCHON_REMEDIATION_DLQ_URL:
+          "https://sqs.eu-west-1.amazonaws.com/remediation-dlq",
+        DATAHUB_WRITE_GMS_URL: "https://datahub-write.example.test",
+        DATAHUB_WRITE_GMS_TOKEN: "write-token",
+        DATAHUB_WRITE_MCP_URL: "https://datahub-write.example.test/mcp",
+        [credential]: "forbidden-model-credential",
+      },
+      () => {
+        assert.throws(loadRemediationWorkerConfiguration, new RegExp(credential));
+      }
+    );
+  });
 }
 
 test("worker contracts accept the exact audit, approval, and remediation envelopes", () => {
@@ -500,6 +731,63 @@ test("an active remediation journal lease gets a bounded recovery delay", () => 
   }
   assert.equal(shouldFinalizePoisonDelivery(new Error("transient"), 5, 5), true);
   assert.equal(retryVisibilitySeconds(new Error("transient")), 5);
+});
+
+test("worker delivery classifies direct provider HTTP status without unsafe payloads", () => {
+  for (const status of [400, 401, 403, 404]) {
+    const terminal = Object.assign(new Error("opaque provider failure"), {
+      status,
+    });
+    assert.equal(
+      shouldFinalizePoisonDelivery(terminal, 1, 5),
+      true,
+      `HTTP ${status} must be terminal`
+    );
+  }
+
+  for (const status of [408, 429, 500, 503]) {
+    const retryable = Object.assign(new Error("opaque provider failure"), {
+      status,
+    });
+    assert.equal(
+      shouldFinalizePoisonDelivery(retryable, 1, 5),
+      false,
+      `HTTP ${status} must retry before the delivery cap`
+    );
+    assert.equal(
+      shouldFinalizePoisonDelivery(retryable, 5, 5),
+      true,
+      `HTTP ${status} must finalize at the delivery cap`
+    );
+  }
+
+  const taskRoleAuthentication = Object.assign(
+    new Error(
+      "Unable to mint a valid short-term Bedrock Mantle token from the AWS task role."
+    ),
+    {
+      name: "BedrockMantleAuthenticationError",
+      status: 401,
+    }
+  );
+  assert.equal(
+    shouldFinalizePoisonDelivery(taskRoleAuthentication, 1, 5),
+    true
+  );
+  const taskRoleProviderOutage = Object.assign(
+    new Error(
+      "The ECS task-role credential provider is temporarily unavailable for Bedrock Mantle."
+    ),
+    {
+      name: "BedrockMantleTokenProviderUnavailableError",
+      retryable: true,
+      status: 503,
+    }
+  );
+  assert.equal(
+    shouldFinalizePoisonDelivery(taskRoleProviderOutage, 1, 5),
+    false
+  );
 });
 
 test("Dynamo execution claims reconcile transaction cancellations without reasons", async (t) => {

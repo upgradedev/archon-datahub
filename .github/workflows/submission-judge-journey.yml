@@ -1007,11 +1007,12 @@ jobs:
                 .applicationOriginSha256 == $applicationOriginSha256 and
                 .approval == {
                   environment: "judge-access-production",
+                  approvalMode: "solo-owner",
                   requestSha256: $requestSha256,
                   approvalReceiptSha256: $approvalReceiptSha256,
                   targetSha256: .approval.targetSha256,
                   exactReceiptVerified: true,
-                  independentReviewerVerified: true
+                  soloOwnerApprovalVerified: true
                 } and
                 (.approval.targetSha256 |
                   test("^[0-9a-f]{64}$")) and
@@ -1113,11 +1114,12 @@ jobs:
                 .applicationOriginSha256 == $applicationOriginSha256 and
                 .approval == {
                   environment: "judge-access-production",
+                  approvalMode: "solo-owner",
                   requestSha256: $requestSha256,
                   approvalReceiptSha256: $approvalReceiptSha256,
                   targetSha256: $targetSha256,
                   exactReceiptVerified: true,
-                  independentReviewerVerified: true
+                  soloOwnerApprovalVerified: true
                 } and
                 .controlPlane == {
                   mode: "full-green",
@@ -2833,6 +2835,7 @@ jobs:
           raw = b"".join((root / name).read_bytes() for name in retained)
           if re.search(
               rb"(?i)(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+              rb"bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|"
               rb"Bearer[ \t]+[A-Za-z0-9._~+/=-]{20,}|"
               rb"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|"
               rb"xox[baprs]-)",
@@ -3811,6 +3814,7 @@ jobs:
           retained = b"".join((root / name).read_bytes() for name in expected_files)
           if re.search(
               rb"(?i)(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
+              rb"bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|"
               rb"Bearer[ \t]+[A-Za-z0-9._~+/=-]{20,}|"
               rb"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|"
               rb"xox[baprs]-)",

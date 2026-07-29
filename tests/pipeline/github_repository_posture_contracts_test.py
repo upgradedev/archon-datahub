@@ -28,9 +28,11 @@ SCRIPT_TEXT = SCRIPT_PATH.read_text(encoding="utf-8")
 POLICY_TEXT = POLICY_PATH.read_text(encoding="utf-8")
 
 EXPECTED_ENVIRONMENTS = [
+    "aws-foundation",
     "datahub-demo",
     "datahub-demo-seed",
     "governed-canary",
+    "governed-canary-prepare",
     "governed-canary-recovery",
     "governed-canary-rollback",
     "judge-access-production",
@@ -44,7 +46,8 @@ EXPECTED_ENVIRONMENTS = [
     "submission-devpost-confirmation",
     "submission-readiness",
 ]
-EXPECTED_PENDING_ENVIRONMENTS = [
+EXPECTED_SOLO_OWNER_ENVIRONMENTS = [
+    "aws-foundation",
     "datahub-demo-seed",
     "governed-canary",
     "governed-canary-recovery",
@@ -59,10 +62,14 @@ EXPECTED_PENDING_ENVIRONMENTS = [
 ]
 EXPECTED_AUTOMATED_ENVIRONMENTS = [
     "datahub-demo",
+    "governed-canary-prepare",
     "production-observer",
     "production-paging-test",
     "staging",
 ]
+EXPECTED_EMPTY_ENVIRONMENTS = sorted(
+    EXPECTED_SOLO_OWNER_ENVIRONMENTS + ["governed-canary-prepare"]
+)
 EXPECTED_ACTION_PATTERNS = [
     "actions/attest@*",
     "actions/cache/*@*",
@@ -151,8 +158,8 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
             "branchPolicy",
             "canAdminsBypass",
             "exactNames",
-            "pendingIndependentReviewer",
             "reviewerlessByDesign",
+            "soloOwnerApproval",
         },
         "environment policy fields must be exact",
     )
@@ -168,34 +175,11 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
     )
     require(
         environments["canAdminsBypass"] is False,
-        "all fifteen environments must disable administrator bypass",
+        "all seventeen environments must disable administrator bypass",
     )
     require(
         environments["exactNames"] == EXPECTED_ENVIRONMENTS,
-        "the fifteen-environment inventory must be exact",
-    )
-
-    pending = environments["pendingIndependentReviewer"]
-    require(
-        set(pending)
-        == {
-            "exactNames",
-            "expectedProtectionRuleTypes",
-            "state",
-        },
-        "pending-reviewer policy fields must be exact",
-    )
-    require(
-        pending["exactNames"] == EXPECTED_PENDING_ENVIRONMENTS,
-        "the eleven pending-reviewer environments must be exact",
-    )
-    require(
-        pending["state"] == "pending-independent-reviewer",
-        "privileged environments must be transparently pending review",
-    )
-    require(
-        pending["expectedProtectionRuleTypes"] == ["branch_policy"],
-        "pending environments must reject unexpected reviewer rules",
+        "the seventeen-environment inventory must be exact",
     )
     automated = environments["reviewerlessByDesign"]
     require(
@@ -209,7 +193,7 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
     )
     require(
         automated["exactNames"] == EXPECTED_AUTOMATED_ENVIRONMENTS,
-        "the four reviewerless-by-design environments must be exact",
+        "the five reviewerless-by-design environments must be exact",
     )
     require(
         automated["state"] == "reviewerless-by-design",
@@ -219,12 +203,39 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
         automated["expectedProtectionRuleTypes"] == ["branch_policy"],
         "automated environments must reject unexpected protection rules",
     )
+    solo_owner = environments["soloOwnerApproval"]
     require(
-        set(pending["exactNames"]).isdisjoint(automated["exactNames"]),
-        "environment posture tiers must be disjoint",
+        set(solo_owner)
+        == {
+            "exactNames",
+            "expectedProtectionRuleTypes",
+            "ownerLogin",
+            "preventSelfReview",
+            "state",
+        },
+        "solo-owner approval policy fields must be exact",
     )
     require(
-        sorted(pending["exactNames"] + automated["exactNames"])
+        solo_owner["exactNames"] == EXPECTED_SOLO_OWNER_ENVIRONMENTS,
+        "the twelve solo-owner approval environments must be exact",
+    )
+    require(
+        solo_owner["expectedProtectionRuleTypes"]
+        == ["branch_policy", "required_reviewers"]
+        and solo_owner["ownerLogin"] == "upgradedev"
+        and solo_owner["preventSelfReview"] is False
+        and solo_owner["state"] == "solo-owner-approval",
+        "solo-owner approval must bind one self-review-enabled owner gate",
+    )
+    require(
+        set(solo_owner["exactNames"]).isdisjoint(automated["exactNames"]),
+        "solo-owner approval environments must be a distinct posture tier",
+    )
+    require(
+        sorted(
+            solo_owner["exactNames"]
+            + automated["exactNames"]
+        )
         == environments["exactNames"],
         "environment tiers must cover the exact inventory",
     )
@@ -259,7 +270,7 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
         administration["environmentSecrets"]
         == {
             "expectedEmptyEnvironmentNames":
-                EXPECTED_PENDING_ENVIRONMENTS,
+                EXPECTED_EMPTY_ENVIRONMENTS,
             "requiredFineGrainedPermissions": [
                 "Actions:read",
                 "Administration:read",
@@ -490,18 +501,18 @@ def validate_script(script: str) -> None:
 
     for policy_anchor in (
         '(.administrationOnly.actions.patternsAllowed | length) == 16',
-        '(.environments.exactNames | length) == 15',
+        '(.environments.exactNames | length) == 17',
         (
-            '(.environments.pendingIndependentReviewer.exactNames '
-            '| length) == 11'
+            '(.environments.soloOwnerApproval.exactNames '
+            '| length) == 12'
         ),
         (
             '(.environments.reviewerlessByDesign.exactNames '
-            '| length) == 4'
+            '| length) == 5'
         ),
         (
-            '.environments.pendingIndependentReviewer.'
-            'expectedProtectionRuleTypes ==\n    ["branch_policy"]'
+            '.environments.soloOwnerApproval.expectedProtectionRuleTypes ==\n'
+            '    ["branch_policy", "required_reviewers"]'
         ),
         (
             '.administrationOnly.environmentSecrets.status ==\n'
@@ -532,6 +543,11 @@ def validate_script(script: str) -> None:
         "observed environment names must equal the policy set",
     )
     require(
+        "jq -r 'length' <<<\"${observed_environments}\"\n)\" = \"17\""
+        in script,
+        "the terminal observed environment count must remain exactly seventeen",
+    )
+    require(
         ".environments.canAdminsBypass == false" in script,
         "policy must require administrator bypass off for all environments",
     )
@@ -553,8 +569,13 @@ def validate_script(script: str) -> None:
     )
     require(
         "expectedEmptyEnvironmentNames ==\n"
-        "    .environments.pendingIndependentReviewer.exactNames" in script,
-        "unverified empty-secret expectation must bind to all pending names",
+        "    (\n"
+        "      (\n"
+        "        .environments.soloOwnerApproval.exactNames +\n"
+        '        ["governed-canary-prepare"]\n'
+        "      ) | sort\n"
+        "    )" in script,
+        "unverified empty-secret expectation must bind all privileged names",
     )
     require(
         "secret_names" not in script
@@ -816,28 +837,29 @@ mutations: dict[str, tuple[str, str, str]] = {
             )
         ),
     ),
-    "unexpected pending reviewer accepted": (
+    "unexpected solo-owner protection rule accepted": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
         mutate_policy(
             lambda policy: policy["environments"][
-                "pendingIndependentReviewer"
+                "soloOwnerApproval"
             ].update(
                 {
                     "expectedProtectionRuleTypes": [
                         "branch_policy",
                         "required_reviewers",
+                        "wait_timer",
                     ]
                 }
             )
         ),
     ),
-    "secret expectation leaked into automatic tier": (
+    "secret expectation leaked into approval tier": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
         mutate_policy(
             lambda policy: policy["environments"][
-                "pendingIndependentReviewer"
+                "soloOwnerApproval"
             ].update({"secretInventory": "verified-empty"})
         ),
     ),
@@ -1118,7 +1140,8 @@ print(
             "automatedEnvironments": len(EXPECTED_AUTOMATED_ENVIRONMENTS),
             "environmentCount": len(EXPECTED_ENVIRONMENTS),
             "mutationCases": sorted(mutations),
-            "pendingEnvironments": len(EXPECTED_PENDING_ENVIRONMENTS),
+            "soloOwnerEnvironments":
+                len(EXPECTED_SOLO_OWNER_ENVIRONMENTS),
             "result": "passed",
         },
         separators=(",", ":"),

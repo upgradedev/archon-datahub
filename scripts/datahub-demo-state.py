@@ -570,7 +570,7 @@ def load_approval_receipt(
     reviewer_ids = receipt["configuredReviewerIds"]
     if (
         not isinstance(reviewer_ids, list)
-        or not reviewer_ids
+        or len(reviewer_ids) != 1
         or any(
             not isinstance(identifier, int)
             or isinstance(identifier, bool)
@@ -606,11 +606,9 @@ def load_approval_receipt(
     ):
         fail("approval receipt user is not a configured reviewer")
     approved_login = validate_github_login(user["login"], "approval user login")
-    if approved_login.casefold() in {
-        expected_actor.casefold(),
-        expected_triggering_actor.casefold(),
-    }:
-        fail("approval user must differ from actor and triggering actor")
+    repository_owner = repository.split("/", maxsplit=1)[0]
+    if approved_login.casefold() != repository_owner.casefold():
+        fail("approval user must match the repository owner")
     return receipt, digest_obj(receipt)
 
 
@@ -2028,7 +2026,7 @@ def command_verify_receipt(args: argparse.Namespace) -> None:
     initiators = approval.get("initiators")
     if (
         not isinstance(reviewer_ids, list)
-        or not reviewer_ids
+        or len(reviewer_ids) != 1
         or len(set(reviewer_ids)) != len(reviewer_ids)
         or not all(isinstance(item, int) and not isinstance(item, bool) for item in reviewer_ids)
         or not isinstance(approval_user, dict)
@@ -2043,10 +2041,10 @@ def command_verify_receipt(args: argparse.Namespace) -> None:
             not isinstance(initiators.get(key), str) or not initiators[key]
             for key in ("actor", "triggeringActor")
         )
-        or approval_user["login"].lower()
-        in {initiators["actor"].lower(), initiators["triggeringActor"].lower()}
+        or approval_user["login"].casefold()
+        != repository.split("/", maxsplit=1)[0].casefold()
     ):
-        fail("approval receipt reviewer or exact comment binding is invalid")
+        fail("approval receipt solo-owner or exact comment binding is invalid")
 
     exact_keys(
         plan,

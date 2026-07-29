@@ -37,9 +37,16 @@ export function loadRemediationWorkerConfiguration(): RemediationWorkerConfigura
     "DATAHUB_GMS_TOKEN",
     "DATAHUB_GMS_URL",
     "DATAHUB_MCP_URL",
+    "LLM_PROVIDER",
     "LLM_API_KEY",
     "LLM_BASE_URL",
     "LLM_MODEL",
+    "LLM_PROJECT_ID",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "DASHSCOPE_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
   ]);
   const writeGmsUrl = httpsUrl("DATAHUB_WRITE_GMS_URL");
   httpsUrl("DATAHUB_WRITE_MCP_URL");

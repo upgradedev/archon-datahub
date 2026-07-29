@@ -63,7 +63,7 @@ Create these GitHub environments:
 | Environment | Purpose | Required configuration |
 | --- | --- | --- |
 | `datahub-demo` | Read-only dry-run and live-state plan | secrets `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN` using a read-only DataHub principal |
-| `datahub-demo-seed` | Human-approved mutation and post-read | individual User reviewer(s) only, prevent self-review, one custom deployment branch policy for `master`; admin bypass disabled in the UI as defense-in-depth; secrets `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN` using the narrow demo writer; optional public variable `DATAHUB_URL` |
+| `datahub-demo-seed` | Human-approved mutation and post-read | sole individual User reviewer `upgradedev`, self-review allowed (`prevent self-review` disabled), one custom deployment branch policy for `master`; admin bypass disabled in the UI as defense-in-depth; secrets `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN` using the narrow demo writer; optional public variable `DATAHUB_URL` |
 
 `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` are environment-only secret names. Do not
 define secrets or variables with either name at organization or repository scope:
@@ -97,12 +97,13 @@ DataHub runtime, or AWS credential. Only that secretless job receives GitHub
 
 GitHub's environment REST and GraphQL responses do not expose the admin-bypass toggle, so
 the workflow does not present that UI setting as machine-verified. Keep admin bypass
-disabled as defense-in-depth. The independent control is the first apply step: before
+disabled as defense-in-depth. The explicit solo-owner control is the first apply step: before
 checkout, runtime creation, secret use, or mutation, it reads the run's environment
 approval receipts and requires an approval for exactly `datahub-demo-seed`. The approver
-must be one of the environment's configured individual User reviewer IDs and their login
-must differ from both `GITHUB_ACTOR` and `GITHUB_TRIGGERING_ACTOR`. Team reviewers are
-rejected.
+must be the environment's sole configured individual User reviewer, and that login must
+case-insensitively equal the repository owner (`upgradedev`). Team reviewers are rejected.
+The receipt retains the initiating identities for attribution, but the deliberate second
+approval action may be performed by the solo owner.
 
 The approval comment must exactly match this deterministic format:
 
@@ -113,7 +114,7 @@ APPROVE ARCHON DATAHUB DEMO run_id=<run_id> run_attempt=<run_attempt> action=<se
 The plan job prints the fully substituted phrase in its GitHub step summary for copying
 into the environment approval dialog. Run ID, run attempt, action, release SHA, and sealed
 plan digest are all bound; a comment from another attempt or plan is invalid. Therefore a
-UI admin bypass without that independent receipt cannot reach a DataHub mutation step.
+UI admin bypass without that explicit receipt cannot reach a DataHub mutation step.
 The apply gate retains only a canonical, allowlisted `approval-receipt.json`: exact
 workflow/repository/plan fields, environment name and ID, configured reviewer IDs,
 initiator logins, and the one matched decision/comment/user. It never retains unrelated
@@ -139,8 +140,8 @@ the exact query above. The pipeline:
 
 1. proves that the SHA is still `master` and that exact-SHA CI, CodeQL, and Workflow
    security push runs are green;
-2. validates that the protected mutation environment has only individual User
-   reviewers, prevents self-review, and allows only `master`;
+2. validates that the protected mutation environment has exactly the repository owner as
+   its individual User reviewer, allows self-review, and allows only `master`;
 3. recreates the hash-locked Python/DataHub runtime; normal CI also constructs and
    validates all seven exact SDK proposals/MCPs with this pinned runtime;
 4. materializes and verifies the immutable official pack;
@@ -153,7 +154,7 @@ the exact query above. The pipeline:
 8. prints the exact attempt-bound approval phrase and pauses on the
    `datahub-demo-seed` environment approval;
 9. independently verifies the approval state, exact environment, exact comment,
-   configured reviewer ID, and case-insensitively distinct approver identity before any
+   configured reviewer ID, and case-insensitive repository-owner identity before any
    mutation step, then writes the canonical sanitized approval receipt;
 10. revalidates the ref, signed upstream tree membership, security runs, GitHub artifact
     digest, inner checksums, runtime, baseline, endpoint fingerprint, dry-run, and live

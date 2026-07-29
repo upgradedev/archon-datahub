@@ -101,8 +101,10 @@ jobs:
               .repository.full_name == $repository and
               (.actor.id | type) == "number" and
               .actor.id > 0 and
+              (.actor.login | ascii_downcase) == "upgradedev" and
               (.triggering_actor.id | type) == "number" and
-              .triggering_actor.id > 0
+              .triggering_actor.id > 0 and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
             ' <<<"${run}" >/dev/null
           environment_json="$(
             gh api \
@@ -125,19 +127,19 @@ jobs:
             any(
               .protection_rules[]?;
               .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1 and
+              .prevent_self_review == false and
+              (.reviewers | length) == 1 and
               all(
                 .reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
           ' <<<"${environment_json}" >/dev/null || {
-            echo "::error::submission-content-review requires individual User reviewers, prevent-self-review, and a custom branch policy"
+            echo "::error::submission-content-review requires the sole owner reviewer, self-review enabled, and a custom branch policy"
             exit 1
           }
           policies="$(
@@ -759,7 +761,7 @@ jobs:
           compression-level: 0
           retention-days: 90
 
-      - name: Publish exact independent approval request
+      - name: Publish exact solo-owner approval request
         env:
           CANDIDATE_ARTIFACT_DIGEST: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
           CANDIDATE_ARTIFACT_ID: ${{ steps.upload.outputs['artifact-id'] }}
@@ -779,7 +781,7 @@ jobs:
           [[ "${VIDEO_OBSERVATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           approval="APPROVE ARCHON SUBMISSION CONTENT run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} project_access_run_id=${PROJECT_ACCESS_RUN_ID} project_access_binding_digest=${PROJECT_ACCESS_BINDING_DIGEST} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} content_digest=${CONTENT_DIGEST} video_observation_digest=${VIDEO_OBSERVATION_DIGEST}"
           {
-            echo "### Independent final-content review required"
+            echo "### Solo-owner final-content approval required"
             echo
             echo "Approve the protected \`submission-content-review\` environment with this exact comment:"
             echo
@@ -791,7 +793,7 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
 
   review:
-    name: Independently approve and seal reviewed subjects
+    name: Approve and seal reviewed subjects as solo owner
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -806,7 +808,7 @@ jobs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
       producer_attempt: ${{ steps.package.outputs.producer_attempt }}
     steps:
-      - name: Verify exact independent environment approval
+      - name: Verify exact solo-owner environment approval
         id: approval
         env:
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
@@ -857,15 +859,15 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -873,7 +875,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           policies="$(
@@ -898,6 +900,10 @@ jobs:
           triggering_actor_id="$(jq -er '.triggering_actor.id' <<<"${run}")"
           [[ "${actor_id}" =~ ^[1-9][0-9]*$ ]]
           [[ "${triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          jq -e '
+            (.actor.login | ascii_downcase) == "upgradedev" and
+            (.triggering_actor.login | ascii_downcase) == "upgradedev"
+          ' <<<"${run}" >/dev/null
           approvals="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
@@ -922,15 +928,16 @@ jobs:
                   (.user.id | type) == "number" and
                   (.user.login | type) == "string" and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
                 )
               ] |
               if length == 1 then .[0]
-              else error("expected exactly one matching independent approval")
+              else error("expected exactly one matching solo-owner approval")
               end
             ' <<<"${approvals}")" || {
-            echo "::error::Missing one exact independent content approval"
+            echo "::error::Missing one exact solo-owner content approval"
             exit 1
           }
           receipt_dir="${RUNNER_TEMP}/submission-content-approval"
@@ -976,6 +983,8 @@ jobs:
                   id: $environmentId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   reviewer: {
                     id: $reviewerId,
                     login: $reviewerLogin
@@ -1843,6 +1852,7 @@ jobs:
                 crossMediumConsistent:
                   $projection[0].disclosures.crossMediumConsistent,
                 reviewApproval: {
+                  approvalMode: "solo-owner",
                   environment: "submission-content-review",
                   workflowPath:
                     ".github/workflows/submission-content-review.yml",
@@ -1928,7 +1938,7 @@ jobs:
               support/SQ7/media-rights.json \
               support/SQ7/provider-metadata.json \
               support/SQ8/cross-medium-review.json \
-              support/SQ8/independent-approval.json \
+              support/SQ8/solo-owner-approval.json \
               support/SQ8/preexisting-work-inventory.json \
               support/SQ8/repository-history.json
           )"
@@ -1941,7 +1951,7 @@ jobs:
             --recursive \
             --binary-files=without-match \
             --extended-regexp \
-            '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})' \
+            '(bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})' \
             "${output}" "${candidate}"; then
             echo "::error::Retained submission evidence contains credential-shaped bytes"
             exit 1
@@ -2209,7 +2219,7 @@ jobs:
               support/SQ7/media-rights.json \
               support/SQ7/provider-metadata.json \
               support/SQ8/cross-medium-review.json \
-              support/SQ8/independent-approval.json \
+              support/SQ8/solo-owner-approval.json \
               support/SQ8/preexisting-work-inventory.json \
               support/SQ8/repository-history.json
           )"
@@ -2803,7 +2813,9 @@ jobs:
               .id == $runId and
               .run_attempt == $attempt and
               .actor.id == $actorId and
-              .triggering_actor.id == $triggeringActorId
+              .triggering_actor.id == $triggeringActorId and
+              (.actor.login | ascii_downcase) == "upgradedev" and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
             ' <<<"${producer_run}" >/dev/null
           expected_approval="APPROVE ARCHON SUBMISSION CONTENT run_id=${GITHUB_RUN_ID} run_attempt=${PRODUCER_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} project_access_run_id=${PROJECT_ACCESS_RUN_ID} project_access_binding_digest=${project_access_binding_digest} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${candidate_digest} content_digest=${content_digest} video_observation_digest=${video_observation_digest}"
           environment_json="$(
@@ -2829,15 +2841,15 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -2845,7 +2857,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           policies="$(
@@ -2884,12 +2896,13 @@ jobs:
                   (.user.id | type) == "number" and
                   (.user.login | type) == "string" and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
                 )
               ] |
               if length == 1 then .[0]
-              else error("expected exactly one matching independent approval")
+              else error("expected exactly one matching solo-owner approval")
               end
             ' <<<"${approvals}")"
           reviewer_id="$(jq -er '.user.id' <<<"${matched}")"
@@ -2936,6 +2949,8 @@ jobs:
                   id: $environmentId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   reviewer: {
                     id: $reviewerId,
                     login: $reviewerLogin
@@ -3138,6 +3153,7 @@ jobs:
                 crossMediumConsistent:
                   $projection[0].disclosures.crossMediumConsistent,
                 reviewApproval: {
+                  approvalMode: "solo-owner",
                   environment: "submission-content-review",
                   workflowPath:
                     ".github/workflows/submission-content-review.yml",

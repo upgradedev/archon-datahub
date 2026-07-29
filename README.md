@@ -285,18 +285,20 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 [infra/aws](infra/aws) contains the deployment-grade reference:
 
-- a self-contained `Archon-<stage>-Edge` stack in `us-east-1` that requests and
-  DNS-validates the environment's ACM certificate, creates a CloudFront-scope WAF with
-  encrypted retained logs, and hands both ARNs to the regional platform deployment;
-- private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC and Route 53 dual-stack
-  aliases, with `TLSv1.3_2025`, CloudFront access logging, and S3 server-access logging;
+- a self-contained `Archon-<stage>-Edge` stack in `us-east-1` that creates the
+  CloudFront-scope WAF and its KMS-encrypted retained logs, then hands the Web ACL ARN to
+  the regional platform deployment;
+- a private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC, served from the
+  distribution's provider-managed `*.cloudfront.net` hostname and default certificate,
+  with HTTPS enforcement, CloudFront access logging, and S3 server-access logging;
 - same-origin API Gateway and the exact Cognito user pool bound to one regional WAF,
   with throttling, strict schemas, access logs, active X-Ray, and a two-second encrypted
   cache limited to the capability-scoped status GET;
 - private ECS Fargate API/worker services behind an internal NLB and VPC Link;
-- separate read/write/LLM secrets, KMS keys, IAM roles, and default-deny security groups;
-  Fargate never receives a public IP, public subnets disable automatic public-IP
-  assignment, and HTTPS egress is limited to AWS service or customer-managed prefix lists;
+- separate DataHub read/write secrets, stage-scoped Bedrock Mantle projects,
+  short-term task-role authentication, KMS keys, IAM roles, and default-deny security
+  groups; Fargate never receives a public IP, public subnets disable automatic public-IP
+  assignment, and inference uses a dedicated PrivateLink endpoint;
 - Cognito Hosted UI with browser PKCE S256, an `archon/approve`-scoped approval
   Lambda, DynamoDB conditional state, Standard Step Functions, encrypted
   SQS/DLQs, and an Object-Lock evidence bucket;
@@ -317,8 +319,8 @@ full commit SHA, and the exact run ID, run attempt, artifact ID, artifact digest
 receipt SHA-256 of a successful protected DataHub demo-state run for that release. It
 verifies GitHub's artifact envelope digests plus the inner
 container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
-the `us-east-1` edge stack before the regional platform stack, passes the edge certificate
-and CloudFront WAF outputs into that platform deployment, deploys staging via GitHub OIDC,
+the `us-east-1` edge stack before the regional platform stack, passes the CloudFront WAF
+output into that platform deployment, deploys staging via GitHub OIDC,
 runs security/smoke contracts, then waits at the protected `production` environment before
 promoting those same three immutable artifacts. Selecting an older retained CI run is the
 rollback path; no application artifact is rebuilt during deploy.
@@ -342,26 +344,34 @@ canary and production. It prepares a secretless, checksum-sealed three-file hand
 `staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`. The
 manifest binds the release, deployment control plane, run, staging evidence, account,
 region, stack, image, application URL, evidence bucket, Cognito client ID, and Cognito
-Hosted UI origin; the workflow attests that inventory, reverifies it, and retains it for
+Hosted UI origin plus the remotely observed Chrome version and binary digest; the workflow attests that inventory, reverifies it, and retains it for
 90 days. `promote` redeploys/verifies staging from the selected immutable release, requires
 the exact governed write/rollback canary, and only then enters the protected production
 promotion. For a clean account, first configure and run the staging prerequisites in
-`staging-bootstrap`, verify its attestation, configure the four emitted
-`CANARY_*` non-secret values plus the separately protected canary credentials and reviewer
-rules, and then run `promote`. The handoff never contains or replaces AWS, DataHub, model,
-or reviewer credentials. These mode and handoff changes remain source-complete but are not
+`staging-bootstrap`, verify its attestation, configure the six emitted
+`CANARY_*` non-secret values plus the separately protected canary credentials and
+explicit solo-owner reviewer rules, and then run `promote`. The handoff never contains or
+replaces AWS or DataHub credentials. These mode and handoff changes remain source-complete but are not
 deployment-complete: their static/source contracts passed remote CI, while neither
 `staging-bootstrap` nor `promote` has been dispatched against AWS.
 
-AWS deployment is user-gated until environment roles, URLs, secrets, per-environment
-DNS names, owning Route 53 public hosted zones, customer-managed prefix lists for the
-external DataHub read, DataHub write, and LLM endpoints, and a narrow
-`DATAHUB_DEMO_QUERY` that resolves to exactly one dataset exist. The edge stack owns ACM
-issuance and DNS validation; operators do not pre-provision a CloudFront certificate.
-The target AWS account must be CDK-bootstrapped in both the workload region and
-`us-east-1` before the edge-first deployment can run.
-The deployment pipeline resolves the regional AWS-managed S3 and DynamoDB prefix-list IDs
-itself and keeps them distinct from those three external allowlists. Staging and production
+AWS deployment is user-gated until the protected foundation run, environment roles,
+four tenant-scoped DataHub URLs, separate read/write secrets and provider RBAC, the
+DataHub Cloud `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME`, and a narrow
+`DATAHUB_DEMO_QUERY` that resolves to exactly one
+dataset exist. No custom DNS name, Route 53 hosted-zone input, or ACM certificate input is
+required: the regional stack uses the distribution's generated `*.cloudfront.net`
+hostname and default certificate, and derives the Cognito callback and logout URLs from
+that hostname. The target AWS account must be CDK-bootstrapped in both the workload region
+and `us-east-1` before the edge-first CloudFront-WAF deployment can run.
+The deployment pipeline preflights the DataHub service, verified provider private DNS,
+external provider ownership, and exact two-AZ coverage before mutation, then drives the
+VPC and one dedicated interface endpoint from those validated AZs. Workloads reach
+DataHub only through its TCP 443 endpoint security group. It resolves the regional
+AWS-managed S3 and DynamoDB prefix-list IDs itself. Bedrock Mantle inference
+is pinned to `eu-west-1` and uses a stack-owned private endpoint, stage project, and
+short-term ECS task-role tokens instead of a configured LLM allowlist or credential.
+Staging and production
 smoke evidence bind the exact query and state digests and reject `{}` / wildcard catalog
 sweeps. Smoke must reproduce exactly the G6 email gap, the dangling upstream plus
 one-hop target blast-radius edge, and the two-source retained owner contradiction; the
@@ -369,11 +379,12 @@ sanitized semantic projection must be identical in staging and production. Each
 SPA reads that same exact query from runtime config and pre-fills the audit scope, so the
 judge path is one click while remaining bounded to the proven single dataset. Each
 deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
-contracts, including the exact ACM/WAF identities, KMS-encrypted retained WAF log groups,
-sampled-data protection, five-minute rate windows, exact enabled/rotating customer KMS
-keys, CDK-output digest, prefix-list identities, versions and entry digests, plus the
-exact live active IPv4 NLB/workload security-group rules. Source code does not imply that
-a public endpoint has already been deployed.
+contracts, including the exact provider-managed viewer hostname/default-certificate mode,
+WAF identity, KMS-encrypted retained WAF log groups, sampled-data protection, five-minute
+rate windows, exact enabled/rotating customer KMS keys, CDK-output digest, AWS-managed
+prefix-list identities, DataHub service/private-DNS/AZ identity, plus the exact live active IPv4 NLB/workload
+security-group rules. Source code does not imply that a public endpoint has already been
+deployed.
 
 ## Pipeline-only security and CI/CD
 
@@ -393,7 +404,7 @@ output is not accepted as release evidence:
 | Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, exact-run rescans, and a daily read-only-OIDC rescan transitively bound to current ECS image digests, Lambda ZIP/config/content digests, every versioned KMS-encrypted SPA object, exact deployment/CI artifacts, and a second post-scan live-byte TOCTOU observation |
 | Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
 | Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
-| Deployment security | OIDC short-lived AWS credentials, account allow-list, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/network plus dual API-stage/Cognito regional-WAF contracts |
+| Deployment security | OIDC short-lived AWS credentials, account allow-list, exact persisted stage CloudFormation execution-role bindings with an explicit one-time legacy-role migration gate and mandatory exact post-deploy proof, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/network plus dual API-stage/Cognito regional-WAF contracts |
 | Production availability | Six-hour read-only public-path probe with strict TLS/header/schema checks, exact CI/deployment/runtime-byte provenance, TOCTOU revalidation, and checksum-sealed 90-day evidence |
 | External paging delivery | Protected, release-bound SNS publish correlated to one unique 2xx external HTTPS delivery-status record; no publish-only or human-acknowledgement claim |
 
@@ -418,13 +429,17 @@ Workflows:
   scheduled/manual, secretless observation using only the automatic `GITHUB_TOKEN`.
   This public tier verifies repository identity and merge/lifecycle settings, the public
   `master` protection signal, Apache-2.0 detection, private vulnerability reporting, the
-  exact 15-environment inventory, administrator-bypass state, and exact `master`-only
+  exact 17-environment inventory, administrator-bypass state, and exact `master`-only
   deployment policies. Detailed branch-protection rules, the Actions allowlist/SHA-pinning
   policy, and environment secret-name inventories remain explicitly
   `unverified-requires-administration-and-environments-read`: the elevated tier is
   deliberately unconfigured. Its future least-privilege boundary is
   `Actions:read`, `Administration:read`, `Environments:read`, and `Metadata:read`.
   A workstation `gh` token is never copied into CI.
+- [AWS foundation](.github/workflows/aws-foundation.yml) — protected, manual-only
+  reconciliation of the pinned modern `CDKToolkit` stacks in `eu-west-1` and `us-east-1`,
+  a non-administrator CloudFormation execution policy, and the environment-bound
+  deployment role, followed by sanitized 90-day evidence and attestation.
 - [Production supply chain](.github/workflows/supply-chain.yml) — automatic and exact-run
   rescans plus a daily rescan of the original CI container, SPA, and Lambda bytes for the
   exact successful deployment currently identified by `Archon-production`; it verifies
@@ -466,7 +481,7 @@ Workflows:
   retained-history contradiction, G6 email gap, and dangling lineage target. Its
   plan-before-mutation protocol and two-URN delete allowlist are documented in
   [docs/DEMO_DATA_STATE.md](docs/DEMO_DATA_STATE.md).
-- [Cognito judge access](.github/workflows/judge-user.yml) — independently approved,
+- [Cognito judge access](.github/workflows/judge-user.yml) — solo-owner approved,
   stage- and target-bound provision, rotation, reactivation, and emergency deactivation
   of the single immutable judge identity, with no exported credential artifact. Only
   emergency deactivation can bypass red CI status; it still binds the exact current
@@ -483,8 +498,8 @@ Workflows:
   `SQ3`–`SQ5` project-access evidence.
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
-  digests, then `APPROVE → VERIFIED`, followed by a separately approved exact rollback
-  and read-after-rollback proof. Its isolation contract is in
+  digests, then `APPROVE → VERIFIED`, followed by an explicit solo-owner approval of the
+  exact rollback and read-after-rollback proof. Its isolation contract is in
   [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
 - [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
   exact-parent `workflow_run` compensation for failed or cancelled canaries.
@@ -503,10 +518,11 @@ Workflows:
   checksums, attestations, semantics, and freshness, and emits the canonical aggregate
   without turning missing proof into a pass.
 - [Submission readiness](.github/workflows/submission-readiness.yml) — protected
-  independent review and revalidation of the exact aggregate followed by a checksum-bound
-  readiness seal; the post-submit `SQ11` confirmation remains deliberately separate.
+  solo-owner approval and fresh revalidation of the exact aggregate followed by a
+  checksum-bound readiness seal; the post-submit `SQ11` confirmation remains deliberately
+  separate.
 - [Submission content review](.github/workflows/submission-content-review.yml) —
-  protected independent review of the exact final Devpost copy, public
+  protected solo-owner review of the exact final Devpost copy, public
   under-three-minute video, complete repository history, prior-work/media
   disclosures, and cross-medium claims. It independently reconstructs SQ6,
   SQ7, and SQ8, retains 16 checksum-sealed subjects for 90 days, and verifies
@@ -531,7 +547,7 @@ Workflows:
   [docs/SUBMISSION_BONUS_OSS.md](docs/SUBMISSION_BONUS_OSS.md).
 - [Submission bonus feedback](.github/workflows/submission-bonus-feedback.yml) —
   retains only privacy-preserving commitments and exact public-rules metadata
-  after an independent protected-environment reviewer privately verifies the
+  after the protected solo owner privately verifies the
   real one-per-entrant feedback confirmation. It never receives Devpost
   credentials, raw feedback, raw entrant identifiers, or private confirmation
   bytes. Its fail-closed contract is in
@@ -563,23 +579,23 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
   scheduled/manual `master` receipt is still pending and must label administration-only
   controls as unverified unless a separately reviewed least-privilege elevated tier is
   configured;
-- all 15 named GitHub environments now exist with one exact `master` deployment
+- all 17 named GitHub environments now exist with one exact `master` deployment
   policy, administrator bypass disabled, no environment secrets, and `master`
-  protection enabled; production, demo-seed, judge-access, the three governed-canary
-  approval environments, and all submission review environments still require a
-  trusted second collaborator before their reviewer rules and protected credentials
-  can be configured with self-review disabled;
-- AWS OIDC, CDK bootstrap, DataHub/model credentials, and a hosted deployment are
-  user-gated;
+  protection enabled; all 12 mutation/approval environments have `upgradedev` as
+  their sole User reviewer with self-review enabled, while the five read-only or
+  automated environments are reviewerless by design;
+- the AWS OIDC provider, protected `aws-foundation` environment, and narrowly scoped
+  foundation role are configured; the protected foundation/bootstrap run, DataHub
+  credentials/endpoints, and hosted deployment are the remaining live operations;
 - a real retained-history contradiction and governed canary write/rollback need sanitized
   evidence;
 - screenshots, the under-three-minute public video, Devpost copy, and optional public post
   are intentionally last; the content-review workflow remains fail-closed until
-  its canonical final JSON, public video, and independent environment reviewer exist;
+  its canonical final JSON, public video, and explicit solo-owner environment approval exist;
 - `SQ11` is source-complete but externally blocked until the pre-submit aggregate
   (which must exclude `SQ11`) is sealed, the real Devpost entry is submitted,
   its public URL and authoritative private timestamp/commitment are supplied,
-  and an independent `submission-devpost-confirmation` reviewer approves the
+  and the protected solo owner approves the
   exact binding; only a later reporting aggregate may consume the attested result;
 - the optional OSS workflow remains intentionally blocked until an independent
   upstream maintainer merges the exact four-path candidate, after which the
@@ -587,7 +603,7 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
   a normal CI-reviewed release before the evidence workflow is dispatched;
 - the optional feedback workflow remains undispatchable until a registered
   entrant submits the real feedback once, commits the privacy-preserving
-  canonical confirmation, and an independent reviewer can verify its private
+  canonical confirmation, and the solo owner can verify its private
   preimages out of band.
 
 ## Prior-work disclosure

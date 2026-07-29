@@ -38,13 +38,13 @@ remains red; containment is not presented as a successful lifecycle result.
 Create dedicated `judge-access-staging` and `judge-access-production` GitHub
 environments. Do not reuse the deployment environments: doing so would share an OIDC
 subject and make deployment secrets eligible for this workflow. Restrict both judge
-environments to `master`, configure only individual GitHub **Users** as required
-reviewers (no Teams), prevent self-review, disable administrator bypass in the UI, and
+environments to `master`, configure only `upgradedev` as the sole individual GitHub
+**User** reviewer (no Teams), allow self-review, disable administrator bypass in the UI, and
 allow only this workflow if environment workflow rules are available.
 
 Before requesting an OIDC token, the workflow uses GitHub's environment REST API to
 require the exact `judge-access-{stage}` name, one required-reviewer rule,
-`prevent_self_review: true`, individual User reviewers, the configured reviewer User ID,
+`prevent_self_review: false`, the sole `upgradedev` User reviewer, the configured reviewer User ID,
 custom deployment-branch policies, and exactly one allowed branch named `master`.
 
 The control-plane job selects the stage-specific 256-bit opaque account ID and the
@@ -77,8 +77,8 @@ ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=RUN_ID|run_attempt=RUN_ATTEMPT|request_sh
 The protected job reads GitHub's
 [workflow-run approval history](https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run)
 and requires exactly one matching `approved` record for the selected environment. Its
-approver must be the configured individual User ID and login, and must differ
-case-insensitively from both `github.actor` and `github.triggering_actor`. A comment from
+approver must be the configured `upgradedev` User ID and login and must equal both
+`github.actor` and `github.triggering_actor`. A comment from
 another run, rerun attempt, request, reviewer, Team, or environment cannot reach OIDC.
 This receipt check is the first protected-job step, before checkout, AWS role
 configuration, repository scripts, protected secrets, or OIDC.
@@ -86,7 +86,7 @@ configuration, repository scripts, protected secrets, or OIDC.
 GitHub's documented environment REST and GraphQL schemas do not expose the UI's
 administrator-bypass toggle, so the workflow makes no API-enforcement claim for that
 setting. Disabling bypass remains defense in depth. Even if an administrator uses the UI
-bypass, the run has no exact independent approval-history receipt and therefore fails
+bypass, the run has no exact solo-owner approval-history receipt and therefore fails
 before OIDC credentials are requested.
 
 Configure:
@@ -96,7 +96,7 @@ Configure:
 | `AWS_JUDGE_USER_ROLE_ARN` | protected environment variable | Exact `arn:PARTITION:iam::ACCOUNT_ID:role/archon-STAGE-judge-user` role for this lifecycle only. It must not be the deploy role. |
 | `AWS_ACCOUNT_ID` | protected environment variable | Exact 12-digit account containing the selected stack. |
 | `AWS_REGION` | protected environment variable | Region containing the selected stack and user pool. |
-| `JUDGE_REVIEWER_USER_ID` | protected environment variable | Numeric GitHub ID of an individual User listed in the environment's required-reviewer rule. It must not identify the workflow actor or rerun actor. |
+| `JUDGE_REVIEWER_USER_ID` | protected environment variable | Numeric GitHub ID of the sole `upgradedev` User listed in the environment's required-reviewer rule. It must identify both the workflow actor and rerun actor. |
 | `JUDGE_STAGING_ACCOUNT_ID` / `JUDGE_PRODUCTION_ACCOUNT_ID` | repository variables | Distinct password-manager-generated 64-character lower-case hex identifiers. They are non-secret opaque bindings, fixed for the lifetime of each judge identity. |
 | `JUDGE_STAGING_AWS_ACCOUNT_ID` / `JUDGE_PRODUCTION_AWS_ACCOUNT_ID` | repository variables | Stage-specific 12-digit AWS targets sealed before approval. |
 | `JUDGE_STAGING_AWS_REGION` / `JUDGE_PRODUCTION_AWS_REGION` | repository variables | Stage-specific AWS regions sealed before approval. |
@@ -219,7 +219,7 @@ redirect only when it is that same URI. It also requires
 `PreventUserExistenceErrors: ENABLED`, `AllowedOAuthFlowsUserPoolClient: true`, and explicitly rejects
 `aws.cognito.signin.user.admin`. Cognito's `ChangePassword` operation requires that
 admin scope, so a judge access token cannot self-change the shared password; provision
-and rotation remain protected, independently approved pipeline operations.
+and rotation remain explicit, protected solo-owner-approved pipeline operations.
 
 The client-specific threat policy deliberately uses `NO_ACTION` with `Notify: false` at
 low, medium, and high account-takeover risk. A shared hackathon judge identity can
@@ -241,7 +241,7 @@ ATP/ACFP or CAPTCHA rules. That regional control protects managed login and the
 unauthenticated Cognito API surface; the separate edge ACL protects the SPA and
 same-origin API path. These WAF controls, a strong password-manager-generated stable
 credential, 15-minute access/ID tokens, a one-day refresh token, threat protection,
-CloudTrail management-event audit history, and the independently approved
+CloudTrail management-event audit history, and the explicitly solo-owner-approved
 rotate/reactivate/deactivate path are the
 compensating controls. This policy avoids availability failures for legitimate
 reviewers without treating account-takeover `NO_ACTION` as the only compromise defense.
@@ -391,12 +391,12 @@ reviewed break-glass procedure instead of weakening the exact-identity check.
 2. From **Actions → Manage Cognito judge user → Run workflow**, select the environment and
    explicit operation. There is deliberately no username or password input.
 3. Open the completed control-plane job and copy its exact approval phrase. The configured
-   individual reviewer enters that phrase as the environment approval comment. The
+   solo owner enters that phrase as the environment approval comment. The
    workflow requires the exact default-branch SHA to have successful CI, CodeQL, and
    Workflow security runs for provision, rotation, and reactivation. Deactivation instead
    displays the explicit emergency/current-master warning, exact workflow SHA, and
    validated workflow-file SHA-256 because it does not claim green CI status. Both paths
-   verify the attempt-bound independent
+   verify the attempt-bound solo-owner
    approval receipt before OIDC and recompute their sealed control-plane receipt before
    and immediately after requesting AWS credentials.
 4. Require a green read-back result. A red run means the requested end state was not

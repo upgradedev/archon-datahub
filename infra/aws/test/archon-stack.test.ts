@@ -35,6 +35,49 @@ function platformTemplate(stage: string): Template {
 }
 
 describe("Archon AWS reference architecture", () => {
+  test("rejects undeclared deployment stages", () => {
+    expect(() => platformTemplate("development")).toThrow(
+      "ArchonPlatformStack stage must be exactly staging or production"
+    );
+  });
+
+  test("caps every runtime role with the exact stage permissions boundary", () => {
+    for (const stage of ["staging", "production"]) {
+      const platform = platformTemplate(stage);
+      const roles = Object.values(
+        platform.findResources("AWS::IAM::Role")
+      ) as any[];
+      expect(roles.length).toBeGreaterThan(0);
+      expect(
+        roles.every(
+          (role) =>
+            role.Properties.PermissionsBoundary !== undefined &&
+            JSON.stringify(role.Properties.PermissionsBoundary).includes(
+              `archon-datahub-runtime-boundary-${stage}`
+            )
+        )
+      ).toBe(true);
+    }
+  });
+
+  test("does not let a stage own the shared API Gateway account role", () => {
+    for (const stage of ["staging", "production"]) {
+      const platform = platformTemplate(stage);
+      platform.resourceCountIs("AWS::ApiGateway::Account", 0);
+      expect(
+        JSON.stringify(platform.findResources("AWS::IAM::Role"))
+      ).not.toContain("AmazonAPIGatewayPushToCloudWatchLogs");
+    }
+  });
+
+  test("uses one predictable, stage-scoped SPA bucket for least-privilege delivery", () => {
+    for (const stage of ["staging", "production"]) {
+      platformTemplate(stage).hasResourceProperties("AWS::S3::Bucket", {
+        BucketName: `archon-${stage}-spa-111111111111-eu-west-1`
+      });
+    }
+  });
+
   test("uses one immutable, retained, scan-on-push ECR repository", () => {
     const { registry } = templates();
     registry.resourceCountIs("AWS::ECR::Repository", 1);
@@ -100,24 +143,9 @@ describe("Archon AWS reference architecture", () => {
       );
       expect(json.Parameters[parameter].Default).toBeUndefined();
     }
-    expect(json.Parameters.CloudFrontDomainName).toEqual(
-      expect.objectContaining({
-        MaxLength: 253,
-        AllowedPattern:
-          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
-      })
-    );
-    expect(json.Parameters.CloudFrontCertificateArn).toEqual(
-      expect.objectContaining({
-        AllowedPattern:
-          "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-      })
-    );
-    expect(json.Parameters.CloudFrontHostedZoneId).toEqual(
-      expect.objectContaining({
-        AllowedPattern: "^Z[A-Z0-9]{1,31}$"
-      })
-    );
+    expect(json.Parameters.CloudFrontDomainName).toBeUndefined();
+    expect(json.Parameters.CloudFrontCertificateArn).toBeUndefined();
+    expect(json.Parameters.CloudFrontHostedZoneId).toBeUndefined();
     expect(json.Parameters.CloudFrontWebAclArn).toEqual(
       expect.objectContaining({
         Default:
@@ -149,10 +177,7 @@ describe("Archon AWS reference architecture", () => {
     );
     for (const parameterName of [
       "S3PrefixListId",
-      "DynamoDbPrefixListId",
-      "DataHubReadEgressPrefixListId",
-      "DataHubWriteEgressPrefixListId",
-      "LlmEgressPrefixListId"
+      "DynamoDbPrefixListId"
     ]) {
       expect(json.Parameters[parameterName]).toEqual(
         expect.objectContaining({
@@ -160,6 +185,29 @@ describe("Archon AWS reference architecture", () => {
         })
       );
     }
+    expect(json.Parameters.DataHubPrivateLinkServiceName).toEqual(
+      expect.objectContaining({
+        Type: "String",
+        AllowedPattern:
+          "^com\\.amazonaws\\.vpce\\.eu-west-1\\.vpce-svc-(?:[0-9a-f]{8}|[0-9a-f]{17})$"
+      })
+    );
+    expect(json.Parameters.DataHubPrivateLinkServiceName.Default).toBeUndefined();
+    for (const parameterName of [
+      "DataHubPrivateLinkAzOne",
+      "DataHubPrivateLinkAzTwo"
+    ]) {
+      expect(json.Parameters[parameterName]).toEqual(
+        expect.objectContaining({
+          Type: "String",
+          AllowedPattern: "^eu-west-1[a-z]$"
+        })
+      );
+      expect(json.Parameters[parameterName].Default).toBeUndefined();
+    }
+    expect(
+      json.Rules.RequireDistinctDataHubPrivateLinkAvailabilityZones
+    ).toBeDefined();
     expect(json.Parameters.DataHubReadMcpUrl).toEqual(
       expect.objectContaining({
         AllowedPattern: "^https://[^\\s]+$"
@@ -183,9 +231,32 @@ describe("Archon AWS reference architecture", () => {
     expect(serialized).toContain('"@"');
     expect(serialized).toContain('"Name":"DATAHUB_MCP_URL"');
     expect(serialized).toContain('"Name":"DATAHUB_WRITE_MCP_URL"');
+    expect(serialized).toContain('"Name":"LLM_PROVIDER","Value":"bedrock-mantle"');
+    expect(serialized).toContain('"Name":"AWS_REGION","Value":"eu-west-1"');
+    expect(serialized).toContain(
+      '"Name":"LLM_MODEL","Value":"qwen.qwen3-235b-a22b-2507"'
+    );
+    expect(serialized).toContain('"Name":"LLM_PROJECT_ID"');
+    expect(json.Parameters.LlmEgressPrefixListId).toBeUndefined();
+    expect(json.Parameters.LlmBaseUrl).toBeUndefined();
+    expect(json.Parameters.LlmModel).toBeUndefined();
+    platform.resourceCountIs("AWS::BedrockMantle::Project", 1);
+    platform.hasResourceProperties("AWS::BedrockMantle::Project", {
+      Name: "Archon-staging",
+      Tags: Match.arrayWith([
+        { Key: "Application", Value: "archon-datahub" },
+        { Key: "Environment", Value: "staging" },
+        { Key: "ManagedBy", Value: "aws-cdk" },
+        { Key: "CostCenter", Value: "DataHub-Agent-Hackathon" }
+      ])
+    });
+    platform.hasResource("AWS::BedrockMantle::Project", {
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain"
+    });
   });
 
-  test("resolves exactly two VPC availability zones at deploy time", () => {
+  test("uses exactly the two provider-supported availability zones from preflight", () => {
     const { platform } = templates();
     const subnets = Object.values(
       platform.findResources("AWS::EC2::Subnet")
@@ -197,12 +268,8 @@ describe("Archon AWS reference architecture", () => {
     );
     expect(subnetAvailabilityZones).toEqual(
       new Set([
-        JSON.stringify({
-          "Fn::Select": [0, { "Fn::GetAZs": "" }]
-        }),
-        JSON.stringify({
-          "Fn::Select": [1, { "Fn::GetAZs": "" }]
-        })
+        JSON.stringify({ Ref: "DataHubPrivateLinkAzOne" }),
+        JSON.stringify({ Ref: "DataHubPrivateLinkAzTwo" })
       ])
     );
     expect(
@@ -304,44 +371,23 @@ describe("Archon AWS reference architecture", () => {
   test("serves the private SPA through CloudFront OAC and routes same-origin API", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::CloudFront::OriginAccessControl", 1);
-    platform.resourceCountIs("AWS::CloudFront::Function", 1);
-    platform.resourceCountIs("AWS::Route53::RecordSet", 2);
-    platform.hasResourceProperties("AWS::CloudFront::Function", {
-      AutoPublish: true,
-      FunctionConfig: Match.objectLike({
-        Runtime: "cloudfront-js-2.0"
-      })
-    });
-    const canonicalHostFunction = Object.values(
-      platform.findResources("AWS::CloudFront::Function")
-    )[0] as any;
-    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
-      "CloudFrontDomainName"
-    );
-    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
-      "421"
-    );
+    platform.resourceCountIs("AWS::CloudFront::Function", 0);
+    platform.resourceCountIs("AWS::Route53::RecordSet", 0);
     platform.hasResourceProperties("AWS::CloudFront::Distribution", {
       DistributionConfig: Match.objectLike({
         DefaultRootObject: "index.html",
         HttpVersion: "http2and3",
         Enabled: true,
-        Aliases: [{ Ref: "CloudFrontDomainName" }],
+        Aliases: Match.absent(),
         WebACLId: { Ref: "CloudFrontWebAclArn" },
         ViewerCertificate: Match.objectLike({
-          AcmCertificateArn: Match.anyValue(),
-          SslSupportMethod: "sni-only",
-          MinimumProtocolVersion: "TLSv1.3_2025",
-          CloudFrontDefaultCertificate: Match.absent()
+          CloudFrontDefaultCertificate: true,
+          AcmCertificateArn: Match.absent(),
+          SslSupportMethod: Match.absent()
         }),
         DefaultCacheBehavior: Match.objectLike({
           ViewerProtocolPolicy: "redirect-to-https",
-          FunctionAssociations: Match.arrayWith([
-            Match.objectLike({
-              EventType: "viewer-request",
-              FunctionARN: Match.anyValue()
-            })
-          ])
+          FunctionAssociations: Match.absent()
         }),
         Origins: Match.arrayWith([
           Match.objectLike({
@@ -359,17 +405,6 @@ describe("Archon AWS reference architecture", () => {
         CustomErrorResponses: Match.absent()
       })
     });
-    for (const recordType of ["A", "AAAA"]) {
-      platform.hasResourceProperties("AWS::Route53::RecordSet", {
-        Type: recordType,
-        Name: { Ref: "CloudFrontDomainName" },
-        HostedZoneId: { Ref: "CloudFrontHostedZoneId" },
-        AliasTarget: Match.objectLike({
-          HostedZoneId: "Z2FDTNDATAQYW2",
-          EvaluateTargetHealth: false
-        })
-      });
-    }
     const distribution = Object.values(
       platform.findResources("AWS::CloudFront::Distribution")
     )[0] as any;
@@ -379,9 +414,7 @@ describe("Archon AWS reference architecture", () => {
       );
     expect(
       distribution.Properties.DistributionConfig.CacheBehaviors.every(
-        (behavior: any) =>
-          behavior.FunctionAssociations?.length === 1 &&
-          behavior.FunctionAssociations[0].EventType === "viewer-request"
+        (behavior: any) => behavior.FunctionAssociations === undefined
       )
     ).toBe(true);
     expect(runtimeConfigBehavior).toEqual(
@@ -397,7 +430,7 @@ describe("Archon AWS reference architecture", () => {
     );
   });
 
-  test("uses workload-specific prefix-list egress and one locked PrivateLink boundary", () => {
+  test("uses workload-specific egress and an isolated Bedrock Mantle PrivateLink boundary", () => {
     const { platform } = templates();
     const securityGroups = Object.values(
       platform.findResources("AWS::EC2::SecurityGroup")
@@ -416,15 +449,17 @@ describe("Archon AWS reference architecture", () => {
         resource.Properties.CidrIp === "255.255.255.255/32" &&
         resource.Properties.IpProtocol === "icmp"
     );
-    expect(noTrafficEgress).toHaveLength(1);
-    expect(noTrafficEgress[0]!.Properties).toEqual(
-      expect.objectContaining({
-        CidrIp: "255.255.255.255/32",
-        FromPort: 252,
-        IpProtocol: "icmp",
-        ToPort: 86
-      })
-    );
+    expect(noTrafficEgress).toHaveLength(3);
+    for (const rule of noTrafficEgress) {
+      expect(rule.Properties).toEqual(
+        expect.objectContaining({
+          CidrIp: "255.255.255.255/32",
+          FromPort: 252,
+          IpProtocol: "icmp",
+          ToPort: 86
+        })
+      );
+    }
     platform.hasResourceProperties(
       "AWS::ElasticLoadBalancingV2::LoadBalancer",
       {
@@ -468,33 +503,97 @@ describe("Archon AWS reference architecture", () => {
     expect(
       prefixListRefs.filter((value) => value === "DynamoDbPrefixListId")
     ).toHaveLength(2);
-    expect(
-      prefixListRefs.filter(
-        (value) => value === "DataHubReadEgressPrefixListId"
-      )
-    ).toHaveLength(2);
-    expect(
-      prefixListRefs.filter(
-        (value) => value === "DataHubWriteEgressPrefixListId"
-      )
-    ).toHaveLength(1);
-    expect(
-      prefixListRefs.filter((value) => value === "LlmEgressPrefixListId")
-    ).toHaveLength(2);
+    expect(prefixListRefs).not.toContain("LlmEgressPrefixListId");
 
     const interfaceEndpoints = Object.values(
       platform.findResources("AWS::EC2::VPCEndpoint")
     ).filter(
       (resource: any) => resource.Properties.VpcEndpointType === "Interface"
     ) as any[];
-    expect(interfaceEndpoints).toHaveLength(7);
-    const endpointSecurityGroupRefs = new Set(
-      interfaceEndpoints.map((resource) =>
-        JSON.stringify(resource.Properties.SecurityGroupIds)
+    expect(interfaceEndpoints).toHaveLength(9);
+    const dataHubEndpoint = interfaceEndpoints.find(
+      (resource) =>
+        resource.Properties.ServiceName?.Ref ===
+        "DataHubPrivateLinkServiceName"
+    );
+    expect(dataHubEndpoint).toBeDefined();
+    expect(dataHubEndpoint.Properties.PrivateDnsEnabled).toBe(true);
+    expect(dataHubEndpoint.Properties.PolicyDocument).toBeUndefined();
+    expect(
+      JSON.stringify(dataHubEndpoint.Properties.SecurityGroupIds)
+    ).toContain("DataHubEndpointSecurityGroup");
+    const dataHubIngressRules = Object.values(
+      platform.findResources("AWS::EC2::SecurityGroupIngress")
+    ).filter(
+      (resource: any) =>
+        resource.Properties.IpProtocol === "tcp" &&
+        resource.Properties.FromPort === 443 &&
+        resource.Properties.ToPort === 443 &&
+        JSON.stringify(resource.Properties.GroupId).includes(
+          "DataHubEndpointSecurityGroup"
+        )
+    ) as any[];
+    expect(dataHubIngressRules).toHaveLength(3);
+    expect(
+      dataHubIngressRules.map((resource) =>
+        JSON.stringify(resource.Properties.SourceSecurityGroupId)
+      )
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("ApiSecurityGroup"),
+        expect.stringContaining("AuditWorkerSecurityGroup"),
+        expect.stringContaining("RemediationWorkerSecurityGroup")
+      ])
+    );
+    expect(
+      dataHubIngressRules.every(
+        (resource) =>
+          resource.Properties.CidrIp === undefined &&
+          resource.Properties.CidrIpv6 === undefined
+      )
+    ).toBe(true);
+    const dataHubEgressRules = standaloneEgress.filter(
+      (resource) =>
+        resource.Properties.IpProtocol === "tcp" &&
+        resource.Properties.FromPort === 443 &&
+        resource.Properties.ToPort === 443 &&
+        JSON.stringify(
+          resource.Properties.DestinationSecurityGroupId
+        ).includes("DataHubEndpointSecurityGroup")
+    );
+    expect(dataHubEgressRules).toHaveLength(3);
+    const bedrockEndpoint = interfaceEndpoints.find((resource) =>
+      JSON.stringify(resource.Properties.ServiceName).includes(
+        ".bedrock-mantle"
       )
     );
-    expect(endpointSecurityGroupRefs.size).toBe(1);
-    expect([...endpointSecurityGroupRefs][0]).toContain(
+    expect(bedrockEndpoint).toBeDefined();
+    expect(bedrockEndpoint.Properties.PrivateDnsEnabled).toBe(true);
+    expect(
+      JSON.stringify(bedrockEndpoint.Properties.SecurityGroupIds)
+    ).toContain("BedrockMantleEndpointSecurityGroup");
+    expect(
+      JSON.stringify(bedrockEndpoint.Properties.PolicyDocument)
+    ).toContain("OnlyInferenceRolesMayInvokeApprovedModel");
+    expect(
+      JSON.stringify(bedrockEndpoint.Properties.PolicyDocument)
+    ).toContain("OnlyInferenceRolesMayUseShortTermTokens");
+    const sharedEndpoints = interfaceEndpoints.filter(
+      (resource) =>
+        resource !== bedrockEndpoint &&
+        resource !== dataHubEndpoint
+    );
+    expect(sharedEndpoints).toHaveLength(7);
+    expect(
+      new Set(
+        sharedEndpoints.map((resource) =>
+          JSON.stringify(resource.Properties.SecurityGroupIds)
+        )
+      ).size
+    ).toBe(1);
+    expect(
+      JSON.stringify(sharedEndpoints[0]!.Properties.SecurityGroupIds)
+    ).toContain(
       "VpcEndpointSecurityGroup"
     );
   });
@@ -1046,6 +1145,9 @@ describe("Archon AWS reference architecture", () => {
     const [clientLogicalId, client] = Object.entries(
       platform.findResources("AWS::Cognito::UserPoolClient")
     )[0] as [string, any];
+    const distributionLogicalId = Object.keys(
+      platform.findResources("AWS::CloudFront::Distribution")
+    )[0]!;
     const resourceServerLogicalId = Object.keys(
       platform.findResources("AWS::Cognito::UserPoolResourceServer")
     )[0]!;
@@ -1063,7 +1165,11 @@ describe("Archon AWS reference architecture", () => {
       {
         "Fn::Join": [
           "",
-          ["https://", { Ref: "CloudFrontDomainName" }, "/"]
+          [
+            "https://",
+            { "Fn::GetAtt": [distributionLogicalId, "DomainName"] },
+            "/"
+          ]
         ]
       }
     ]);
@@ -1129,7 +1235,11 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonAuthRedirectUri.Value).toEqual({
       "Fn::Join": [
         "",
-        ["https://", { Ref: "CloudFrontDomainName" }, "/"]
+        [
+          "https://",
+          { "Fn::GetAtt": [distributionLogicalId, "DomainName"] },
+          "/"
+        ]
       ]
     });
     expect(outputs.ArchonApprovalOAuthScope.Value).toBe("archon/approve");
@@ -1167,9 +1277,7 @@ describe("Archon AWS reference architecture", () => {
       remediationWorker.Properties.ContainerDefinitions[0].Secrets.map(
         (secret: any) => secret.Name
       );
-    expect(apiSecretNames).toEqual(
-      expect.arrayContaining(["DATAHUB_GMS_TOKEN", "LLM_API_KEY"])
-    );
+    expect(apiSecretNames).toEqual(["DATAHUB_GMS_TOKEN"]);
     expect(apiSecretNames).not.toContain("DATAHUB_WRITE_GMS_TOKEN");
     const apiEnvironment = api.Properties.ContainerDefinitions[0].Environment.map(
       (entry: any) => entry.Name
@@ -1178,6 +1286,33 @@ describe("Archon AWS reference architecture", () => {
       Name: "ARCHON_DEMO_QUERY",
       Value: { Ref: "DemoQuery" }
     });
+    expect(api.Properties.ContainerDefinitions[0].Environment).toEqual(
+      expect.arrayContaining([
+        {
+          Name: "LLM_PROVIDER",
+          Value: "bedrock-mantle"
+        },
+        {
+          Name: "AWS_REGION",
+          Value: "eu-west-1"
+        },
+        {
+          Name: "LLM_BASE_URL",
+          Value: "https://bedrock-mantle.eu-west-1.api.aws/v1"
+        },
+        {
+          Name: "LLM_MODEL",
+          Value: "qwen.qwen3-235b-a22b-2507"
+        }
+      ])
+    );
+    expect(
+      JSON.stringify(
+        api.Properties.ContainerDefinitions[0].Environment.find(
+          (entry: any) => entry.Name === "LLM_PROJECT_ID"
+        )?.Value
+      )
+    ).toContain("BedrockMantleProject");
     expect(apiEnvironment).not.toEqual(
       expect.arrayContaining([
         "ARCHON_APPROVAL_TABLE",
@@ -1185,9 +1320,36 @@ describe("Archon AWS reference architecture", () => {
         "ARCHON_EVIDENCE_BUCKET"
       ])
     );
-    expect(auditWorkerSecretNames.sort()).toEqual(
-      ["DATAHUB_GMS_TOKEN", "LLM_API_KEY"].sort()
+    expect(auditWorkerSecretNames).toEqual(["DATAHUB_GMS_TOKEN"]);
+    expect(
+      auditWorker.Properties.ContainerDefinitions[0].Environment
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          Name: "LLM_PROVIDER",
+          Value: "bedrock-mantle"
+        },
+        {
+          Name: "AWS_REGION",
+          Value: "eu-west-1"
+        },
+        {
+          Name: "LLM_BASE_URL",
+          Value: "https://bedrock-mantle.eu-west-1.api.aws/v1"
+        },
+        {
+          Name: "LLM_MODEL",
+          Value: "qwen.qwen3-235b-a22b-2507"
+        }
+      ])
     );
+    expect(
+      JSON.stringify(
+        auditWorker.Properties.ContainerDefinitions[0].Environment.find(
+          (entry: any) => entry.Name === "LLM_PROJECT_ID"
+        )?.Value
+      )
+    ).toContain("BedrockMantleProject");
     expect(remediationWorkerSecretNames).toEqual([
       "DATAHUB_WRITE_GMS_TOKEN"
     ]);
@@ -1200,9 +1362,108 @@ describe("Archon AWS reference architecture", () => {
         "ARCHON_APPROVAL_TABLE",
         "DATAHUB_GMS_URL",
         "DATAHUB_MCP_URL",
+        "LLM_PROVIDER",
         "LLM_BASE_URL",
-        "LLM_MODEL"
+        "LLM_MODEL",
+        "LLM_PROJECT_ID",
+        "LLM_API_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "DASHSCOPE_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY"
       ])
+    );
+    for (const forbiddenCredential of [
+      "LLM_API_KEY",
+      "AWS_BEARER_TOKEN_BEDROCK",
+      "DASHSCOPE_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY"
+    ]) {
+      expect(JSON.stringify(taskDefinitions)).not.toContain(
+        forbiddenCredential
+      );
+    }
+  });
+
+  test("grants only API and audit task roles bounded Bedrock Mantle access", () => {
+    const { platform } = templates();
+    const policies = Object.values(
+      platform.findResources("AWS::IAM::Policy")
+    ) as any[];
+    const bedrockPolicies = policies.filter((policy) =>
+      JSON.stringify(policy.Properties.PolicyDocument).includes(
+        "InvokeOnlyApprovedBedrockMantleModel"
+      )
+    );
+    expect(bedrockPolicies).toHaveLength(2);
+    for (const policy of bedrockPolicies) {
+      const roleRefs = JSON.stringify(policy.Properties.Roles);
+      expect(roleRefs).not.toContain("RemediationWorkerTaskDefinition");
+      const statements = policy.Properties.PolicyDocument.Statement;
+      const inferenceStatement = statements.find(
+        (statement: any) =>
+          statement.Sid === "InvokeOnlyApprovedBedrockMantleModel"
+      );
+      expect(JSON.stringify(inferenceStatement.Resource)).toContain(
+        "BedrockMantleProject"
+      );
+      expect(JSON.stringify(inferenceStatement.Resource)).not.toContain(
+        "project/default"
+      );
+      expect(statements).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            Sid: "InvokeOnlyApprovedBedrockMantleModel",
+            Effect: "Allow",
+            Action: "bedrock-mantle:CreateInference",
+            Condition: {
+              StringEquals: {
+                "bedrock-mantle:Model": "qwen.qwen3-235b-a22b-2507"
+              }
+            }
+          }),
+          expect.objectContaining({
+            Sid: "MintOnlyShortTermBedrockMantleBearerTokens",
+            Effect: "Allow",
+            Action: "bedrock-mantle:CallWithBearerToken",
+            Resource: "*",
+            Condition: {
+              StringEquals: {
+                "bedrock-mantle:BearerTokenType": "SHORT_TERM"
+              }
+            }
+          }),
+          expect.objectContaining({
+            Sid: "DenyLongTermBedrockMantleBearerTokens",
+            Effect: "Deny",
+            Action: "bedrock-mantle:CallWithBearerToken",
+            Resource: "*",
+            Condition: {
+              StringEquals: {
+                "bedrock-mantle:BearerTokenType": "LONG_TERM"
+              }
+            }
+          })
+        ])
+      );
+      expect(JSON.stringify(statements)).not.toContain("aws-marketplace:");
+    }
+
+    const endpoint = Object.values(
+      platform.findResources("AWS::EC2::VPCEndpoint")
+    ).find((resource: any) =>
+      JSON.stringify(resource.Properties.ServiceName).includes(
+        ".bedrock-mantle"
+      )
+    ) as any;
+    const endpointPolicy = JSON.stringify(endpoint.Properties.PolicyDocument);
+    expect(endpointPolicy).toContain("ApiTaskDefinitionTaskRole");
+    expect(endpointPolicy).toContain("AuditWorkerTaskDefinitionTaskRole");
+    expect(endpointPolicy).not.toContain(
+      "RemediationWorkerTaskDefinitionTaskRole"
     );
   });
 
@@ -1623,9 +1884,17 @@ describe("Archon AWS reference architecture", () => {
       "ArchonAuditWorkerSecurityGroupId",
       "ArchonRemediationWorkerSecurityGroupId",
       "ArchonVpcEndpointSecurityGroupId",
+      "ArchonBedrockMantleEndpointSecurityGroupId",
+      "ArchonBedrockMantleEndpointId",
+      "ArchonBedrockMantleEndpointServiceName",
+      "ArchonBedrockMantleModel",
+      "ArchonBedrockMantleProjectId",
+      "ArchonBedrockMantleProjectArn",
+      "ArchonApiTaskRoleArn",
+      "ArchonAuditWorkerTaskRoleArn",
+      "ArchonRemediationWorkerTaskRoleArn",
       "ArchonReadSecretArn",
       "ArchonWriteSecretArn",
-      "ArchonLlmSecretArn",
       "ArchonAlarmTopicArn",
       "ArchonAlarmTopicKmsKeyArn",
       "ArchonAlarmDeliveryFeedbackRoleArn",

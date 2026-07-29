@@ -29,11 +29,11 @@ EXPECTED_STEPS = {
         "Publish exact private-review approval request",
     ),
     "review": (
-        "Verify exact independent protected-environment approval",
+        "Verify exact solo-owner protected-environment approval",
         "Check out the exact protected producer",
         "Resolve exact current-attempt candidate artifact",
         "Download exact immutable feedback candidate",
-        "Independently revalidate private-reference candidate and public rules",
+        "Revalidate private-reference candidate and public rules",
         "Assemble exact protected BONUS-FEEDBACK facts",
         "Recheck candidate approval and master before retention",
         "Retain exact checksum-sealed feedback subjects",
@@ -44,7 +44,7 @@ EXPECTED_STEPS = {
         "Resolve latest retained producer and exact candidate artifacts",
         "Download exact retained feedback subjects",
         "Download exact approved feedback candidate",
-        "Independently rederive candidate rules approval and retained facts",
+        "Rederive candidate rules approval and retained facts",
         "Recheck immutable evidence approval rules and master before signing",
         "Attest all three exact feedback subjects",
         "Verify persisted signed full-subject attestation",
@@ -270,7 +270,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         len(
             re.findall(
                 r"(?m)^    name: "
-                r"Independently approve and seal feedback evidence$",
+                r"Approve and seal feedback evidence as solo owner$",
                 jobs["review"],
             )
         )
@@ -457,7 +457,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "deployment-branch-policies?per_page=100"
         )
         == 3
-        and workflow.count("prevent_self_review == true") == 3,
+        and workflow.count("prevent_self_review == false") == 3,
         "environment posture must be checked before, during, and after review",
     )
     require(
@@ -478,7 +478,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         ),
         (
             jobs["review"],
-            "Verify exact independent protected-environment approval",
+            "Verify exact solo-owner protected-environment approval",
         ),
         (
             jobs["review"],
@@ -486,7 +486,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         ),
         (
             jobs["attest"],
-            "Independently rederive candidate rules approval and retained facts",
+            "Rederive candidate rules approval and retained facts",
         ),
         (
             jobs["attest"],
@@ -502,15 +502,15 @@ def validate_contract(workflow: str, documentation: str) -> None:
         )
     approval_step = named_step(
         jobs["review"],
-        "Verify exact independent protected-environment approval",
+        "Verify exact solo-owner protected-environment approval",
     )
     require_all(
         approval_step,
         (
-            'prevent_self_review == true',
+            'prevent_self_review == false',
             '.type == "User"',
-            '.user.id != $actorId',
-            '.user.id != $triggeringActorId',
+            '.user.id == $actorId',
+            '.user.id == $triggeringActorId',
             'length == 1 then .[0]',
             'branch_policies[].name] == ["master"]',
             'branch_policies[].type] == ["branch"]',
@@ -550,6 +550,9 @@ def validate_contract(workflow: str, documentation: str) -> None:
             "authoritativeApprovalTimestampAvailable: false",
             "reviewJobStartedAt",
             "reviewApproval",
+            'approvalMode: "solo-owner"',
+            'mode: "solo-owner"',
+            "selfApproved: true",
             "approvalCommentDigest",
             "approvalReceiptDigest",
             '"rawFeedbackIncluded": False,',
@@ -649,10 +652,10 @@ def validate_contract(workflow: str, documentation: str) -> None:
     require_all(
         attester,
         (
-            "Independently rederive candidate rules approval and retained facts",
+            "Rederive candidate rules approval and retained facts",
             "/attempts/${PRODUCER_ATTEMPT}",
             "successful review job is missing or ambiguous",
-            "exact independent approval is missing or ambiguous",
+            "exact solo-owner approval is missing or ambiguous",
             'jq -cS \'.facts\'',
             "cmp --silent",
             "Recheck immutable evidence approval rules and master before signing",
@@ -780,7 +783,7 @@ mutations = {
     ),
     "review job display name changed": replace_first(
         workflow_text,
-        "    name: Independently approve and seal feedback evidence\n",
+        "    name: Approve and seal feedback evidence as solo owner\n",
         "    name: Renamed protected reviewer\n",
         "review job display name",
     ),
@@ -808,10 +811,10 @@ mutations = {
         "      PREDICATE_TYPE: https://attacker.invalid/predicate/v1\n",
         "attester predicate shadow",
     ),
-    "self review enabled": replace_first(
+    "self review prevented": replace_first(
         workflow_text,
-        "prevent_self_review == true",
         "prevent_self_review == false",
+        "prevent_self_review == true",
         "self review",
     ),
     "master policy weakened": replace_first(
@@ -838,11 +841,11 @@ mutations = {
         "",
         "run-attempt approval binding",
     ),
-    "reviewer may equal actor": replace_first(
+    "reviewer detached from actor": replace_first(
         workflow_text,
-        ".user.id != $actorId and",
+        ".user.id == $actorId and",
         "true and",
-        "actor independence",
+        "solo-owner actor binding",
     ),
     "official period ordering removed": replace_first(
         workflow_text,

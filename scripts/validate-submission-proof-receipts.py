@@ -272,7 +272,7 @@ SUPPORT_BINDING_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
         "finalizedAt",
         "reviewedAt",
     ),
-    ("SQ8", "independent-approval"): ("reviewApproval", "reviewedAt"),
+    ("SQ8", "solo-owner-approval"): ("reviewApproval", "reviewedAt"),
     ("SQ9", "ci-attestation"): ("evidenceClass", "ci"),
     ("SQ9", "judge-pack-manifest"): (
         "artifact",
@@ -2072,6 +2072,7 @@ def validate_facts(
         approval = exact_keys(
             facts["reviewApproval"],
             {
+                "approvalMode",
                 "environment",
                 "workflowPath",
                 "runId",
@@ -2088,6 +2089,11 @@ def validate_facts(
                 "approvalReceiptDigest",
             },
             f"{label}.reviewApproval",
+        )
+        exact(
+            approval["approvalMode"],
+            "solo-owner",
+            f"{label}.reviewApproval.approvalMode",
         )
         exact(
             approval["environment"],
@@ -2123,8 +2129,8 @@ def validate_facts(
             approval["reviewerId"],
             f"{label}.reviewApproval.reviewerId",
         )
-        if reviewer_id in {actor_id, triggering_id}:
-            fail(f"{label}.reviewApproval reviewer must be independent")
+        if reviewer_id != actor_id or reviewer_id != triggering_id:
+            fail(f"{label}.reviewApproval reviewer must be the workflow owner")
         candidate_attempt = positive_int(
             approval["candidateRunAttempt"],
             f"{label}.reviewApproval.candidateRunAttempt",
@@ -2823,6 +2829,7 @@ def validate_facts(
         approval = exact_keys(
             facts["reviewApproval"],
             {
+                "approvalMode",
                 "environment",
                 "workflowActorId",
                 "triggeringActorId",
@@ -2830,6 +2837,11 @@ def validate_facts(
                 "approvalReceiptDigest",
             },
             f"{label}.reviewApproval",
+        )
+        exact(
+            approval["approvalMode"],
+            "solo-owner",
+            f"{label}.reviewApproval.approvalMode",
         )
         exact(
             approval["environment"],
@@ -2848,8 +2860,8 @@ def validate_facts(
             approval["reviewerId"],
             f"{label}.reviewApproval.reviewerId",
         )
-        if reviewer_id in {actor_id, triggering_id}:
-            fail(f"{label}.reviewApproval reviewer must be independent")
+        if reviewer_id != actor_id or reviewer_id != triggering_id:
+            fail(f"{label}.reviewApproval reviewer must be the workflow owner")
         approval_digest = sha256_digest(
             approval["approvalReceiptDigest"],
             f"{label}.reviewApproval.approvalReceiptDigest",
@@ -3347,6 +3359,7 @@ def validate_facts(
         approval = exact_keys(
             facts["reviewApproval"],
             {
+                "approvalMode",
                 "environment",
                 "workflowPath",
                 "runId",
@@ -3365,6 +3378,11 @@ def validate_facts(
                 "approvalReceiptDigest",
             },
             f"{label}.reviewApproval",
+        )
+        exact(
+            approval["approvalMode"],
+            "solo-owner",
+            f"{label}.reviewApproval.approvalMode",
         )
         exact(
             approval["environment"],
@@ -3397,8 +3415,8 @@ def validate_facts(
             approval["reviewerId"],
             f"{label}.reviewApproval.reviewerId",
         )
-        if reviewer_id in {actor_id, triggering_id}:
-            fail(f"{label}.reviewApproval reviewer must be independent")
+        if reviewer_id != actor_id or reviewer_id != triggering_id:
+            fail(f"{label}.reviewApproval reviewer must be the workflow owner")
         candidate_attempt = positive_int(
             approval["candidateRunAttempt"],
             f"{label}.reviewApproval.candidateRunAttempt",

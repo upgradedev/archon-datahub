@@ -2,8 +2,8 @@ name: Submission Devpost confirmation evidence
 
 # Post-submit, fail-closed SQ11 producer. This workflow never submits to
 # Devpost and never receives Devpost credentials, cookies, screenshots, raw
-# confirmation bytes, or private identifiers. An independent protected
-# reviewer verifies the private Devpost confirmation out of band and approves
+# confirmation bytes, or private identifiers. The protected solo owner
+# verifies the private Devpost confirmation out of band and approves
 # an immutable candidate containing only public facts and salted commitments.
 on:
   workflow_dispatch:
@@ -190,19 +190,19 @@ jobs:
             any(
               .protection_rules[]?;
               .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1 and
+              .prevent_self_review == false and
+              (.reviewers | length) == 1 and
               all(
                 .reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
           ' <<<"${environment_json}" >/dev/null || {
-            echo "::error::submission-devpost-confirmation requires independent individual User reviewers and prevent-self-review"
+            echo "::error::submission-devpost-confirmation requires the sole owner reviewer with self-review enabled"
             exit 1
           }
           policies="$(
@@ -627,7 +627,9 @@ jobs:
               .path == ".github/workflows/submission-content-review.yml" and
               .head_sha == $release and
               .head_branch == "master" and
-              .repository.full_name == $repository
+              .repository.full_name == $repository and
+              (.actor.login | ascii_downcase) == "upgradedev" and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
             ' <<<"${content_run}" >/dev/null
           content_archive="${work}/content-candidate.zip"
           gh api \
@@ -1215,7 +1217,7 @@ jobs:
           set -euo pipefail
           approval="APPROVE ARCHON DATAHUB DEVPOST run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} readiness_run_id=${READINESS_RUN_ID} readiness_run_attempt=${READINESS_RUN_ATTEMPT} readiness_artifact_id=${READINESS_ARTIFACT_ID} readiness_artifact_digest=${READINESS_ARTIFACT_DIGEST} readiness_predicate_digest=${READINESS_PREDICATE_DIGEST} seal_binding_digest=${SEAL_BINDING_DIGEST} submission_binding_digest=${SUBMISSION_BINDING_DIGEST} public_observation_digest=${PUBLIC_OBSERVATION_DIGEST} devpost_project_url=${DEVPOST_PROJECT_URL} submitted_at=${SUBMITTED_AT} prepared_at=${PREPARED_AT} confirmation_digest=${CONFIRMATION_DIGEST}"
           {
-            echo "### Independent post-submit review required"
+            echo "### Solo-owner post-submit approval required"
             echo
             echo "Privately verify the authenticated Devpost confirmation and exact submitted fields. Do not paste confirmation bytes, screenshots, credentials, cookies, or personal data into GitHub."
             echo
@@ -1225,7 +1227,7 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
 
   review:
-    name: Independently approve and seal Devpost confirmation
+    name: Approve and seal Devpost confirmation as solo owner
     needs: prepare
     if: needs.prepare.result == 'success'
     runs-on: ubuntu-24.04
@@ -1241,7 +1243,7 @@ jobs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
       producer_attempt: ${{ steps.package.outputs.producer_attempt }}
     steps:
-      - name: Verify exact independent protected-environment approval
+      - name: Verify exact solo-owner protected-environment approval
         id: approval
         env:
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
@@ -1268,6 +1270,8 @@ jobs:
           test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
           test "${GITHUB_REF}" = "refs/heads/master"
           test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "${GITHUB_ACTOR,,}" = "upgradedev"
+          test "${GITHUB_TRIGGERING_ACTOR,,}" = "upgradedev"
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -1314,15 +1318,15 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -1330,7 +1334,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           policies="$(
@@ -1393,15 +1397,16 @@ jobs:
                   (.user.id | type) == "number" and
                   (.user.login | type) == "string" and
                   (.user.id as $id | ($reviewerIds | index($id)) != null) and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
                 )
               ] |
               if length == 1 then .[0]
-              else error("expected exactly one matching independent approval")
+              else error("expected exactly one matching solo-owner approval")
               end
             ' <<<"${approvals}")" || {
-            echo "::error::Missing exact independent Devpost confirmation approval"
+            echo "::error::Missing exact solo-owner Devpost confirmation approval"
             exit 1
           }
           review_job_started_at=""
@@ -1420,7 +1425,7 @@ jobs:
                   .[].jobs[] |
                   select(
                     .name ==
-                      "Independently approve and seal Devpost confirmation" and
+                      "Approve and seal Devpost confirmation as solo owner" and
                     .run_attempt == $attempt and
                     .status == "in_progress" and
                     .conclusion == null and
@@ -1504,6 +1509,8 @@ jobs:
                   id: $reviewerId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   comment: $comment,
                   authoritativeTimestampAvailable: false,
                   reviewJobStartedAt: $reviewJobStartedAt
@@ -2444,6 +2451,7 @@ jobs:
                 },
                 preSubmitSeal: $seal[0],
                 reviewApproval: {
+                  approvalMode: "solo-owner",
                   environment: "submission-devpost-confirmation",
                   workflowActorId: $actorId,
                   triggeringActorId: $triggeringActorId,
@@ -2581,7 +2589,7 @@ jobs:
               ' <<<"${artifact}" >/dev/null
           done
 
-      - name: Upload independently reviewed SQ11 evidence
+      - name: Upload solo-owner approved SQ11 evidence
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -2721,7 +2729,7 @@ jobs:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: ${{ runner.temp }}/submission-devpost-attester-candidate
 
-      - name: Download exact independently reviewed SQ11 evidence
+      - name: Download exact solo-owner approved SQ11 evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.review.outputs.artifact_id }}
@@ -3669,8 +3677,8 @@ jobs:
             [[ "${identifier}" =~ ^[1-9][0-9]*$ ]]
           done
           [[ "${expected_receipt_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "${expected_reviewer_id}" != "${expected_actor_id}"
-          test "${expected_reviewer_id}" != \
+          test "${expected_reviewer_id}" = "${expected_actor_id}"
+          test "${expected_reviewer_id}" = \
             "${expected_triggering_actor_id}"
           environment_json="$(
             gh api \
@@ -3695,15 +3703,15 @@ jobs:
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             )
             then (
@@ -3711,7 +3719,7 @@ jobs:
               sort |
               unique
             )
-            else error("invalid independent reviewer posture")
+            else error("invalid solo-owner reviewer posture")
             end
           ' <<<"${environment_json}")"
           jq -e \
@@ -3753,7 +3761,9 @@ jobs:
               .head_branch == "master" and
               .repository.full_name == $repository and
               .actor.id == $actorId and
-              .triggering_actor.id == $triggeringActorId
+              .triggering_actor.id == $triggeringActorId and
+              (.actor.login | ascii_downcase) == "upgradedev" and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
             ' <<<"${review_run}" >/dev/null
           expected_approval="APPROVE ARCHON DATAHUB DEVPOST run_id=${GITHUB_RUN_ID} run_attempt=${REVIEW_RUN_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} readiness_run_id=${READINESS_RUN_ID} readiness_run_attempt=${READINESS_RUN_ATTEMPT} readiness_artifact_id=${READINESS_ARTIFACT_ID} readiness_artifact_digest=${READINESS_ARTIFACT_DIGEST} readiness_predicate_digest=${READINESS_PREDICATE_DIGEST} seal_binding_digest=${SEAL_BINDING_DIGEST} submission_binding_digest=${SUBMISSION_BINDING_DIGEST} public_observation_digest=${PUBLIC_OBSERVATION_DIGEST} devpost_project_url=${DEVPOST_PROJECT_URL} submitted_at=${SUBMITTED_AT} prepared_at=${PREPARED_AT} confirmation_digest=${CONFIRMATION_DIGEST}"
           approvals="$(
@@ -3781,12 +3791,13 @@ jobs:
                       "submission-devpost-confirmation" and
                     .environments[0].id == $environmentId and
                     .user.id == $reviewerId and
-                    .user.id != $actorId and
-                    .user.id != $triggeringActorId
+                    (.user.login | ascii_downcase) == "upgradedev" and
+                    .user.id == $actorId and
+                    .user.id == $triggeringActorId
                   )
                 ] |
                 if length == 1 then .[0]
-                else error("exact independent approval is missing")
+                else error("exact solo-owner approval is missing")
                 end
               ' <<<"${approvals}"
           )"
@@ -3805,7 +3816,7 @@ jobs:
                   .[].jobs[] |
                   select(
                     .name ==
-                      "Independently approve and seal Devpost confirmation" and
+                      "Approve and seal Devpost confirmation as solo owner" and
                     .run_attempt == $attempt and
                     .status == "completed" and
                     .conclusion == "success" and
@@ -3882,6 +3893,8 @@ jobs:
                   id: $reviewerId
                 },
                 approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
                   comment: $comment,
                   authoritativeTimestampAvailable: false,
                   reviewJobStartedAt: $reviewJobStartedAt
@@ -4157,15 +4170,15 @@ jobs:
               .deployment_branch_policy.protected_branches == false and
               .deployment_branch_policy.custom_branch_policies == true and
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
               all(
                 $rules[0].reviewers[];
                 .type == "User" and
                 (.reviewer.id | type) == "number" and
                 .reviewer.id > 0 and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             ) |
             .id
@@ -4200,7 +4213,7 @@ jobs:
                 .type == "User" and
                 .reviewer.id == $reviewerId and
                 (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               )
             ' <<<"${environment_json}" >/dev/null
           expected_approval="APPROVE ARCHON DATAHUB DEVPOST run_id=${GITHUB_RUN_ID} run_attempt=${REVIEW_RUN_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} readiness_run_id=${READINESS_RUN_ID} readiness_run_attempt=${READINESS_RUN_ATTEMPT} readiness_artifact_id=${READINESS_ARTIFACT_ID} readiness_artifact_digest=${READINESS_ARTIFACT_DIGEST} readiness_predicate_digest=${READINESS_PREDICATE_DIGEST} seal_binding_digest=${SEAL_BINDING_DIGEST} submission_binding_digest=${SUBMISSION_BINDING_DIGEST} public_observation_digest=${PUBLIC_OBSERVATION_DIGEST} devpost_project_url=${DEVPOST_PROJECT_URL} submitted_at=${SUBMITTED_AT} prepared_at=${PREPARED_AT} confirmation_digest=${CONFIRMATION_DIGEST}"
@@ -4226,8 +4239,9 @@ jobs:
                     "submission-devpost-confirmation" and
                   .environments[0].id == $environmentId and
                   .user.id == $reviewerId and
-                  .user.id != $actorId and
-                  .user.id != $triggeringActorId
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
                 )
               ] |
               length == 1
@@ -4436,5 +4450,5 @@ jobs:
             echo "- Persisted lookup verification: all 6 subjects independently verified"
             echo "- Attestation: ${ATTESTATION_URL}"
             echo "- Private Devpost data: salted commitment only; no credentials, cookies, screenshots, confirmation bytes, or private entrant data retained"
-            echo "- Approval identity: public GitHub numeric actor and reviewer IDs retained solely to prove reviewer independence; no GitHub login names retained"
+            echo "- Approval identity: public GitHub numeric actor/owner IDs retain explicit solo-owner approval provenance; no dynamic GitHub login names retained"
           } >>"${GITHUB_STEP_SUMMARY}"

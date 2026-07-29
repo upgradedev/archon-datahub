@@ -1,0 +1,741 @@
+name: Bootstrap AWS foundation
+
+run-name: Bootstrap AWS foundation at ${{ inputs.expected_head_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: Exact lowercase 40-character master HEAD approved for this operation
+        required: true
+        type: string
+      confirmation:
+        description: Type BOOTSTRAP_CDK_FOUNDATION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-aws-control-plane
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.23.1"
+  NPM_VERSION: "10.9.8"
+  EXPECTED_REPOSITORY: upgradedev/archon-datahub
+  EXPECTED_BRANCH: master
+  EXPECTED_ENVIRONMENT: aws-foundation
+  FOUNDATION_ROLE_NAME: archon-datahub-github-foundation
+  EXPECTED_BOOTSTRAP_VERSION: "32"
+  AWS_PAGER: ""
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  foundation:
+    name: Reconcile and attest AWS foundation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      deployments: read
+      id-token: write
+    steps:
+      - name: Validate protected master control plane
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD_SHA_INPUT: ${{ inputs.expected_head_sha }}
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCOUNT_ID:?aws-foundation AWS_ACCOUNT_ID is required}"
+          : "${AWS_REGION:?aws-foundation AWS_REGION is required}"
+          : "${AWS_FOUNDATION_ROLE_ARN:?aws-foundation AWS_FOUNDATION_ROLE_ARN is required}"
+          echo "::add-mask::${AWS_ACCOUNT_ID}"
+          echo "::add-mask::${AWS_FOUNDATION_ROLE_ARN}"
+
+          test "${GITHUB_REPOSITORY}" = "${EXPECTED_REPOSITORY}"
+          test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_REF}" = "refs/heads/${EXPECTED_BRANCH}"
+          test "${GITHUB_REF_NAME}" = "${EXPECTED_BRANCH}"
+          test "${CONTROL_PLANE_SHA}" = "${WORKFLOW_SHA}"
+          test "${WORKFLOW_REF}" = \
+            "${EXPECTED_REPOSITORY}/.github/workflows/aws-foundation.yml@refs/heads/${EXPECTED_BRANCH}"
+          test "${CONFIRMATION_INPUT}" = "BOOTSTRAP_CDK_FOUNDATION"
+          [[ "${EXPECTED_HEAD_SHA_INPUT}" =~ ^[0-9a-f]{40}$ ]]
+          test "${EXPECTED_HEAD_SHA_INPUT}" = "${CONTROL_PLANE_SHA}"
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${AWS_REGION}" = "eu-west-1"
+          test "${AWS_FOUNDATION_ROLE_ARN}" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${FOUNDATION_ROLE_NAME}"
+
+          repository_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          test "$(jq -er '.default_branch' <<<"${repository_json}")" = \
+            "${EXPECTED_BRANCH}"
+          remote_ref="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${EXPECTED_BRANCH}"
+          )"
+          test "$(
+            jq -er \
+              --arg ref "refs/heads/${EXPECTED_BRANCH}" '
+                select(
+                  .ref == $ref and
+                  .object.type == "commit" and
+                  (.object.sha | test("^[0-9a-f]{40}$"))
+                ) |
+                .object.sha
+              ' <<<"${remote_ref}"
+          )" = "${CONTROL_PLANE_SHA}"
+
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${EXPECTED_ENVIRONMENT}"
+          )"
+          jq -e \
+            --arg environment "${EXPECTED_ENVIRONMENT}" \
+            --arg reviewer "${GITHUB_REPOSITORY_OWNER}" '
+              .name == $environment and
+              .can_admins_bypass == false and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true and
+              (
+                [.protection_rules[]?.type] | sort
+              ) == ["branch_policy", "required_reviewers"] and
+              (
+                [.protection_rules[]? |
+                  select(.type == "required_reviewers")][0] as $rule |
+                $rule.prevent_self_review == false and
+                ($rule.reviewers | length) == 1 and
+                $rule.reviewers[0].type == "User" and
+                $rule.reviewers[0].reviewer.login == $reviewer
+              )
+            ' <<<"${environment_json}" >/dev/null
+          branch_policies="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${EXPECTED_ENVIRONMENT}/deployment-branch-policies?per_page=100"
+          )"
+          jq -e --arg branch "${EXPECTED_BRANCH}" '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == $branch and
+            .branch_policies[0].type == "branch"
+          ' <<<"${branch_policies}" >/dev/null
+
+      - name: Check out exact master control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify foundation source contracts
+        env:
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          for path in \
+            contracts/aws-foundation-v1.json \
+            infra/aws/foundation/api-gateway-account.yml \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            infra/aws/foundation/github-actions-deploy-role.yml \
+            infra/aws/foundation/github-actions-foundation-policy.json \
+            infra/aws/foundation/github-actions-foundation-role.yml \
+            infra/aws/foundation/governed-canary-roles.yml \
+            scripts/bootstrap-aws-foundation-role.sh \
+            scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/reconcile-aws-foundation.sh \
+            scripts/render-aws-foundation-policy.mjs \
+            scripts/verify-aws-runtime-boundary.mjs; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          jq -e '
+            .schemaVersion == "archon.aws-foundation/v1" and
+            .repository == "upgradedev/archon-datahub" and
+            .defaultBranch == "master" and
+            .workflow.path == ".github/workflows/aws-foundation.yml" and
+            .workflow.environment == "aws-foundation" and
+            .workflow.confirmation == "BOOTSTRAP_CDK_FOUNDATION" and
+            .aws.primaryRegion == "eu-west-1" and
+            .aws.regions == ["eu-west-1", "us-east-1"] and
+            .aws.foundationRoleName == "archon-datahub-github-foundation" and
+            .aws.foundationRoleAdoption == {
+              allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
+              convergesToCanonicalRole: true,
+              knownLegacyDescription:
+                "GitHub OIDC role for the Archon DataHub CDK foundation bootstrap pipeline",
+              knownLegacyTags: {
+                Application: "archon-datahub",
+                Environment: "foundation",
+                ManagedBy: "github-actions"
+              },
+              knownLegacyTrustDifference: "missing-canonical-sid-only",
+              requiresZeroAttachedManagedPolicies: true,
+              requiresZeroInlinePolicies: true
+            } and
+            .aws.foundationPolicies.sourceBundleAttachable == false and
+            .aws.foundationPolicies.roleInlinePolicyCount == 0 and
+            .aws.foundationPolicies.roleAttachedPolicyCount == 4 and
+            .aws.foundationPolicies.roleManagedPolicyQuota == 10 and
+            .aws.foundationPolicies.roleManagedPolicyHeadroom == 6 and
+            .aws.foundationPolicies.maximumDocumentBytes == 6144 and
+            .aws.foundationPolicies.attachedPolicyNames == [
+              "archon-aws-foundation-control",
+              "archon-aws-foundation-assets",
+              "archon-aws-foundation-identity",
+              "archon-aws-foundation-attachments"
+            ] and
+            .aws.sharedApiGatewayLogging == {
+              inlinePolicyName: "archon-apigateway-cloudwatch-logs",
+              region: "eu-west-1",
+              roleName: "archon-datahub-apigateway-cloudwatch-logs",
+              stackName: "Archon-Shared-ApiGateway-Logging"
+            } and
+            .aws.deployRoles.staging.roleName ==
+              "archon-datahub-github-staging-deploy" and
+            .aws.deployRoles.production.roleName ==
+              "archon-datahub-github-production-deploy" and
+            .aws.governedCanaryRoles.stackName ==
+              "Archon-Governed-Canary-Roles" and
+            (
+              .aws.governedCanaryRoles.roles |
+              keys |
+              sort
+            ) == ["approval", "prepare", "recovery"] and
+            .aws.privateLink.route53Actions ==
+              ["route53:AssociateVPCWithHostedZone"] and
+            .aws.privateLink.route53VpcCondition ==
+              "VPCId=vpc-*,VPCRegion=eu-west-1" and
+            .aws.privateLink.route53VpcArnConditionAllowed == false and
+            .aws.privateLink.disassociateVpcFromHostedZoneAllowed == false and
+            .aws.stages.staging.qualifier == "archonstg" and
+            .aws.stages.production.qualifier == "archonprd" and
+            (.aws.stages.staging.executionPolicyNames | length) == 10 and
+            (.aws.stages.production.executionPolicyNames | length) == 10 and
+            (
+              .aws.stages.staging.executionPolicyAttachments["eu-west-1"] |
+              length
+            ) == 9 and
+            (
+              .aws.stages.staging.executionPolicyAttachments["us-east-1"] |
+              length
+            ) == 2 and
+            .aws.stages.staging.executionPolicyAttachments ==
+              .aws.stages.production.executionPolicyAttachments and
+            .aws.bootstrap.pinnedVersion == 32 and
+            .aws.bootstrap.terminationProtection == true and
+            .aws.runtimeBoundary.schemaVersion ==
+              "archon.aws-runtime-boundary/v1" and
+            (.aws.runtimeBoundary.allowedActions | length) > 0 and
+            (
+              .aws.runtimeBoundary.approvedAwsManagedPolicies |
+              keys |
+              sort
+            ) == [
+              "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+            ] and
+            .evidence.applicationStackRolePreflight == {
+              allowedEntryValidations: [
+                "passed",
+                "requires-explicit-deploy-migration"
+              ],
+              deployFinalPostcheckRequiresExactBindings: true,
+              entryCount: 5,
+              migrationRequiredState:
+                "foundation-complete-deploy-migration-required",
+              readyState: "ready-for-deploy"
+            }
+          ' contracts/aws-foundation-v1.json >/dev/null
+          jq -e '
+            .Version == "2012-10-17" and
+            ([.Statement[].Action] | flatten | index("*") | not) and
+            (
+              [.Statement[] |
+                select(.Sid == "RejectLegacySharedDeployRole")] |
+              length
+            ) == 1 and
+            (
+              [.Statement[] |
+                select(.Sid == "ConfigureSharedApiGatewayLogging")] |
+              length
+            ) == 1
+          ' infra/aws/foundation/github-actions-foundation-policy.json >/dev/null
+
+      - name: Use the locked Node toolchain
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/aws/package-lock.json
+
+      - name: Install and verify locked AWS CDK dependencies
+        run: |
+          set -euo pipefail
+          test "$(npm --version)" = "${NPM_VERSION}"
+          npm ci --prefix infra/aws --ignore-scripts
+          node scripts/verify-exact-npm-overrides.mjs infra/aws
+          bash scripts/patch-cdk-brace-expansion.sh infra/aws
+          bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
+          test "$(
+            node -p \
+              "require('./infra/aws/node_modules/aws-cdk/package.json').version"
+          )" = "2.1133.0"
+
+      - name: Seal the pinned modern bootstrap template
+        id: bootstrap_template
+        run: |
+          set -euo pipefail
+          template="${RUNNER_TEMP}/cdk-bootstrap-template.yml"
+          infra/aws/node_modules/.bin/cdk bootstrap \
+            --show-template \
+            --no-notices >"${template}"
+          test -s "${template}"
+          test -f "${template}"
+          test ! -L "${template}"
+          template_version="$(
+            awk '
+              $1 == "CdkBootstrapVersion:" { in_version = 1; next }
+              in_version && $1 == "Value:" {
+                gsub(/\047/, "", $2)
+                print $2
+                exit
+              }
+            ' "${template}"
+          )"
+          test "${template_version}" = "${EXPECTED_BOOTSTRAP_VERSION}"
+          for logical_id in \
+            StagingBucket \
+            StagingBucketPolicy \
+            ContainerAssetsRepository \
+            FilePublishingRole \
+            ImagePublishingRole \
+            LookupRole \
+            DeploymentActionRole \
+            CloudFormationExecutionRole \
+            CdkBootstrapVersion; do
+            grep -Eq "^[[:space:]]{2}${logical_id}:" "${template}"
+          done
+          template_sha="$(sha256sum "${template}" | awk '{print $1}')"
+          for stage in staging production; do
+            for region_slot in primary edge; do
+              if [[ "${region_slot}" == "primary" ]]; then
+                region="eu-west-1"
+              else
+                region="us-east-1"
+              fi
+              stage_template="$(
+                printf '%s/cdk-bootstrap-%s-%s.yml' \
+                  "${RUNNER_TEMP}" "${stage}" "${region}"
+              )"
+              node scripts/patch-cdk-bootstrap-template.mjs \
+                --input "${template}" \
+                --output "${stage_template}" \
+                --stage "${stage}" \
+                --region "${region}"
+              test -s "${stage_template}"
+              test ! -L "${stage_template}"
+              grep -Fq \
+                "Archon DataHub ${stage} ${region} isolated bootstrap v1" \
+                "${stage_template}"
+              stage_sha="$(sha256sum "${stage_template}" | awk '{print $1}')"
+              echo "${stage}_${region_slot}_path=${stage_template}" \
+                >>"${GITHUB_OUTPUT}"
+              echo "${stage}_${region_slot}_sha=${stage_sha}" \
+                >>"${GITHUB_OUTPUT}"
+            done
+          done
+          echo "path=${template}" >>"${GITHUB_OUTPUT}"
+          echo "sha=${template_sha}" >>"${GITHUB_OUTPUT}"
+          echo "version=${template_version}" >>"${GITHUB_OUTPUT}"
+
+      - name: Prove exact synthesized runtime action equality for both stages
+        run: |
+          set -euo pipefail
+          for stage in staging production; do
+            assembly="${RUNNER_TEMP}/foundation-cdk.out/${stage}"
+            (
+              cd infra/aws
+              ./node_modules/.bin/cdk synth \
+                --all \
+                --no-lookups \
+                --output "${assembly}" \
+                --context "stage=${stage}" \
+                --no-notices
+            )
+            node scripts/verify-aws-runtime-boundary.mjs \
+              --contract contracts/aws-foundation-v1.json \
+              --stage "${stage}" \
+              --templates "${assembly}"
+          done
+
+      - name: Revalidate immutable master immediately before AWS trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
+          BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
+          STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
+          STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
+          STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_edge_sha }}
+          PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.production_primary_path }}
+          PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.production_primary_sha }}
+          PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.production_edge_path }}
+          PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.production_edge_sha }}
+        run: |
+          set -euo pipefail
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${EXPECTED_BRANCH}" |
+              jq -er '.object.sha'
+          )" = "${CONTROL_PLANE_SHA}"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
+            "${BOOTSTRAP_TEMPLATE_SHA}"
+          for tuple in \
+            "STAGING_PRIMARY_BOOTSTRAP_TEMPLATE STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
+            "STAGING_EDGE_BOOTSTRAP_TEMPLATE STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA" \
+            "PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
+            "PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA"; do
+            read -r path_name sha_name <<<"${tuple}"
+            test "$(sha256sum "${!path_name}" | awk '{print $1}')" = \
+              "${!sha_name}"
+          done
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Configure short-lived foundation credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          role-session-name: archon-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Verify exact foundation identity and resolved-only inline policy
+        id: identity
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_REGION: ${{ vars.AWS_REGION }}
+          EXPECTED_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          EXPECTED_SESSION_NAME: archon-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${EXPECTED_ACCOUNT_ID}"
+          echo "::add-mask::${EXPECTED_ROLE_ARN}"
+          identity="${RUNNER_TEMP}/foundation-identity.json"
+          aws sts get-caller-identity --output json >"${identity}"
+          jq -e \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg session "${EXPECTED_SESSION_NAME}" '
+              .Account == $account and
+              .Arn == (
+                "arn:aws:sts::" + $account +
+                ":assumed-role/archon-datahub-github-foundation/" + $session
+              )
+            ' "${identity}" >/dev/null
+          test "${AWS_REGION}" = "${EXPECTED_REGION}"
+          test "${AWS_DEFAULT_REGION}" = "${EXPECTED_REGION}"
+
+          role_json="${RUNNER_TEMP}/foundation-role.json"
+          aws iam get-role \
+            --role-name "${FOUNDATION_ROLE_NAME}" \
+            --output json >"${role_json}"
+          jq -e \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg subject \
+              "repo:upgradedev/archon-datahub:environment:aws-foundation" '
+              .Role.RoleName == "archon-datahub-github-foundation" and
+              .Role.MaxSessionDuration == 3600 and
+              (.Role.PermissionsBoundary == null) and
+              (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+              .Role.AssumeRolePolicyDocument.Statement[0].Action ==
+                "sts:AssumeRoleWithWebIdentity" and
+              .Role.AssumeRolePolicyDocument.Statement[0].Principal.Federated ==
+                ("arn:aws:iam::" + $account +
+                  ":oidc-provider/token.actions.githubusercontent.com") and
+              .Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals[
+                "token.actions.githubusercontent.com:aud"
+              ] == "sts.amazonaws.com" and
+              .Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals[
+                "token.actions.githubusercontent.com:sub"
+              ] == $subject
+            ' "${role_json}" >/dev/null
+          control_policy_arn="$(
+            printf 'arn:aws:iam::%s:policy/archon-aws-foundation-control' \
+              "${EXPECTED_ACCOUNT_ID}"
+          )"
+          assets_policy_arn="$(
+            printf 'arn:aws:iam::%s:policy/archon-aws-foundation-assets' \
+              "${EXPECTED_ACCOUNT_ID}"
+          )"
+          identity_policy_arn="$(
+            printf 'arn:aws:iam::%s:policy/archon-aws-foundation-identity' \
+              "${EXPECTED_ACCOUNT_ID}"
+          )"
+          attachments_policy_arn="$(
+            printf 'arn:aws:iam::%s:policy/archon-aws-foundation-attachments' \
+              "${EXPECTED_ACCOUNT_ID}"
+          )"
+          aws iam list-attached-role-policies \
+            --role-name "${FOUNDATION_ROLE_NAME}" \
+            --output json |
+            jq -e \
+              --arg control "${control_policy_arn}" \
+              --arg assets "${assets_policy_arn}" \
+              --arg identity "${identity_policy_arn}" \
+              --arg attachments "${attachments_policy_arn}" '
+                (.AttachedPolicies | length) == 4 and
+                (10 - (.AttachedPolicies | length)) >= 6 and
+                (.AttachedPolicies | sort_by(.PolicyArn)) ==
+                  ([
+                    {
+                      PolicyArn: $control,
+                      PolicyName: "archon-aws-foundation-control"
+                    },
+                    {
+                      PolicyArn: $assets,
+                      PolicyName: "archon-aws-foundation-assets"
+                    },
+                    {
+                      PolicyArn: $identity,
+                      PolicyName: "archon-aws-foundation-identity"
+                    },
+                    {
+                      PolicyArn: $attachments,
+                      PolicyName: "archon-aws-foundation-attachments"
+                    }
+                  ] | sort_by(.PolicyArn))
+              ' >/dev/null
+          aws iam list-role-policies \
+            --role-name "${FOUNDATION_ROLE_NAME}" \
+            --output json |
+            jq -e '.PolicyNames == []' >/dev/null
+
+          canonical='
+            def sorted_array:
+              if type == "array" then sort else [.] end;
+            .Statement |= (
+              map(
+                .Action |= sorted_array |
+                .Resource |= sorted_array
+              ) |
+              sort_by(.Sid)
+            )
+          '
+          control_rendered="${RUNNER_TEMP}/foundation-control-resolved.json"
+          assets_rendered="${RUNNER_TEMP}/foundation-assets-resolved.json"
+          identity_rendered="${RUNNER_TEMP}/foundation-identity-resolved.json"
+          attachments_rendered="${RUNNER_TEMP}/foundation-attachments-resolved.json"
+          node scripts/render-aws-foundation-policy.mjs \
+            --input infra/aws/foundation/github-actions-foundation-policy.json \
+            --control-output "${control_rendered}" \
+            --assets-output "${assets_rendered}" \
+            --identity-output "${identity_rendered}" \
+            --attachments-output "${attachments_rendered}" \
+            --account "${EXPECTED_ACCOUNT_ID}"
+          actual_bundle="${RUNNER_TEMP}/foundation-policy-actual.jsonl"
+          : >"${actual_bundle}"
+          for group in control assets identity attachments; do
+            case "${group}" in
+              control)
+                policy_arn="${control_policy_arn}"
+                rendered="${control_rendered}"
+                ;;
+              assets)
+                policy_arn="${assets_policy_arn}"
+                rendered="${assets_rendered}"
+                ;;
+              identity)
+                policy_arn="${identity_policy_arn}"
+                rendered="${identity_rendered}"
+                ;;
+              attachments)
+                policy_arn="${attachments_policy_arn}"
+                rendered="${attachments_rendered}"
+                ;;
+            esac
+            metadata="${RUNNER_TEMP}/foundation-${group}-metadata.json"
+            deployed="${RUNNER_TEMP}/foundation-${group}-deployed.json"
+            expected="${RUNNER_TEMP}/foundation-${group}-expected.json"
+            actual="${RUNNER_TEMP}/foundation-${group}-actual.json"
+            aws iam get-policy \
+              --policy-arn "${policy_arn}" \
+              --output json >"${metadata}"
+            aws iam get-policy-version \
+              --policy-arn "${policy_arn}" \
+              --version-id "$(
+                jq -er '.Policy.DefaultVersionId' "${metadata}"
+              )" \
+              --output json >"${deployed}"
+            jq -S "${canonical}" "${rendered}" >"${expected}"
+            jq '.PolicyVersion.Document' "${deployed}" |
+              jq -S "${canonical}" >"${actual}"
+            cmp -s "${expected}" "${actual}"
+            compact_size="$(
+              jq -c '.PolicyVersion.Document' "${deployed}" |
+                wc -c |
+                awk '{print $1 - 1}'
+            )"
+            test "${compact_size}" -le 6144
+            jq -cS "${canonical}" "${actual}" >>"${actual_bundle}"
+          done
+          actual_sha="$(sha256sum "${actual_bundle}" | awk '{print $1}')"
+          echo "actual_sha=${actual_sha}" >>"${GITHUB_OUTPUT}"
+
+      - name: Reconcile, drift-check, and seal the AWS foundation
+        id: reconcile
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+          BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
+          BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
+          STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
+          STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
+          STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_edge_sha }}
+          PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.production_primary_path }}
+          PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.production_primary_sha }}
+          PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.production_edge_path }}
+          PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.production_edge_sha }}
+          PINNED_BOOTSTRAP_VERSION: ${{ steps.bootstrap_template.outputs.version }}
+          FOUNDATION_POLICY_ACTUAL_SHA: ${{ steps.identity.outputs.actual_sha }}
+        run: bash scripts/reconcile-aws-foundation.sh
+
+      - name: Revalidate master before credential clearing
+        env:
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${EXPECTED_BRANCH}" |
+              jq -er '.object.sha'
+          )" = "${CONTROL_PLANE_SHA}"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Clear AWS credentials before artifact handling
+        run: |
+          set -euo pipefail
+          {
+            echo "AWS_ACCESS_KEY_ID="
+            echo "AWS_SECRET_ACCESS_KEY="
+            echo "AWS_SESSION_TOKEN="
+            echo "AWS_SECURITY_TOKEN="
+          } >>"${GITHUB_ENV}"
+
+      - name: Reverify sanitized foundation evidence
+        env:
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EVIDENCE_DIR: ${{ steps.reconcile.outputs.path }}
+          EXPECTED_FOUNDATION_SHA: ${{ steps.reconcile.outputs.foundation_sha }}
+          EXPECTED_MANIFEST_SHA: ${{ steps.reconcile.outputs.manifest_sha }}
+          EXPECTED_DRIFT_SHA: ${{ steps.reconcile.outputs.drift_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${EXPECTED_BRANCH}" |
+              jq -er '.object.sha'
+          )" = "${CONTROL_PLANE_SHA}"
+          test -d "${EVIDENCE_DIR}"
+          test ! -L "${EVIDENCE_DIR}"
+          test "$(
+            sha256sum "${EVIDENCE_DIR}/foundation.json" | awk '{print $1}'
+          )" = "${EXPECTED_FOUNDATION_SHA}"
+          test "$(
+            sha256sum "${EVIDENCE_DIR}/manifest.json" | awk '{print $1}'
+          )" = "${EXPECTED_MANIFEST_SHA}"
+          test "$(
+            sha256sum "${EVIDENCE_DIR}/drift.json" | awk '{print $1}'
+          )" = "${EXPECTED_DRIFT_SHA}"
+          (
+            cd "${EVIDENCE_DIR}"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Attest exact sanitized foundation evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.reconcile.outputs.subject }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-foundation/v1
+          predicate-path: ${{ steps.reconcile.outputs.predicate }}
+
+      - name: Retain sanitized foundation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-foundation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.reconcile.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Publish non-sensitive handoff
+        env:
+          FOUNDATION_SHA: ${{ steps.reconcile.outputs.foundation_sha }}
+          DRIFT_SHA: ${{ steps.reconcile.outputs.drift_sha }}
+          DEPLOY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.deploy_role_binding_sha }}
+          CANARY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.canary_role_binding_sha }}
+          APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### AWS foundation reconciled"
+            echo
+            echo "- Regions: \`eu-west-1\`, \`us-east-1\`"
+            echo "- Bootstraps: \`CDKToolkit-archonstg\`, \`CDKToolkit-archonprd\` (version 32)"
+            echo "- Stage execution policies and runtime boundaries: exact and drift-free"
+            echo "- GitHub deploy roles: separate staging and production OIDC subjects"
+            echo "- Governed canary roles: prepare, approval, and recovery read paths"
+            echo "- Shared API Gateway logging account: exact foundation-owned role"
+            echo "- Application stack RoleARN transition: \`${APPLICATION_STACK_ROLE_TRANSITION}\`"
+            echo "- Ten-stack drift digest: \`${DRIFT_SHA}\`"
+            echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
+            echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
+            echo "- Foundation evidence digest: \`${FOUNDATION_SHA}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

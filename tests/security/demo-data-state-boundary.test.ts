@@ -82,7 +82,11 @@ test("demo data mutation is manual, serialized, and isolated behind protected en
     /environment:\n      name: datahub-demo-seed/u
   );
   assert.match(workflow, /required_reviewers/u);
-  assert.match(workflow, /prevent_self_review == true/u);
+  assert.match(workflow, /prevent_self_review == false/u);
+  assert.match(
+    workflow,
+    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+  );
   assert.match(workflow, /\.type == "User"/u);
   assert.match(workflow, /\.reviewer\.id/u);
   assert.doesNotMatch(workflow, /can_admins_bypass/u);
@@ -110,7 +114,7 @@ test("demo data mutation is manual, serialized, and isolated behind protected en
   );
 
   const approvalGate = workflow.indexOf(
-    "Bind the exact independent environment approval receipt"
+    "Bind the exact solo-owner environment approval receipt"
   );
   const checkout = workflow.indexOf(
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -163,11 +167,11 @@ test("demo data mutation is manual, serialized, and isolated behind protected en
   assert.match(workflow, /\$reviewerIds \| index\(\$userId\)/u);
   assert.match(
     workflow,
-    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$actor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
   );
-  assert.match(
+  assert.doesNotMatch(
     workflow,
-    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$triggeringActor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$(?:actor|triggeringActor) \| ascii_downcase\)/u
   );
   assert.equal(
     workflow.match(

@@ -116,8 +116,8 @@ The accepted manifest schema is
   `https://archon.datahub.dev/attestations/submission-readiness/v1` and predicate digest;
 - protected environment `submission-readiness`; and
 - verifier workflow `.github/workflows/submission-readiness.yml` on
-  `refs/heads/master`, with its exact run ID/attempt, environment ID, independent reviewer
-  ID, and approval-receipt digest.
+  `refs/heads/master`, with its exact run ID/attempt, environment ID, configured solo-owner
+  reviewer ID, and approval-receipt digest.
 
 Every proof also carries its exact registered ID/criterion, literal `verified` state,
 sanitized evidence summary, and a named SHA-256-bound receipt. Unknown keys, unknown or
@@ -188,10 +188,10 @@ The protected **review/sealer** path is
    envelope/support subject, and GitHub attestations over both aggregate claims and
    inventory.
 2. `review` is bound to the `submission-readiness` environment. It requires one exact
-   approval comment from a configured individual reviewer who is neither the actor nor
-   triggering actor, validates the collected artifact metadata before downloading its
-   bytes, then independently refetches and reruns the complete source verifier after
-   approval. It constructs the canonical manifest and separate expected binding,
+   approval comment from the configured sole `upgradedev` owner, with self-review enabled
+   and the approval remaining attributable. It validates the collected artifact metadata
+   before downloading its bytes, then refetches and reruns the complete source verifier
+   after approval. It constructs the canonical manifest and separate expected binding,
    invokes the unsigned programmatic readiness projection, and fails unless
    `evidenceCompleteForSealing == true`, status is
    `evidence-complete-awaiting-seal`, all of `ready`, `readyToSubmit`, and `submitted`
@@ -213,8 +213,9 @@ and the two bonus receipts remain optional in this bundle. `SQ11` is forbidden: 
 protected source verifier rejects both a claims entry and any retained `SQ11` receipt so
 the pre-submit seal cannot depend on post-submit evidence. If an upstream receipt does not
 yet exist, the workflow fails; it never creates a passing claim for it. The
-environment must be configured with prevent-self-review, at least one individual reviewer,
-and a master-only custom branch policy before this path can run.
+environment must be configured with `upgradedev` as its sole individual User reviewer,
+prevent-self-review disabled so the solo owner can approve, and a master-only custom
+branch policy before this path can run.
 
 For producers, `claimsDigest` is the SHA-256 of the exact `claims.json` bytes.
 `receiptSetDigest` is the SHA-256 of the newline-terminated output of
@@ -253,8 +254,8 @@ credentialless public-video observation, complete repository history, disclosure
 cross-medium claims; binds the protected environment approval to the candidate and its
 transitive source digests; and signs the exact sixteen-subject inventory. It is
 source-complete but intentionally cannot pass before the canonical final content JSON,
-public under-three-minute video, fresh project-access evidence, and trusted independent
-environment reviewer exist.
+public under-three-minute video, fresh project-access evidence, and the trusted protected
+solo-owner approval exist.
 
 The optional `.github/workflows/submission-judge-pack.yml` standard-v1 producer now exists
 for `SQ9`. It resolves only the latest successful current-release `master` CI push and its
@@ -267,15 +268,15 @@ The post-submit
 for `SQ11` and is documented in
 [`SUBMISSION_DEVPOST_CONFIRMATION.md`](SUBMISSION_DEVPOST_CONFIRMATION.md). Its unprivileged
 prepare job revalidates the exact pre-submit seal and reviewed final content; its
-`submission-devpost-confirmation` protected job requires an independent individual
-reviewer to verify the private submission confirmation and salted commitment out of band;
+`submission-devpost-confirmation` protected job requires the configured sole owner to
+verify the private submission confirmation and salted commitment out of band;
 and its attester repeats the full source, approval, rules, and public-URL checks before
 signing and verifying all six subjects offline and through persisted lookup. Its source
 contract is CI-validated, but its protected workflow has not run and remains externally
 blocked until the real entry is submitted,
 the exact public Devpost URL and authoritative private submission time/commitment exist,
-all judging URLs are live, the protected environment is configured, and the independent
-review occurs.
+all judging URLs are live, the protected environment is configured, and the attributable
+solo-owner approval occurs.
 
 The optional `.github/workflows/submission-bonus-oss.yml` standard-v1 producer now exists.
 It credentiallessly binds the exact public Apache-2.0 upstream repository and independently
@@ -296,7 +297,7 @@ and is documented in
 [`SUBMISSION_BONUS_FEEDBACK.md`](SUBMISSION_BONUS_FEEDBACK.md). Its source contract is
 CI-validated, but it deliberately cannot pass before the real feedback, authoritative
 confirmation timestamp/reference, canonical confirmation file, protected environment,
-and independent private reviewer exist.
+and exact solo-owner private approval exist.
 Consequently the aggregate workflow fails closed when any required run is missing or comes
 from another workflow; it does not reinterpret CI fixtures, availability, posture, paging,
 or local OSS artifacts as sufficient proof. Video/final copy remain deferred-to-end, and
@@ -349,12 +350,12 @@ The five official Stage Two criteria are equally weighted.
 | Official criterion | Present in source | Current status | Proof still required |
 |---|---|---|---|
 | **1. Use of DataHub** | Official MCP read adapter; direct GMS aspect-version read; stable-source provenance handling; lineage blast radius; separate official `add_tags`/`remove_tags` write adapter; G6 governed writeback loop; frozen seven-case current-view-vs-retained-history benchmark. | **Implemented / source-complete; benchmark CI-validated; live path user-gated.** | Use the retained exact benchmark artifact, then run against a real DataHub with retained aspect versions and stable pipeline identities; plant both a cross-source contradiction and a G6 gap; retain sanitized evidence of MCP reads, version recovery, blast radius, approval-bound canary tag write, read-after-write verification, and separately approved rollback. |
-| **2. Technical Execution** | Deterministic audit/remediation code; strict fixture-vs-live model-runtime provenance with no prompt/credential/raw-response fields; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, lifecycle polling, terminal proof, WebCrypto evidence export, and passive judge tour; global plus decision-critical web coverage ratchets; exact-pinned Playwright/Axe CI journey over built Vite preview on desktop, Pixel 7, and 320×568 with fail-closed auth, zero-authority, keyboard, overflow, screenshot, and accessibility evidence; reproducible judge pack; deployment-generated no-store auth runtime config; self-contained `us-east-1` certificate/CloudFront-WAF edge stack; regional API WAF; default-deny prefix-list-scoped workload networking with no Fargate public IP; versioned S3 access logging; encrypted two-second status cache; active X-Ray; CI, CodeQL, availability, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; source CI, CodeQL, and workflow-security validated; live CD execution user-gated.** | Link the retained source evidence for judges. Add independent reviewer rules to the 11 pre-created, `master`-only privileged environment skeletons; configure separate hosted DataHub read/write MCP endpoints, distinct tokens, the three external endpoint prefix lists, and AWS OIDC. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
+| **2. Technical Execution** | Deterministic audit/remediation code; strict fixture-vs-live model-runtime provenance with no prompt/credential/raw-response fields; one-bundle live harvest with fail-closed search/entity/history completeness; fixed one-URN synchronous and 25-URN durable budgets with controlled concurrency/deadlines; isolated hosted audit/remediation workers; secretless approval handoff with separate immutable deadline/90-day decided retention; least-privilege async start/status Lambda that verifies execution evidence and receipt chains; HTTP boundary in `src/http/server.ts`; production `Dockerfile`; React/Tailwind application with Cognito code + PKCE, lifecycle polling, terminal proof, WebCrypto evidence export, and passive judge tour; global plus decision-critical web coverage ratchets; exact-pinned Playwright/Axe CI journey over built Vite preview on desktop, Pixel 7, and 320×568 with fail-closed auth, zero-authority, keyboard, overflow, screenshot, and accessibility evidence; reproducible judge pack; deployment-generated no-store auth runtime config; self-contained `us-east-1` CloudFront-WAF/log edge stack and regional provider-hostname/default-certificate distribution; regional API WAF; default-deny workload networking with dedicated DataHub PrivateLink and no Fargate public IP; stage-scoped retained Bedrock Mantle projects, PrivateLink, and short-term task-role tokens; versioned S3 access logging; encrypted two-second status cache; active X-Ray; CI, CodeQL, availability, live-proof, protected governed-canary/rollback, supply-chain, and immutable AWS promotion workflows; locked AWS CDK reference architecture in `infra/aws/`; project-owned Guard policy and Trivy IaC scan. | **Implemented / source-complete; source CI, CodeQL, and workflow-security validated; live CD execution user-gated.** | Link the retained source evidence for judges. The 12 solo-owner reviewer gates and five reviewerless automation/read-only environments are configured. Run the protected AWS foundation workflow, then configure tenant-scoped hosted DataHub read/write GMS and MCP URLs, distinct tokens/provider RBAC, and `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME`. Keep `WorkerDesiredCount=0` until the exact image is green, then activate and prove both isolated worker services and retain browser start → immutable report → approval → terminal receipt/evidence digests and verified/rejected summaries. |
 | **3. Originality** | “Audit the catalog itself” positioning; temporal/provenance contradictions rather than generic catalog chat; lineage-aware blast radius; evidence dossier, human approval, exact-action catalog, verified writeback, hash-chained receipt; frozen positive and false-positive-control cases. | **Implemented / source-complete; benchmark CI-validated.** | Link the retained benchmark artifact and obtain live proof. Do not describe the current-view boundary as a competitor-product benchmark or claim hosted statistical superiority. |
 | **4. Real-World Usefulness** | Governance checks, current-view drift, version-history conflict detection, blast radius, JSON/Markdown/SARIF exporters, browser and CI judge packs, safe remediation contracts, dashboard, scheduled public-path availability proof, and production-oriented AWS topology. | **Implemented / source-complete; operational value user-gated.** | Complete one realistic catalog incident end-to-end on live infrastructure; show a practitioner-readable report and verified remediation receipt; prove authentication, least-privilege read/write separation, failure behavior, audit retention, rollback, and sustained availability. |
 | **5. Submission Quality** | Public-facing README and design/research documents; guided UI; deterministic sample-output generator/verifier; reproducible commands and disclosure material (`LICENSE`, `NOTICE.md`). | **Source CI-validated except final/live media; final deliverables user-gated.** | Link the retained verified judge pack, then add the public working-project URL, final screenshots, concise English testing instructions, sub-three-minute public demo video, required Devpost text, and claim consistency review. |
 | **OSS bonus** | A distinct `get_aspect_history` candidate for the official DataHub MCP server is staged against exact upstream commit `9a6946d…`, with a read-only/bounded implementation, registration patch, 13 focused upstream tests, dated overlap inspection, CI validation receipt, and a source-complete [merged-upstream evidence producer](SUBMISSION_BONUS_OSS.md). The older `datahub-audit` Skill remains supplemental because it overlaps parallel audit-skill work. | **Source and candidate CI-validated; externally blocked; no PR opened and no bonus claimed.** | Use the retained remote candidate validation receipt, recheck overlap, open one public PR limited to the exact four paths, and obtain an independent upstream maintainer merge within the submission period. Then update only the manifest status and contribution README status paragraph to their exact merged phase in a normal CI-reviewed release and dispatch the evidence workflow. A local folder, CI result, or merely open PR does not earn the bonus. |
-| **Most Valuable Feedback prize** | The [official rules](https://datahub.devpost.com/rules) define an optional, one-per-entrant Feedback Submission and award its prize to individuals rather than Projects; the public challenge overview instructs entrants to complete the feedback section during submission. The [privacy-preserving evidence producer](SUBMISSION_BONUS_FEEDBACK.md) is source-complete. | **Source contract CI-validated; user-gated; completion unverified.** | While registered for the hackathon, opt in and submit at most one complete, actionable feedback response before **2026-08-10, 17:00 EDT**. Retain only the documented salted commitments and protected independent review; do not treat the feedback as a Project feature or substitute for the OSS contribution. |
+| **Most Valuable Feedback prize** | The [official rules](https://datahub.devpost.com/rules) define an optional, one-per-entrant Feedback Submission and award its prize to individuals rather than Projects; the public challenge overview instructs entrants to complete the feedback section during submission. The [privacy-preserving evidence producer](SUBMISSION_BONUS_FEEDBACK.md) is source-complete. | **Source contract CI-validated; user-gated; completion unverified.** | While registered for the hackathon, opt in and submit at most one complete, actionable feedback response before **2026-08-10, 17:00 EDT**. Retain only the documented salted commitments and protected solo-owner review; do not treat the feedback as a Project feature or substitute for the OSS contribution. |
 
 ## Required deliverables
 
@@ -370,7 +371,7 @@ The five official Stage Two criteria are equally weighted.
 | Testing access through the judging period | **User-gated operational requirement.** | Before submission, activate free judge access, scheduled monitoring/alerting, rollback, recovery, and protected credential rotation. Keep those controls active through **2026-08-31, 17:00 Eastern Time**; the readiness projection records active controls, not fictional proof of future uptime. |
 | English submission materials | **Deferred-to-end; submission-blocking.** | Deliver the description, video narration/subtitles, and testing instructions in English or include a complete English translation. |
 | New-project and third-party disclosure compliance | Disclosure files exist; **final cross-medium review is submission-blocking.** | Ensure `NOTICE.md`, repository history, final text, and video consistently disclose reused patterns and authorized third-party services. |
-| Completed Devpost entry | `SQ11` producer is **source CI-validated; unexecuted, deferred-to-end, and externally blocked.** | Seal an aggregate that excludes `SQ11`; submit every required field before the deadline; dispatch `submission-devpost-confirmation.yml` with the exact seal identity, public project URL, authoritative private UTC timestamp, and salted commitment; obtain independent protected approval; require persisted verification of all six subjects; only then build a new reporting aggregate that may include `SQ11`. The unsigned projection itself never sets `readyToSubmit`. |
+| Completed Devpost entry | `SQ11` producer is **source CI-validated; unexecuted, deferred-to-end, and externally blocked.** | Seal an aggregate that excludes `SQ11`; submit every required field before the deadline; dispatch `submission-devpost-confirmation.yml` with the exact seal identity, public project URL, authoritative private UTC timestamp, and salted commitment; obtain the attributable protected solo-owner approval; require persisted verification of all six subjects; only then build a new reporting aggregate that may include `SQ11`. The unsigned projection itself never sets `readyToSubmit`. |
 
 A separate blog post is not listed as a required deliverable. The optional Most Valuable
 Feedback action is a rules-defined Feedback Submission and the public overview places its
@@ -412,7 +413,7 @@ UI layout.
   `.github/workflows/github-repository-posture.yml` on `master` and retain its first live
   normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks only the
   repository/merge lifecycle values, public `master` protection signal, Apache-2.0
-  detection, private vulnerability reporting, exact 15-environment inventory,
+  detection, private vulnerability reporting, exact 17-environment inventory,
   `can_admins_bypass=false`, and each environment's exact `master`-only deployment policy.
   It must report detailed branch-protection rules, the Actions allowlist/SHA-pinning
   controls, and all environment secret-name inventories as unverified. No elevated
@@ -427,7 +428,7 @@ UI layout.
   audits fail closed rather than treating MCP-only current state as complete history.
 - Seed version history where repeated runs of one pipeline remain one source and two stable
   pipelines create the intended contradiction.
-- Configure `datahub-demo` and reviewer-protected `datahub-demo-seed`, then run the
+- Configure `datahub-demo` and explicit solo-owner-protected `datahub-demo-seed`, then run the
   plan-before-mutation seed/reset protocol in
   [`docs/DEMO_DATA_STATE.md`](DEMO_DATA_STATE.md). Its exact official-pack commit/file
   digests, query/URN, two retained source identities, G6 email gap, dangling upstream, and
@@ -439,7 +440,8 @@ UI layout.
   [`docs/LIVE_DATAHUB_PROOF.md`](LIVE_DATAHUB_PROOF.md).
 - Prove the instance actually retains the aspect versions Archon needs.
 - Run `.github/workflows/live-datahub-proof.yml` and retain the sanitized result.
-- Configure the three protected canary environments in
+- Configure the reviewerless read-only preparation environment and the three protected
+  canary environments in
   [`docs/GOVERNED_CANARY.md`](GOVERNED_CANARY.md). The immutable deployment pipeline
   dispatches `.github/workflows/governed-canary.yml` after staging and blocks production
   until its exact signed rollback proof is verified. It fails closed unless the exact
@@ -450,18 +452,21 @@ UI layout.
 
 ### 3. AWS deployment evidence
 
-- Configure an AWS account, GitHub OIDC trust, protected environments, budgets, and
-  deployment secrets.
-- Bootstrap a clean account in two pipeline phases. First dispatch
+- Use the protected `.github/workflows/aws-foundation.yml` pipeline to reconcile the
+  exact modern CDK bootstrap in `eu-west-1` and `us-east-1` and create the dedicated,
+  environment-bound deployment role. The GitHub OIDC provider, protected environment,
+  and foundation role already exist; no local bootstrap is accepted as evidence.
+- Deploy the application in two pipeline phases. First dispatch
   `.github/workflows/deploy.yml` with `deployment_mode=staging-bootstrap`, an exact
   successful default-branch CI run/SHA, and the protected demo-state receipt. This runs the
   immutable source and control-plane gates, deploys and verifies staging, stops before the
   governed canary/production, and emits only
   `staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`.
-  Verify the workflow attestation, then configure the four emitted non-secret values
+  Verify the workflow attestation, then configure the six emitted non-secret values
   `CANARY_APPLICATION_URL`, `CANARY_EVIDENCE_BUCKET`,
-  `CANARY_COGNITO_CLIENT_ID`, and `CANARY_COGNITO_HOSTED_UI_ORIGIN`, together with the
-  separately protected canary credentials and independent reviewer rules. Finally dispatch
+  `CANARY_COGNITO_CLIENT_ID`, `CANARY_COGNITO_HOSTED_UI_ORIGIN`,
+  `CANARY_CHROME_VERSION`, and `CANARY_CHROME_BINARY_SHA256`, together with the
+  separately protected canary credentials and explicit solo-owner reviewer rules. Finally dispatch
   `deployment_mode=promote` for the selected immutable release; it repeats staging
   verification, requires the signed governed write/rollback canary, and only then permits
   protected production promotion. The bootstrap artifact is a bound configuration handoff,
@@ -478,31 +483,35 @@ UI layout.
 - Ensure each environment's OIDC deployment role can perform the live, read-only
   evidence calls used by the fail-closed gates, including `ec2:DescribeVpcs`,
   `ec2:DescribeSecurityGroups`, `ec2:DescribeSecurityGroupRules`,
+  `ec2:DescribeVpcEndpoints`, `cloudformation:GetResource`,
+  `iam:SimulatePrincipalPolicy`,
   `elasticloadbalancing:DescribeLoadBalancers`, `wafv2:GetWebACL`,
   `wafv2:GetLoggingConfiguration`, `wafv2:GetWebACLForResource`, the dependent
   `cognito-idp:GetWebACLForResource` scoped to the exact `ArchonUserPoolArn`,
   `logs:DescribeLogGroups`, `kms:DescribeKey`, and `kms:GetKeyRotationStatus`.
   A successful CloudFormation deployment without the independently observed API-stage
   and exact Cognito user-pool associations is not promotable.
-- CDK-bootstrap that account in both the selected workload region and `us-east-1`; the
-  edge-first deployment cannot create its global certificate/WAF resources otherwise.
-- Configure `ARCHON_CLOUDFRONT_DOMAIN_NAME` and its owning public
-  `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` in both protected GitHub environments. Do not
-  configure a certificate ARN: `Archon-<stage>-Edge` creates and DNS-validates the ACM
-  certificate in `us-east-1`, creates the CloudFront-scope WAF/logging resources, and
-  hands their validated outputs to the regional platform deployment.
-- Configure the account-owned customer-managed
-  `ARCHON_DATAHUB_READ_EGRESS_PREFIX_LIST_ID`,
-  `ARCHON_DATAHUB_WRITE_EGRESS_PREFIX_LIST_ID`, and
-  `ARCHON_LLM_EGRESS_PREFIX_LIST_ID` values in both protected environments. Each must
-  be a complete, non-empty IPv4 list with entries no broader than `/8` and the exact
-  `ArchonEgressScope` tag expected by the deployment gate; their `MaxEntries` weights,
-  together with the AWS service lists, must remain within the pipeline's conservative
-  60-rule outbound security-group quota.
+- Verify the foundation attestation proves the exact pinned `CDKToolkit` version in both
+  the selected workload region and `us-east-1`; the edge-first deployment cannot create
+  its global CloudFront-WAF/logging resources otherwise.
+- Do not configure a custom CloudFront hostname, Route 53 hosted-zone value, or ACM
+  certificate input. The regional stack uses the distribution's generated
+  `*.cloudfront.net` hostname and default certificate, enforces HTTPS, and derives the
+  Cognito callback/logout URLs from that hostname. `Archon-<stage>-Edge` creates only the
+  CloudFront-scope WAF and retained KMS-encrypted logs in `us-east-1`; the pipeline passes
+  its validated Web ACL ARN to the regional platform deployment.
+- Configure the provider-issued
+  `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME` in both protected environments. The deployment
+  must discover it in the authenticated account/region, require an external owner and
+  verified provider private DNS, select two provider-supported account AZs, and pass that
+  exact service/AZ tuple to CloudFormation before any mutation.
 - Do not configure S3/DynamoDB prefix-list variables. The pipeline must resolve the exact
   AWS-owned regional `com.amazonaws.<region>.s3` and
   `com.amazonaws.<region>.dynamodb` IDs and pass them to the platform stack separately
-  from the three external endpoint allowlists.
+  from the DataHub PrivateLink boundary. Do not configure an LLM secret or
+  egress prefix list: each stack creates a retained stage-scoped Bedrock Mantle project
+  and dedicated PrivateLink endpoint, and API/audit tasks mint short-term tokens from
+  their bounded ECS task roles.
 - Configure a trimmed, non-wildcard `DATAHUB_DEMO_QUERY` in staging and production that
   resolves to exactly one safe demo dataset; retain its digest-bound smoke evidence.
 - Allow deployment only from a successful default-branch CI run and matching full SHA.
@@ -536,9 +545,9 @@ UI layout.
 - Record the final live demo only after the deployed commit and DataHub proof are fixed.
 - Write the English Devpost text and testing instructions, then perform a claim-by-claim
   consistency check against the README, video, live application, and retained evidence.
-- Configure `submission-devpost-confirmation` with individual `User` reviewers,
-  prevent-self-review, and an exact `master` branch policy; the actor and triggering actor
-  cannot approve their own binding.
+- Keep `submission-devpost-confirmation` bound to the sole `upgradedev` User reviewer,
+  self-review enabled, administrator bypass disabled, and an exact `master` branch policy;
+  the protected approval remains attributable without claiming separation of duties.
 - Seal the pre-submit aggregate without `SQ11`, then submit on Devpost last. Keep the
   authenticated confirmation, salt, credentials, cookies, screenshots, and entrant PII
   outside GitHub.
@@ -567,19 +576,19 @@ not mark scheduled, manual, protected, credentialed, or deployment workflows as 
 The CD definition now covers a successful-default-branch source gate, artifact-envelope and
 inner-digest verification, short-lived AWS OIDC credentials, account allow-listing,
 semantic v4 attestation verification with a 24-hour database-retrieval limit,
-edge-first certificate/WAF deployment and validated platform handoff, AWS-owned regional
-S3/DynamoDB prefix-list resolution, validation of the three account-owned external egress
-lists, staging deployment, versioned secret refresh, ECR scan, exact no-store auth
+edge-first CloudFront-WAF deployment and validated platform handoff, AWS-owned regional
+S3/DynamoDB prefix-list resolution, fail-closed DataHub PrivateLink service/private-DNS/AZ
+preflight and live endpoint evidence, staging deployment, versioned secret refresh, ECR scan, exact no-store auth
 runtime-config publication, control-Lambda dependency/SCA gates, fail-closed hosted
 start/status smoke contracts, protected OWASP
 ZAP DAST, production approval, same-digest promotion, rollback selection, and
 retained deployment evidence plus a scheduled public availability proof. The repository
-control plane now has all 15 exact `master`-only environments, administrator bypass
+control plane now has all 17 exact `master`-only environments, administrator bypass
 disabled, strict app-bound `master` protection, a SHA-pinned explicit Actions allowlist,
-and private vulnerability reporting. It is **not operationally proven yet** because it
-still has no trusted second collaborator or reviewer rules for the 11 privileged approval
-environments, AWS role/bootstrapped account, deployment secrets, hosted URL, or successful
-promotion receipt. Therefore Archon has a comparable CD design,
+private vulnerability reporting, and exact sole-owner approval on all 12 protected
+mutation/approval environments. It is **not operationally proven yet** because the
+protected AWS foundation/bootstrap pipeline, DataHub credential/endpoint configuration,
+hosted URL, and production promotion receipt are still pending. Therefore Archon has a comparable CD design,
 but not yet the same proven end-to-end posture as the referenced Nebius, Qwen, or OpenAI
 Buildweek projects.
 

@@ -70,6 +70,7 @@ export interface Classification {
 }
 
 export type LiveModelProvider =
+  | "bedrock-mantle"
   | "custom"
   | "qwen"
   | "gemini"

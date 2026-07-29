@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")/../.." &&
+    pwd
+)"
+foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
+deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
+ci_workflow="${repository_root}/.github/workflows/ci.yml"
+contract="${repository_root}/contracts/aws-foundation-v1.json"
+foundation_policy="${repository_root}/infra/aws/foundation/github-actions-foundation-policy.json"
+foundation_role="${repository_root}/infra/aws/foundation/github-actions-foundation-role.yml"
+deploy_role="${repository_root}/infra/aws/foundation/github-actions-deploy-role.yml"
+canary_roles="${repository_root}/infra/aws/foundation/governed-canary-roles.yml"
+execution_policy="${repository_root}/infra/aws/foundation/cdk-execution-policy.yml"
+api_gateway_account="${repository_root}/infra/aws/foundation/api-gateway-account.yml"
+bootstrap_patcher="${repository_root}/scripts/patch-cdk-bootstrap-template.mjs"
+foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
+foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
+reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
+runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
+runbook="${repository_root}/docs/AWS_FOUNDATION.md"
+
+fail() {
+  echo "::error::$*" >&2
+  exit 1
+}
+
+require_text() {
+  local path="$1"
+  shift
+  local expected
+  for expected in "$@"; do
+    grep -Fq -- "${expected}" "${path}" ||
+      fail "${path#${repository_root}/} is missing: ${expected}"
+  done
+}
+
+forbid_text() {
+  local path="$1"
+  shift
+  local forbidden
+  for forbidden in "$@"; do
+    if grep -Fq -- "${forbidden}" "${path}"; then
+      fail "${path#${repository_root}/} contains forbidden text: ${forbidden}"
+    fi
+  done
+}
+
+for path in \
+  "${foundation_workflow}" \
+  "${deploy_workflow}" \
+  "${ci_workflow}" \
+  "${contract}" \
+  "${foundation_policy}" \
+  "${foundation_role}" \
+  "${deploy_role}" \
+  "${canary_roles}" \
+  "${execution_policy}" \
+  "${api_gateway_account}" \
+  "${bootstrap_patcher}" \
+  "${foundation_renderer}" \
+  "${foundation_bootstrap}" \
+  "${reconciler}" \
+  "${runtime_verifier}" \
+  "${runbook}"; do
+  test -f "${path}" || fail "missing ${path#${repository_root}/}"
+  test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
+done
+
+jq --exit-status '
+  .schemaVersion == "archon.aws-foundation/v1" and
+  .repository == "upgradedev/archon-datahub" and
+  .defaultBranch == "master" and
+  .workflow == {
+    confirmation: "BOOTSTRAP_CDK_FOUNDATION",
+    environment: "aws-foundation",
+    path: ".github/workflows/aws-foundation.yml"
+  } and
+  .aws.partition == "aws" and
+  .aws.primaryRegion == "eu-west-1" and
+  .aws.regions == ["eu-west-1", "us-east-1"] and
+  .aws.foundationRoleName == "archon-datahub-github-foundation" and
+  .aws.foundationRoleAdoption == {
+    allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
+    convergesToCanonicalRole: true,
+    knownLegacyDescription:
+      "GitHub OIDC role for the Archon DataHub CDK foundation bootstrap pipeline",
+    knownLegacyTags: {
+      Application: "archon-datahub",
+      Environment: "foundation",
+      ManagedBy: "github-actions"
+    },
+    knownLegacyTrustDifference: "missing-canonical-sid-only",
+    requiresZeroAttachedManagedPolicies: true,
+    requiresZeroInlinePolicies: true
+  } and
+  .aws.foundationPolicies == {
+    attachedPolicyNames: [
+      "archon-aws-foundation-control",
+      "archon-aws-foundation-assets",
+      "archon-aws-foundation-identity",
+      "archon-aws-foundation-attachments"
+    ],
+    maximumDocumentBytes: 6144,
+    renderer: "scripts/render-aws-foundation-policy.mjs",
+    roleAttachedPolicyCount: 4,
+    roleInlinePolicyCount: 0,
+    roleManagedPolicyHeadroom: 6,
+    roleManagedPolicyQuota: 10,
+    sourceBundle: "infra/aws/foundation/github-actions-foundation-policy.json",
+    sourceBundleAttachable: false
+  } and
+  .aws.governedCanaryRoles.stackName == "Archon-Governed-Canary-Roles" and
+  .aws.governedCanaryRoles.region == "eu-west-1" and
+  .aws.governedCanaryRoles.roles.prepare == {
+    environment: "governed-canary-prepare",
+    permissions: ["cloudformation:DescribeStacks"],
+    roleName: "archon-datahub-github-governed-canary-prepare",
+    variable: "AWS_CANARY_PREPARE_ROLE_ARN"
+  } and
+  .aws.governedCanaryRoles.roles.approval == {
+    environment: "governed-canary",
+    permissions: [
+      "cloudformation:DescribeStacks",
+      "cognito-idp:AdminGetUser",
+      "cognito-idp:AdminListGroupsForUser"
+    ],
+    roleName: "archon-datahub-github-governed-canary-approval",
+    variable: "AWS_CANARY_APPROVAL_ROLE_ARN"
+  } and
+  .aws.governedCanaryRoles.roles.recovery == {
+    environment: "governed-canary-recovery",
+    permissions: ["cloudformation:DescribeStacks"],
+    roleName: "archon-datahub-github-governed-canary-recovery",
+    variable: "AWS_CANARY_RECOVERY_ROLE_ARN"
+  } and
+  .aws.privateLink == {
+    disassociateVpcFromHostedZoneAllowed: false,
+    ec2Actions: [
+      "ec2:CreateTags",
+      "ec2:CreateVpcEndpoint",
+      "ec2:DeleteTags",
+      "ec2:DeleteVpcEndpoints",
+      "ec2:DescribeVpcEndpointServices",
+      "ec2:DescribeVpcEndpoints",
+      "ec2:ModifyVpcEndpoint"
+    ],
+    executionPolicyFamily: "endpoint",
+    privateDnsEnabled: true,
+    region: "eu-west-1",
+    route53Actions: ["route53:AssociateVPCWithHostedZone"],
+    route53VpcArnConditionAllowed: false,
+    route53VpcCondition: "VPCId=vpc-*,VPCRegion=eu-west-1",
+    serviceOwnerMustDifferFromDeploymentAccount: true
+  } and
+  .aws.stages.staging.qualifier == "archonstg" and
+  .aws.stages.production.qualifier == "archonprd" and
+  (.aws.stages.staging.executionPolicyNames | length) == 10 and
+  (.aws.stages.production.executionPolicyNames | length) == 10 and
+  .aws.stages.staging.executionPolicyAttachments == {
+    "eu-west-1": [
+      "guard",
+      "identity",
+      "data",
+      "state",
+      "observability",
+      "compute",
+      "network",
+      "endpoint",
+      "delivery"
+    ],
+    "us-east-1": ["guard", "edge"]
+  } and
+  .aws.stages.staging.executionPolicyAttachments ==
+    .aws.stages.production.executionPolicyAttachments and
+  .aws.bootstrap == {
+    customerManagedKey: false,
+    minimumVersion: 6,
+    pinnedVersion: 32,
+    terminationProtection: true
+  } and
+  .oidc.foundationSubject ==
+    "repo:upgradedev/archon-datahub:environment:aws-foundation" and
+  .oidc.governedCanarySubjects == [
+    "repo:upgradedev/archon-datahub:environment:governed-canary-prepare",
+    "repo:upgradedev/archon-datahub:environment:governed-canary",
+    "repo:upgradedev/archon-datahub:environment:governed-canary-recovery"
+  ] and
+  .evidence.containsRawAccountId == false and
+  .evidence.containsRawRoleArn == false and
+  .evidence.applicationStackRolePreflight == {
+    allowedEntryValidations: [
+      "passed",
+      "requires-explicit-deploy-migration"
+    ],
+    deployFinalPostcheckRequiresExactBindings: true,
+    entryCount: 5,
+    migrationRequiredState:
+      "foundation-complete-deploy-migration-required",
+    readyState: "ready-for-deploy"
+  }
+' "${contract}" >/dev/null
+
+jq --exit-status '
+  .aws.runtimeBoundary.schemaVersion == "archon.aws-runtime-boundary/v1" and
+  (.aws.runtimeBoundary.allowedActions | length) > 0 and
+  (
+    .aws.runtimeBoundary.approvedAwsManagedPolicies |
+    keys |
+    sort
+  ) == [
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+    "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  ] and
+  (
+    [.aws.runtimeBoundary.allowedActions[] |
+      select(
+        startswith("iam:") or
+        startswith("sts:") or
+        startswith("account:") or
+        startswith("organizations:")
+      )] |
+    length
+  ) == 0
+' "${contract}" >/dev/null
+
+trigger_contract="$(
+  sed -n '/^on:/,/^permissions:/p' "${foundation_workflow}" |
+    sed '$d'
+)"
+grep -Fq '  workflow_dispatch:' <<<"${trigger_contract}"
+for forbidden_trigger in push: pull_request: schedule: workflow_call:; do
+  if grep -Fq "${forbidden_trigger}" <<<"${trigger_contract}"; then
+    fail "AWS foundation must remain manual-only: ${forbidden_trigger}"
+  fi
+done
+
+require_text "${foundation_workflow}" \
+  'name: Bootstrap AWS foundation' \
+  'group: archon-aws-control-plane' \
+  'cancel-in-progress: false' \
+  'name: aws-foundation' \
+  'id-token: write' \
+  'attestations: write' \
+  'test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"' \
+  'test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"' \
+  'test "${CONFIRMATION_INPUT}" = "BOOTSTRAP_CDK_FOUNDATION"' \
+  '$rule.prevent_self_review == false' \
+  'role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}' \
+  'scripts/render-aws-foundation-policy.mjs' \
+  'archon-aws-foundation-control' \
+  'archon-aws-foundation-assets' \
+  'archon-aws-foundation-identity' \
+  'archon-aws-foundation-attachments' \
+  "jq -e '.PolicyNames == []'" \
+  'infra/aws/foundation/governed-canary-roles.yml' \
+  'node scripts/patch-cdk-bootstrap-template.mjs' \
+  '--region "${region}"' \
+  'run: bash scripts/reconcile-aws-foundation.sh' \
+  'Clear AWS credentials before artifact handling' \
+  'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
+  'retention-days: 90'
+if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
+  fail "AWS foundation must not consume long-lived GitHub secrets"
+fi
+if grep -E '^[[:space:]]*uses: [^@]+@(main|master|v[0-9]+)' \
+  "${foundation_workflow}"; then
+  fail "AWS foundation contains a mutable action reference"
+fi
+
+jq --exit-status '
+  .Version == "2012-10-17" and
+  ([.Statement[].Action] | flatten | index("*") | not) and
+  (
+    [.Statement[] | select(.Sid == "ReadFoundationManagedPolicies")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] | select(.Sid == "ReadFoundationManagedPolicies")][0] |
+    .Resource |
+    length
+  ) == 4 and
+  (
+    [.Statement[] | select(.Sid == "ReadFoundationManagedPolicies")][0] |
+    .Resource |
+    index(
+      "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-aws-foundation-attachments"
+    )
+  ) != null and
+  (
+    [.Statement[] | select(.Sid == "ReconcileExactFoundationStacks")][0] |
+    .Resource |
+    index(
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Governed-Canary-Roles/*"
+    )
+  ) != null and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactBootstrapAndDeployRoles")][0] |
+    .Resource |
+    map(select(contains("governed-canary"))) |
+    length
+  ) == 3
+' "${foundation_policy}" >/dev/null
+
+require_text "${foundation_renderer}" \
+  'const policyGroups = ["control", "assets", "identity", "attachments"]' \
+  'if (Buffer.byteLength(compact, "utf8") > 6144)' \
+  'source statement Sids must be unique, non-empty strings'
+require_text "${foundation_bootstrap}" \
+  'test "${CONFIRMATION}" = "BOOTSTRAP_FOUNDATION_POLICIES"' \
+  'readonly -a POLICY_GROUPS=(control assets identity attachments)' \
+  'aws iam get-open-id-connect-provider' \
+  'expected_attachments='\''[]'\''' \
+  '--stdout-group "${group}"' \
+  'aws iam create-policy' \
+  'test "${compact_size}" -le 6144' \
+  'role_error="$(' \
+  'if grep -q '\''NoSuchEntity'\'' <<<"${role_error}"; then' \
+  'aws iam create-role' \
+  'LEGACY_FOUNDATION_ROLE_DESCRIPTION="GitHub OIDC role for the Archon DataHub CDK foundation bootstrap pipeline"' \
+  '{"Key":"Environment","Value":"foundation"}' \
+  '{"Key":"ManagedBy","Value":"github-actions"}' \
+  '--argjson legacyTrust "${legacy_trust_policy}"' \
+  'def normalize_actions:' \
+  'jq -e '\''.AttachedPolicies == []'\'' >/dev/null' \
+  'aws iam update-assume-role-policy' \
+  'aws iam update-role-description' \
+  'aws iam tag-role' \
+  '.Role.AssumeRolePolicyDocument == $trust' \
+  '($expected | index($actual)) != null' \
+  '(10 - (.AttachedPolicies | length)) >= 6' \
+  'aws iam attach-role-policy'
+forbid_text "${foundation_bootstrap}" \
+  'aws iam detach-role-policy' \
+  'aws iam put-role-policy' \
+  'aws iam untag-role'
+policy_first_line="$(
+  grep -n '^for group in "${POLICY_GROUPS\[@\]}"; do$' \
+    "${foundation_bootstrap}" |
+    head -n 1 |
+    cut -d: -f1
+)"
+role_adoption_line="$(
+  grep -n '^role_error=' "${foundation_bootstrap}" |
+    cut -d: -f1
+)"
+test -n "${policy_first_line}"
+test -n "${role_adoption_line}"
+test "${policy_first_line}" -lt "${role_adoption_line}"
+legacy_zero_attachments_line="$(
+  grep -n "jq -e '.AttachedPolicies == \\[\\]' >/dev/null" \
+    "${foundation_bootstrap}" |
+    cut -d: -f1
+)"
+legacy_trust_update_line="$(
+  grep -n '^[[:space:]]*aws iam update-assume-role-policy' \
+    "${foundation_bootstrap}" |
+    cut -d: -f1
+)"
+test -n "${legacy_zero_attachments_line}"
+test -n "${legacy_trust_update_line}"
+test "${legacy_zero_attachments_line}" -lt "${legacy_trust_update_line}"
+
+require_text "${foundation_role}" \
+  'The policy-first bootstrap creates or safely adopts this' \
+  'RoleName: archon-datahub-github-foundation' \
+  'Action: sts:AssumeRoleWithWebIdentity' \
+  'repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}' \
+  'policy/archon-aws-foundation-control' \
+  'policy/archon-aws-foundation-assets' \
+  'policy/archon-aws-foundation-identity' \
+  'policy/archon-aws-foundation-attachments'
+test "$(
+  grep -Fc -- '- !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-' \
+    "${foundation_role}"
+)" -eq 4
+forbid_text "${foundation_role}" \
+  'Policies:' \
+  'PolicyName:' \
+  'AdministratorAccess'
+
+require_text "${canary_roles}" \
+  'RoleName: archon-datahub-github-governed-canary-prepare' \
+  'RoleName: archon-datahub-github-governed-canary-approval' \
+  'RoleName: archon-datahub-github-governed-canary-recovery' \
+  'environment:governed-canary-prepare' \
+  'environment:governed-canary' \
+  'environment:governed-canary-recovery' \
+  'Action: cloudformation:DescribeStacks' \
+  'cognito-idp:AdminGetUser' \
+  'cognito-idp:AdminListGroupsForUser' \
+  'aws:ResourceTag/Application: archon-datahub' \
+  'aws:ResourceTag/Environment: staging' \
+  'aws:ResourceTag/ManagedBy: aws-cdk'
+test "$(
+  grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${canary_roles}"
+)" -eq 3
+if grep -Eq \
+  "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
+  "${canary_roles}"; then
+  fail "governed canary roles contain a wildcard action"
+fi
+
+for family in \
+  identity guard data state observability compute network endpoint delivery edge; do
+  grep -Fq \
+    "ManagedPolicyName: !Sub archon-datahub-cdk-${family}-\${DeploymentEnvironment}" \
+    "${execution_policy}" ||
+    fail "execution template omits ${family} managed policy"
+done
+require_text "${execution_policy}" \
+  'ArchonCdkEuWest1ExecutionPolicyArns:' \
+  'ArchonCdkUsEast1ExecutionPolicyArns:' \
+  'ArchonCdkExecutionPolicyNames:' \
+  'ArchonRuntimeBoundaryArn:' \
+  'DenySharedApiGatewayAccountMutation' \
+  'DenyRuntimeBoundaryRemoval' \
+  'DenyFoundationControlPlaneMutation' \
+  'iam:PermissionsBoundary: !Ref ArchonRuntimeBoundary' \
+  'CreateOnlyTaggedSameRegionVpcEndpoints' \
+  'ReconcileOnlyOwnedStageVpcEndpoints' \
+  'DenyVpcEndpointOwnershipTagRemoval' \
+  'ec2:VpceServiceOwner: !Ref AWS::AccountId' \
+  'Action: route53:AssociateVPCWithHostedZone' \
+  'route53:VPCs: VPCId=vpc-*,VPCRegion=eu-west-1'
+forbid_text "${execution_policy}" \
+  'route53:DisassociateVPCFromHostedZone' \
+  'route53:VPCs: arn:' \
+  'route53:*'
+if grep -E \
+  '^[[:space:]]*(-[[:space:]]+|Action:[[:space:]]+)route53:' \
+  "${execution_policy}" |
+  grep -Fv 'route53:AssociateVPCWithHostedZone'; then
+  fail "execution template grants a Route53 action other than private-DNS association"
+fi
+if grep -Eq \
+  '^[[:space:]]*-[[:space:]]+[a-z0-9-]+:\*[[:space:]]*$' \
+  "${execution_policy}"; then
+  fail "execution template contains a service-wide allow action"
+fi
+
+require_text "${bootstrap_patcher}" \
+  '--stage' \
+  '--region' \
+  'CreateOrUpdateOnlyWithBootstrapExecutionRole' \
+  'CreateOnlyCdkDeployChangeSet' \
+  'UseOnlyCdkDeployChangeSets' \
+  'cloudformation:ChangeSetName' \
+  'cloudformation:RoleArn'
+require_text "${reconciler}" \
+  'STAGING_PRIMARY_BOOTSTRAP_TEMPLATE' \
+  'STAGING_EDGE_BOOTSTRAP_TEMPLATE' \
+  'PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE' \
+  'PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE' \
+  'readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"' \
+  'Reconcile the three governed-canary read roles' \
+  'Require all ten foundation stacks to be IN_SYNC' \
+  "jq -e 'length == 10 and all(.[]; .stackDriftStatus == \"IN_SYNC\")'" \
+  'test "${compact_policy_size}" -le 6144' \
+  'test "${boundary_compact_size}" -le 6144' \
+  'stackCount: 10' \
+  'sourceTemplateSha256: $sourceTemplateSha256' \
+  'canary_role_binding_sha=${combined_canary_binding_sha}' \
+  '.Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"' \
+  'foundation-complete-deploy-migration-required' \
+  'requires-explicit-deploy-migration' \
+  'deployRequirement: "explicit-role-migration"' \
+  'applicationStackRoleTransition: $applicationStackRoleTransition' \
+  'application_stack_role_transition=${application_stack_role_transition_state}'
+
+require_text "${runtime_verifier}" \
+  'const uncovered' \
+  'const unusedAllowed' \
+  'const unseenApprovedPolicies' \
+  'approved managed policies absent from synthesis'
+require_text "${ci_workflow}" \
+  'bash tests/pipeline/aws-foundation-contracts.test.sh' \
+  'scripts/bootstrap-aws-foundation-role.sh' \
+  'scripts/reconcile-aws-foundation.sh' \
+  'scripts/patch-cdk-bootstrap-template.mjs' \
+  'scripts/render-aws-foundation-policy.mjs' \
+  'node scripts/verify-aws-runtime-boundary.mjs'
+require_text "${deploy_workflow}" \
+  'group: archon-aws-control-plane' \
+  'cancel-in-progress: false' \
+  'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
+  'ALLOW_ABSENT=false' \
+  'ALLOW_ROLE_MIGRATION=false' \
+  'bash scripts/validate-cloudformation-role-bindings.sh'
+require_text "${foundation_workflow}" \
+  'APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}' \
+  'Application stack RoleARN transition:'
+require_text "${deploy_role}" \
+  'ec2:DescribeAvailabilityZones' \
+  'ec2:DescribeSecurityGroupRules' \
+  'ec2:DescribeSecurityGroups' \
+  'ec2:DescribeSubnets' \
+  'ec2:DescribeVpcEndpointServices' \
+  'ec2:DescribeVpcEndpoints'
+
+require_text "${api_gateway_account}" \
+  'AWS::ApiGateway::Account' \
+  'RoleName: archon-datahub-apigateway-cloudwatch-logs' \
+  'PolicyName: archon-apigateway-cloudwatch-logs'
+
+for path in \
+  "${foundation_policy}" \
+  "${foundation_role}" \
+  "${deploy_role}" \
+  "${canary_roles}"; do
+  if grep -Eiq '(^|[^[:alnum:]_-])(acm|route53|route53domains):' "${path}"; then
+    fail "${path#${repository_root}/} must not grant or deny ACM/Route53"
+  fi
+  if grep -Fq 'AdministratorAccess' "${path}"; then
+    fail "${path#${repository_root}/} must not refer to AdministratorAccess"
+  fi
+done
+if grep -Eiq '(^|[^[:alnum:]_-])(acm):' "${execution_policy}"; then
+  fail "execution template must not grant or deny ACM"
+fi
+if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
+  fail "execution template must not refer to AdministratorAccess"
+fi
+
+require_text "${runbook}" \
+  'pinned CDK CLI `2.1133.0`' \
+  'version `32`' \
+  'ten CloudFormation stack instances' \
+  '`Archon-Governed-Canary-Roles`' \
+  '`archon-aws-foundation-control`' \
+  '`archon-aws-foundation-assets`' \
+  '`archon-aws-foundation-identity`' \
+  '`archon-aws-foundation-attachments`' \
+  '`AWS_CANARY_PREPARE_ROLE_ARN`' \
+  '`AWS_CANARY_APPROVAL_ROLE_ARN`' \
+  '`AWS_CANARY_RECOVERY_ROLE_ARN`' \
+  '`prevent_self_review=false`' \
+  'not account-grade isolation' \
+  'policy-first' \
+  'On a fresh account' \
+  'On an existing account' \
+  'current policyless role' \
+  'Before any role update' \
+  'missing canonical `Sid`' \
+  'Every other mismatch fails closed' \
+  '`foundation-complete-deploy-migration-required`' \
+  '`requires-explicit-deploy-migration`' \
+  '`ready-for-deploy`'

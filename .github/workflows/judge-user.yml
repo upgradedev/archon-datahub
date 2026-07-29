@@ -198,9 +198,9 @@ jobs:
               bash scripts/verify-judge-environment-approval.sh approval-comment
           )"
           echo "request_sha256=${request_sha256}" >>"${GITHUB_OUTPUT}"
-          echo "::notice title=Required independent judge approval comment::${approval_comment}"
+          echo "::notice title=Required solo-owner judge approval comment::${approval_comment}"
           {
-            echo "### Required independent judge approval comment"
+            echo "### Required solo-owner judge approval comment"
             echo
             if [[ "${CONTROL_PLANE_MODE}" == "emergency-deactivate-current-master" ]]; then
               [[ "${EMERGENCY_WORKFLOW_FILE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
@@ -239,7 +239,7 @@ jobs:
       producer_run_id: ${{ steps.operation_receipt.outputs.producer_run_id }}
       release_sha: ${{ github.sha }}
     steps:
-      - name: Require exact independent approval receipt before any privileged setup
+      - name: Require exact solo-owner approval receipt before any privileged setup
         env:
           ARCHON_STAGE: ${{ inputs.stage }}
           EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
@@ -260,6 +260,8 @@ jobs:
           [[ "${REVIEW_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
           [[ "${REVIEW_TRIGGERING_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
           test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${REVIEW_ACTOR,,}" = "upgradedev"
+          test "${REVIEW_TRIGGERING_ACTOR,,}" = "upgradedev"
 
           environment_name="judge-access-${ARCHON_STAGE}"
           expected_comment="ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${GITHUB_RUN_ID}|run_attempt=${GITHUB_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}"
@@ -292,13 +294,14 @@ jobs:
               .deployment_branch_policy.protected_branches == false and
               .deployment_branch_policy.custom_branch_policies == true and
               ($review_rules | length) == 1 and
-              $review_rules[0].prevent_self_review == true and
-              (($review_rules[0].reviewers // []) | length) >= 1 and
+              $review_rules[0].prevent_self_review == false and
+              (($review_rules[0].reviewers // []) | length) == 1 and
               all(
                 ($review_rules[0].reviewers // [])[];
                 .type == "User" and
                 (.reviewer.id | type == "number") and
-                (.reviewer.login | type == "string")
+                (.reviewer.login | type == "string") and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
               ) and
               (
                 [
@@ -366,9 +369,9 @@ jobs:
                     .user.id == $reviewer_id and
                     (.user.login | ascii_downcase) ==
                       ($reviewer_login | ascii_downcase) and
-                    (.user.login | ascii_downcase) !=
+                    (.user.login | ascii_downcase) ==
                       ($actor | ascii_downcase) and
-                    (.user.login | ascii_downcase) !=
+                    (.user.login | ascii_downcase) ==
                       ($triggering_actor | ascii_downcase) and
                     ((.environments // []) | length) == 1 and
                     .environments[0].name == $environment
@@ -755,11 +758,12 @@ jobs:
                 applicationOriginSha256: $applicationOriginSha256,
                 approval: {
                   environment: $environmentName,
+                  approvalMode: "solo-owner",
                   requestSha256: $requestSha256,
                   approvalReceiptSha256: $approvalReceiptSha256,
                   targetSha256: $targetSha256,
                   exactReceiptVerified: true,
-                  independentReviewerVerified: true
+                  soloOwnerApprovalVerified: true
                 },
                 controlPlane: {
                   mode: $gateMode,
@@ -854,11 +858,12 @@ jobs:
                 applicationOriginSha256: $applicationOriginSha256,
                 approval: {
                   environment: $environmentName,
+                  approvalMode: "solo-owner",
                   requestSha256: $requestSha256,
                   approvalReceiptSha256: $approvalReceiptSha256,
                   targetSha256: $targetSha256,
                   exactReceiptVerified: true,
-                  independentReviewerVerified: true
+                  soloOwnerApprovalVerified: true
                 },
                 controlPlane: {
                   mode: $gateMode,
@@ -1473,7 +1478,7 @@ jobs:
               .sanitized == true and
               .secretMaterialRetained == false
             ' "${state}" >/dev/null || {
-            echo "::error::Operation state receipt failed independent validation"
+            echo "::error::Operation state receipt failed isolated validation"
             exit 1
           }
 
@@ -1533,11 +1538,12 @@ jobs:
               .applicationOriginSha256 == $applicationOriginSha256 and
               .approval == {
                 environment: $environmentName,
+                approvalMode: "solo-owner",
                 requestSha256: $requestSha256,
                 approvalReceiptSha256: $approvalReceiptSha256,
                 targetSha256: $targetSha256,
                 exactReceiptVerified: true,
-                independentReviewerVerified: true
+                soloOwnerApprovalVerified: true
               } and
               .controlPlane == {
                 mode: $gateMode,
@@ -1649,11 +1655,12 @@ jobs:
               .applicationOriginSha256 == $applicationOriginSha256 and
               .approval == {
                 environment: $environmentName,
+                approvalMode: "solo-owner",
                 requestSha256: $requestSha256,
                 approvalReceiptSha256: $approvalReceiptSha256,
                 targetSha256: $targetSha256,
                 exactReceiptVerified: true,
-                independentReviewerVerified: true
+                soloOwnerApprovalVerified: true
               } and
               .controlPlane == {
                 mode: $gateMode,

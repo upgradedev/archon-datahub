@@ -784,7 +784,7 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   );
   assert.match(judgeApprovalVerifier, /\.name == \$name/u);
   assert.match(judgeApprovalVerifier, /\.type == "required_reviewers"/u);
-  assert.match(judgeApprovalVerifier, /\.prevent_self_review == true/u);
+  assert.match(judgeApprovalVerifier, /\.prevent_self_review == false/u);
   assert.match(
     judgeApprovalVerifier,
     /\.deployment_branch_policy\.custom_branch_policies == true/u
@@ -818,11 +818,11 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   assert.doesNotMatch(judgeApprovalVerifier, /\.type == "Team"/u);
   assert.match(
     judgeApprovalVerifier,
-    /\(\.user\.login \| ascii_downcase\) != \(\$actor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) == \(\$actor \| ascii_downcase\)/u
   );
   assert.match(
     judgeApprovalVerifier,
-    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$triggering_actor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$triggering_actor \| ascii_downcase\)/u
   );
   assert.match(
     judgeApprovalVerifier,
@@ -840,7 +840,7 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   assert.doesNotMatch(approvalCommentFunction, /JUDGE_USERNAME/u);
   assert.doesNotMatch(judgeUserWorkflow, /admin_bypass_disabled_when_exposed/u);
   const environmentPosture = privileged.indexOf(
-    "Require exact independent approval receipt before any privileged setup"
+    "Require exact solo-owner approval receipt before any privileged setup"
   );
   const roleConfiguration = privileged.indexOf(
     "Validate protected role configuration"
@@ -850,7 +850,7 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   );
   assert.match(
     privileged,
-    /steps:\n      - name: Require exact independent approval receipt before any privileged setup/u
+    /steps:\n      - name: Require exact solo-owner approval receipt before any privileged setup/u
   );
   const oidc = privileged.indexOf(
     "Configure dedicated judge-user AWS credentials through OIDC"
@@ -1144,7 +1144,7 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
   assert.match(judgeUserManager, /DefaultRedirectURI/u);
   assert.match(
     judgeUserManager,
-    /ArchonApplicationUrl does not match the independently approved target/u
+    /ArchonApplicationUrl does not match the solo-owner-approved target/u
   );
   assert.match(judgeUserManager, /email_verified/u);
   assert.match(judgeUserManager, /UserMFASettingList/u);

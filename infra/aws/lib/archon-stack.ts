@@ -15,9 +15,9 @@ import {
   type StackProps,
   Tags
 } from "aws-cdk-lib";
-import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as appscaling from "aws-cdk-lib/aws-applicationautoscaling";
+import * as bedrockmantle from "aws-cdk-lib/aws-bedrockmantle";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
@@ -33,7 +33,6 @@ import * as kms from "aws-cdk-lib/aws-kms";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import * as logs from "aws-cdk-lib/aws-logs";
-import * as route53 from "aws-cdk-lib/aws-route53";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sns from "aws-cdk-lib/aws-sns";
@@ -49,6 +48,11 @@ import { join } from "node:path";
 // rejects it before any create/update unless the edge stack's live ARN is supplied.
 const REQUIRED_CLOUDFRONT_WEB_ACL_ARN =
   "arn:aws:wafv2:us-east-1:000000000000:global/webacl/required-override/00000000-0000-0000-0000-000000000000";
+const BEDROCK_MANTLE_PROVIDER = "bedrock-mantle";
+const BEDROCK_MANTLE_REGION = "eu-west-1";
+const BEDROCK_MANTLE_MODEL = "qwen.qwen3-235b-a22b-2507";
+const BEDROCK_MANTLE_BASE_URL =
+  "https://bedrock-mantle.eu-west-1.api.aws/v1";
 
 export class ArchonRegistryStack extends Stack {
   readonly repository: ecr.Repository;
@@ -97,26 +101,33 @@ export class ArchonRegistryStack extends Stack {
 
 export interface ArchonPlatformStackProps extends StackProps {
   readonly stage: string;
-  readonly repository: ecr.IRepository;
+  readonly repository?: ecr.IRepository;
 }
 
 export class ArchonPlatformStack extends Stack {
-  public override get availabilityZones(): string[] {
-    // The base Stack getter performs an account/region context lookup for
-    // concrete environments. This stack intentionally selects two AZs at
-    // deploy time so credential-free CI and real deployments synthesize the
-    // same template without cached environmental context.
-    return [
-      Fn.select(0, Fn.getAzs()),
-      Fn.select(1, Fn.getAzs())
-    ];
-  }
-
   constructor(scope: Construct, id: string, props: ArchonPlatformStackProps) {
     super(scope, id, props);
 
-    const { stage, repository } = props;
-    const isProduction = stage === "prod" || stage === "production";
+    const { stage } = props;
+    if (stage !== "staging" && stage !== "production") {
+      throw new Error(
+        "ArchonPlatformStack stage must be exactly staging or production"
+      );
+    }
+    const repository =
+      props.repository ??
+      ecr.Repository.fromRepositoryName(
+        this,
+        "SharedImmutableRepository",
+        "archon-datahub"
+      );
+    const isProduction = stage === "production";
+    const runtimeBoundary = iam.ManagedPolicy.fromManagedPolicyArn(
+      this,
+      "RuntimePermissionsBoundary",
+      `arn:${Aws.PARTITION}:iam::${Aws.ACCOUNT_ID}:policy/archon-datahub-runtime-boundary-${stage}`
+    );
+    iam.PermissionsBoundary.of(this).apply(runtimeBoundary);
     const publicApiBurstLimit = isProduction ? 100 : 20;
     const publicApiRateLimit = isProduction ? 50 : 10;
     const publicApiDailyQuota = isProduction ? 250_000 : 25_000;
@@ -199,45 +210,6 @@ export class ArchonPlatformStack extends Stack {
       constraintDescription:
         "must be a trimmed, non-wildcard, control-free query"
     });
-    const cloudFrontDomainName = new CfnParameter(
-      this,
-      "CloudFrontDomainName",
-      {
-        type: "String",
-        description:
-          "Environment-specific DNS name covered by the CloudFront ACM certificate",
-        minLength: 4,
-        maxLength: 253,
-        allowedPattern:
-          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$",
-        constraintDescription: "must be a valid fully qualified DNS name"
-      }
-    );
-    const cloudFrontCertificateArn = new CfnParameter(
-      this,
-      "CloudFrontCertificateArn",
-      {
-        type: "String",
-        description:
-          "ACM certificate ARN in us-east-1 covering CloudFrontDomainName",
-        allowedPattern:
-          "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-        constraintDescription:
-          "must be an ACM certificate ARN from us-east-1 in the standard AWS partition"
-      }
-    );
-    const cloudFrontHostedZoneId = new CfnParameter(
-      this,
-      "CloudFrontHostedZoneId",
-      {
-        type: "String",
-        description:
-          "Route 53 public hosted-zone ID that owns CloudFrontDomainName",
-        allowedPattern: "^Z[A-Z0-9]{1,31}$",
-        constraintDescription:
-          "must be a Route 53 hosted-zone ID without the /hostedzone/ prefix"
-      }
-    );
     const cloudFrontWebAclArn = new CfnParameter(
       this,
       "CloudFrontWebAclArn",
@@ -283,20 +255,47 @@ export class ArchonPlatformStack extends Stack {
       "DynamoDbPrefixListId",
       "AWS-managed regional DynamoDB prefix list used by the gateway endpoint"
     );
-    const dataHubReadEgressPrefixListId = prefixListIdParameter(
+    const dataHubPrivateLinkServiceName = new CfnParameter(
       this,
-      "DataHubReadEgressPrefixListId",
-      "Customer-managed CIDR allowlist for read-only DataHub GMS and MCP endpoints"
+      "DataHubPrivateLinkServiceName",
+      {
+        type: "String",
+        description:
+          "DataHub Cloud interface VPC endpoint service in eu-west-1; provider private DNS must be verified",
+        allowedPattern:
+          "^com\\.amazonaws\\.vpce\\.eu-west-1\\.vpce-svc-(?:[0-9a-f]{8}|[0-9a-f]{17})$",
+        constraintDescription:
+          "must be an eu-west-1 interface endpoint service name such as com.amazonaws.vpce.eu-west-1.vpce-svc-0123456789abcdef0"
+      }
     );
-    const dataHubWriteEgressPrefixListId = prefixListIdParameter(
+    const dataHubPrivateLinkAzOne = dataHubAvailabilityZoneParameter(
       this,
-      "DataHubWriteEgressPrefixListId",
-      "Customer-managed CIDR allowlist for write-enabled DataHub GMS and MCP endpoints"
+      "DataHubPrivateLinkAzOne"
     );
-    const llmEgressPrefixListId = prefixListIdParameter(
+    const dataHubPrivateLinkAzTwo = dataHubAvailabilityZoneParameter(
       this,
-      "LlmEgressPrefixListId",
-      "Customer-managed CIDR allowlist for the configured inference endpoint"
+      "DataHubPrivateLinkAzTwo"
+    );
+    const requireDistinctDataHubPrivateLinkAvailabilityZones = new CfnRule(
+      this,
+      "RequireDistinctDataHubPrivateLinkAvailabilityZones",
+      {
+        assertions: [
+          {
+            assert: Fn.conditionNot(
+              Fn.conditionEquals(
+                dataHubPrivateLinkAzOne.valueAsString,
+                dataHubPrivateLinkAzTwo.valueAsString
+              )
+            ),
+            assertDescription:
+              "DataHubPrivateLinkAzOne and DataHubPrivateLinkAzTwo must be distinct provider-supported availability zones"
+          }
+        ]
+      }
+    );
+    requireDistinctDataHubPrivateLinkAvailabilityZones.overrideLogicalId(
+      "RequireDistinctDataHubPrivateLinkAvailabilityZones"
     );
     const dataHubReadUrl = httpsUrlParameter(
       this,
@@ -318,19 +317,6 @@ export class ArchonPlatformStack extends Stack {
       "DataHubWriteMcpUrl",
       "Hosted mutation-enabled DataHub MCP Streamable HTTP endpoint; worker only"
     );
-    const llmBaseUrl = httpsUrlParameter(
-      this,
-      "LlmBaseUrl",
-      "OpenAI-compatible inference endpoint",
-      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    );
-    const llmModel = new CfnParameter(this, "LlmModel", {
-      type: "String",
-      default: "qwen-plus",
-      minLength: 1,
-      maxLength: 128,
-      allowedPattern: "^[A-Za-z0-9._:/-]+$"
-    });
     const workerDesiredCount = new CfnParameter(this, "WorkerDesiredCount", {
       type: "Number",
       default: 0,
@@ -339,6 +325,20 @@ export class ArchonPlatformStack extends Stack {
       description:
         "Bootstrap at 0; set to 1 only for a tested image to activate both isolated workers and their autoscaling floor"
     });
+    const bedrockMantleProject = new bedrockmantle.CfnProject(
+      this,
+      "BedrockMantleProject",
+      {
+        name: `Archon-${stage}`,
+        tags: [
+          { key: "Application", value: "archon-datahub" },
+          { key: "Environment", value: stage },
+          { key: "ManagedBy", value: "aws-cdk" },
+          { key: "CostCenter", value: "DataHub-Agent-Hackathon" }
+        ]
+      }
+    );
+    bedrockMantleProject.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     const dataKey = retainedKey(this, "DataKey", `alias/archon/${stage}/data`);
     const spaKey = retainedKey(this, "SpaKey", `alias/archon/${stage}/spa`);
@@ -354,7 +354,10 @@ export class ArchonPlatformStack extends Stack {
 
     const vpc = new ec2.Vpc(this, "Vpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.42.0.0/16"),
-      maxAzs: 2,
+      availabilityZones: [
+        dataHubPrivateLinkAzOne.valueAsString,
+        dataHubPrivateLinkAzTwo.valueAsString
+      ],
       natGateways: isProduction ? 2 : 1,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [
@@ -426,6 +429,18 @@ export class ArchonPlatformStack extends Stack {
       vpc,
       "Shared stateful ingress boundary for AWS PrivateLink endpoints"
     );
+    const dataHubEndpointSecurityGroup = workloadSecurityGroup(
+      this,
+      "DataHubEndpointSecurityGroup",
+      vpc,
+      "Dedicated DataHub Cloud PrivateLink boundary reachable only by Archon workloads"
+    );
+    const bedrockMantleEndpointSecurityGroup = workloadSecurityGroup(
+      this,
+      "BedrockMantleEndpointSecurityGroup",
+      vpc,
+      "Dedicated Bedrock Mantle PrivateLink boundary reachable only by inference workloads"
+    );
     for (const workloadGroup of [
       apiSecurityGroup,
       auditWorkerSecurityGroup,
@@ -435,6 +450,11 @@ export class ArchonPlatformStack extends Stack {
         vpcEndpointSecurityGroup,
         ec2.Port.tcp(443),
         "AWS PrivateLink HTTPS"
+      );
+      workloadGroup.connections.allowTo(
+        dataHubEndpointSecurityGroup,
+        ec2.Port.tcp(443),
+        "DataHub Cloud PrivateLink HTTPS"
       );
       workloadGroup.addEgressRule(
         ec2.Peer.prefixList(s3PrefixListId.valueAsString),
@@ -453,22 +473,12 @@ export class ArchonPlatformStack extends Stack {
       );
     }
     for (const readGroup of [apiSecurityGroup, auditWorkerSecurityGroup]) {
-      readGroup.addEgressRule(
-        ec2.Peer.prefixList(dataHubReadEgressPrefixListId.valueAsString),
+      readGroup.connections.allowTo(
+        bedrockMantleEndpointSecurityGroup,
         ec2.Port.tcp(443),
-        "Allowlisted read-only DataHub endpoints"
-      );
-      readGroup.addEgressRule(
-        ec2.Peer.prefixList(llmEgressPrefixListId.valueAsString),
-        ec2.Port.tcp(443),
-        "Allowlisted inference endpoint"
+        "Bedrock Mantle PrivateLink HTTPS"
       );
     }
-    remediationWorkerSecurityGroup.addEgressRule(
-      ec2.Peer.prefixList(dataHubWriteEgressPrefixListId.valueAsString),
-      ec2.Port.tcp(443),
-      "Allowlisted write-enabled DataHub endpoints"
-    );
 
     vpc.addGatewayEndpoint("S3Endpoint", {
       service: ec2.GatewayVpcEndpointAwsService.S3
@@ -493,6 +503,29 @@ export class ArchonPlatformStack extends Stack {
         subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }
       });
     }
+    const dataHubEndpoint = vpc.addInterfaceEndpoint("DataHubEndpoint", {
+      service: new ec2.InterfaceVpcEndpointService(
+        dataHubPrivateLinkServiceName.valueAsString,
+        443
+      ),
+      open: false,
+      privateDnsEnabled: true,
+      securityGroups: [dataHubEndpointSecurityGroup],
+      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }
+    });
+    const bedrockMantleEndpoint = vpc.addInterfaceEndpoint(
+      "BedrockMantleEndpoint",
+      {
+        service: new ec2.InterfaceVpcEndpointService(
+          `com.amazonaws.${Aws.REGION}.bedrock-mantle`,
+          443
+        ),
+        open: false,
+        privateDnsEnabled: true,
+        securityGroups: [bedrockMantleEndpointSecurityGroup],
+        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }
+      }
+    );
 
     const flowLogGroup = retainedLogGroup(
       this,
@@ -528,6 +561,7 @@ export class ArchonPlatformStack extends Stack {
     Tags.of(cloudFrontLogBucket).add("ArchonBucketPurpose", "access-logs");
 
     const spaBucket = new s3.Bucket(this, "SpaBucket", {
+      bucketName: `archon-${stage}-spa-${Aws.ACCOUNT_ID}-${Aws.REGION}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: spaKey,
@@ -609,14 +643,6 @@ export class ArchonPlatformStack extends Stack {
       `archon/${stage}/datahub-write`,
       "Write-enabled DataHub token; never granted to the API task",
       secretsKey
-    );
-    const llmSecret = bootstrapSecret(
-      this,
-      "LlmSecret",
-      `archon/${stage}/llm`,
-      "Inference provider API key",
-      secretsKey,
-      "apiKey"
     );
     const cloudFrontOriginApiKeySecretName =
       `archon/${stage}/cloudfront-origin-api-key`;
@@ -742,12 +768,14 @@ export class ArchonPlatformStack extends Stack {
         ARCHON_DEMO_QUERY: demoQuery.valueAsString,
         DATAHUB_GMS_URL: dataHubReadUrl.valueAsString,
         DATAHUB_MCP_URL: dataHubReadMcpUrl.valueAsString,
-        LLM_BASE_URL: llmBaseUrl.valueAsString,
-        LLM_MODEL: llmModel.valueAsString
+        LLM_PROVIDER: BEDROCK_MANTLE_PROVIDER,
+        AWS_REGION: BEDROCK_MANTLE_REGION,
+        LLM_BASE_URL: BEDROCK_MANTLE_BASE_URL,
+        LLM_MODEL: BEDROCK_MANTLE_MODEL,
+        LLM_PROJECT_ID: bedrockMantleProject.attrId
       },
       secrets: {
-        DATAHUB_GMS_TOKEN: ecs.Secret.fromSecretsManager(readSecret, "token"),
-        LLM_API_KEY: ecs.Secret.fromSecretsManager(llmSecret, "apiKey")
+        DATAHUB_GMS_TOKEN: ecs.Secret.fromSecretsManager(readSecret, "token")
       },
       healthCheck: {
         command: [
@@ -767,7 +795,6 @@ export class ArchonPlatformStack extends Stack {
       name: "http"
     });
     readSecret.grantRead(apiTaskDefinition.executionRole!);
-    llmSecret.grantRead(apiTaskDefinition.executionRole!);
     repository.grantPull(apiTaskDefinition.executionRole!);
 
     nlbSecurityGroup.connections.allowTo(
@@ -862,16 +889,18 @@ export class ArchonPlatformStack extends Stack {
         ARCHON_RELEASE_SHA: releaseSha.valueAsString,
         DATAHUB_GMS_URL: dataHubReadUrl.valueAsString,
         DATAHUB_MCP_URL: dataHubReadMcpUrl.valueAsString,
-        LLM_BASE_URL: llmBaseUrl.valueAsString,
-        LLM_MODEL: llmModel.valueAsString,
+        LLM_PROVIDER: BEDROCK_MANTLE_PROVIDER,
+        AWS_REGION: BEDROCK_MANTLE_REGION,
+        LLM_BASE_URL: BEDROCK_MANTLE_BASE_URL,
+        LLM_MODEL: BEDROCK_MANTLE_MODEL,
+        LLM_PROJECT_ID: bedrockMantleProject.attrId,
         ARCHON_AUDIT_QUEUE_URL: auditQueue.queueUrl,
         ARCHON_AUDIT_DLQ_URL: auditDlq.queueUrl,
         ARCHON_IDEMPOTENCY_TABLE: idempotencyTable.tableName,
         ARCHON_EVIDENCE_BUCKET: evidenceBucket.bucketName
       },
       secrets: {
-        DATAHUB_GMS_TOKEN: ecs.Secret.fromSecretsManager(readSecret, "token"),
-        LLM_API_KEY: ecs.Secret.fromSecretsManager(llmSecret, "apiKey")
+        DATAHUB_GMS_TOKEN: ecs.Secret.fromSecretsManager(readSecret, "token")
       },
       healthCheck: {
         command: ["CMD-SHELL", "kill -0 1"],
@@ -883,7 +912,6 @@ export class ArchonPlatformStack extends Stack {
       stopTimeout: Duration.seconds(120)
     });
     readSecret.grantRead(auditWorkerTaskDefinition.executionRole!);
-    llmSecret.grantRead(auditWorkerTaskDefinition.executionRole!);
     repository.grantPull(auditWorkerTaskDefinition.executionRole!);
     auditQueue.grantConsumeMessages(auditWorkerTaskDefinition.taskRole);
     auditDlq.grantSendMessages(auditWorkerTaskDefinition.taskRole);
@@ -903,6 +931,79 @@ export class ArchonPlatformStack extends Stack {
       auditWorkerTaskDefinition.taskRole,
       ["v1/audit/*"],
       ["v1/audit/*"]
+    );
+    const bedrockMantleProjectArn = bedrockMantleProject.attrArn;
+    const bedrockMantlePrincipals = [
+      new iam.ArnPrincipal(apiTaskDefinition.taskRole.roleArn),
+      new iam.ArnPrincipal(auditWorkerTaskDefinition.taskRole.roleArn)
+    ];
+    for (const taskRole of [
+      apiTaskDefinition.taskRole,
+      auditWorkerTaskDefinition.taskRole
+    ]) {
+      taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: "InvokeOnlyApprovedBedrockMantleModel",
+          actions: ["bedrock-mantle:CreateInference"],
+          resources: [bedrockMantleProjectArn],
+          conditions: {
+            StringEquals: {
+              "bedrock-mantle:Model": BEDROCK_MANTLE_MODEL
+            }
+          }
+        })
+      );
+      taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: "MintOnlyShortTermBedrockMantleBearerTokens",
+          actions: ["bedrock-mantle:CallWithBearerToken"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "bedrock-mantle:BearerTokenType": "SHORT_TERM"
+            }
+          }
+        })
+      );
+      taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: "DenyLongTermBedrockMantleBearerTokens",
+          effect: iam.Effect.DENY,
+          actions: ["bedrock-mantle:CallWithBearerToken"],
+          resources: ["*"],
+          conditions: {
+            StringEquals: {
+              "bedrock-mantle:BearerTokenType": "LONG_TERM"
+            }
+          }
+        })
+      );
+    }
+    bedrockMantleEndpoint.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "OnlyInferenceRolesMayInvokeApprovedModel",
+        principals: bedrockMantlePrincipals,
+        actions: ["bedrock-mantle:CreateInference"],
+        resources: [bedrockMantleProjectArn],
+        conditions: {
+          StringEquals: {
+            "bedrock-mantle:Model": BEDROCK_MANTLE_MODEL
+          }
+        }
+      })
+    );
+    bedrockMantleEndpoint.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "OnlyInferenceRolesMayUseShortTermTokens",
+        principals: bedrockMantlePrincipals,
+        actions: ["bedrock-mantle:CallWithBearerToken"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "bedrock-mantle:BearerTokenType": "SHORT_TERM"
+          }
+        }
+      })
     );
 
     const remediationWorkerTaskDefinition = new ecs.FargateTaskDefinition(
@@ -1447,7 +1548,10 @@ export class ArchonPlatformStack extends Stack {
         }),
         tracingEnabled: true
       },
-      cloudWatchRole: true,
+      // API Gateway's CloudWatch role is an account/region singleton. The
+      // foundation stack owns that shared setting so stage stacks cannot
+      // overwrite each other's logging identity.
+      cloudWatchRole: false,
       binaryMediaTypes: [],
       minCompressionSize: Size.bytes(1024),
       retainDeployments: true
@@ -1869,49 +1973,10 @@ export class ArchonPlatformStack extends Stack {
       }
     );
     const spaOrigin = origins.S3BucketOrigin.withOriginAccessControl(spaBucket);
-    const canonicalHostFunction = new cloudfront.Function(
-      this,
-      "CanonicalHost",
-      {
-        comment: `Reject non-canonical Archon ${stage} viewer hosts`,
-        runtime: cloudfront.FunctionRuntime.JS_2_0,
-        code: cloudfront.FunctionCode.fromInline(
-          [
-            "function handler(event) {",
-            "  var request = event.request;",
-            '  var host = (request.headers.host && request.headers.host.value || "").toLowerCase();',
-            `  if (host !== "${cloudFrontDomainName.valueAsString}") {`,
-            "    return {",
-            "      statusCode: 421,",
-            '      statusDescription: "Misdirected Request",',
-            "      headers: {",
-            '        "cache-control": { value: "no-store" },',
-            '        "content-type": { value: "text/plain; charset=utf-8" }',
-            "      }",
-            "    };",
-            "  }",
-            "  return request;",
-            "}"
-          ].join("\n")
-        )
-      }
-    );
-    const canonicalHostAssociation = {
-      function: canonicalHostFunction,
-      eventType: cloudfront.FunctionEventType.VIEWER_REQUEST
-    };
-    const viewerCertificate = acm.Certificate.fromCertificateArn(
-      this,
-      "ViewerCertificate",
-      cloudFrontCertificateArn.valueAsString
-    );
     const distribution = new cloudfront.Distribution(this, "Distribution", {
       comment: `Archon ${stage}: private SPA plus same-origin authenticated API`,
       defaultRootObject: "index.html",
-      certificate: viewerCertificate,
-      domainNames: [cloudFrontDomainName.valueAsString],
       webAclId: cloudFrontWebAclArn.valueAsString,
-      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_3_2025,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
       enableLogging: true,
@@ -1923,7 +1988,6 @@ export class ArchonPlatformStack extends Stack {
         cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         compress: true,
-        functionAssociations: [canonicalHostAssociation],
         responseHeadersPolicy,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS
       },
@@ -1934,7 +1998,6 @@ export class ArchonPlatformStack extends Stack {
           cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           compress: true,
-          functionAssociations: [canonicalHostAssociation],
           responseHeadersPolicy,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY
         },
@@ -1944,7 +2007,6 @@ export class ArchonPlatformStack extends Stack {
           cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           compress: true,
-          functionAssociations: [canonicalHostAssociation],
           originRequestPolicy: apiOriginRequestPolicy,
           responseHeadersPolicy,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY
@@ -1953,21 +2015,11 @@ export class ArchonPlatformStack extends Stack {
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100
     });
     distribution.node.addDependency(cloudFrontOriginApiKeySecret);
-    const cloudFrontAliasTarget = {
-      dnsName: distribution.distributionDomainName,
-      // CloudFront's canonical hosted-zone ID is global for Route 53 aliases.
-      hostedZoneId: "Z2FDTNDATAQYW2",
-      evaluateTargetHealth: false
-    };
-    for (const recordType of ["A", "AAAA"]) {
-      new route53.CfnRecordSet(this, `CloudFrontAlias${recordType}`, {
-        name: cloudFrontDomainName.valueAsString,
-        type: recordType,
-        hostedZoneId: cloudFrontHostedZoneId.valueAsString,
-        aliasTarget: cloudFrontAliasTarget
-      });
-    }
-    const applicationRootUrl = `https://${cloudFrontDomainName.valueAsString}/`;
+    const applicationRootUrl = Fn.join("", [
+      "https://",
+      distribution.distributionDomainName,
+      "/"
+    ]);
     const userPoolClient = userPool.addClient("SpaClient", {
       userPoolClientName: `archon-${stage}-spa`,
       // Supplying a non-empty AuthFlow object prevents Cognito's default
@@ -2356,13 +2408,21 @@ export class ArchonPlatformStack extends Stack {
       ]
     });
 
-    const preferredApiUrl = `https://${cloudFrontDomainName.valueAsString}/api`;
+    const preferredApiUrl = Fn.join("", [
+      "https://",
+      distribution.distributionDomainName,
+      "/api"
+    ]);
     output(this, "ArchonSpaBucketName", spaBucket.bucketName);
     output(this, "ArchonSpaKeyArn", spaKey.keyArn);
     output(this, "ArchonEvidenceBucketName", evidenceBucket.bucketName);
     output(this, "ArchonCloudFrontDistributionId", distribution.distributionId);
     output(this, "ArchonCloudFrontDomainName", distribution.distributionDomainName);
-    output(this, "ArchonApplicationUrl", `https://${cloudFrontDomainName.valueAsString}`);
+    output(
+      this,
+      "ArchonApplicationUrl",
+      Fn.join("", ["https://", distribution.distributionDomainName])
+    );
     output(this, "ArchonApiUrl", preferredApiUrl);
     output(this, "ArchonApiInvokeUrl", api.url);
     output(this, "ArchonApiStageArn", apiStageArn);
@@ -2425,9 +2485,74 @@ export class ArchonPlatformStack extends Stack {
       "ArchonVpcEndpointSecurityGroupId",
       vpcEndpointSecurityGroup.securityGroupId
     );
+    output(
+      this,
+      "ArchonDataHubEndpointSecurityGroupId",
+      dataHubEndpointSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonDataHubEndpointId",
+      dataHubEndpoint.vpcEndpointId
+    );
+    output(
+      this,
+      "ArchonDataHubEndpointServiceName",
+      dataHubPrivateLinkServiceName.valueAsString
+    );
+    output(
+      this,
+      "ArchonDataHubPrivateLinkAzOne",
+      dataHubPrivateLinkAzOne.valueAsString
+    );
+    output(
+      this,
+      "ArchonDataHubPrivateLinkAzTwo",
+      dataHubPrivateLinkAzTwo.valueAsString
+    );
+    output(
+      this,
+      "ArchonBedrockMantleEndpointSecurityGroupId",
+      bedrockMantleEndpointSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonBedrockMantleEndpointId",
+      bedrockMantleEndpoint.vpcEndpointId
+    );
+    output(
+      this,
+      "ArchonBedrockMantleEndpointServiceName",
+      `com.amazonaws.${Aws.REGION}.bedrock-mantle`
+    );
+    output(this, "ArchonBedrockMantleModel", BEDROCK_MANTLE_MODEL);
+    output(
+      this,
+      "ArchonBedrockMantleProjectId",
+      bedrockMantleProject.attrId
+    );
+    output(
+      this,
+      "ArchonBedrockMantleProjectArn",
+      bedrockMantleProject.attrArn
+    );
+    output(
+      this,
+      "ArchonApiTaskRoleArn",
+      apiTaskDefinition.taskRole.roleArn
+    );
+    output(
+      this,
+      "ArchonAuditWorkerTaskRoleArn",
+      auditWorkerTaskDefinition.taskRole.roleArn
+    );
+    output(
+      this,
+      "ArchonRemediationWorkerTaskRoleArn",
+      remediationWorkerTaskDefinition.taskRole.roleArn
+    );
     output(this, "ArchonReadSecretArn", readSecret.secretArn);
     output(this, "ArchonWriteSecretArn", writeSecret.secretArn);
-    output(this, "ArchonLlmSecretArn", llmSecret.secretArn);
     output(this, "ArchonAlarmTopicArn", alarmTopic.topicArn);
     output(this, "ArchonAlarmTopicKmsKeyArn", logsKey.keyArn);
     output(
@@ -2705,6 +2830,20 @@ function prefixListIdParameter(
     allowedPattern: "^pl-(?:[0-9a-f]{8}|[0-9a-f]{17})$",
     constraintDescription:
       "must be a managed prefix-list ID such as pl-0123456789abcdef0"
+  });
+}
+
+function dataHubAvailabilityZoneParameter(
+  scope: Construct,
+  id: string
+): CfnParameter {
+  return new CfnParameter(scope, id, {
+    type: "String",
+    description:
+      "Provider-supported eu-west-1 availability zone selected by the deployment preflight",
+    allowedPattern: "^eu-west-1[a-z]$",
+    constraintDescription:
+      "must be a concrete eu-west-1 availability zone such as eu-west-1a"
   });
 }
 

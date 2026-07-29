@@ -58,7 +58,11 @@ jobs:
     permissions:
       actions: read
       contents: read
+      deployments: write
       id-token: write
+    environment:
+      name: governed-canary-prepare
+      url: ${{ vars.CANARY_APPLICATION_URL }}
     outputs:
       recovery_digest: ${{ steps.prepare.outputs.recovery_digest }}
       plan_digest: ${{ steps.prepare.outputs.plan_digest }}
@@ -167,23 +171,58 @@ jobs:
             exit 1
           fi
 
+          prepare_environment_name="governed-canary-prepare"
+          prepare_environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/${prepare_environment_name}")"
+          jq -e --arg name "${prepare_environment_name}" '
+            .name == $name and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            ([.protection_rules[]?.type] | sort) == ["branch_policy"]
+          ' <<<"${prepare_environment_json}" >/dev/null || {
+            echo "::error::${prepare_environment_name} must be a reviewerless read-only environment with a custom branch policy"
+            exit 1
+          }
+          prepare_branch_policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/${prepare_environment_name}/deployment-branch-policies?per_page=100")"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and .branch_policies[0].name == $branch
+          ' <<<"${prepare_branch_policies}" >/dev/null || {
+            echo "::error::${prepare_environment_name} must allow only the default branch"
+            exit 1
+          }
+
           for environment_name in governed-canary governed-canary-rollback; do
             environment_json="$(gh api \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}")"
-            jq -e --arg name "${environment_name}" '
+            jq -e \
+              --arg name "${environment_name}" \
+              --arg owner "${GITHUB_REPOSITORY_OWNER}" '
               .name == $name and
               .deployment_branch_policy.protected_branches == false and
               .deployment_branch_policy.custom_branch_policies == true and
-              any(
-                .protection_rules[]?;
-                .type == "required_reviewers" and
-                .prevent_self_review == true and
-                (.reviewers | length) >= 1
+              (
+                [
+                  .protection_rules[]? |
+                  select(.type == "required_reviewers")
+                ] as $rules |
+                ($rules | length) == 1 and
+                $rules[0].prevent_self_review == false and
+                ($rules[0].reviewers | length) == 1 and
+                $rules[0].reviewers[0].type == "User" and
+                ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+                $rules[0].reviewers[0].reviewer.id > 0 and
+                ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                  ($owner | ascii_downcase)
               )
             ' <<<"${environment_json}" >/dev/null || {
-              echo "::error::${environment_name} needs required reviewers, prevent-self-review, and a custom branch policy"
+              echo "::error::${environment_name} needs the explicit solo-owner User reviewer, self-review enabled, and a custom branch policy"
               exit 1
             }
             branch_policies="$(gh api \
@@ -253,7 +292,7 @@ jobs:
                 (
                   [
                     .jobs[] |
-                    select(.name == "Approve and promote identical artifacts") |
+                    select(.name == "Explicit solo-owner approval and promote identical artifacts") |
                     select(
                       .started_at != null or
                       (.status != "queued" and .status != "pending")
@@ -641,15 +680,25 @@ jobs:
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}")"
-            jq -e --arg name "${environment_name}" '
+            jq -e \
+              --arg name "${environment_name}" \
+              --arg owner "${GITHUB_REPOSITORY_OWNER}" '
               .name == $name and
               .deployment_branch_policy.protected_branches == false and
               .deployment_branch_policy.custom_branch_policies == true and
-              any(
-                .protection_rules[]?;
-                .type == "required_reviewers" and
-                .prevent_self_review == true and
-                (.reviewers | length) >= 1
+              (
+                [
+                  .protection_rules[]? |
+                  select(.type == "required_reviewers")
+                ] as $rules |
+                ($rules | length) == 1 and
+                $rules[0].prevent_self_review == false and
+                ($rules[0].reviewers | length) == 1 and
+                $rules[0].reviewers[0].type == "User" and
+                ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+                $rules[0].reviewers[0].reviewer.id > 0 and
+                ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                  ($owner | ascii_downcase)
               )
             ' <<<"${environment_json}" >/dev/null
             branch_policies="$(gh api \
@@ -906,15 +955,23 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-rollback")"
-          jq -e '
+          jq -e --arg owner "${GITHUB_REPOSITORY_OWNER}" '
             .name == "governed-canary-rollback" and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true and
-            any(
-              .protection_rules[]?;
-              .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] as $rules |
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             )
           ' <<<"${environment_json}" >/dev/null
           branch_policies="$(gh api \

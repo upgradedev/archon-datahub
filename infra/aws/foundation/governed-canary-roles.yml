@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Least-privilege GitHub OIDC read roles for the governed staging canary.
+  Mutation remains application-mediated and protected by GitHub environments.
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Default: upgradedev
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepository:
+    Type: String
+    Default: archon-datahub
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+
+Resources:
+  GovernedCanaryPrepareRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-github-governed-canary-prepare
+      Description: >-
+        Read-only staging-stack binding role for governed-canary preparation.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubEnvironmentOidcOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:governed-canary-prepare
+      Policies:
+        - PolicyName: archon-staging-stack-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadExactStagingStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: governed-canary-prepare
+        - Key: ManagedBy
+          Value: github-actions
+
+  GovernedCanaryApprovalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-github-governed-canary-approval
+      Description: >-
+        Read-only staging and exact approver-membership binding role for the
+        governed-canary approval environment.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubEnvironmentOidcOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:governed-canary
+      Policies:
+        - PolicyName: archon-staging-approval-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadExactStagingStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+              - Sid: ReadExactStagingApproverMembership
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${AWS::Region}_*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: archon-datahub
+                    aws:ResourceTag/Environment: staging
+                    aws:ResourceTag/ManagedBy: aws-cdk
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: governed-canary
+        - Key: ManagedBy
+          Value: github-actions
+
+  GovernedCanaryRecoveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-github-governed-canary-recovery
+      Description: >-
+        Read-only staging-stack binding role for the separately approved
+        governed-canary recovery path.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubEnvironmentOidcOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:governed-canary-recovery
+      Policies:
+        - PolicyName: archon-staging-stack-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadExactStagingStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: governed-canary-recovery
+        - Key: ManagedBy
+          Value: github-actions
+
+Outputs:
+  GovernedCanaryPrepareRoleArn:
+    Value: !GetAtt GovernedCanaryPrepareRole.Arn
+  GovernedCanaryApprovalRoleArn:
+    Value: !GetAtt GovernedCanaryApprovalRole.Arn
+  GovernedCanaryRecoveryRoleArn:
+    Value: !GetAtt GovernedCanaryRecoveryRole.Arn

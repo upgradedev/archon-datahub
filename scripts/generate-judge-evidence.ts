@@ -286,7 +286,7 @@ function compareCodePoints(left: string, right: string): number {
 function assertPublicFixtureValue(value: unknown, path: string): void {
   if (typeof value === "string") {
     if (
-      /@|https?:\/\/|-----BEGIN .*PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/iu.test(
+      /@|https?:\/\/|-----BEGIN .*PRIVATE KEY-----|\bbedrock-api-key-[A-Za-z0-9_+/=-]{16,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/iu.test(
         value
       )
     ) {

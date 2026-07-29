@@ -13,8 +13,8 @@ closed until all three external prerequisites are real:
    with no userinfo or explicit port, and the target video's own provider
    object proves logged-out access and a duration from 1 through 179 seconds;
    and
-3. the GitHub `submission-content-review` environment has an independent
-   individual reviewer.
+3. the GitHub `submission-content-review` environment has the explicit
+   `upgradedev` solo-owner reviewer.
 
 The editable starting point is
 [`SUBMISSION_CONTENT.example.json`](SUBMISSION_CONTENT.example.json). Copy it to
@@ -32,17 +32,17 @@ Create one GitHub environment named `submission-content-review` with all of the
 following controls:
 
 - exactly one custom deployment-branch policy named `master`;
-- at least one required reviewer, each configured as an individual GitHub
-  `User`, not a team;
-- prevent self-review enabled; and
-- a reviewer whose numeric user ID differs from both the workflow actor and
+- exactly one required reviewer, configured as the individual GitHub `User`
+  `upgradedev`, not a team;
+- `prevent_self_review` disabled so the owner may approve; and
+- a reviewer whose numeric user ID equals both the workflow actor and
   triggering actor.
 
 The prepare job prints a candidate-specific approval sentence in the workflow
 summary. The reviewer must inspect the immutable candidate artifact and approve
 the environment with that exact sentence. A generic approval, changed
-whitespace, a second matching approval, a team approval, self-approval, or an
-approval for another attempt is rejected.
+whitespace, a second matching approval, a non-owner approval, a team approval,
+or an approval for another attempt is rejected.
 
 The approval receipt binds the repository, release, workflow path/ref, run and
 review-producer attempt, actor IDs, environment ID, reviewer ID/login, exact
@@ -100,7 +100,7 @@ video ID and reads the duration from that object. Zero, duplicate, conflicting,
 private, unavailable, credential-gated, zero-second, or 180-second-and-longer
 targets fail closed.
 
-## Independent pipeline phases
+## Pipeline phases
 
 `prepare` is read-only. It verifies current `master`, the full attested
 project-access subject set, canonical final content, the exact public
@@ -115,7 +115,7 @@ a 90-day immutable candidate and publishes the exact approval request.
 - reproduces every content digest from reviewed bytes;
 - reproduces the complete Git commit inventory from a full-history checkout;
 - repeats the logged-out, no-redirect, strict-TLS video observation;
-- proves one exact independent environment approval; and
+- proves one exact solo-owner environment approval; and
 - assembles the registered SQ6, SQ7, and SQ8 standard-v1 subjects.
 
 Provider pages are dynamic, so prepare and review each retain the SHA-256 digest
@@ -162,7 +162,7 @@ the under-three-minute duration, functioning footage, English accessibility,
 media rights, application-origin consistency, and video claims. SQ8 proves the
 official rules window, complete repository chronology, prior-work and
 third-party inventories, `NOTICE.md`, cross-medium consistency, and the
-independent approval provenance.
+explicit solo-owner approval provenance.
 
 All three proofs use one identical `reviewedAt`. Every opaque digest is derived
 from exact observed or reviewed bytes. SQ7 separately binds the prepare and

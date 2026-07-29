@@ -123,13 +123,26 @@ function awsErrorName(error: unknown): string {
   return error instanceof Error ? error.name : "UnknownError";
 }
 
+function errorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const direct = (error as { status?: unknown }).status;
+  if (Number.isInteger(direct) && (direct as number) >= 100 && (direct as number) <= 599) {
+    return direct as number;
+  }
+  const metadata = (error as {
+    $metadata?: { httpStatusCode?: unknown };
+  }).$metadata;
+  const sdkStatus = metadata?.httpStatusCode;
+  return Number.isInteger(sdkStatus) &&
+    (sdkStatus as number) >= 100 &&
+    (sdkStatus as number) <= 599
+    ? (sdkStatus as number)
+    : undefined;
+}
+
 function isRetryableError(error: unknown): boolean {
   if (error instanceof WorkerContractError) return false;
-  const metadata = (error as {
-    $metadata?: { httpStatusCode?: number };
-    retryable?: boolean;
-  })?.$metadata;
-  const status = metadata?.httpStatusCode;
+  const status = errorStatus(error);
   const name = awsErrorName(error);
   if ((error as { retryable?: boolean })?.retryable === true) return true;
   if (RETRYABLE_ERROR_NAMES.has(name)) return true;

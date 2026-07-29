@@ -1,4 +1,31 @@
 ---
+- name: IAM runtime roles with a permissions boundary pass
+  input:
+    Resources:
+      BoundedRuntimeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          PermissionsBoundary: arn:aws:iam::111111111111:policy/archon-datahub-runtime-boundary-staging
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      iam_roles_require_a_permissions_boundary: PASS
+
+- name: IAM runtime roles without a permissions boundary are rejected
+  input:
+    Resources:
+      UnboundedRuntimeRole:
+        Type: AWS::IAM::Role
+        Properties:
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      iam_roles_require_a_permissions_boundary: FAIL
+
 - name: secure Archon reference architecture passes every preventive control
   input:
     Resources:
@@ -289,29 +316,19 @@
         Properties:
           DistributionConfig:
             Enabled: true
-            Aliases:
-              - archon.example.com
             Logging:
               Bucket: logs.s3.amazonaws.com
             WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
             ViewerCertificate:
-              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
-              SslSupportMethod: sni-only
-              MinimumProtocolVersion: TLSv1.3_2025
+              CloudFrontDefaultCertificate: true
             DefaultCacheBehavior:
               ViewerProtocolPolicy: redirect-to-https
-              FunctionAssociations:
-                - EventType: viewer-request
-                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
             CacheBehaviors:
               - PathPattern: api/*
                 OriginRequestPolicyId:
                   Ref: ApiOriginRequestPolicy
                 TargetOriginId: ApiOrigin
                 ViewerProtocolPolicy: https-only
-                FunctionAssociations:
-                  - EventType: viewer-request
-                    FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
             Origins:
               - Id: SpaOrigin
                 DomainName: spa.s3.amazonaws.com
@@ -2493,20 +2510,13 @@
         Properties:
           DistributionConfig:
             Enabled: true
-            Aliases:
-              - archon.example.com
             Logging:
               Bucket: logs.s3.amazonaws.com
             WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
             ViewerCertificate:
-              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
-              SslSupportMethod: sni-only
-              MinimumProtocolVersion: TLSv1.3_2025
+              CloudFrontDefaultCertificate: true
             DefaultCacheBehavior:
               ViewerProtocolPolicy: redirect-to-https
-              FunctionAssociations:
-                - EventType: viewer-request
-                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
             CacheBehaviors:
               - PathPattern: api/*
                 OriginRequestPolicyId:
@@ -2638,20 +2648,13 @@
         Properties:
           DistributionConfig:
             Enabled: true
-            Aliases:
-              - archon.example.com
             Logging:
               Bucket: logs.s3.amazonaws.com
             WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
             ViewerCertificate:
-              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
-              SslSupportMethod: sni-only
-              MinimumProtocolVersion: TLSv1.3_2025
+              CloudFrontDefaultCertificate: true
             DefaultCacheBehavior:
               ViewerProtocolPolicy: redirect-to-https
-              FunctionAssociations:
-                - EventType: viewer-request
-                  FunctionARN: arn:aws:cloudfront::111111111111:function/archon-host
             CacheBehaviors:
               - PathPattern: api/*
                 OriginRequestPolicyId:
@@ -2993,3 +2996,191 @@
   expectations:
     rules:
       waf_logging_is_filtered_and_redacted: FAIL
+
+- name: ECS tasks with a static LLM bearer credential are rejected
+  input:
+    Resources:
+      UnsafeInferenceTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: AuditWorker
+              Environment:
+                - Name: AWS_BEARER_TOKEN_BEDROCK
+                  Value: forbidden-static-token
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+  expectations:
+    rules:
+      ecs_tasks_never_receive_static_llm_credentials: FAIL
+
+- name: ECS tasks with a named-provider secret are rejected
+  input:
+    Resources:
+      UnsafeNamedProviderTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: AuditWorker
+              Secrets:
+                - Name: OPENAI_API_KEY
+                  ValueFrom: arn:aws:secretsmanager:eu-west-1:111111111111:secret:forbidden
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+  expectations:
+    rules:
+      ecs_tasks_never_receive_static_llm_credentials: FAIL
+
+- name: ECS tasks with a static AWS access key are rejected
+  input:
+    Resources:
+      UnsafeStaticAwsCredentialTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: AuditWorker
+              Environment:
+                - Name: AWS_ACCESS_KEY_ID
+                  Value: forbidden-static-access-key
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+  expectations:
+    rules:
+      ecs_tasks_do_not_override_aws_task_role_credentials: FAIL
+
+- name: ECS tasks with an explicit container credential endpoint are rejected
+  input:
+    Resources:
+      UnsafeCredentialEndpointTask:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+          ContainerDefinitions:
+            - Name: AuditWorker
+              Environment:
+                - Name: AWS_CONTAINER_CREDENTIALS_FULL_URI
+                  Value: http://127.0.0.1/credentials
+              ReadonlyRootFilesystem: true
+              User: "1000"
+              LogConfiguration:
+                LogDriver: awslogs
+  expectations:
+    rules:
+      ecs_tasks_do_not_override_aws_task_role_credentials: FAIL
+
+- name: a Bedrock Mantle project without retained lifecycle is rejected
+  input:
+    Resources:
+      EphemeralBedrockMantleProject:
+        Type: AWS::BedrockMantle::Project
+        Properties:
+          Name: Archon-staging
+          Tags:
+            - Key: Application
+              Value: archon-datahub
+            - Key: Environment
+              Value: staging
+            - Key: ManagedBy
+              Value: aws-cdk
+            - Key: CostCenter
+              Value: DataHub-Agent-Hackathon
+  expectations:
+    rules:
+      bedrock_mantle_projects_are_retained: FAIL
+
+- name: a Bedrock Mantle endpoint without private DNS is rejected
+  input:
+    Resources:
+      UnsafeBedrockMantleEndpoint:
+        Type: AWS::EC2::VPCEndpoint
+        Properties:
+          VpcEndpointType: Interface
+          PrivateDnsEnabled: false
+          ServiceName:
+            Fn::Join:
+              - ""
+              - - com.amazonaws.
+                - Ref: AWS::Region
+                - .bedrock-mantle
+          SecurityGroupIds:
+            - sg-11111111111111111
+          SubnetIds:
+            - subnet-11111111111111111
+            - subnet-22222222222222222
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: OnlyInferenceRolesMayInvokeApprovedModel
+                Effect: Allow
+                Principal:
+                  AWS:
+                    - arn:aws:iam::111111111111:role/api
+                    - arn:aws:iam::111111111111:role/audit
+                Action: bedrock-mantle:CreateInference
+                Resource: arn:aws:bedrock-mantle:eu-west-1:111111111111:project/default
+                Condition:
+                  StringEquals:
+                    bedrock-mantle:Model: qwen.qwen3-235b-a22b-2507
+              - Sid: OnlyInferenceRolesMayUseShortTermTokens
+                Effect: Allow
+                Principal:
+                  AWS:
+                    - arn:aws:iam::111111111111:role/api
+                    - arn:aws:iam::111111111111:role/audit
+                Action: bedrock-mantle:CallWithBearerToken
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    bedrock-mantle:BearerTokenType: SHORT_TERM
+  expectations:
+    rules:
+      bedrock_mantle_endpoint_is_private_and_least_privilege: FAIL
+
+- name: one provider-private-DNS DataHub interface endpoint passes
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      DataHubEndpoint:
+        Type: AWS::EC2::VPCEndpoint
+        Properties:
+          VpcEndpointType: Interface
+          PrivateDnsEnabled: true
+          ServiceName:
+            Ref: DataHubPrivateLinkServiceName
+          SecurityGroupIds:
+            - Ref: DataHubEndpointSecurityGroup
+          SubnetIds:
+            - subnet-11111111111111111
+            - subnet-22222222222222222
+  expectations:
+    rules:
+      platform_uses_one_private_dns_datahub_interface_endpoint: PASS
+
+- name: a DataHub interface endpoint without provider private DNS is rejected
+  input:
+    Resources:
+      PlatformMarker:
+        Type: AWS::ECS::Cluster
+        Properties: {}
+      DataHubEndpoint:
+        Type: AWS::EC2::VPCEndpoint
+        Properties:
+          VpcEndpointType: Interface
+          PrivateDnsEnabled: false
+          ServiceName:
+            Ref: DataHubPrivateLinkServiceName
+          SecurityGroupIds:
+            - Ref: DataHubEndpointSecurityGroup
+          SubnetIds:
+            - subnet-11111111111111111
+            - subnet-22222222222222222
+  expectations:
+    rules:
+      platform_uses_one_private_dns_datahub_interface_endpoint: FAIL

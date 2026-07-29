@@ -510,15 +510,23 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-recovery")"
-          jq -e '
+          jq -e --arg owner "${GITHUB_REPOSITORY_OWNER}" '
             .name == "governed-canary-recovery" and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true and
-            any(
-              .protection_rules[]?;
-              .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] as $rules |
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             )
           ' <<<"${environment_json}" >/dev/null
           policies="$(gh api \
@@ -685,7 +693,7 @@ jobs:
             jq -e '
               [
                 .jobs[] |
-                select(.name == "Approve and promote identical artifacts") |
+                select(.name == "Explicit solo-owner approval and promote identical artifacts") |
                 select(
                   .started_at != null or
                   (.status != "queued" and .status != "pending")

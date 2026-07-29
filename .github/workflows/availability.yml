@@ -410,7 +410,7 @@ jobs:
               [.. | strings] |
               all(
                 test(
-                  "(?i)(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-)"
+                  "(?i)(-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-)"
                 ) |
                 not
               )

@@ -160,7 +160,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed")"
-          jq -e '
+          jq -e --arg owner "${GITHUB_REPOSITORY_OWNER}" '
             .name == "datahub-demo-seed" and
             .deployment_branch_policy.protected_branches == false and
             .deployment_branch_policy.custom_branch_policies == true and
@@ -168,24 +168,18 @@ jobs:
               [
                 .protection_rules[]? |
                 select(.type == "required_reviewers")
-              ] |
-              length
-            ) == 1 and
-            any(
-              .protection_rules[]?;
-              .type == "required_reviewers" and
-              .prevent_self_review == true and
-              (.reviewers | length) >= 1 and
-              all(
-                .reviewers[];
-                .type == "User" and
-                (.reviewer.id | type) == "number" and
-                (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
-              )
+              ] as $rules |
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             )
           ' <<<"${environment_json}" >/dev/null || {
-            echo "::error::datahub-demo-seed needs individual User reviewers, prevent-self-review, and a custom branch policy"
+            echo "::error::datahub-demo-seed needs the explicit solo-owner User reviewer, self-review enabled, and a custom branch policy"
             exit 1
           }
           branch_policies="$(gh api \
@@ -470,7 +464,7 @@ jobs:
           retention-days: 90
 
   apply:
-    name: Human-approved apply of plan ${{ needs.plan.outputs.plan_sha256 }}
+    name: Solo-owner-approved apply of plan ${{ needs.plan.outputs.plan_sha256 }}
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 35
@@ -484,7 +478,7 @@ jobs:
       receipt_artifact_digest: "sha256:${{ steps.receipt-upload.outputs['artifact-digest'] }}"
       receipt_artifact_id: ${{ steps.receipt-upload.outputs['artifact-id'] }}
     steps:
-      - name: Bind the exact independent environment approval receipt
+      - name: Bind the exact solo-owner environment approval receipt
         id: approval
         env:
           GH_TOKEN: ${{ github.token }}
@@ -511,22 +505,21 @@ jobs:
             ) |
             .id
           ' <<<"${environment_json}")"
-          reviewer_ids="$(jq -ce '
+          reviewer_ids="$(jq -ce \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" '
             [
               .protection_rules[]? |
               select(.type == "required_reviewers")
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
-              all(
-                $rules[0].reviewers[];
-                .type == "User" and
-                (.reviewer.id | type) == "number" and
-                (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
-              )
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             )
             then (
               [$rules[0].reviewers[].reviewer.id] |
@@ -544,10 +537,9 @@ jobs:
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
           matched_approval="$(jq -ce \
-            --arg actor "${GITHUB_ACTOR}" \
             --arg environment "datahub-demo-seed" \
             --arg expected "${expected_approval}" \
-            --arg triggeringActor "${GITHUB_TRIGGERING_ACTOR}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
             --argjson environmentId "${environment_id}" \
             --argjson reviewerIds "${reviewer_ids}" '
               if type != "array" then
@@ -567,10 +559,8 @@ jobs:
                     (.user.login | type) == "string" and
                     (.user.id as $userId |
                       ($reviewerIds | index($userId)) != null) and
-                    (.user.login | ascii_downcase) !=
-                      ($actor | ascii_downcase) and
-                    (.user.login | ascii_downcase) !=
-                      ($triggeringActor | ascii_downcase)
+                    (.user.login | ascii_downcase) ==
+                      ($owner | ascii_downcase)
                   )
                 ] |
                 if length == 1 then
@@ -580,7 +570,7 @@ jobs:
                 end
               end
             ' <<<"${approvals}")" || {
-              echo "::error::missing exact independent approval comment: ${expected_approval}"
+              echo "::error::missing exact solo-owner approval comment: ${expected_approval}"
               exit 1
             }
           approval_dir="${RUNNER_TEMP}/datahub-demo-approval"
@@ -1142,22 +1132,21 @@ jobs:
             ) |
             .id
           ' <<<"${environment_json}")"
-          reviewer_ids="$(jq -ce '
+          reviewer_ids="$(jq -ce \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" '
             [
               .protection_rules[]? |
               select(.type == "required_reviewers")
             ] as $rules |
             if (
               ($rules | length) == 1 and
-              $rules[0].prevent_self_review == true and
-              ($rules[0].reviewers | length) >= 1 and
-              all(
-                $rules[0].reviewers[];
-                .type == "User" and
-                (.reviewer.id | type) == "number" and
-                (.reviewer.login | type) == "string" and
-                (.reviewer.login | length) > 0
-              )
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             )
             then (
               [$rules[0].reviewers[].reviewer.id] |
@@ -1172,10 +1161,9 @@ jobs:
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
           matched_approval="$(jq -ce \
-            --arg actor "${GITHUB_ACTOR}" \
             --arg environment "datahub-demo-seed" \
             --arg expected "${expected_approval}" \
-            --arg triggeringActor "${GITHUB_TRIGGERING_ACTOR}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
             --argjson environmentId "${environment_id}" \
             --argjson reviewerIds "${reviewer_ids}" '
               if type != "array" then
@@ -1195,10 +1183,8 @@ jobs:
                     (.user.login | type) == "string" and
                     (.user.id as $userId |
                       ($reviewerIds | index($userId)) != null) and
-                    (.user.login | ascii_downcase) !=
-                      ($actor | ascii_downcase) and
-                    (.user.login | ascii_downcase) !=
-                      ($triggeringActor | ascii_downcase)
+                    (.user.login | ascii_downcase) ==
+                      ($owner | ascii_downcase)
                   )
                 ] |
                 if length == 1 then
@@ -1293,6 +1279,7 @@ jobs:
             --arg action "${ACTION}" \
             --arg actor "${GITHUB_ACTOR}" \
             --arg comment "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
             --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
             --arg releaseSha "${EXPECTED_RELEASE_SHA}" \
             --arg repository "${GITHUB_REPOSITORY}" \
@@ -1343,10 +1330,8 @@ jobs:
                   login: $userLogin
                 }
               } and
-              (.approval.user.login | ascii_downcase) !=
-                ($actor | ascii_downcase) and
-              (.approval.user.login | ascii_downcase) !=
-                ($triggeringActor | ascii_downcase)
+              (.approval.user.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
             ' approval-receipt.json >/dev/null
 
           jq -e \

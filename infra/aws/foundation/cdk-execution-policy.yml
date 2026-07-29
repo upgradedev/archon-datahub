@@ -1,0 +1,1428 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Stage-bound CloudFormation execution policy and runtime permissions boundary
+  for Archon CDK stacks in eu-west-1 and us-east-1.
+
+Parameters:
+  DeploymentEnvironment:
+    Type: String
+    AllowedValues:
+      - staging
+      - production
+
+Conditions:
+  IsStaging: !Equals [!Ref DeploymentEnvironment, staging]
+
+Resources:
+  ArchonRuntimeBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-runtime-boundary-${DeploymentEnvironment}
+      Description: !Sub >-
+        Maximum runtime permissions for Archon ${DeploymentEnvironment} roles.
+        This policy grants nothing unless an identity policy also allows it.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeOnlyBedrockMantleProjects
+            Effect: Allow
+            Action:
+              - bedrock-mantle:CreateInference
+            Resource: !Sub arn:${AWS::Partition}:bedrock-mantle:eu-west-1:${AWS::AccountId}:project/*
+            Condition:
+              StringEquals:
+                bedrock-mantle:Model: qwen.qwen3-235b-a22b-2507
+          - Sid: MintOnlyShortTermBedrockMantleTokens
+            Effect: Allow
+            Action: bedrock-mantle:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals:
+                bedrock-mantle:BearerTokenType: SHORT_TERM
+          - Sid: UseOnlyStageTables
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:TransactWriteItems
+              - dynamodb:UpdateItem
+            Resource: !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*
+          - Sid: RestrictDefaultStageSecurityGroup
+            Effect: Allow
+            Action:
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+            Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
+          - Sid: DiscoverDefaultStageSecurityGroup
+            Effect: Allow
+            Action: ec2:DescribeSecurityGroups
+            Resource: "*"
+          - Sid: AuthenticateRuntimeImagePull
+            Effect: Allow
+            Action: ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: PullOnlySharedImmutableImage
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+            Resource: !Sub arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub
+          - Sid: UseOnlyStageRuntimeKeys
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Describe*
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              ForAnyValue:StringLike:
+                kms:ResourceAliases: !Sub alias/archon/${DeploymentEnvironment}/*
+              StringLike:
+                kms:ViaService:
+                  - s3.eu-west-1.amazonaws.com
+                  - secretsmanager.eu-west-1.amazonaws.com
+                  - sqs.eu-west-1.amazonaws.com
+                  - logs.eu-west-1.amazonaws.com
+          - Sid: WriteOnlyStageRuntimeLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:DescribeLogStreams
+              - logs:PutLogEvents
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*:*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*:*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-api*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:sns/eu-west-1/${AWS::AccountId}/archon-${DeploymentEnvironment}-alarms*
+          - Sid: DeliverStepFunctionsLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:DescribeLogGroups
+              - logs:DescribeResourcePolicies
+              - logs:GetLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:UpdateLogDelivery
+            Resource: "*"
+          - Sid: UseOnlyStageObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAttributes
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-*/*
+          - Sid: ReadOnlyStageRuntimeSecrets
+            Effect: Allow
+            Action:
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-read-*
+              - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-write-*
+          - Sid: UseOnlyStageQueues
+            Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource: !Sub arn:${AWS::Partition}:sqs:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
+          - Sid: PublishOnlyStageAlarms
+            Effect: Allow
+            Action: sns:Publish
+            Resource: !Sub arn:${AWS::Partition}:sns:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
+          - Sid: UseOnlyStageStateMachine
+            Effect: Allow
+            Action:
+              - states:DescribeExecution
+              - states:StartExecution
+            Resource:
+              - !Sub arn:${AWS::Partition}:states:eu-west-1:${AWS::AccountId}:stateMachine:archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:states:eu-west-1:${AWS::AccountId}:execution:archon-${DeploymentEnvironment}-*:*
+          - Sid: ReturnOpaqueTaskTokens
+            Effect: Allow
+            Action:
+              - states:SendTaskFailure
+              - states:SendTaskHeartbeat
+              - states:SendTaskSuccess
+            Resource: "*"
+          - Sid: EmitRuntimeTraces
+            Effect: Allow
+            Action:
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Resource: "*"
+          - Sid: DenyIdentityEscalation
+            Effect: Deny
+            Action:
+              - account:*
+              - iam:*
+              - organizations:*
+              - sts:AssumeRole
+            Resource: "*"
+          - Sid: DenyLongTermBedrockMantleTokens
+            Effect: Deny
+            Action: bedrock-mantle:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals:
+                bedrock-mantle:BearerTokenType: LONG_TERM
+          - Sid: DenyEvidenceDeletionAndRetentionBypass
+            Effect: Deny
+            Action:
+              - s3:BypassGovernanceRetention
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:PutObjectRetention
+            Resource: !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-*/*
+
+  ArchonCdkIdentityPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-identity-${DeploymentEnvironment}
+      Description: !Sub >-
+        Exact runtime-role creation, boundary, policy, and PassRole permissions
+        for Archon ${DeploymentEnvironment} CloudFormation execution.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateStageRolesWithExactBoundary
+            Effect: Allow
+            Action: iam:CreateRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Ref ArchonRuntimeBoundary
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestTag/ManagedBy: aws-cdk
+          - Sid: PreserveExactStageBoundary
+            Effect: Allow
+            Action: iam:PutRolePermissionsBoundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Ref ArchonRuntimeBoundary
+          - Sid: ReadStageRoles
+            Effect: Allow
+            Action:
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+              - iam:ListRoleTags
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+          - Sid: ReconcileStageRoleInlinePolicies
+            Effect: Allow
+            Action:
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+              - iam:PutRolePolicy
+              - iam:UpdateAssumeRolePolicy
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              StringEquals:
+                iam:ResourceTag/Application: archon-datahub
+                iam:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: TagOnlyExistingStageRoles
+            Effect: Allow
+            Action:
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              StringEquals:
+                iam:ResourceTag/Application: archon-datahub
+                iam:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: DenyCrossStageRoleRetag
+            Effect: Deny
+            Action: iam:TagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              "Null":
+                aws:RequestTag/Environment: "false"
+              StringNotEquals:
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: DenyCoreStageRoleTagRemoval
+            Effect: Deny
+            Action: iam:UntagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+          - Sid: AttachOnlyApprovedServiceRolePolicies
+            Effect: Allow
+            Action:
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+            Condition:
+              ArnEquals:
+                iam:PolicyARN:
+                  - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+                  - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+          - Sid: PassOnlyStageRolesToRequiredServices
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - ecs-tasks.amazonaws.com
+                  - lambda.amazonaws.com
+                  - sns.amazonaws.com
+                  - states.amazonaws.com
+                  - vpc-flow-logs.amazonaws.com
+          - Sid: CreateOnlyRequiredServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/*
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - autoscaling.amazonaws.com
+                  - ecs.amazonaws.com
+                  - ecs.application-autoscaling.amazonaws.com
+                  - elasticloadbalancing.amazonaws.com
+                  - ops.apigateway.amazonaws.com
+                  - wafv2.amazonaws.com
+
+  ArchonCdkGuardPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-guard-${DeploymentEnvironment}
+      Description: !Sub >-
+        Stage-isolation and foundation-protection explicit denies for Archon
+        ${DeploymentEnvironment} CloudFormation execution roles.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenySharedApiGatewayAccountMutation
+            Effect: Deny
+            Action:
+              - apigateway:DELETE
+              - apigateway:PATCH
+              - apigateway:POST
+              - apigateway:PUT
+            Resource: arn:aws:apigateway:eu-west-1::/account
+          - Sid: DenyRuntimeBoundaryRemoval
+            Effect: Deny
+            Action: iam:DeleteRolePermissionsBoundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
+          - Sid: DenyFoundationControlPlaneMutation
+            Effect: Deny
+            Action: iam:*
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-apigateway-cloudwatch-logs
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-foundation
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-staging-deploy
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-production-deploy
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-cdk-*-staging
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-cdk-*-production
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-runtime-boundary-staging
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-runtime-boundary-production
+          - !If
+            - IsStaging
+            - !Ref AWS::NoValue
+            - Sid: DenySharedRegistryKmsMutationFromProduction
+              Effect: Deny
+              Action:
+                - kms:CancelKeyDeletion
+                - kms:CreateAlias
+                - kms:DeleteAlias
+                - kms:DisableKey
+                - kms:DisableKeyRotation
+                - kms:EnableKey
+                - kms:EnableKeyRotation
+                - kms:PutKeyPolicy
+                - kms:ScheduleKeyDeletion
+                - kms:TagResource
+                - kms:UntagResource
+                - kms:UpdateAlias
+                - kms:UpdateKeyDescription
+              Resource: "*"
+              Condition:
+                ForAnyValue:StringLike:
+                  kms:ResourceAliases: alias/archon/ecr
+          - !If
+            - IsStaging
+            - Sid: DenyProductionNamedResources
+              Effect: Deny
+              Action: "*"
+              Resource:
+                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*Archon-production*
+                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-production*
+                - !Sub arn:${AWS::Partition}:s3:::archon-production-*
+                - !Sub arn:${AWS::Partition}:s3:::archon-production-*/*
+            - Sid: DenyStagingNamedResources
+              Effect: Deny
+              Action: "*"
+              Resource:
+                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*Archon-staging*
+                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-staging*
+                - !Sub arn:${AWS::Partition}:s3:::archon-staging-*
+                - !Sub arn:${AWS::Partition}:s3:::archon-staging-*/*
+          - !If
+            - IsStaging
+            - Sid: DenyProductionTaggedResources
+              Effect: Deny
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/Environment: production
+            - Sid: DenyStagingTaggedResources
+              Effect: Deny
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/Environment: staging
+          - Sid: DenyIdentityAndAccountAdministration
+            Effect: Deny
+            Action:
+              - account:*
+              - billing:*
+              - iam:AddUserToGroup
+              - iam:AttachUserPolicy
+              - iam:CreateAccessKey
+              - iam:CreateGroup
+              - iam:CreateLoginProfile
+              - iam:CreateUser
+              - iam:DeleteAccessKey
+              - iam:DeleteGroup
+              - iam:DeleteLoginProfile
+              - iam:DeleteUser
+              - iam:DeleteUserPolicy
+              - iam:DetachUserPolicy
+              - iam:PutUserPolicy
+              - organizations:*
+              - route53domains:*
+            Resource: "*"
+
+  ArchonCdkDataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-data-${DeploymentEnvironment}
+      Description: !Sub >-
+        Stage-scoped object storage and encryption reconciliation for Archon
+        ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateTaggedStageKeys
+            Effect: Allow
+            Action:
+              - kms:CreateKey
+              - kms:PutKeyPolicy
+              - kms:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileTaggedStageKeys
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:EnableKeyRotation
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+              - kms:PutKeyPolicy
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:UpdateKeyDescription
+            Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ManageOnlyStageAliasNames
+            Effect: Allow
+            Action:
+              - kms:CreateAlias
+              - kms:DeleteAlias
+              - kms:UpdateAlias
+            Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:alias/archon/${DeploymentEnvironment}/*
+          - Sid: UseOnlyStageKeysAsAliasTargets
+            Effect: Allow
+            Action:
+              - kms:CreateAlias
+              - kms:UpdateAlias
+            Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - !If
+            - IsStaging
+            - Sid: CreateTaggedSharedRegistryKey
+              Effect: Allow
+              Action:
+                - kms:CreateKey
+                - kms:PutKeyPolicy
+                - kms:TagResource
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:RequestTag/Application: archon-datahub
+                  aws:RequestTag/Environment: shared
+                  aws:RequestedRegion: eu-west-1
+            - !Ref AWS::NoValue
+          - !If
+            - IsStaging
+            - Sid: ReconcileTaggedSharedRegistryKey
+              Effect: Allow
+              Action:
+                - kms:DescribeKey
+                - kms:EnableKeyRotation
+                - kms:GetKeyPolicy
+                - kms:GetKeyRotationStatus
+                - kms:ListResourceTags
+                - kms:PutKeyPolicy
+                - kms:TagResource
+                - kms:UntagResource
+                - kms:UpdateKeyDescription
+              Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/Application: archon-datahub
+                  aws:ResourceTag/Environment: shared
+            - !Ref AWS::NoValue
+          - !If
+            - IsStaging
+            - Sid: ManageOnlySharedRegistryAlias
+              Effect: Allow
+              Action:
+                - kms:CreateAlias
+                - kms:DeleteAlias
+                - kms:UpdateAlias
+              Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:alias/archon/ecr
+            - !Ref AWS::NoValue
+          - !If
+            - IsStaging
+            - Sid: UseOnlySharedTaggedKeyAsRegistryAliasTarget
+              Effect: Allow
+              Action:
+                - kms:CreateAlias
+                - kms:UpdateAlias
+              Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/Application: archon-datahub
+                  aws:ResourceTag/Environment: shared
+            - !Ref AWS::NoValue
+          - Sid: ReconcileOnlyStageBuckets
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketAcl
+              - s3:GetBucketCORS
+              - s3:GetBucketLocation
+              - s3:GetBucketLogging
+              - s3:GetBucketNotification
+              - s3:GetBucketObjectLockConfiguration
+              - s3:GetBucketOwnershipControls
+              - s3:GetBucketPolicy
+              - s3:GetBucketPublicAccessBlock
+              - s3:GetBucketTagging
+              - s3:GetBucketVersioning
+              - s3:GetEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:ListBucket
+              - s3:PutBucketAcl
+              - s3:PutBucketCORS
+              - s3:PutBucketLogging
+              - s3:PutBucketNotification
+              - s3:PutBucketObjectLockConfiguration
+              - s3:PutBucketOwnershipControls
+              - s3:PutBucketPolicy
+              - s3:PutBucketPublicAccessBlock
+              - s3:PutBucketTagging
+              - s3:PutBucketVersioning
+              - s3:PutEncryptionConfiguration
+              - s3:PutLifecycleConfiguration
+            Resource: !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-*
+
+  ArchonCdkStatePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-state-${DeploymentEnvironment}
+      Description: !Sub >-
+        Stage-scoped tables, secrets, queues, topics, and staging-owned
+        registry reconciliation for Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateTaggedStageTables
+            Effect: Allow
+            Action: dynamodb:CreateTable
+            Resource: !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyStageTables
+            Effect: Allow
+            Action:
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:DescribeContributorInsights
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:ListTagsOfResource
+              - dynamodb:TagResource
+              - dynamodb:UntagResource
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:UpdateContributorInsights
+              - dynamodb:UpdateTable
+              - dynamodb:UpdateTimeToLive
+            Resource:
+              - !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*/index/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyStageSecrets
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteResourcePolicy
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:ListSecretVersionIds
+              - secretsmanager:ListTagsForResource
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+              - secretsmanager:UpdateSecret
+            Resource: !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/*
+          - Sid: ReconcileOnlyStageQueues
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+              - sqs:SetQueueAttributes
+              - sqs:TagQueue
+              - sqs:UntagQueue
+            Resource: !Sub arn:${AWS::Partition}:sqs:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
+          - Sid: ReconcileOnlyStageAlarmTopic
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:ListTagsForResource
+              - sns:SetTopicAttributes
+              - sns:TagResource
+              - sns:UntagResource
+            Resource: !Sub arn:${AWS::Partition}:sns:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
+          - !If
+            - IsStaging
+            - Sid: ReconcileOnlySharedImmutableRegistry
+              Effect: Allow
+              Action:
+                - ecr:CreateRepository
+                - ecr:DescribeRepositories
+                - ecr:GetLifecyclePolicy
+                - ecr:GetRepositoryPolicy
+                - ecr:ListTagsForResource
+                - ecr:PutImageScanningConfiguration
+                - ecr:PutImageTagMutability
+                - ecr:PutLifecyclePolicy
+                - ecr:SetRepositoryPolicy
+                - ecr:TagResource
+                - ecr:UntagResource
+              Resource: !Sub arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub
+            - !Ref AWS::NoValue
+
+  ArchonCdkObservabilityPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-observability-${DeploymentEnvironment}
+      Description: !Sub >-
+        Stage-scoped logs, alarms, dashboards, and service log-delivery
+        reconciliation for Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateOnlyTaggedStageLogGroups
+            Effect: Allow
+            Action: logs:CreateLogGroup
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-api
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:sns/eu-west-1/${AWS::AccountId}/archon-${DeploymentEnvironment}-alarms
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyStageLogGroups
+            Effect: Allow
+            Action:
+              - logs:AssociateKmsKey
+              - logs:DeleteLogGroup
+              - logs:DeleteRetentionPolicy
+              - logs:DescribeLogGroups
+              - logs:DisassociateKmsKey
+              - logs:ListTagsForResource
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-api*
+              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:sns/eu-west-1/${AWS::AccountId}/archon-${DeploymentEnvironment}-alarms*
+          - Sid: ReconcileOnlyRequiredLogDeliveryControlPlane
+            Effect: Allow
+            Action:
+              - logs:CreateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:DescribeLogGroups
+              - logs:DescribeResourcePolicies
+              - logs:GetLogDelivery
+              - logs:ListLogDeliveries
+              - logs:PutResourcePolicy
+              - logs:UpdateLogDelivery
+            Resource: "*"
+          - Sid: ReconcileOnlyStageAlarms
+            Effect: Allow
+            Action:
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListTagsForResource
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:TagResource
+              - cloudwatch:UntagResource
+            Resource: !Sub arn:${AWS::Partition}:cloudwatch:eu-west-1:${AWS::AccountId}:alarm:Archon-${DeploymentEnvironment}-*
+          - Sid: ReconcileOnlyStageDashboard
+            Effect: Allow
+            Action:
+              - cloudwatch:DeleteDashboards
+              - cloudwatch:GetDashboard
+              - cloudwatch:ListDashboards
+              - cloudwatch:PutDashboard
+            Resource: !Sub arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/archon-${DeploymentEnvironment}
+
+  ArchonCdkComputePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-compute-${DeploymentEnvironment}
+      Description: !Sub >-
+        Stage-scoped Bedrock Mantle, ECS, Lambda, Step Functions, Cognito, and
+        autoscaling reconciliation for Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateTaggedStageBedrockMantleProject
+            Effect: Allow
+            Action: bedrock-mantle:CreateProject
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyTaggedStageBedrockMantleProjects
+            Effect: Allow
+            Action:
+              - bedrock-mantle:ArchiveProject
+              - bedrock-mantle:GetProject
+              - bedrock-mantle:ListTagsForResource
+              - bedrock-mantle:TagResource
+              - bedrock-mantle:UntagResource
+              - bedrock-mantle:UpdateProject
+            Resource: !Sub arn:${AWS::Partition}:bedrock-mantle:eu-west-1:${AWS::AccountId}:project/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ListOnlyBedrockMantleProjectsForProviderStabilization
+            Effect: Allow
+            Action: bedrock-mantle:ListProjects
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedStageEcsResources
+            Effect: Allow
+            Action:
+              - ecs:CreateCluster
+              - ecs:CreateService
+              - ecs:RegisterTaskDefinition
+              - ecs:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyTaggedStageEcsResources
+            Effect: Allow
+            Action:
+              - ecs:DeleteCluster
+              - ecs:DeleteService
+              - ecs:DeregisterTaskDefinition
+              - ecs:DescribeClusters
+              - ecs:DescribeServices
+              - ecs:DescribeTaskDefinition
+              - ecs:ListTagsForResource
+              - ecs:PutClusterCapacityProviders
+              - ecs:UntagResource
+              - ecs:UpdateCluster
+              - ecs:UpdateClusterSettings
+              - ecs:UpdateService
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedStageFunctions
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:TagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:Archon-${DeploymentEnvironment}-*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyTaggedStageFunctions
+            Effect: Allow
+            Action:
+              - lambda:AddPermission
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:GetPolicy
+              - lambda:ListTags
+              - lambda:RemovePermission
+              - lambda:UntagResource
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-*
+              - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:Archon-${DeploymentEnvironment}-*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyStageStateMachine
+            Effect: Allow
+            Action:
+              - states:CreateStateMachine
+              - states:DeleteStateMachine
+              - states:DescribeStateMachine
+              - states:ListTagsForResource
+              - states:TagResource
+              - states:UntagResource
+              - states:UpdateStateMachine
+            Resource: !Sub arn:${AWS::Partition}:states:eu-west-1:${AWS::AccountId}:stateMachine:archon-${DeploymentEnvironment}-*
+          - Sid: ReconcileOnlyTaggedStageScaling
+            Effect: Allow
+            Action:
+              - application-autoscaling:DeleteScalingPolicy
+              - application-autoscaling:DeregisterScalableTarget
+              - application-autoscaling:DescribeScalableTargets
+              - application-autoscaling:DescribeScalingPolicies
+              - application-autoscaling:ListTagsForResource
+              - application-autoscaling:PutScalingPolicy
+              - application-autoscaling:RegisterScalableTarget
+              - application-autoscaling:TagResource
+              - application-autoscaling:UntagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                application-autoscaling:service-namespace: ecs
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedStageUserPool
+            Effect: Allow
+            Action:
+              - cognito-idp:CreateUserPool
+              - cognito-idp:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyTaggedStageUserPool
+            Effect: Allow
+            Action:
+              - cognito-idp:CreateGroup
+              - cognito-idp:CreateResourceServer
+              - cognito-idp:CreateUserPoolClient
+              - cognito-idp:CreateUserPoolDomain
+              - cognito-idp:DeleteGroup
+              - cognito-idp:DeleteResourceServer
+              - cognito-idp:DeleteUserPool
+              - cognito-idp:DeleteUserPoolClient
+              - cognito-idp:DeleteUserPoolDomain
+              - cognito-idp:DescribeResourceServer
+              - cognito-idp:DescribeRiskConfiguration
+              - cognito-idp:DescribeUserPool
+              - cognito-idp:DescribeUserPoolClient
+              - cognito-idp:DescribeUserPoolDomain
+              - cognito-idp:GetGroup
+              - cognito-idp:ListGroups
+              - cognito-idp:ListResourceServers
+              - cognito-idp:ListTagsForResource
+              - cognito-idp:ListUserPoolClients
+              - cognito-idp:SetRiskConfiguration
+              - cognito-idp:UntagResource
+              - cognito-idp:UpdateGroup
+              - cognito-idp:UpdateResourceServer
+              - cognito-idp:UpdateUserPool
+              - cognito-idp:UpdateUserPoolClient
+              - cognito-idp:UpdateUserPoolDomain
+            Resource: !Sub arn:${AWS::Partition}:cognito-idp:eu-west-1:${AWS::AccountId}:userpool/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+
+  ArchonCdkNetworkPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-network-${DeploymentEnvironment}
+      Description: !Sub >-
+        Tagged VPC, load-balancer, and API Gateway reconciliation for Archon
+        ${DeploymentEnvironment} in eu-west-1.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DiscoverOnlyRequiredRegionalNetworkState
+            Effect: Allow
+            Action:
+              - ec2:DescribeAccountAttributes
+              - ec2:DescribeAddresses
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeFlowLogs
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeManagedPrefixLists
+              - ec2:DescribeNatGateways
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribePrefixLists
+              - ec2:DescribeRouteTables
+              - ec2:DescribeSecurityGroupRules
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSubnets
+              - ec2:DescribeTags
+              - ec2:DescribeVpcs
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedStageNetworkResources
+            Effect: Allow
+            Action:
+              - ec2:AllocateAddress
+              - ec2:CreateFlowLogs
+              - ec2:CreateInternetGateway
+              - ec2:CreateNatGateway
+              - ec2:CreateRouteTable
+              - ec2:CreateSecurityGroup
+              - ec2:CreateSubnet
+              - ec2:CreateTags
+              - ec2:CreateVpc
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyTaggedStageNetworkResources
+            Effect: Allow
+            Action:
+              - ec2:AssociateAddress
+              - ec2:AssociateRouteTable
+              - ec2:AttachInternetGateway
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:CreateRoute
+              - ec2:DeleteFlowLogs
+              - ec2:DeleteInternetGateway
+              - ec2:DeleteNatGateway
+              - ec2:DeleteRoute
+              - ec2:DeleteRouteTable
+              - ec2:DeleteSecurityGroup
+              - ec2:DeleteSubnet
+              - ec2:DeleteTags
+              - ec2:DeleteVpc
+              - ec2:DetachInternetGateway
+              - ec2:DisassociateAddress
+              - ec2:DisassociateRouteTable
+              - ec2:ModifySubnetAttribute
+              - ec2:ModifyVpcAttribute
+              - ec2:ReleaseAddress
+              - ec2:ReplaceRoute
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: DiscoverOnlyRequiredStageLoadBalancerState
+            Effect: Allow
+            Action:
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeTags
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetHealth
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedStageLoadBalancerResources
+            Effect: Allow
+            Action:
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:CreateTargetGroup
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyTaggedStageLoadBalancerResources
+            Effect: Allow
+            Action:
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:DeleteTargetGroup
+              - elasticloadbalancing:DeregisterTargets
+              - elasticloadbalancing:ModifyListener
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:ModifyTargetGroup
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:RegisterTargets
+              - elasticloadbalancing:RemoveTags
+              - elasticloadbalancing:SetIpAddressType
+              - elasticloadbalancing:SetSecurityGroups
+              - elasticloadbalancing:SetSubnets
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyNamedTaggedRestApi
+            Effect: Allow
+            Action: apigateway:POST
+            Resource: arn:aws:apigateway:eu-west-1::/restapis
+            Condition:
+              StringEquals:
+                apigateway:Request/ApiName: !Sub archon-${DeploymentEnvironment}
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: CreateOnlyTaggedStageApiTopLevelResources
+            Effect: Allow
+            Action:
+              - apigateway:POST
+              - apigateway:PUT
+            Resource:
+              - arn:aws:apigateway:eu-west-1::/apikeys
+              - arn:aws:apigateway:eu-west-1::/usageplans
+              - arn:aws:apigateway:eu-west-1::/vpclinks
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyTaggedStageRestApiTree
+            Effect: Allow
+            Action:
+              - apigateway:DELETE
+              - apigateway:GET
+              - apigateway:PATCH
+              - apigateway:POST
+              - apigateway:PUT
+            Resource:
+              - arn:aws:apigateway:eu-west-1::/restapis/*
+              - arn:aws:apigateway:eu-west-1::/apikeys/*
+              - arn:aws:apigateway:eu-west-1::/usageplans/*
+              - arn:aws:apigateway:eu-west-1::/vpclinks/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+
+  ArchonCdkEndpointPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-endpoint-${DeploymentEnvironment}
+      Description: !Sub >-
+        Exact same-region PrivateLink endpoint and private-DNS reconciliation
+        for Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DiscoverOnlyRequiredVpcEndpointState
+            Effect: Allow
+            Action:
+              - ec2:DescribeVpcEndpointServices
+              - ec2:DescribeVpcEndpoints
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+          - Sid: CreateOnlyTaggedSameRegionVpcEndpoints
+            Effect: Allow
+            Action: ec2:CreateVpcEndpoint
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+                ec2:VpceServiceRegion: eu-west-1
+              StringNotEquals:
+                ec2:VpceServiceOwner: !Ref AWS::AccountId
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+                  - Name
+          - Sid: TagOnlyDuringOwnedVpcEndpointCreation
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+                ec2:CreateAction: CreateVpcEndpoint
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+                  - Name
+          - Sid: ReconcileOnlyOwnedStageVpcEndpoints
+            Effect: Allow
+            Action:
+              - ec2:CreateTags
+              - ec2:DeleteTags
+              - ec2:DeleteVpcEndpoints
+              - ec2:ModifyVpcEndpoint
+            Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: DenyVpcEndpointOwnershipTagRemoval
+            Effect: Deny
+            Action: ec2:DeleteTags
+            Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+          - Sid: AssociatePrivateDnsOnlyWithCallerAccountVpc
+            Effect: Allow
+            Action: route53:AssociateVPCWithHostedZone
+            Resource: arn:aws:route53:::hostedzone/*
+            Condition:
+              ForAllValues:StringLike:
+                route53:VPCs: VPCId=vpc-*,VPCRegion=eu-west-1
+
+  ArchonCdkDeliveryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-delivery-${DeploymentEnvironment}
+      Description: !Sub >-
+        Exact CloudFront and regional WAF control-plane permissions for
+        Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateOnlyTaggedStageDistribution
+            Effect: Allow
+            Action: cloudfront:CreateDistribution
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: TagOnlyStageDistribution
+            Effect: Allow
+            Action: cloudfront:TagResource
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyTaggedStageDistribution
+            Effect: Allow
+            Action:
+              - cloudfront:DeleteDistribution
+              - cloudfront:GetDistribution
+              - cloudfront:GetDistributionConfig
+              - cloudfront:ListTagsForResource
+              - cloudfront:UntagResource
+              - cloudfront:UpdateDistribution
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: CreateOnlyRequiredUntaggableCloudFrontComponents
+            Effect: Allow
+            Action:
+              - cloudfront:CreateOriginAccessControl
+              - cloudfront:CreateOriginRequestPolicy
+              - cloudfront:CreateResponseHeadersPolicy
+            Resource: "*"
+          - Sid: ReconcileOnlyRequiredOriginAccessControls
+            Effect: Allow
+            Action:
+              - cloudfront:DeleteOriginAccessControl
+              - cloudfront:GetOriginAccessControl
+              - cloudfront:GetOriginAccessControlConfig
+              - cloudfront:UpdateOriginAccessControl
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-access-control/*
+          - Sid: ReconcileOnlyRequiredOriginRequestPolicies
+            Effect: Allow
+            Action:
+              - cloudfront:DeleteOriginRequestPolicy
+              - cloudfront:GetOriginRequestPolicy
+              - cloudfront:GetOriginRequestPolicyConfig
+              - cloudfront:UpdateOriginRequestPolicy
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:origin-request-policy/*
+          - Sid: ReconcileOnlyRequiredResponseHeadersPolicies
+            Effect: Allow
+            Action:
+              - cloudfront:DeleteResponseHeadersPolicy
+              - cloudfront:GetResponseHeadersPolicy
+              - cloudfront:GetResponseHeadersPolicyConfig
+              - cloudfront:UpdateResponseHeadersPolicy
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:response-headers-policy/*
+          - Sid: CreateOnlyTaggedStageRegionalWebAcl
+            Effect: Allow
+            Action:
+              - wafv2:CreateWebACL
+              - wafv2:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+          - Sid: ReconcileOnlyNamedStageRegionalWebAcl
+            Effect: Allow
+            Action:
+              - wafv2:AssociateWebACL
+              - wafv2:DeleteLoggingConfiguration
+              - wafv2:DeleteWebACL
+              - wafv2:DisassociateWebACL
+              - wafv2:GetLoggingConfiguration
+              - wafv2:GetWebACL
+              - wafv2:GetWebACLForResource
+              - wafv2:ListTagsForResource
+              - wafv2:PutLoggingConfiguration
+              - wafv2:UntagResource
+              - wafv2:UpdateWebACL
+            Resource: !Sub arn:${AWS::Partition}:wafv2:eu-west-1:${AWS::AccountId}:regional/webacl/archon-${DeploymentEnvironment}-*/*
+
+  ArchonCdkEdgePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub archon-datahub-cdk-edge-${DeploymentEnvironment}
+      Description: !Sub >-
+        Exact us-east-1 KMS, log, and CloudFront-scope WAF permissions for
+        Archon ${DeploymentEnvironment}.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CreateTaggedStageEdgeKey
+            Effect: Allow
+            Action:
+              - kms:CreateKey
+              - kms:PutKeyPolicy
+              - kms:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: us-east-1
+          - Sid: ReconcileTaggedStageEdgeKey
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:EnableKeyRotation
+              - kms:GetKeyPolicy
+              - kms:GetKeyRotationStatus
+              - kms:ListResourceTags
+              - kms:PutKeyPolicy
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:UpdateKeyDescription
+            Resource: !Sub arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ManageOnlyStageEdgeAlias
+            Effect: Allow
+            Action:
+              - kms:CreateAlias
+              - kms:DeleteAlias
+              - kms:UpdateAlias
+            Resource: !Sub arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:alias/archon/${DeploymentEnvironment}/edge-waf-logs
+          - Sid: UseOnlyStageEdgeKeyAsAliasTarget
+            Effect: Allow
+            Action:
+              - kms:CreateAlias
+              - kms:UpdateAlias
+            Resource: !Sub arn:${AWS::Partition}:kms:us-east-1:${AWS::AccountId}:key/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+          - Sid: CreateOnlyTaggedStageEdgeLogGroup
+            Effect: Allow
+            Action: logs:CreateLogGroup
+            Resource: !Sub arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-cloudfront
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+          - Sid: ReconcileOnlyStageEdgeLogGroup
+            Effect: Allow
+            Action:
+              - logs:AssociateKmsKey
+              - logs:DeleteLogGroup
+              - logs:DeleteRetentionPolicy
+              - logs:DescribeLogGroups
+              - logs:DisassociateKmsKey
+              - logs:ListTagsForResource
+              - logs:PutRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+            Resource: !Sub arn:${AWS::Partition}:logs:us-east-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-cloudfront*
+          - Sid: CreateOnlyTaggedStageGlobalWebAcl
+            Effect: Allow
+            Action:
+              - wafv2:CreateWebACL
+              - wafv2:TagResource
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: us-east-1
+          - Sid: ReconcileOnlyNamedStageGlobalWebAcl
+            Effect: Allow
+            Action:
+              - wafv2:DeleteLoggingConfiguration
+              - wafv2:DeleteWebACL
+              - wafv2:GetLoggingConfiguration
+              - wafv2:GetWebACL
+              - wafv2:ListTagsForResource
+              - wafv2:PutLoggingConfiguration
+              - wafv2:UntagResource
+              - wafv2:UpdateWebACL
+            Resource: !Sub arn:${AWS::Partition}:wafv2:us-east-1:${AWS::AccountId}:global/webacl/archon-${DeploymentEnvironment}-cloudfront/*
+
+Outputs:
+  ArchonCdkEuWest1ExecutionPolicyArns:
+    Description: Comma-delimited exact policy inventory for the eu-west-1 bootstrap.
+    Value: !Join
+      - ","
+      - - !Ref ArchonCdkGuardPolicy
+        - !Ref ArchonCdkIdentityPolicy
+        - !Ref ArchonCdkDataPolicy
+        - !Ref ArchonCdkStatePolicy
+        - !Ref ArchonCdkObservabilityPolicy
+        - !Ref ArchonCdkComputePolicy
+        - !Ref ArchonCdkNetworkPolicy
+        - !Ref ArchonCdkEndpointPolicy
+        - !Ref ArchonCdkDeliveryPolicy
+  ArchonCdkUsEast1ExecutionPolicyArns:
+    Description: Comma-delimited exact policy inventory for the us-east-1 bootstrap.
+    Value: !Join
+      - ","
+      - - !Ref ArchonCdkGuardPolicy
+        - !Ref ArchonCdkEdgePolicy
+  ArchonCdkExecutionPolicyNames:
+    Value: !Sub >-
+      archon-datahub-cdk-guard-${DeploymentEnvironment},
+      archon-datahub-cdk-identity-${DeploymentEnvironment},
+      archon-datahub-cdk-data-${DeploymentEnvironment},
+      archon-datahub-cdk-state-${DeploymentEnvironment},
+      archon-datahub-cdk-observability-${DeploymentEnvironment},
+      archon-datahub-cdk-compute-${DeploymentEnvironment},
+      archon-datahub-cdk-network-${DeploymentEnvironment},
+      archon-datahub-cdk-endpoint-${DeploymentEnvironment},
+      archon-datahub-cdk-delivery-${DeploymentEnvironment},
+      archon-datahub-cdk-edge-${DeploymentEnvironment}
+  ArchonRuntimeBoundaryArn:
+    Description: Applied to every IAM role synthesized for this stage.
+    Value: !Ref ArchonRuntimeBoundary
+  ArchonRuntimeBoundaryName:
+    Value: !Sub archon-datahub-runtime-boundary-${DeploymentEnvironment}

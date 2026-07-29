@@ -32,10 +32,10 @@ EXPECTED_STEPS = {
         "Validate canonical final content and credentialless video",
         "Capture exact repository history and immutable candidate",
         "Upload immutable final-content candidate",
-        "Publish exact independent approval request",
+        "Publish exact solo-owner approval request",
     ),
     "review": (
-        "Verify exact independent environment approval",
+        "Verify exact solo-owner environment approval",
         "Check out exact reviewed release and complete history",
         "Validate immutable candidate metadata before download",
         "Download exact immutable candidate",
@@ -114,11 +114,12 @@ EXPECTED_SUBJECT_FILES = (
     "support/SQ7/media-rights.json",
     "support/SQ7/provider-metadata.json",
     "support/SQ8/cross-medium-review.json",
-    "support/SQ8/independent-approval.json",
+    "support/SQ8/solo-owner-approval.json",
     "support/SQ8/preexisting-work-inventory.json",
     "support/SQ8/repository-history.json",
 )
 REVIEW_APPROVAL_FIELDS = (
+    "approvalMode",
     "environment",
     "workflowPath",
     "runId",
@@ -711,7 +712,7 @@ def validate_workflow(workflow: str) -> None:
             'test "${GITHUB_REF}" = "refs/heads/master"',
             'test "${GITHUB_SHA}" = "${RELEASE_SHA}"',
             'test "${current_release}" = "${RELEASE_SHA}"',
-            '.prevent_self_review == true',
+            '.prevent_self_review == false',
             '.type == "User"',
             '[.[].branch_policies[].name] == ["master"]',
         ),
@@ -744,7 +745,7 @@ def validate_workflow(workflow: str) -> None:
     )
     approval_request = named_step(
         jobs["prepare"],
-        "Publish exact independent approval request",
+        "Publish exact solo-owner approval request",
     )
     require_tokens(
         approval_request,
@@ -772,17 +773,17 @@ def validate_workflow(workflow: str) -> None:
 
     approval = named_step(
         jobs["review"],
-        "Verify exact independent environment approval",
+        "Verify exact solo-owner environment approval",
     )
     require_tokens(
         approval,
-        "independent approval",
+        "solo-owner approval",
         (
-            ".prevent_self_review == true",
+            ".prevent_self_review == false",
             '.type == "User"',
-            ".user.id != $actorId",
-            ".user.id != $triggeringActorId",
-            "expected exactly one matching independent approval",
+            ".user.id == $actorId",
+            ".user.id == $triggeringActorId",
+            "expected exactly one matching solo-owner approval",
             "archon.submission-content-approval/v1",
             "candidateArtifactDigest",
             "candidateRunAttempt",
@@ -917,7 +918,7 @@ def validate_workflow(workflow: str) -> None:
         reconstruction,
         "attester fact reconstruction",
         (
-            "expected exactly one matching independent approval",
+            "expected exactly one matching solo-owner approval",
             "printf '%s' \"${expected_approval}\"",
             "candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT}",
             "attempts/${PRODUCER_ATTEMPT}",
@@ -1111,17 +1112,17 @@ tamper_cases = {
         "    environment: submission-content-review\n",
         "    environment: production\n",
     ),
-    "prevent-self-review weakened": replace_in_step(
+    "self-review unexpectedly prevented": replace_in_step(
         workflow_text,
         "review",
-        "Verify exact independent environment approval",
-        ".prevent_self_review == true",
+        "Verify exact solo-owner environment approval",
         ".prevent_self_review == false",
+        ".prevent_self_review == true",
     ),
     "individual reviewer weakened": replace_in_step(
         workflow_text,
         "review",
-        "Verify exact independent environment approval",
+        "Verify exact solo-owner environment approval",
         '.type == "User"',
         '.type == "Team"',
     ),

@@ -1,7 +1,7 @@
 // NarratorAgent — the ONLY LLM-backed agent. Writes a short, steward-facing executive
 // summary over the findings the deterministic agents produced. The LLM never invents
 // findings or numbers: it is handed the exact counts + top findings and asked to
-// narrate them. Injectable client (defaults to real LLM when LLM_API_KEY is set, else
+// narrate them. Injectable client (defaults to a real configured provider, else
 // the deterministic FakeLlmClient), so CI runs the narrator offline with zero spend.
 
 import { performance } from "node:perf_hooks";
