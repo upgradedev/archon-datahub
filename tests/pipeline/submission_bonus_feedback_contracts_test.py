@@ -44,7 +44,7 @@ EXPECTED_STEPS = {
         "Resolve latest retained producer and exact candidate artifacts",
         "Download exact retained feedback subjects",
         "Download exact approved feedback candidate",
-        "Rederive candidate rules approval and retained facts",
+        "Independently rederive candidate rules approval and retained facts",
         "Recheck immutable evidence approval rules and master before signing",
         "Attest all three exact feedback subjects",
         "Verify persisted signed full-subject attestation",
@@ -486,7 +486,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
         ),
         (
             jobs["attest"],
-            "Rederive candidate rules approval and retained facts",
+            "Independently rederive candidate rules approval and retained facts",
         ),
         (
             jobs["attest"],
@@ -652,7 +652,7 @@ def validate_contract(workflow: str, documentation: str) -> None:
     require_all(
         attester,
         (
-            "Rederive candidate rules approval and retained facts",
+            "Independently rederive candidate rules approval and retained facts",
             "/attempts/${PRODUCER_ATTEMPT}",
             "successful review job is missing or ambiguous",
             "exact solo-owner approval is missing or ambiguous",

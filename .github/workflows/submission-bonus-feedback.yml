@@ -1685,7 +1685,7 @@ jobs:
           artifact-ids: ${{ steps.artifacts.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/submission-bonus-feedback-candidate-attester
 
-      - name: Rederive candidate rules approval and retained facts
+      - name: Independently rederive candidate rules approval and retained facts
         env:
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
           CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
