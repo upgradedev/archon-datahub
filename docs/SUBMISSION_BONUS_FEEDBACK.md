@@ -227,5 +227,5 @@ The workflow must stay red or undispatched until all of these are true:
 - the configured solo owner can privately verify the form,
   confirmation/reference, uniqueness, and quality assertions.
 
-The workflow does not submit, edit, or read the form. If the solo owner cannot
-privately verify it, do not claim `BONUS-FEEDBACK`.
+The workflow does not submit, edit, or read the form. If no independent private
+verification is possible, do not claim `BONUS-FEEDBACK`.
