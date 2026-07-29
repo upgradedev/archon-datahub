@@ -219,8 +219,8 @@ mismatched existing policy is never overwritten.
 
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
-An existing canonical role may already have any subset of the four approved
-attachments, but it must have zero inline policies.
+On an existing account, a canonical role may already have any subset of the
+four approved attachments, but it must have zero inline policies.
 
 The current policyless role is a single, explicitly contracted legacy adoption
 case. Before any role update, the script requires zero inline and zero attached

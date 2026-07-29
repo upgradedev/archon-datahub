@@ -1763,7 +1763,14 @@ describe("Archon AWS reference architecture", () => {
       MinimumCompressionSize: 1024
     });
     platform.resourceCountIs("AWS::ECS::Service", 3);
-    const services = Object.values(platform.findResources("AWS::ECS::Service")) as any[];
+    const serviceResources = platform.findResources("AWS::ECS::Service");
+    const services = Object.values(serviceResources) as any[];
+    const serviceLogicalIdsByName = Object.fromEntries(
+      Object.entries(serviceResources).map(([logicalId, service]) => [
+        (service as any).Properties.ServiceName,
+        logicalId
+      ])
+    ) as Record<string, string>;
     expect(
       services.map((service) => service.Properties.ServiceName).sort()
     ).toEqual([
@@ -2029,13 +2036,18 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonEcsClusterName.Value).toEqual({
       Ref: clusterLogicalIds[0]
     });
-    expect(outputs.ArchonApiServiceName.Value).toBe("archon-staging-api");
-    expect(outputs.ArchonAuditWorkerServiceName.Value).toBe(
-      "archon-staging-audit-worker"
-    );
-    expect(outputs.ArchonRemediationWorkerServiceName.Value).toBe(
-      "archon-staging-remediation-worker"
-    );
+    for (const [outputName, serviceName] of [
+      ["ArchonApiServiceName", "archon-staging-api"],
+      ["ArchonAuditWorkerServiceName", "archon-staging-audit-worker"],
+      [
+        "ArchonRemediationWorkerServiceName",
+        "archon-staging-remediation-worker"
+      ]
+    ] as const) {
+      expect(outputs[outputName].Value).toEqual({
+        "Fn::GetAtt": [serviceLogicalIdsByName[serviceName], "Name"]
+      });
+    }
     for (const [outputName, parameterName] of [
       ["ArchonContainerArchiveSha256", "ContainerArchiveSha256"],
       ["ArchonLambdaArchiveSha256", "LambdaArchiveSha256"],
