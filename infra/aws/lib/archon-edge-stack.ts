@@ -1,7 +1,6 @@
 import {
   ArnFormat,
   CfnOutput,
-  CfnParameter,
   Duration,
   RemovalPolicy,
   Stack,

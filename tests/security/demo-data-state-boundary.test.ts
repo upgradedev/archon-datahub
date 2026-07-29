@@ -85,7 +85,7 @@ test("demo data mutation is manual, serialized, and isolated behind protected en
   assert.match(workflow, /prevent_self_review == false/u);
   assert.match(
     workflow,
-    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+    /\(\$rules\[0\]\.reviewers\[0\]\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
   );
   assert.match(workflow, /\.type == "User"/u);
   assert.match(workflow, /\.reviewer\.id/u);

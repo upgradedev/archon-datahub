@@ -369,15 +369,17 @@ jobs:
                 "Archon DataHub ${stage} ${region} isolated bootstrap v1" \
                 "${stage_template}"
               stage_sha="$(sha256sum "${stage_template}" | awk '{print $1}')"
-              echo "${stage}_${region_slot}_path=${stage_template}" \
-                >>"${GITHUB_OUTPUT}"
-              echo "${stage}_${region_slot}_sha=${stage_sha}" \
-                >>"${GITHUB_OUTPUT}"
+              {
+                echo "${stage}_${region_slot}_path=${stage_template}"
+                echo "${stage}_${region_slot}_sha=${stage_sha}"
+              } >>"${GITHUB_OUTPUT}"
             done
           done
-          echo "path=${template}" >>"${GITHUB_OUTPUT}"
-          echo "sha=${template_sha}" >>"${GITHUB_OUTPUT}"
-          echo "version=${template_version}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "path=${template}"
+            echo "sha=${template_sha}"
+            echo "version=${template_version}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Prove exact synthesized runtime action equality for both stages
         run: |

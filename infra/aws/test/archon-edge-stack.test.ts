@@ -1,4 +1,4 @@
-import { App } from "aws-cdk-lib";
+import { App, DefaultStackSynthesizer } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { ArchonEdgeStack } from "../lib/archon-edge-stack";
 
@@ -8,7 +8,10 @@ function edgeTemplate(
   const app = new App();
   const stack = new ArchonEdgeStack(app, `TestEdge-${stage}`, {
     env: { account: "111111111111", region: "us-east-1" },
-    stage
+    stage,
+    synthesizer: new DefaultStackSynthesizer({
+      qualifier: stage === "production" ? "archonprd" : "archonstg"
+    })
   });
   return { stack, template: Template.fromStack(stack) };
 }
@@ -25,7 +28,14 @@ describe("Archon CloudFront edge stack", () => {
   test("is fixed to us-east-1 and accepts only declared stages", () => {
     const { stack, template } = edgeTemplate();
     expect(stack.region).toBe("us-east-1");
-    expect(template.toJSON().Parameters).toBeUndefined();
+    expect(template.toJSON().Parameters).toEqual({
+      BootstrapVersion: {
+        Type: "AWS::SSM::Parameter::Value<String>",
+        Default: "/cdk-bootstrap/archonstg/version",
+        Description:
+          "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]"
+      }
+    });
 
     const implicitRegionStack = new ArchonEdgeStack(
       new App(),

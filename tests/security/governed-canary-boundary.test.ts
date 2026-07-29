@@ -32,7 +32,7 @@ test("governed canary is dispatch-only, staging-only, and explicitly solo-owner 
   assert.match(workflow, /prevent_self_review == false/u);
   assert.match(
     workflow,
-    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+    /\(\$rules\[0\]\.reviewers\[0\]\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
   );
   assert.match(workflow, /RUN ISOLATED GOVERNED CANARY/u);
   assert.match(workflow, /\.path == "\.github\/workflows\/deploy\.yml"/u);
@@ -717,7 +717,7 @@ test("failed or cancelled parents have automatic and idempotent manual recovery"
   assert.match(recoveryWorkflow, /prevent_self_review == false/u);
   assert.match(
     recoveryWorkflow,
-    /\(\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
+    /\(\$rules\[0\]\.reviewers\[0\]\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
   );
   assert.match(
     recoveryWorkflow,

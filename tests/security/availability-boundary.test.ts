@@ -260,7 +260,10 @@ test("public runtime, response, and header contracts are exact and sanitized", (
     workflow,
     /\(\?i\)\(secret\|password\|credential\|authorization\|cookie\|api\[_-\]\?key/u
   );
-  assert.match(workflow, /PRIVATE KEY-----\|Bearer/u);
+  assert.match(
+    workflow,
+    /PRIVATE KEY-----\|bedrock-api-key-\[A-Za-z0-9_\+\/=-\]\{16,\}\|Bearer/u
+  );
   assert.match(workflow, /responseSha256: \$responseSha256/u);
   assert.match(workflow, /requestIdSha256: \$requestIdSha256/u);
   assert.match(workflow, /scanIdSha256: \$scanIdSha256/u);

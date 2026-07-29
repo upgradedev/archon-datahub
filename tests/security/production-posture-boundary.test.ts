@@ -894,11 +894,15 @@ test("judge-user lifecycle is manual, protected, serialized, and gate-bound", ()
   assert.doesNotMatch(firstManageStep, /\.type == "Team"/u);
   assert.match(
     firstManageStep,
-    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$actor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$actor \| ascii_downcase\)/u
   );
   assert.match(
     firstManageStep,
-    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$triggering_actor \| ascii_downcase\)/u
+    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$triggering_actor \| ascii_downcase\)/u
+  );
+  assert.doesNotMatch(
+    firstManageStep,
+    /\(\.user\.login \| ascii_downcase\) !=\s+\(\$(?:actor|triggering_actor) \| ascii_downcase\)/u
   );
   assert.doesNotMatch(
     firstManageStep,

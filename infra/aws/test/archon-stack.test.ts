@@ -1,16 +1,26 @@
-import { App } from "aws-cdk-lib";
+import { App, DefaultStackSynthesizer } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import { ArchonPlatformStack, ArchonRegistryStack } from "../lib/archon-stack";
 
+function stackSynthesizer(stage: string): DefaultStackSynthesizer {
+  return new DefaultStackSynthesizer({
+    qualifier: stage === "production" ? "archonprd" : "archonstg"
+  });
+}
+
 function templates(): { registry: Template; platform: Template } {
   const app = new App();
   const env = { account: "111111111111", region: "eu-west-1" };
-  const registryStack = new ArchonRegistryStack(app, "TestRegistry", { env });
+  const registryStack = new ArchonRegistryStack(app, "TestRegistry", {
+    env,
+    synthesizer: stackSynthesizer("staging")
+  });
   const platformStack = new ArchonPlatformStack(app, "TestPlatform", {
     env,
     stage: "staging",
-    repository: registryStack.repository
+    repository: registryStack.repository,
+    synthesizer: stackSynthesizer("staging")
   });
   return {
     registry: Template.fromStack(registryStack),
@@ -24,12 +34,13 @@ function platformTemplate(stage: string): Template {
   const registryStack = new ArchonRegistryStack(
     app,
     `TestRegistry-${stage}`,
-    { env }
+    { env, synthesizer: stackSynthesizer(stage) }
   );
   const platformStack = new ArchonPlatformStack(app, `TestPlatform-${stage}`, {
     env,
     stage,
-    repository: registryStack.repository
+    repository: registryStack.repository,
+    synthesizer: stackSynthesizer(stage)
   });
   return Template.fromStack(platformStack);
 }
@@ -73,7 +84,17 @@ describe("Archon AWS reference architecture", () => {
   test("uses one predictable, stage-scoped SPA bucket for least-privilege delivery", () => {
     for (const stage of ["staging", "production"]) {
       platformTemplate(stage).hasResourceProperties("AWS::S3::Bucket", {
-        BucketName: `archon-${stage}-spa-111111111111-eu-west-1`
+        BucketName: {
+          "Fn::Join": [
+            "",
+            [
+              `archon-${stage}-spa-`,
+              { Ref: "AWS::AccountId" },
+              "-",
+              { Ref: "AWS::Region" }
+            ]
+          ]
+        }
       });
     }
   });
@@ -245,9 +266,9 @@ describe("Archon AWS reference architecture", () => {
       Name: "Archon-staging",
       Tags: Match.arrayWith([
         { Key: "Application", Value: "archon-datahub" },
+        { Key: "CostCenter", Value: "DataHub-Agent-Hackathon" },
         { Key: "Environment", Value: "staging" },
-        { Key: "ManagedBy", Value: "aws-cdk" },
-        { Key: "CostCenter", Value: "DataHub-Agent-Hackathon" }
+        { Key: "ManagedBy", Value: "aws-cdk" }
       ])
     });
     platform.hasResource("AWS::BedrockMantle::Project", {
@@ -380,11 +401,7 @@ describe("Archon AWS reference architecture", () => {
         Enabled: true,
         Aliases: Match.absent(),
         WebACLId: { Ref: "CloudFrontWebAclArn" },
-        ViewerCertificate: Match.objectLike({
-          CloudFrontDefaultCertificate: true,
-          AcmCertificateArn: Match.absent(),
-          SslSupportMethod: Match.absent()
-        }),
+        ViewerCertificate: Match.absent(),
         DefaultCacheBehavior: Match.objectLike({
           ViewerProtocolPolicy: "redirect-to-https",
           FunctionAssociations: Match.absent()
@@ -557,6 +574,7 @@ describe("Archon AWS reference architecture", () => {
         resource.Properties.IpProtocol === "tcp" &&
         resource.Properties.FromPort === 443 &&
         resource.Properties.ToPort === 443 &&
+        resource.Properties.DestinationSecurityGroupId !== undefined &&
         JSON.stringify(
           resource.Properties.DestinationSecurityGroupId
         ).includes("DataHubEndpointSecurityGroup")

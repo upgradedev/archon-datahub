@@ -426,7 +426,7 @@ application_stack_role_transition_json="$(
 application_stack_role_transition_state="$(
   jq -er '.state' <<<"${application_stack_role_transition_json}"
 )"
-if [[ "${application_stack_role_transition_state}" ==
+if [[ "${application_stack_role_transition_state}" == \
   "foundation-complete-deploy-migration-required" ]]; then
   migration_required_count="$(
     jq -er '.migrationRequiredCount' \
