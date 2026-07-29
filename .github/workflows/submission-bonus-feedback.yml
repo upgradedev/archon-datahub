@@ -969,7 +969,7 @@ jobs:
           artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
           path: ${{ runner.temp }}/submission-bonus-feedback-candidate-reviewed
 
-      - name: Revalidate private-reference candidate and public rules
+      - name: Independently revalidate private-reference candidate and public rules
         env:
           CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
           CANONICAL_EVIDENCE_DIGEST: ${{ needs.prepare.outputs.canonical_evidence_digest }}
