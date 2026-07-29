@@ -632,7 +632,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(ciWorkflow, /lockSha256: \$webLockSha256/u);
   assert.match(
     lockCandidateJob,
-    /root-package-lock\.json" \|[\s\S]+cut -d' ' -f1[\s\S]+\)\" = \"\$\{root_lock_sha\}\"/u
+    /root-package-lock\.json" \|[\s\S]+cut -d' ' -f1[\s\S]+\)" = "\$\{root_lock_sha\}"/u
   );
   assert.match(
     lockCandidateJob,
@@ -658,7 +658,7 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   );
   assert.match(
     lockCandidateJob,
-    /SHA256SUMS" \| cut -d' ' -f1[\s\S]+\)\" = \"\$\{SEALED_CANDIDATE_INVENTORY_SHA256\}\"/u
+    /SHA256SUMS" \| cut -d' ' -f1[\s\S]+\)" = "\$\{SEALED_CANDIDATE_INVENTORY_SHA256\}"/u
   );
   assert.match(
     lockCandidateJob,
