@@ -1,11 +1,13 @@
 import {
   ArnFormat,
   CfnOutput,
+  CfnParameter,
   Duration,
   RemovalPolicy,
   Stack,
   type StackProps
 } from "aws-cdk-lib";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as kms from "aws-cdk-lib/aws-kms";
 import * as logs from "aws-cdk-lib/aws-logs";
@@ -13,11 +15,14 @@ import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
 
 const CLOUDFRONT_CONTROL_PLANE_REGION = "us-east-1";
+const P256_CERTIFICATE_ALGORITHM = ["EC", "prime256v1"].join("_");
+
 export interface ArchonEdgeStackProps extends StackProps {
   readonly stage: string;
 }
 
 export class ArchonEdgeStack extends Stack {
+  readonly certificateArn: string;
   readonly webAclArn: string;
 
   constructor(scope: Construct, id: string, props: ArchonEdgeStackProps) {
@@ -45,6 +50,53 @@ export class ArchonEdgeStack extends Stack {
         region: CLOUDFRONT_CONTROL_PLANE_REGION
       }
     });
+
+    const cloudFrontDomainName = new CfnParameter(
+      this,
+      "CloudFrontDomainName",
+      {
+        type: "String",
+        description:
+          "Exact lowercase environment-specific DNS name served by CloudFront",
+        minLength: 4,
+        maxLength: 253,
+        allowedPattern:
+          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+        constraintDescription:
+          "must be an exact lowercase fully qualified DNS name without a wildcard or trailing dot"
+      }
+    );
+    const cloudFrontHostedZoneId = new CfnParameter(
+      this,
+      "CloudFrontHostedZoneId",
+      {
+        type: "String",
+        description:
+          "Route 53 public hosted-zone ID that owns CloudFrontDomainName",
+        allowedPattern: "^Z[A-Z0-9]{1,31}$",
+        constraintDescription:
+          "must be a Route 53 public hosted-zone ID without the /hostedzone/ prefix"
+      }
+    );
+    const viewerCertificate = new acm.CfnCertificate(
+      this,
+      "ViewerCertificate",
+      {
+        domainName: cloudFrontDomainName.valueAsString,
+        domainValidationOptions: [
+          {
+            domainName: cloudFrontDomainName.valueAsString,
+            hostedZoneId: cloudFrontHostedZoneId.valueAsString
+          }
+        ],
+        certificateExport: "DISABLED",
+        certificateTransparencyLoggingPreference: "ENABLED",
+        keyAlgorithm: P256_CERTIFICATE_ALGORITHM,
+        validationMethod: "DNS"
+      }
+    );
+    viewerCertificate.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    this.certificateArn = viewerCertificate.ref;
 
     const isProduction = stage === "production";
     const wafLogKey = new kms.Key(this, "WafLogKey", {
@@ -187,6 +239,11 @@ export class ArchonEdgeStack extends Stack {
     );
     wafLogging.node.addDependency(webAcl, wafLogGroup);
 
+    new CfnOutput(this, "ArchonCloudFrontCertificateArn", {
+      value: this.certificateArn,
+      description:
+        "us-east-1 ACM certificate ARN to pass to ArchonPlatformStack"
+    });
     new CfnOutput(this, "ArchonCloudFrontWebAclArn", {
       value: this.webAclArn,
       description:

@@ -320,6 +320,10 @@ test("production posture checks exact protected stacks, drift, and termination p
   assert.match(workflow, /READ_ROLE_ARN: \$\{\{ vars\.AWS_READ_ROLE_ARN \}\}/u);
   assert.match(
     workflow,
+    /role\/archon-production-posture-observer/u
+  );
+  assert.match(
+    workflow,
     /uses: aws-actions\/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c/u
   );
   assert.match(workflow, /allowed-account-ids: \$\{\{ vars\.AWS_ACCOUNT_ID \}\}/u);

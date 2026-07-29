@@ -286,11 +286,13 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 [infra/aws](infra/aws) contains the deployment-grade reference:
 
 - a self-contained `Archon-<stage>-Edge` stack in `us-east-1` that creates the
-  CloudFront-scope WAF and its KMS-encrypted retained logs, then hands the Web ACL ARN to
-  the regional platform deployment;
+  CloudFront-scope WAF, its KMS-encrypted retained logs, and an Amazon-issued,
+  DNS-validated P-256 ACM certificate for the exact environment hostname, then hands the
+  Web ACL and certificate ARNs to the regional platform deployment;
 - a private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC, served from the
-  distribution's provider-managed `*.cloudfront.net` hostname and default certificate,
-  with HTTPS enforcement, CloudFront access logging, and S3 server-access logging;
+  exact Route 53 alias with SNI and the `TLSv1.3_2025` security policy, a canonical-host
+  viewer-request gate on every behavior, CloudFront access logging, and S3 server-access
+  logging;
 - same-origin API Gateway and the exact Cognito user pool bound to one regional WAF,
   with throttling, strict schemas, access logs, active X-Ray, and a two-second encrypted
   cache limited to the capability-scoped status GET;
@@ -319,8 +321,9 @@ full commit SHA, and the exact run ID, run attempt, artifact ID, artifact digest
 receipt SHA-256 of a successful protected DataHub demo-state run for that release. It
 verifies GitHub's artifact envelope digests plus the inner
 container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
-the `us-east-1` edge stack before the regional platform stack, passes the CloudFront WAF
-output into that platform deployment, deploys staging via GitHub OIDC,
+the `us-east-1` edge stack before the regional platform stack, validates and passes its
+exact CloudFront WAF and ACM certificate outputs into that platform deployment, deploys
+staging via GitHub OIDC,
 runs security/smoke contracts, then waits at the protected `production` environment before
 promoting those same three immutable artifacts. Selecting an older retained CI run is the
 rollback path; no application artifact is rebuilt during deploy.
@@ -359,11 +362,13 @@ AWS deployment is user-gated until the protected foundation run, environment rol
 four tenant-scoped DataHub URLs, separate read/write secrets and provider RBAC, the
 DataHub Cloud `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME`, and a narrow
 `DATAHUB_DEMO_QUERY` that resolves to exactly one
-dataset exist. No custom DNS name, Route 53 hosted-zone input, or ACM certificate input is
-required: the regional stack uses the distribution's generated `*.cloudfront.net`
-hostname and default certificate, and derives the Cognito callback and logout URLs from
-that hostname. The target AWS account must be CDK-bootstrapped in both the workload region
-and `us-east-1` before the edge-first CloudFront-WAF deployment can run.
+dataset exist. Both protected environments also require an exact
+`ARCHON_CLOUDFRONT_DOMAIN_NAME` inside the account-owned public Route 53 zone selected by
+`ARCHON_CLOUDFRONT_HOSTED_ZONE_ID`. The edge stack issues the exact-name certificate in
+`us-east-1`; the regional stack creates dual-stack aliases and derives the Cognito callback
+and logout URLs from the canonical hostname. It has no insecure default-certificate
+fallback. The target AWS account must be CDK-bootstrapped in both the workload region and
+`us-east-1` before the edge-first CloudFront-WAF/certificate deployment can run.
 The deployment pipeline preflights the DataHub service, verified provider private DNS,
 external provider ownership, and exact two-AZ coverage before mutation, then drives the
 VPC and one dedicated interface endpoint from those validated AZs. Workloads reach
@@ -379,8 +384,9 @@ sanitized semantic projection must be identical in staging and production. Each
 SPA reads that same exact query from runtime config and pre-fills the audit scope, so the
 judge path is one click while remaining bounded to the proven single dataset. Each
 deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
-contracts, including the exact provider-managed viewer hostname/default-certificate mode,
-WAF identity, KMS-encrypted retained WAF log groups, sampled-data protection, five-minute
+contracts, including the exact canonical viewer hostname, public hosted-zone identity,
+Amazon-issued P-256 certificate and `TLSv1.3_2025` mode, WAF identity,
+KMS-encrypted retained WAF log groups, sampled-data protection, five-minute
 rate windows, exact enabled/rotating customer KMS keys, CDK-output digest, AWS-managed
 prefix-list identities, DataHub service/private-DNS/AZ identity, plus the exact live active IPv4 NLB/workload
 security-group rules. Source code does not imply that a public endpoint has already been

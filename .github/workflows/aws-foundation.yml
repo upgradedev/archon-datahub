@@ -61,11 +61,19 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}
+          STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}
+          PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}
+          PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}
         run: |
           set -euo pipefail
           : "${AWS_ACCOUNT_ID:?aws-foundation AWS_ACCOUNT_ID is required}"
           : "${AWS_REGION:?aws-foundation AWS_REGION is required}"
           : "${AWS_FOUNDATION_ROLE_ARN:?aws-foundation AWS_FOUNDATION_ROLE_ARN is required}"
+          : "${STAGING_CLOUDFRONT_DOMAIN_NAME:?aws-foundation STAGING_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${STAGING_CLOUDFRONT_HOSTED_ZONE_ID:?aws-foundation STAGING_CLOUDFRONT_HOSTED_ZONE_ID is required}"
+          : "${PRODUCTION_CLOUDFRONT_DOMAIN_NAME:?aws-foundation PRODUCTION_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID:?aws-foundation PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID is required}"
           echo "::add-mask::${AWS_ACCOUNT_ID}"
           echo "::add-mask::${AWS_FOUNDATION_ROLE_ARN}"
 
@@ -84,6 +92,14 @@ jobs:
           test "${AWS_REGION}" = "eu-west-1"
           test "${AWS_FOUNDATION_ROLE_ARN}" = \
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${FOUNDATION_ROLE_NAME}"
+          dns_name_pattern='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+          hosted_zone_id_pattern='^Z[A-Z0-9]{1,31}$'
+          [[ "${STAGING_CLOUDFRONT_DOMAIN_NAME}" =~ ${dns_name_pattern} ]]
+          [[ "${PRODUCTION_CLOUDFRONT_DOMAIN_NAME}" =~ ${dns_name_pattern} ]]
+          [[ "${STAGING_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ${hosted_zone_id_pattern} ]]
+          [[ "${PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ${hosted_zone_id_pattern} ]]
+          test "${STAGING_CLOUDFRONT_DOMAIN_NAME}" != \
+            "${PRODUCTION_CLOUDFRONT_DOMAIN_NAME}"
 
           repository_json="$(
             gh api \
@@ -225,6 +241,81 @@ jobs:
               "archon-datahub-github-staging-deploy" and
             .aws.deployRoles.production.roleName ==
               "archon-datahub-github-production-deploy" and
+            .aws.operationalRoles == {
+              judgeAccess: {
+                production: {
+                  environment: "judge-access-production",
+                  roleName: "archon-production-judge-user",
+                  variable: "AWS_JUDGE_USER_ROLE_ARN"
+                },
+                staging: {
+                  environment: "judge-access-staging",
+                  roleName: "archon-staging-judge-user",
+                  variable: "AWS_JUDGE_USER_ROLE_ARN"
+                }
+              },
+              managedPolicyCountPerRole: 0,
+              maximumSessionDurationSeconds: 3600,
+              productionObserver: {
+                environment: "production-observer",
+                roleName: "archon-production-posture-observer",
+                variable: "AWS_READ_ROLE_ARN"
+              },
+              productionPagingTest: {
+                environment: "production-paging-test",
+                roleName: "archon-production-paging-test",
+                variable: "AWS_PAGING_TEST_ROLE_ARN"
+              },
+              productionRuntimeRead: {
+                environment: "production-observer",
+                roleName: "archon-production-runtime-read",
+                variable: "AWS_RUNTIME_READ_ROLE_ARN"
+              }
+            } and
+            .aws.publicViewerDns == {
+              acmActions: [
+                "acm:AddTagsToCertificate",
+                "acm:DeleteCertificate",
+                "acm:DescribeCertificate",
+                "acm:ListTagsForCertificate",
+                "acm:RemoveTagsFromCertificate",
+                "acm:RequestCertificate",
+                "acm:UpdateCertificateOptions"
+              ],
+              aliasRecordTypes: ["A", "AAAA"],
+              certificateExport: "DISABLED",
+              certificateKeyAlgorithm: "EC_prime256v1",
+              certificateRegion: "us-east-1",
+              certificateTransparencyLogging: "ENABLED",
+              certificateValidation: "DNS",
+              cloudFrontMinimumProtocolVersion: "TLSv1.3_2025",
+              deploymentVariables: {
+                domainName: "ARCHON_CLOUDFRONT_DOMAIN_NAME",
+                hostedZoneId: "ARCHON_CLOUDFRONT_HOSTED_ZONE_ID"
+              },
+              executionPolicyFamilies: {
+                aliasesAndCanonicalHost: "delivery",
+                certificateAndValidation: "edge"
+              },
+              foundationVariables: {
+                productionDomainName:
+                  "PRODUCTION_CLOUDFRONT_DOMAIN_NAME",
+                productionHostedZoneId:
+                  "PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID",
+                stagingDomainName: "STAGING_CLOUDFRONT_DOMAIN_NAME",
+                stagingHostedZoneId:
+                  "STAGING_CLOUDFRONT_HOSTED_ZONE_ID"
+              },
+              requiresDistinctStageHostnames: true,
+              route53Actions: [
+                "route53:ChangeResourceRecordSets",
+                "route53:GetChange",
+                "route53:GetHostedZone",
+                "route53:ListResourceRecordSets"
+              ],
+              route53DomainsAllowed: false,
+              validationRecordTypes: ["CNAME"]
+            } and
             .aws.governedCanaryRoles.stackName ==
               "Archon-Governed-Canary-Roles" and
             (
@@ -256,6 +347,12 @@ jobs:
             .aws.bootstrap.terminationProtection == true and
             .aws.runtimeBoundary.schemaVersion ==
               "archon.aws-runtime-boundary/v1" and
+            .oidc.operationalSubjects == [
+              "repo:upgradedev/archon-datahub:environment:judge-access-production",
+              "repo:upgradedev/archon-datahub:environment:judge-access-staging",
+              "repo:upgradedev/archon-datahub:environment:production-observer",
+              "repo:upgradedev/archon-datahub:environment:production-paging-test"
+            ] and
             (.aws.runtimeBoundary.allowedActions | length) > 0 and
             (
               .aws.runtimeBoundary.approvedAwsManagedPolicies |
@@ -638,6 +735,10 @@ jobs:
           PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.production_edge_sha }}
           PINNED_BOOTSTRAP_VERSION: ${{ steps.bootstrap_template.outputs.version }}
           FOUNDATION_POLICY_ACTUAL_SHA: ${{ steps.identity.outputs.actual_sha }}
+          STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}
+          STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}
+          PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}
+          PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}
         run: bash scripts/reconcile-aws-foundation.sh
 
       - name: Revalidate master before credential clearing
@@ -722,6 +823,7 @@ jobs:
           DRIFT_SHA: ${{ steps.reconcile.outputs.drift_sha }}
           DEPLOY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.deploy_role_binding_sha }}
           CANARY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.canary_role_binding_sha }}
+          OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
         run: |
           set -euo pipefail
@@ -733,10 +835,12 @@ jobs:
             echo "- Stage execution policies and runtime boundaries: exact and drift-free"
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
+            echo "- Operational roles: stage judge access plus production posture, runtime, and paging"
             echo "- Shared API Gateway logging account: exact foundation-owned role"
             echo "- Application stack RoleARN transition: \`${APPLICATION_STACK_ROLE_TRANSITION}\`"
             echo "- Ten-stack drift digest: \`${DRIFT_SHA}\`"
             echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
+            echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"
             echo "- Foundation evidence digest: \`${FOUNDATION_SHA}\`"
           } >>"${GITHUB_STEP_SUMMARY}"

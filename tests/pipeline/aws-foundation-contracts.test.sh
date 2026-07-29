@@ -155,6 +155,78 @@ jq --exit-status '
     route53VpcCondition: "VPCId=vpc-*,VPCRegion=eu-west-1",
     serviceOwnerMustDifferFromDeploymentAccount: true
   } and
+  .aws.operationalRoles == {
+    judgeAccess: {
+      production: {
+        environment: "judge-access-production",
+        roleName: "archon-production-judge-user",
+        variable: "AWS_JUDGE_USER_ROLE_ARN"
+      },
+      staging: {
+        environment: "judge-access-staging",
+        roleName: "archon-staging-judge-user",
+        variable: "AWS_JUDGE_USER_ROLE_ARN"
+      }
+    },
+    managedPolicyCountPerRole: 0,
+    maximumSessionDurationSeconds: 3600,
+    productionObserver: {
+      environment: "production-observer",
+      roleName: "archon-production-posture-observer",
+      variable: "AWS_READ_ROLE_ARN"
+    },
+    productionPagingTest: {
+      environment: "production-paging-test",
+      roleName: "archon-production-paging-test",
+      variable: "AWS_PAGING_TEST_ROLE_ARN"
+    },
+    productionRuntimeRead: {
+      environment: "production-observer",
+      roleName: "archon-production-runtime-read",
+      variable: "AWS_RUNTIME_READ_ROLE_ARN"
+    }
+  } and
+  .aws.publicViewerDns == {
+    acmActions: [
+      "acm:AddTagsToCertificate",
+      "acm:DeleteCertificate",
+      "acm:DescribeCertificate",
+      "acm:ListTagsForCertificate",
+      "acm:RemoveTagsFromCertificate",
+      "acm:RequestCertificate",
+      "acm:UpdateCertificateOptions"
+    ],
+    aliasRecordTypes: ["A", "AAAA"],
+    certificateExport: "DISABLED",
+    certificateKeyAlgorithm: "EC_prime256v1",
+    certificateRegion: "us-east-1",
+    certificateTransparencyLogging: "ENABLED",
+    certificateValidation: "DNS",
+    cloudFrontMinimumProtocolVersion: "TLSv1.3_2025",
+    deploymentVariables: {
+      domainName: "ARCHON_CLOUDFRONT_DOMAIN_NAME",
+      hostedZoneId: "ARCHON_CLOUDFRONT_HOSTED_ZONE_ID"
+    },
+    executionPolicyFamilies: {
+      aliasesAndCanonicalHost: "delivery",
+      certificateAndValidation: "edge"
+    },
+    foundationVariables: {
+      productionDomainName: "PRODUCTION_CLOUDFRONT_DOMAIN_NAME",
+      productionHostedZoneId: "PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID",
+      stagingDomainName: "STAGING_CLOUDFRONT_DOMAIN_NAME",
+      stagingHostedZoneId: "STAGING_CLOUDFRONT_HOSTED_ZONE_ID"
+    },
+    requiresDistinctStageHostnames: true,
+    route53Actions: [
+      "route53:ChangeResourceRecordSets",
+      "route53:GetChange",
+      "route53:GetHostedZone",
+      "route53:ListResourceRecordSets"
+    ],
+    route53DomainsAllowed: false,
+    validationRecordTypes: ["CNAME"]
+  } and
   .aws.stages.staging.qualifier == "archonstg" and
   .aws.stages.production.qualifier == "archonprd" and
   (.aws.stages.staging.executionPolicyNames | length) == 10 and
@@ -187,6 +259,12 @@ jq --exit-status '
     "repo:upgradedev/archon-datahub:environment:governed-canary-prepare",
     "repo:upgradedev/archon-datahub:environment:governed-canary",
     "repo:upgradedev/archon-datahub:environment:governed-canary-recovery"
+  ] and
+  .oidc.operationalSubjects == [
+    "repo:upgradedev/archon-datahub:environment:judge-access-production",
+    "repo:upgradedev/archon-datahub:environment:judge-access-staging",
+    "repo:upgradedev/archon-datahub:environment:production-observer",
+    "repo:upgradedev/archon-datahub:environment:production-paging-test"
   ] and
   .evidence.containsRawAccountId == false and
   .evidence.containsRawRoleArn == false and
@@ -412,6 +490,8 @@ for family in \
     fail "execution template omits ${family} managed policy"
 done
 require_text "${execution_policy}" \
+  'CloudFrontDomainName:' \
+  'CloudFrontHostedZoneId:' \
   'ArchonCdkEuWest1ExecutionPolicyArns:' \
   'ArchonCdkUsEast1ExecutionPolicyArns:' \
   'ArchonCdkExecutionPolicyNames:' \
@@ -419,26 +499,160 @@ require_text "${execution_policy}" \
   'DenySharedApiGatewayAccountMutation' \
   'DenyRuntimeBoundaryRemoval' \
   'DenyFoundationControlPlaneMutation' \
+  'role/archon-staging-judge-user' \
+  'role/archon-production-judge-user' \
+  'role/archon-production-posture-observer' \
+  'role/archon-production-runtime-read' \
+  'role/archon-production-paging-test' \
   'iam:PermissionsBoundary: !Ref ArchonRuntimeBoundary' \
   'CreateOnlyTaggedSameRegionVpcEndpoints' \
   'ReconcileOnlyOwnedStageVpcEndpoints' \
   'DenyVpcEndpointOwnershipTagRemoval' \
   'ec2:VpceServiceOwner: !Ref AWS::AccountId' \
   'Action: route53:AssociateVPCWithHostedZone' \
-  'route53:VPCs: VPCId=vpc-*,VPCRegion=eu-west-1'
+  'route53:VPCs: VPCId=vpc-*,VPCRegion=eu-west-1' \
+  'RequestOnlyExactStageViewerCertificate' \
+  'acm:CertificateTransparencyLogging: ENABLED' \
+  'acm:Export: DISABLED' \
+  'acm:KeyAlgorithm: EC_prime256v1' \
+  'TagOnlyExactStageViewerCertificateAtCreate' \
+  'ReconcileOnlyExactStageViewerAliases' \
+  'ReconcileOnlyExactStageDnsValidation' \
+  "!Sub '_*.\${CloudFrontDomainName}'" \
+  'CreateOnlyTaggedStageCloudFrontFunctions' \
+  'ReconcileOnlyExactCanonicalHostFunction'
 forbid_text "${execution_policy}" \
   'route53:DisassociateVPCFromHostedZone' \
   'route53:VPCs: arn:' \
-  'route53:*'
-if grep -E \
-  '^[[:space:]]*(-[[:space:]]+|Action:[[:space:]]+)route53:' \
-  "${execution_policy}" |
-  grep -Fv 'route53:AssociateVPCWithHostedZone'; then
-  fail "execution template grants a Route53 action other than private-DNS association"
+  'route53:*' \
+  'acm:*'
+actual_route53_actions="$(
+  grep -E \
+    '^[[:space:]]*(Action:[[:space:]]+|-[[:space:]]+)route53:[A-Za-z0-9]+' \
+    "${execution_policy}" |
+    grep -Eo 'route53:[A-Za-z0-9]+' |
+    sort -u
+)"
+expected_route53_actions="$(
+  printf '%s\n' \
+    'route53:AssociateVPCWithHostedZone' \
+    'route53:ChangeResourceRecordSets' \
+    'route53:GetChange' \
+    'route53:GetHostedZone' \
+    'route53:ListResourceRecordSets' |
+    sort -u
+)"
+test "${actual_route53_actions}" = "${expected_route53_actions}" ||
+  fail "execution template Route53 action inventory is not exact"
+actual_acm_actions="$(
+  grep -E \
+    '^[[:space:]]*(Action:[[:space:]]+|-[[:space:]]+)acm:[A-Za-z0-9]+' \
+    "${execution_policy}" |
+    grep -Eo 'acm:[A-Za-z0-9]+' |
+    sort -u
+)"
+expected_acm_actions="$(
+  printf '%s\n' \
+    'acm:AddTagsToCertificate' \
+    'acm:DeleteCertificate' \
+    'acm:DescribeCertificate' \
+    'acm:ListTagsForCertificate' \
+    'acm:RemoveTagsFromCertificate' \
+    'acm:RequestCertificate' \
+    'acm:UpdateCertificateOptions' |
+    sort -u
+)"
+test "${actual_acm_actions}" = "${expected_acm_actions}" ||
+  fail "execution template ACM action inventory is not exact"
+if ! awk '
+  /^[[:space:]]*-[[:space:]]+Sid:[[:space:]]+RequestOnlyExactStageViewerCertificate[[:space:]]*$/ {
+    in_statement = 1
+    next
+  }
+  in_statement && /^[[:space:]]*-[[:space:]]+Sid:/ {
+    exit found_region ? 0 : 1
+  }
+  in_statement &&
+    /^[[:space:]]+aws:RequestedRegion:[[:space:]]+us-east-1[[:space:]]*$/ {
+      found_region = 1
+    }
+  END {
+    if (in_statement) {
+      exit found_region ? 0 : 1
+    }
+  }
+' "${execution_policy}"; then
+  fail "viewer certificate request must be region-bound to us-east-1"
 fi
-if grep -Eq \
-  '^[[:space:]]*-[[:space:]]+[a-z0-9-]+:\*[[:space:]]*$' \
-  "${execution_policy}"; then
+if ! awk '
+  /^[[:space:]]*-[[:space:]]+Sid:[[:space:]]+TagOnlyExactStageViewerCertificateAtCreate[[:space:]]*$/ {
+    in_statement = 1
+    next
+  }
+  in_statement && /^[[:space:]]*-[[:space:]]+Sid:/ {
+    exit (
+      found_action &&
+      found_resource &&
+      found_application &&
+      found_environment &&
+      found_managed_by &&
+      found_region
+    ) ? 0 : 1
+  }
+  in_statement &&
+    /^[[:space:]]+Action:[[:space:]]+acm:AddTagsToCertificate[[:space:]]*$/ {
+      found_action = 1
+    }
+  in_statement &&
+    /arn:\$\{AWS::Partition\}:acm:us-east-1:\$\{AWS::AccountId\}:certificate\/\*/ {
+      found_resource = 1
+    }
+  in_statement &&
+    /^[[:space:]]+aws:RequestTag\/Application:[[:space:]]+archon-datahub[[:space:]]*$/ {
+      found_application = 1
+    }
+  in_statement &&
+    /^[[:space:]]+aws:RequestTag\/Environment:[[:space:]]+!Ref DeploymentEnvironment[[:space:]]*$/ {
+      found_environment = 1
+    }
+  in_statement &&
+    /^[[:space:]]+aws:RequestTag\/ManagedBy:[[:space:]]+aws-cdk[[:space:]]*$/ {
+      found_managed_by = 1
+    }
+  in_statement &&
+    /^[[:space:]]+aws:RequestedRegion:[[:space:]]+us-east-1[[:space:]]*$/ {
+      found_region = 1
+    }
+  END {
+    if (in_statement) {
+      exit (
+        found_action &&
+        found_resource &&
+        found_application &&
+        found_environment &&
+        found_managed_by &&
+        found_region
+      ) ? 0 : 1
+    }
+  }
+' "${execution_policy}"; then
+  fail "viewer certificate create-time tagging policy is not exact"
+fi
+if awk '
+  /^[[:space:]]*-[[:space:]]+Sid:/ {
+    effect = ""
+  }
+  /^[[:space:]]+Effect:[[:space:]]+/ {
+    effect = $2
+  }
+  effect == "Allow" &&
+    /^[[:space:]]*-[[:space:]]+[a-z0-9-]+:\*[[:space:]]*$/ {
+      wildcard_allow = 1
+    }
+  END {
+    exit wildcard_allow ? 0 : 1
+  }
+' "${execution_policy}"; then
   fail "execution template contains a service-wide allow action"
 fi
 
@@ -451,6 +665,11 @@ require_text "${bootstrap_patcher}" \
   'cloudformation:ChangeSetName' \
   'cloudformation:RoleArn'
 require_text "${reconciler}" \
+  'STAGING_CLOUDFRONT_DOMAIN_NAME' \
+  'STAGING_CLOUDFRONT_HOSTED_ZONE_ID' \
+  'PRODUCTION_CLOUDFRONT_DOMAIN_NAME' \
+  'PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID' \
+  'CloudFrontHostedZoneId="${CLOUDFRONT_HOSTED_ZONE_ID[${stage}]}"' \
   'STAGING_PRIMARY_BOOTSTRAP_TEMPLATE' \
   'STAGING_EDGE_BOOTSTRAP_TEMPLATE' \
   'PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE' \
@@ -464,6 +683,7 @@ require_text "${reconciler}" \
   'stackCount: 10' \
   'sourceTemplateSha256: $sourceTemplateSha256' \
   'canary_role_binding_sha=${combined_canary_binding_sha}' \
+  'operational_role_binding_sha=${combined_operational_binding_sha}' \
   '.Stacks[0].StackStatus == "UPDATE_ROLLBACK_COMPLETE"' \
   'foundation-complete-deploy-migration-required' \
   'requires-explicit-deploy-migration' \
@@ -491,15 +711,50 @@ require_text "${deploy_workflow}" \
   'ALLOW_ROLE_MIGRATION=false' \
   'bash scripts/validate-cloudformation-role-bindings.sh'
 require_text "${foundation_workflow}" \
+  'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
+  'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
+  'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \
+  'PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}' \
   'APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}' \
+  'OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}' \
   'Application stack RoleARN transition:'
 require_text "${deploy_role}" \
+  'CloudFrontHostedZoneId:' \
+  'RoleName: !Sub archon-${DeploymentEnvironment}-judge-user' \
+  'RoleName: archon-production-posture-observer' \
+  'RoleName: archon-production-runtime-read' \
+  'RoleName: archon-production-paging-test' \
+  'environment:judge-access-${DeploymentEnvironment}' \
+  'environment:production-observer' \
+  'environment:production-paging-test' \
+  'ProductionPostureObserverRoleArn:' \
+  'ProductionRuntimeReadRoleArn:' \
+  'ProductionPagingTestRoleArn:' \
+  'acm:DescribeCertificate' \
+  'cloudfront:GetDistributionConfig' \
+  'cloudfront:DescribeFunction' \
+  'route53:GetHostedZone' \
+  'route53:ListResourceRecordSets' \
   'ec2:DescribeAvailabilityZones' \
   'ec2:DescribeSecurityGroupRules' \
   'ec2:DescribeSecurityGroups' \
   'ec2:DescribeSubnets' \
   'ec2:DescribeVpcEndpointServices' \
   'ec2:DescribeVpcEndpoints'
+test "$(
+  grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
+)" -eq 5
+if grep -Eq \
+  "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
+  "${deploy_role}"; then
+  fail "deploy and operational roles contain a wildcard action"
+fi
+require_text "${foundation_policy}" \
+  'role/archon-staging-judge-user' \
+  'role/archon-production-judge-user' \
+  'role/archon-production-posture-observer' \
+  'role/archon-production-runtime-read' \
+  'role/archon-production-paging-test'
 
 require_text "${api_gateway_account}" \
   'AWS::ApiGateway::Account' \
@@ -509,7 +764,6 @@ require_text "${api_gateway_account}" \
 for path in \
   "${foundation_policy}" \
   "${foundation_role}" \
-  "${deploy_role}" \
   "${canary_roles}"; do
   if grep -Eiq '(^|[^[:alnum:]_-])(acm|route53|route53domains):' "${path}"; then
     fail "${path#${repository_root}/} must not grant or deny ACM/Route53"
@@ -518,9 +772,10 @@ for path in \
     fail "${path#${repository_root}/} must not refer to AdministratorAccess"
   fi
 done
-if grep -Eiq '(^|[^[:alnum:]_-])(acm):' "${execution_policy}"; then
-  fail "execution template must not grant or deny ACM"
-fi
+forbid_text "${deploy_role}" \
+  'route53domains:*' \
+  'acm:*' \
+  'route53:*'
 if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
   fail "execution template must not refer to AdministratorAccess"
 fi
@@ -534,6 +789,10 @@ require_text "${runbook}" \
   '`archon-aws-foundation-assets`' \
   '`archon-aws-foundation-identity`' \
   '`archon-aws-foundation-attachments`' \
+  '`STAGING_CLOUDFRONT_DOMAIN_NAME`' \
+  '`STAGING_CLOUDFRONT_HOSTED_ZONE_ID`' \
+  '`PRODUCTION_CLOUDFRONT_DOMAIN_NAME`' \
+  '`PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID`' \
   '`AWS_CANARY_PREPARE_ROLE_ARN`' \
   '`AWS_CANARY_APPROVAL_ROLE_ARN`' \
   '`AWS_CANARY_RECOVERY_ROLE_ARN`' \

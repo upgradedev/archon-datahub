@@ -37,6 +37,11 @@ Configure these environment variables:
 | `AWS_RUNTIME_READ_ROLE_ARN` | Separate GitHub-OIDC runtime-byte observer role used only by `Production Supply Chain`. |
 | `ALARM_SUBSCRIPTION_ARN` | Exact confirmed subscription attached to the `ArchonAlarmTopicArn` output of `Archon-production`. |
 
+The AWS foundation creates both exact observer roles:
+`archon-production-posture-observer` and
+`archon-production-runtime-read`. Map their outputs to the two role variables
+above; do not reuse the production deploy role.
+
 `Archon-production-Edge` is always checked in `us-east-1`; it is not inferred from
 `AWS_REGION`. The subscription must be owned by `AWS_ACCOUNT_ID`, must have
 `PendingConfirmation=false`, and must expose a concrete SNS protocol. The workflow never

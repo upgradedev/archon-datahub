@@ -311,24 +311,58 @@
           VpcId: vpc-12345678
           CidrBlock: 10.42.4.0/22
           MapPublicIpOnLaunch: false
+      CanonicalHost:
+        Type: AWS::CloudFront::Function
+        Properties:
+          Name: archon-staging-canonical-host
+          AutoPublish: true
+          FunctionConfig:
+            Comment: Reject non-canonical hosts
+            Runtime: cloudfront-js-2.0
+          FunctionCode: function handler(event) { return event.request; }
       Distribution:
         Type: AWS::CloudFront::Distribution
         Properties:
           DistributionConfig:
             Enabled: true
+            Aliases:
+              - archon.example.com
             Logging:
               Bucket: logs.s3.amazonaws.com
             WebACLId: arn:aws:wafv2:us-east-1:111111111111:global/webacl/archon/00000000-0000-4000-8000-000000000000
             ViewerCertificate:
-              CloudFrontDefaultCertificate: true
+              AcmCertificateArn: arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-4000-8000-000000000000
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
             DefaultCacheBehavior:
               ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN:
+                    Fn::GetAtt:
+                      - CanonicalHost
+                      - FunctionARN
             CacheBehaviors:
               - PathPattern: api/*
                 OriginRequestPolicyId:
                   Ref: ApiOriginRequestPolicy
                 TargetOriginId: ApiOrigin
                 ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+              - PathPattern: runtime-config.json
+                TargetOriginId: SpaOrigin
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
             Origins:
               - Id: SpaOrigin
                 DomainName: spa.s3.amazonaws.com
@@ -3184,3 +3218,170 @@
   expectations:
     rules:
       platform_uses_one_private_dns_datahub_interface_endpoint: FAIL
+
+- name: a CloudFront default certificate fallback is rejected
+  input:
+    Resources:
+      CanonicalHost:
+        Type: AWS::CloudFront::Function
+        Properties:
+          Name: archon-staging-canonical-host
+          AutoPublish: true
+          FunctionConfig:
+            Runtime: cloudfront-js-2.0
+          FunctionCode: function handler(event) { return event.request; }
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - staging.archon.example
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: web-acl
+            ViewerCertificate:
+              CloudFrontDefaultCertificate: true
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN:
+                    Fn::GetAtt:
+                      - CanonicalHost
+                      - FunctionARN
+            CacheBehaviors:
+              - PathPattern: api/*
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+              - PathPattern: runtime-config.json
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+  expectations:
+    rules:
+      cloudfront_distributions_enforce_tls_logging_and_oac: FAIL
+
+- name: a CloudFront behavior without the canonical host function is rejected
+  input:
+    Resources:
+      CanonicalHost:
+        Type: AWS::CloudFront::Function
+        Properties:
+          Name: archon-staging-canonical-host
+          AutoPublish: true
+          FunctionConfig:
+            Runtime: cloudfront-js-2.0
+          FunctionCode: function handler(event) { return event.request; }
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - staging.archon.example
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: web-acl
+            ViewerCertificate:
+              AcmCertificateArn: certificate
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN:
+                    Fn::GetAtt:
+                      - CanonicalHost
+                      - FunctionARN
+            CacheBehaviors:
+              - PathPattern: api/*
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+              - PathPattern: runtime-config.json
+                ViewerProtocolPolicy: https-only
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+  expectations:
+    rules:
+      cloudfront_distributions_enforce_tls_logging_and_oac: FAIL
+
+- name: multiple CloudFront viewer aliases are rejected
+  input:
+    Resources:
+      CanonicalHost:
+        Type: AWS::CloudFront::Function
+        Properties:
+          Name: archon-staging-canonical-host
+          AutoPublish: true
+          FunctionConfig:
+            Runtime: cloudfront-js-2.0
+          FunctionCode: function handler(event) { return event.request; }
+      Distribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+          DistributionConfig:
+            Enabled: true
+            Aliases:
+              - staging.archon.example
+              - bypass.archon.example
+            Logging:
+              Bucket: logs.s3.amazonaws.com
+            WebACLId: web-acl
+            ViewerCertificate:
+              AcmCertificateArn: certificate
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.3_2025
+            DefaultCacheBehavior:
+              ViewerProtocolPolicy: redirect-to-https
+              FunctionAssociations:
+                - EventType: viewer-request
+                  FunctionARN:
+                    Fn::GetAtt:
+                      - CanonicalHost
+                      - FunctionARN
+            CacheBehaviors:
+              - PathPattern: api/*
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+              - PathPattern: runtime-config.json
+                ViewerProtocolPolicy: https-only
+                FunctionAssociations:
+                  - EventType: viewer-request
+                    FunctionARN:
+                      Fn::GetAtt:
+                        - CanonicalHost
+                        - FunctionARN
+            Origins:
+              - Id: SpaOrigin
+                DomainName: spa.s3.amazonaws.com
+                OriginAccessControlId: oac-123
+  expectations:
+    rules:
+      cloudfront_distributions_enforce_tls_logging_and_oac: FAIL

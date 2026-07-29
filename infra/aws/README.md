@@ -4,10 +4,11 @@ This CDK app implements a secure hosted-demo baseline without coupling release
 artifacts to an environment:
 
 - a self-contained edge stack in `us-east-1` that creates a CloudFront-scope WAF
-  with KMS-encrypted retained logs;
+  with KMS-encrypted retained logs and an Amazon-issued, DNS-validated P-256 ACM
+  certificate for the exact stage hostname;
 - a private, versioned S3 SPA behind CloudFront Origin Access Control, served from the
-  distribution's provider-managed `*.cloudfront.net` hostname and default certificate
-  with HTTPS enforcement, the edge WAF, CloudFront access logging, and S3
+  account-owned Route 53 alias with SNI, the `TLSv1.3_2025` security policy, an
+  exact-host viewer-request gate, the edge WAF, CloudFront access logging, and S3
   server-access logging;
 - same-origin `/api/*` routing to a separately regional-WAF-protected API Gateway;
 - a public, bounded durable audit start/status API plus an explicitly read-only synchronous
@@ -221,15 +222,17 @@ are mandatory. `WorkerDesiredCount` is configurable.
 either process. Set the parameter to one only after all live endpoint values and distinct
 tokens are installed. The isolated services autoscale from their own queues.
 
-Protected GitHub environments supply no custom CloudFront hostname, Route 53 hosted-zone
-ID, or ACM certificate input. The edge stack exports `ArchonCloudFrontWebAclArn`; the
-deployment pipeline validates that output and passes it to the regional platform as
-`CloudFrontWebAclArn`. The regional stack creates the distribution with no aliases, uses
-its generated `*.cloudfront.net` hostname and default certificate, and derives the
-Cognito callback and logout URLs from that hostname.
-This handoff keeps the CloudFront-scope WAF in its required `us-east-1` control plane
-without requiring a certificate, custom DNS resource, or WAF to be provisioned out of
-band.
+Each protected GitHub environment supplies an exact
+`ARCHON_CLOUDFRONT_DOMAIN_NAME` and its account-owned public
+`ARCHON_CLOUDFRONT_HOSTED_ZONE_ID`. The edge stack creates the exact-name ACM certificate
+and exports `ArchonCloudFrontCertificateArn` plus `ArchonCloudFrontWebAclArn`; the
+deployment pipeline validates both outputs and passes them to the regional platform.
+The regional stack imports that certificate, creates exactly one CloudFront alias plus A
+and AAAA Route 53 records, and derives the Cognito callback and logout URLs from the
+canonical hostname. The viewer policy is `TLSv1.3_2025` with SNI and every behavior uses
+the same viewer-request function to reject a non-canonical Host with `421`.
+This handoff keeps the certificate and CloudFront-scope WAF in their required
+`us-east-1` control plane without creating either resource out of band.
 The Web ACL parameter carries an obvious, non-deployable default solely so the exact
 CloudFormation assembly remains resolvable by IaC scanners. An unconditional
 CloudFormation Rule rejects that sentinel before create/update; the pipeline must supply
@@ -264,12 +267,15 @@ The pipeline separately resolves the AWS-owned
 passes them as `S3PrefixListId` and `DynamoDbPrefixListId`; operators do not configure
 GitHub variables for these regional AWS service identities.
 
-The regional stack uses the generated `*.cloudfront.net` hostname and CloudFront default
-certificate directly. It creates no Route 53 aliases, ACM certificate, custom hostname,
-or viewer-request CloudFront Function. The default SPA behavior redirects HTTP to HTTPS;
-the API and runtime-configuration behaviors are HTTPS-only. CloudFront OAC binds private
-SPA reads to the exact distribution, and the generated hostname is the sole public origin
-used for application, API, and Cognito redirect/logout outputs.
+The regional stack accepts only the validated custom hostname, edge certificate ARN, and
+public hosted-zone ID. It creates dual-stack Route 53 aliases and a single canonical-host
+CloudFront Function associated with the default, runtime-configuration, and API
+behaviors. The default SPA behavior redirects HTTP to HTTPS; the API and
+runtime-configuration behaviors are HTTPS-only. CloudFront OAC binds private SPA reads to
+the exact distribution, while the canonical alias is the sole accepted public origin
+used for application, API, and Cognito redirect/logout outputs. There is deliberately no
+`*.cloudfront.net` default-certificate fallback because AWS fixes that mode to the legacy
+`TLSv1` viewer policy.
 
 The platform WAF remains attached directly to the regional API Gateway, including for
 callers that bypass CloudFront. The edge WAF protects every CloudFront behavior and keeps
@@ -303,8 +309,9 @@ after the live production byte observation immediately before promotion evidence
 That final check must reproduce the original receipt digest; the canonical receipt is
 included in deployment evidence. Application rollback never reverts newer IaC protections.
 The staging and production receipts retain compact edge-security and network-egress
-contracts. They bind the exact provider-managed viewer hostname/default-certificate mode,
-WAF identity, and edge-output digest to the AWS-managed prefix-list identities and the
+contracts. They bind the exact canonical viewer hostname, public hosted-zone identity,
+Amazon-issued P-256 certificate, `TLSv1.3_2025` policy, WAF identity, and edge-output
+digest to the AWS-managed prefix-list identities and the
 preflighted plus live-verified DataHub service, provider private DNS, AZs, endpoint, and
 security-group rules.
 
@@ -569,11 +576,10 @@ This stack keeps environment-dependent claims explicit:
   before enabling a long-lived hosted environment;
 - the API stage enables the smallest `0.5` encrypted cache cluster only for the
   two-second status projection; include that hourly service cost in the same budget gate;
-- custom domain registration, Route 53 hosted-zone configuration, ACM certificate
-  provisioning, and a branded Cognito custom domain are not deployment prerequisites; the
-  regional stack uses its generated CloudFront hostname/default certificate and the
-  standard Cognito managed-login domain, while cross-account ECR replication and private
-  DataHub connectivity remain explicit optional environment decisions;
+- custom domain registration and an account-owned public Route 53 hosted zone are
+  deployment prerequisites; the edge stack provisions and retains the exact-name ACM
+  certificate, while a branded Cognito custom domain remains optional and the standard
+  Cognito managed-login domain remains supported;
 - a provider-issued DataHub Cloud interface service remains an environment prerequisite;
   the pipeline validates its external ownership, verified private DNS, same-region
   discovery, tenant URL binding, and exact two-AZ coverage, while resolving AWS-owned

@@ -57,6 +57,10 @@ long-lived AWS access keys in it. Configure:
 | `AWS_PAGING_TEST_ROLE_ARN` | Exact dedicated GitHub-OIDC role ARN ending in `role/archon-production-paging-test`. |
 | `ALARM_SUBSCRIPTION_ARN` | Exact confirmed external HTTPS subscription on the production alarm topic. |
 
+The AWS foundation creates the exact `archon-production-paging-test` role and
+returns its ARN for this environment. No hand-managed paging or deploy-role
+fallback is permitted.
+
 The workflow accepts no dispatch inputs, secrets, URLs, endpoints, payloads, topic ARNs,
 role ARNs, log-group names, or arbitrary JSON. Its unprivileged `control-plane` job derives
 its workflow source and required repository gates from the exact current `master` SHA.

@@ -248,6 +248,11 @@ jobs:
             exit 1
           }
           partition="$(cut -d: -f2 <<<"${READ_ROLE_ARN}")"
+          test "${READ_ROLE_ARN}" = \
+            "arn:${partition}:iam::${EXPECTED_ACCOUNT_ID}:role/archon-production-posture-observer" || {
+            echo "::error::AWS_READ_ROLE_ARN must name archon-production-posture-observer"
+            exit 1
+          }
           [[ "${ALARM_SUBSCRIPTION_ARN}" =~ ^arn:${partition}:sns:${DEPLOY_REGION}:${EXPECTED_ACCOUNT_ID}:[A-Za-z0-9_-]{1,256}:[0-9a-fA-F-]{36}$ ]] || {
             echo "::error::ALARM_SUBSCRIPTION_ARN must be a concrete subscription in the configured account and region"
             exit 1

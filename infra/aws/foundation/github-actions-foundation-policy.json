@@ -198,6 +198,11 @@
       "Resource": [
         "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-staging-deploy",
         "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-production-deploy",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-staging-judge-user",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-production-judge-user",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-production-posture-observer",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-production-runtime-read",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-production-paging-test",
         "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-prepare",
         "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-approval",
         "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-governed-canary-recovery",

@@ -473,13 +473,15 @@ UI layout.
   never a credential carrier. Its static/source contract is CI-validated; the actual
   `staging-bootstrap` and `promote` dispatches remain externally blocked and unexecuted.
 - Configure the dedicated `judge-access-staging` and `judge-access-production`
-  environments, narrow Cognito lifecycle roles, and protected password delivery described
+  environments, map the stage-specific judge roles emitted by the AWS foundation, and use
+  the protected password delivery described
   in [`docs/JUDGE_ACCESS.md`](JUDGE_ACCESS.md). Provision, rotate, reactivate, and deactivate judge
   identities only through the manual pipeline, require a permanent-password
   `CONFIRMED` read-back with no first-login challenge, and retain no credential artifact.
 - Configure `production-observer` with the exact production application origin and bounded
-  demo query. It carries no AWS role or provider token and must run the scheduled
-  credentialless availability workflow without an approval wait.
+  demo query. Map the foundation-owned posture and runtime-read roles for the workflows
+  that need AWS observation; the scheduled availability workflow itself remains
+  credentialless and must run without an approval wait.
 - Ensure each environment's OIDC deployment role can perform the live, read-only
   evidence calls used by the fail-closed gates, including `ec2:DescribeVpcs`,
   `ec2:DescribeSecurityGroups`, `ec2:DescribeSecurityGroupRules`,
@@ -494,12 +496,14 @@ UI layout.
 - Verify the foundation attestation proves the exact pinned `CDKToolkit` version in both
   the selected workload region and `us-east-1`; the edge-first deployment cannot create
   its global CloudFront-WAF/logging resources otherwise.
-- Do not configure a custom CloudFront hostname, Route 53 hosted-zone value, or ACM
-  certificate input. The regional stack uses the distribution's generated
-  `*.cloudfront.net` hostname and default certificate, enforces HTTPS, and derives the
-  Cognito callback/logout URLs from that hostname. `Archon-<stage>-Edge` creates only the
-  CloudFront-scope WAF and retained KMS-encrypted logs in `us-east-1`; the pipeline passes
-  its validated Web ACL ARN to the regional platform deployment.
+- Configure a distinct exact `ARCHON_CLOUDFRONT_DOMAIN_NAME` for each protected
+  environment and the account-owned public `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` that owns
+  both names. `Archon-<stage>-Edge` creates the DNS-validated P-256 certificate,
+  CloudFront-scope WAF, and retained KMS-encrypted logs in `us-east-1`; the pipeline
+  validates its certificate and Web ACL outputs before passing them to the regional
+  platform. Require the canonical alias, A/AAAA records, SNI, `TLSv1.3_2025`, and the
+  viewer-request Host gate on every behavior. Never fall back to CloudFront's
+  legacy-policy default certificate.
 - Configure the provider-issued
   `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME` in both protected environments. The deployment
   must discover it in the authenticated account/region, require an external owner and

@@ -116,8 +116,8 @@ general EC2 write grant. The endpoint service must be same-region and its
 owner must differ from the deployment account.
 
 AWS documents `route53:AssociateVPCWithHostedZone` as a dependent permission
-for `ec2:CreateVpcEndpoint` when private DNS is enabled. It is the only Route
-53 action in any Archon policy. It is restricted to hidden
+for `ec2:CreateVpcEndpoint` when private DNS is enabled. It is the only
+PrivateLink-related Route 53 action in the endpoint policy. It is restricted to hidden
 `arn:aws:route53:::hostedzone/*` resources and the documented multi-valued
 condition:
 
@@ -133,6 +133,11 @@ execution role, the exact stage stack/change-set gate, and the absence of
 direct trust or any other Route 53 permission. Modify and delete have no
 documented Route 53 dependency, so `DisassociateVPCFromHostedZone` is not
 granted.
+
+The separate public-viewer DNS statements are parameter-bound to one
+account-owned hosted zone and one exact stage hostname. They permit only the
+certificate-validation CNAME and the CloudFront A/AAAA aliases described
+below; they do not broaden the PrivateLink association boundary.
 
 PrivateLink is the network boundary. The read and write DataHub tokens and
 DataHub RBAC remain the authorization boundary; the endpoint does not turn a
@@ -156,9 +161,16 @@ deploy only an already verified digest and cannot publish, delete, or retag
 images. This is strong role and policy separation in one AWS account, but it
 is not account-grade isolation. Separate AWS accounts are required for that.
 
-No ACM permission exists. No Route 53 permission exists except the single
-private-DNS association dependency above. Certificate and public hosted-zone
-identifiers remain externally governed deployment inputs.
+The stage execution boundary admits only the exact ACM and Route 53 operations needed
+for the reviewed CloudFront viewer contract. The `us-east-1` edge stack may create,
+tag, describe, and retire its stage-owned exact-name certificate, while the regional
+platform stack may reconcile only A/AAAA aliases for the configured name in the
+account-owned public hosted zone. The existing single Route 53 private-DNS association
+permission remains separately constrained to the caller-account VPC in `eu-west-1`.
+Domain registration is never delegated to CloudFormation or GitHub OIDC:
+`route53domains:*` remains denied. The public hosted-zone ID and exact stage hostnames are
+protected-environment inputs, and every live certificate/zone/record read is revalidated
+before promotion.
 
 ## Initial foundation identity
 
@@ -264,6 +276,26 @@ arn:aws:iam::<AWS_ACCOUNT_ID>:role/<role-name-from-the-table>
 The corresponding environments also require the exact account and
 `eu-west-1` region variables already checked by their workflows.
 
+## Operational roles and variables
+
+The existing staging and production deploy-role stacks also own the
+least-privilege roles used by non-deployment operational pipelines:
+
+| GitHub environment | Variable | Exact role |
+| --- | --- | --- |
+| `judge-access-staging` | `AWS_JUDGE_USER_ROLE_ARN` | `archon-staging-judge-user` |
+| `judge-access-production` | `AWS_JUDGE_USER_ROLE_ARN` | `archon-production-judge-user` |
+| `production-observer` | `AWS_READ_ROLE_ARN` | `archon-production-posture-observer` |
+| `production-observer` | `AWS_RUNTIME_READ_ROLE_ARN` | `archon-production-runtime-read` |
+| `production-paging-test` | `AWS_PAGING_TEST_ROLE_ARN` | `archon-production-paging-test` |
+
+Every role trusts only its exact GitHub environment subject, has a
+3600-second maximum session duration, one bounded inline policy, no attached
+managed policy, and no deployment permission. The foundation evidence records
+each policy digest and an account-redacted role binding. The environment
+variables use
+`arn:aws:iam::<AWS_ACCOUNT_ID>:role/<exact-role-name-from-the-table>`.
+
 ## GitHub environment contract
 
 The `aws-foundation` environment is configured with:
@@ -281,10 +313,26 @@ Required `aws-foundation` variables:
 | `AWS_ACCOUNT_ID` | Exact 12-digit account ID |
 | `AWS_REGION` | `eu-west-1` |
 | `AWS_FOUNDATION_ROLE_ARN` | `arn:aws:iam::<AWS_ACCOUNT_ID>:role/archon-datahub-github-foundation` |
+| `STAGING_CLOUDFRONT_DOMAIN_NAME` | Exact lowercase staging hostname |
+| `STAGING_CLOUDFRONT_HOSTED_ZONE_ID` | Exact public hosted-zone ID owning the staging hostname |
+| `PRODUCTION_CLOUDFRONT_DOMAIN_NAME` | Exact lowercase production hostname, distinct from staging |
+| `PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID` | Exact public hosted-zone ID owning the production hostname |
 
 Staging and production each use their exact environment-bound
 `AWS_DEPLOY_ROLE_ARN`. No AWS access key or other long-lived credential is
 stored in GitHub.
+
+Each of those environments also supplies:
+
+| Variable | Contract |
+| --- | --- |
+| `ARCHON_CLOUDFRONT_DOMAIN_NAME` | Distinct exact lowercase hostname for the stage |
+| `ARCHON_CLOUDFRONT_HOSTED_ZONE_ID` | Raw ID of the account-owned public Route 53 zone containing that hostname |
+
+The edge stack creates the Amazon-issued P-256 certificate in `us-east-1`; no
+certificate ARN is stored as a mutable GitHub variable. The deploy workflow reads the
+edge output, proves the certificate is issued and exact-name scoped, and passes that ARN
+to the regional platform stack.
 
 ## Reconcile and deploy sequence
 

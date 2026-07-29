@@ -54,6 +54,7 @@ on:
 #
 # Configure these values in BOTH `staging` and `production` GitHub environments:
 #   vars:    AWS_DEPLOY_ROLE_ARN, AWS_ACCOUNT_ID, AWS_REGION,
+#            ARCHON_CLOUDFRONT_DOMAIN_NAME, ARCHON_CLOUDFRONT_HOSTED_ZONE_ID,
 #            ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME,
 #            DATAHUB_READ_GMS_URL, DATAHUB_READ_MCP_URL, DATAHUB_WRITE_GMS_URL,
 #            DATAHUB_WRITE_MCP_URL, DATAHUB_DEMO_QUERY
@@ -1283,6 +1284,8 @@ jobs:
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
           ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME: ${{ vars.ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME }}
         run: |
           set -euo pipefail
@@ -1305,7 +1308,42 @@ jobs:
           : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
           : "${EXPECTED_ACCOUNT_ID:?staging AWS_ACCOUNT_ID is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
           : "${ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME:?staging ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME is required}"
+          if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
+            ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
+            [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error::staging ARCHON_CLOUDFRONT_DOMAIN_NAME must be a lowercase concrete DNS hostname"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
+            echo "::error::staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID must be a raw Route 53 hosted-zone ID"
+            exit 1
+          fi
+          hosted_zone_json="$(
+            aws route53 get-hosted-zone \
+              --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '
+              .HostedZone.Id == $id and
+              .HostedZone.Config.PrivateZone == false
+            ' <<<"${hosted_zone_json}" >/dev/null || {
+            echo "::error::staging CloudFront alias requires the exact account-owned public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zone_name="$(
+            jq -er '.HostedZone.Name | rtrimstr(".")' \
+              <<<"${hosted_zone_json}"
+          )"
+          if [[ "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != "${hosted_zone_name}" &&
+            "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != *".${hosted_zone_name}" ]]; then
+            echo "::error::staging CloudFront domain is outside the configured hosted zone"
+            exit 1
+          fi
           test "${AWS_REGION}" = "eu-west-1" || {
             echo "::error::staging Bedrock Mantle deployment is pinned to eu-west-1"
             exit 1
@@ -1434,8 +1472,14 @@ jobs:
               --exclusively \
               --ci \
               --require-approval never \
+              --parameters "${edge_stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${edge_stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --outputs-file "${edge_outputs}"
           )
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontCertificateArn' "${edge_outputs}"
+          )"
           ARCHON_CLOUDFRONT_WEB_ACL_ARN="$(
             jq -er --arg stack "${edge_stack_name}" \
               '.[$stack].ArchonCloudFrontWebAclArn' "${edge_outputs}"
@@ -1444,6 +1488,35 @@ jobs:
             jq -er --arg stack "${edge_stack_name}" \
               '.[$stack].ArchonCloudFrontWafLogKeyArn' "${edge_outputs}"
           )"
+          certificate_algorithm="EC_prime256v1"
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::staging edge stack returned an invalid account-owned ACM certificate ARN"
+            exit 1
+          fi
+          certificate_json="$(
+            aws acm describe-certificate \
+              --region us-east-1 \
+              --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg certificateAlgorithm "${certificate_algorithm}" \
+            '
+              .Certificate.CertificateArn == $certificate and
+              .Certificate.Status == "ISSUED" and
+              .Certificate.Type == "AMAZON_ISSUED" and
+              .Certificate.DomainName == $domain and
+              .Certificate.KeyAlgorithm == $certificateAlgorithm and
+              ((.Certificate.SubjectAlternativeNames // []) == [$domain]) and
+              .Certificate.Options.CertificateTransparencyLoggingPreference ==
+                "ENABLED" and
+              .Certificate.Options.Export == "DISABLED"
+            ' <<<"${certificate_json}" >/dev/null || {
+            echo "::error::staging edge certificate must be non-exportable, transparent, Amazon-issued P-256, and scoped to the exact hostname"
+            exit 1
+          }
           if [[ ! "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_ACCOUNT_ID}:key/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::staging edge stack returned an invalid account-owned us-east-1 KMS key ARN"
             exit 1
@@ -1826,6 +1899,9 @@ jobs:
               --parameters "${stack_name}:CiRunId=${CI_RUN_ID}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
               --parameters "${stack_name}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
+              --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${stack_name}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --parameters "${stack_name}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
               --parameters "${stack_name}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
@@ -1839,6 +1915,128 @@ jobs:
               --parameters "${stack_name}:WorkerDesiredCount=0" \
               --outputs-file "${stack_outputs}"
           )
+
+          distribution_id="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
+          canonical_function_name="archon-staging-canonical-host"
+          canonical_function_json="$(
+            aws cloudfront describe-function \
+              --name "${canonical_function_name}" \
+              --stage LIVE \
+              --output json
+          )"
+          canonical_function_arn="$(
+            jq -er '.FunctionSummary.FunctionMetadata.FunctionARN' \
+              <<<"${canonical_function_json}"
+          )"
+          expected_canonical_function_code="$(
+            cat <<EOF
+          function handler(event) {
+            var request = event.request;
+            var host = (request.headers.host && request.headers.host.value || "").toLowerCase();
+            if (host !== "${ARCHON_CLOUDFRONT_DOMAIN_NAME}") {
+              return {
+                statusCode: 421,
+                statusDescription: "Misdirected Request",
+                headers: {
+                  "cache-control": { value: "no-store" },
+                  "content-type": { value: "text/plain; charset=utf-8" }
+                }
+              };
+            }
+            return request;
+          }
+          EOF
+          )"
+          jq -e \
+            --arg name "${canonical_function_name}" \
+            --arg arn "${canonical_function_arn}" \
+            '
+              .FunctionSummary.Name == $name and
+              .FunctionSummary.Status == "PUBLISHED" and
+              .FunctionSummary.FunctionConfig.Runtime ==
+                "cloudfront-js-2.0" and
+              .FunctionSummary.FunctionMetadata.FunctionARN == $arn and
+              .FunctionSummary.FunctionMetadata.Stage == "LIVE"
+            ' <<<"${canonical_function_json}" >/dev/null || {
+            echo "::error::staging canonical-host CloudFront Function is not published at LIVE"
+            exit 1
+          }
+          canonical_function_code_sha="$(
+            (
+              canonical_function_temp_dir="$(
+                mktemp -d \
+                  "${RUNNER_TEMP}/archon-staging-canonical-function.XXXXXX"
+              )"
+              trap 'rm -rf -- "${canonical_function_temp_dir}"' EXIT
+              canonical_function_code_file="${canonical_function_temp_dir}/function.js"
+              aws cloudfront get-function \
+                --name "${canonical_function_name}" \
+                --stage LIVE \
+                "${canonical_function_code_file}" >/dev/null
+              cmp --silent \
+                <(printf '%s' "${expected_canonical_function_code}") \
+                "${canonical_function_code_file}" || {
+                echo "::error::staging live canonical-host function code does not match the exact 421 handler"
+                exit 1
+              }
+              sha256sum "${canonical_function_code_file}" | awk '{print $1}'
+            )
+          )"
+          [[ "${canonical_function_code_sha}" =~ ^[a-f0-9]{64}$ ]]
+          deployed_distribution="$(
+            aws cloudfront get-distribution-config \
+              --id "${distribution_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg functionArn "${canonical_function_arn}" \
+            --arg webAcl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            '
+              def exact_canonical_association:
+                .FunctionAssociations.Quantity == 1 and
+                (
+                  [
+                    .FunctionAssociations.Items[]? |
+                    select(
+                      .EventType == "viewer-request" and
+                      .FunctionARN == $functionArn
+                    )
+                  ] |
+                  length
+                ) == 1;
+              .DistributionConfig |
+              .Enabled == true and
+              .IsIPV6Enabled == true and
+              .HttpVersion == "http2and3" and
+              .Aliases.Quantity == 1 and
+              ((.Aliases.Items // []) == [$domain]) and
+              .ViewerCertificate.ACMCertificateArn == $certificate and
+              .ViewerCertificate.SSLSupportMethod == "sni-only" and
+              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
+              .WebACLId == $webAcl and
+              .DefaultCacheBehavior.ViewerProtocolPolicy ==
+                "redirect-to-https" and
+              (.DefaultCacheBehavior | exact_canonical_association) and
+              .CacheBehaviors.Quantity == 2 and
+              ((.CacheBehaviors.Items // []) | length) == 2 and
+              (
+                [(.CacheBehaviors.Items // [])[].PathPattern] |
+                sort
+              ) == ["api/*", "runtime-config.json"] and
+              all(
+                .CacheBehaviors.Items[]?;
+                .ViewerProtocolPolicy == "https-only" and
+                exact_canonical_association
+              ) and
+              .Logging.Enabled == true and
+              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
+            ' <<<"${deployed_distribution}" >/dev/null || {
+            echo "::error::staging CloudFront runtime configuration violates the TLS, alias, canonical-host, WAF, or origin-access contract"
+            exit 1
+          }
 
           live_security_group_contract="$(
             ARCHON_STACK_NAME="${stack_name}" \
@@ -1884,6 +2082,9 @@ jobs:
           api_origin_contract="$(
             ARCHON_STACK_NAME="${stack_name}" \
             ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            ARCHON_CLOUDFRONT_DOMAIN_NAME="${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-api-origin-contract.sh
           )"
@@ -1900,25 +2101,84 @@ jobs:
           distribution_domain="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonCloudFrontDomainName' "${stack_outputs}")"
           [[ "${distribution_domain}" =~ ^d[a-z0-9]+[.]cloudfront[.]net$ ]]
-          test "${application_url}" = "https://${distribution_domain}"
-          test "${api_url}" = "https://${distribution_domain}/api"
+          test "${application_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+          test "${api_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}/api"
+          route53_records="$(
+            aws route53 list-resource-record-sets \
+              --hosted-zone-id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg target "${distribution_domain}" \
+            '
+              [
+                .ResourceRecordSets[] |
+                select(
+                  (.Name | rtrimstr(".")) == $domain and
+                  (.Type == "A" or .Type == "AAAA")
+                )
+              ] as $aliases |
+              ($aliases | length) == 2 and
+              (([$aliases[].Type] | sort) == ["A", "AAAA"]) and
+              all(
+                $aliases[];
+                (has("SetIdentifier") | not) and
+                .AliasTarget.HostedZoneId == "Z2FDTNDATAQYW2" and
+                (.AliasTarget.DNSName | rtrimstr(".")) == $target and
+                .AliasTarget.EvaluateTargetHealth == false
+              )
+            ' <<<"${route53_records}" >/dev/null || {
+            echo "::error::staging Route 53 dual-stack aliases violate the edge contract"
+            exit 1
+          }
           edge_outputs_sha="$(sha256sum "${edge_outputs}" | awk '{print $1}')"
           edge_security_contract="$(
             jq -cnS \
               --arg stackName "${edge_stack_name}" \
               --arg cdkOutputsSha256 "${edge_outputs_sha}" \
-              --arg domainName "${distribution_domain}" \
+              --arg domainName "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --arg distributionDomainName "${distribution_domain}" \
+              --arg hostedZoneId "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --arg certificateArn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --arg certificateAlgorithm "${certificate_algorithm}" \
+              --arg canonicalFunctionName "${canonical_function_name}" \
+              --arg canonicalFunctionArn "${canonical_function_arn}" \
+              --arg canonicalFunctionCodeSha256 "${canonical_function_code_sha}" \
               --arg webAclArn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --argjson logging "${edge_waf_log_contract}" \
               --argjson rateLimit 300 \
               '{
-                schemaVersion: "archon.edge-security-contract/v3",
+                schemaVersion: "archon.edge-security-contract/v4",
                 stackName: $stackName,
                 cdkOutputsSha256: $cdkOutputsSha256,
                 viewerEndpoint: {
                   domainName: $domainName,
-                  certificateMode: "CLOUDFRONT_DEFAULT",
-                  httpsOnly: true
+                  distributionDomainName: $distributionDomainName,
+                  certificateMode: "ACM_SNI",
+                  certificateArn: $certificateArn,
+                  certificateType: "AMAZON_ISSUED",
+                  certificateKeyAlgorithm: $certificateAlgorithm,
+                  certificateTransparencyLogging: "ENABLED",
+                  certificateExport: "DISABLED",
+                  sslSupportMethod: "sni-only",
+                  minimumProtocolVersion: "TLSv1.3_2025",
+                  httpsOnly: true,
+                  canonicalHostFunction: {
+                    name: $canonicalFunctionName,
+                    arn: $canonicalFunctionArn,
+                    codeSha256: $canonicalFunctionCodeSha256,
+                    stage: "LIVE",
+                    everyBehavior: true
+                  }
+                },
+                dns: {
+                  hostedZoneId: $hostedZoneId,
+                  recordTypes: ["A", "AAAA"],
+                  cloudFrontAliasHostedZoneId: "Z2FDTNDATAQYW2",
+                  validation: "passed"
                 },
                 webAcl: {
                   arn: $webAclArn,
@@ -2003,7 +2263,10 @@ jobs:
             echo "stack_outputs=${stack_outputs}"
             echo "edge_stack_name=${edge_stack_name}"
             echo "edge_outputs=${edge_outputs}"
-            echo "cloudfront_domain=${distribution_domain}"
+            echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+            echo "cloudfront_distribution_domain=${distribution_domain}"
+            echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
+            echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
             echo "cloudfront_web_acl_arn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}"
             echo "s3_prefix_list_id=${S3_PREFIX_LIST_ID}"
             echo "dynamodb_prefix_list_id=${DYNAMODB_PREFIX_LIST_ID}"
@@ -2172,6 +2435,9 @@ jobs:
           DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
           ARCHON_CLOUDFRONT_WEB_ACL_ARN: ${{ steps.deploy.outputs.cloudfront_web_acl_arn }}
           S3_PREFIX_LIST_ID: ${{ steps.deploy.outputs.s3_prefix_list_id }}
           DYNAMODB_PREFIX_LIST_ID: ${{ steps.deploy.outputs.dynamodb_prefix_list_id }}
@@ -2198,6 +2464,9 @@ jobs:
           : "${DATAHUB_DEMO_QUERY:?staging DATAHUB_DEMO_QUERY is required}"
           : "${DATAHUB_WRITE_GMS_URL:?staging DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?staging DATAHUB_WRITE_MCP_URL is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?staging ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?staging ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?staging ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
           : "${ARCHON_CLOUDFRONT_WEB_ACL_ARN:?staging ARCHON_CLOUDFRONT_WEB_ACL_ARN is required}"
           : "${S3_PREFIX_LIST_ID:?staging S3_PREFIX_LIST_ID is required}"
           : "${DYNAMODB_PREFIX_LIST_ID:?staging DYNAMODB_PREFIX_LIST_ID is required}"
@@ -2234,6 +2503,9 @@ jobs:
               --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
               --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
+              --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${STACK_NAME}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --parameters "${STACK_NAME}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
               --parameters "${STACK_NAME}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
@@ -2273,6 +2545,9 @@ jobs:
           final_api_origin_contract="$(
             ARCHON_STACK_NAME="${STACK_NAME}" \
             ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            ARCHON_CLOUDFRONT_DOMAIN_NAME="${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-api-origin-contract.sh
           )"
@@ -5242,6 +5517,8 @@ jobs:
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ vars.ARCHON_CLOUDFRONT_DOMAIN_NAME }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.ARCHON_CLOUDFRONT_HOSTED_ZONE_ID }}
           ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME: ${{ vars.ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME }}
         run: |
           set -euo pipefail
@@ -5264,8 +5541,48 @@ jobs:
           : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
           : "${EXPECTED_ACCOUNT_ID:?production AWS_ACCOUNT_ID is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
           : "${ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME:?production ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME is required}"
           : "${STAGING_APPLICATION_URL:?verified staging application URL is required}"
+          if (( ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} < 4 ||
+            ${#ARCHON_CLOUDFRONT_DOMAIN_NAME} > 253 )) ||
+            [[ ! "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo "::error::production ARCHON_CLOUDFRONT_DOMAIN_NAME must be a lowercase concrete DNS hostname"
+            exit 1
+          fi
+          if [[ "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}" ==
+            "${STAGING_APPLICATION_URL}" ]]; then
+            echo "::error::production and staging must use distinct CloudFront hostnames"
+            exit 1
+          fi
+          if [[ ! "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" =~ ^Z[A-Z0-9]{1,31}$ ]]; then
+            echo "::error::production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID must be a raw Route 53 hosted-zone ID"
+            exit 1
+          fi
+          hosted_zone_json="$(
+            aws route53 get-hosted-zone \
+              --id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg id "/hostedzone/${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+            '
+              .HostedZone.Id == $id and
+              .HostedZone.Config.PrivateZone == false
+            ' <<<"${hosted_zone_json}" >/dev/null || {
+            echo "::error::production CloudFront alias requires the exact account-owned public Route 53 hosted zone"
+            exit 1
+          }
+          hosted_zone_name="$(
+            jq -er '.HostedZone.Name | rtrimstr(".")' \
+              <<<"${hosted_zone_json}"
+          )"
+          if [[ "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != "${hosted_zone_name}" &&
+            "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" != *".${hosted_zone_name}" ]]; then
+            echo "::error::production CloudFront domain is outside the configured hosted zone"
+            exit 1
+          fi
           test "${AWS_REGION}" = "eu-west-1" || {
             echo "::error::production Bedrock Mantle deployment is pinned to eu-west-1"
             exit 1
@@ -5393,8 +5710,14 @@ jobs:
               --exclusively \
               --ci \
               --require-approval never \
+              --parameters "${edge_stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${edge_stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --outputs-file "${edge_outputs}"
           )
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN="$(
+            jq -er --arg stack "${edge_stack_name}" \
+              '.[$stack].ArchonCloudFrontCertificateArn' "${edge_outputs}"
+          )"
           ARCHON_CLOUDFRONT_WEB_ACL_ARN="$(
             jq -er --arg stack "${edge_stack_name}" \
               '.[$stack].ArchonCloudFrontWebAclArn' "${edge_outputs}"
@@ -5403,6 +5726,35 @@ jobs:
             jq -er --arg stack "${edge_stack_name}" \
               '.[$stack].ArchonCloudFrontWafLogKeyArn' "${edge_outputs}"
           )"
+          certificate_algorithm="EC_prime256v1"
+          if [[ ! "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" =~ ^arn:aws:acm:us-east-1:${EXPECTED_ACCOUNT_ID}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::production edge stack returned an invalid account-owned ACM certificate ARN"
+            exit 1
+          fi
+          certificate_json="$(
+            aws acm describe-certificate \
+              --region us-east-1 \
+              --certificate-arn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg certificateAlgorithm "${certificate_algorithm}" \
+            '
+              .Certificate.CertificateArn == $certificate and
+              .Certificate.Status == "ISSUED" and
+              .Certificate.Type == "AMAZON_ISSUED" and
+              .Certificate.DomainName == $domain and
+              .Certificate.KeyAlgorithm == $certificateAlgorithm and
+              ((.Certificate.SubjectAlternativeNames // []) == [$domain]) and
+              .Certificate.Options.CertificateTransparencyLoggingPreference ==
+                "ENABLED" and
+              .Certificate.Options.Export == "DISABLED"
+            ' <<<"${certificate_json}" >/dev/null || {
+            echo "::error::production edge certificate must be non-exportable, transparent, Amazon-issued P-256, and scoped to the exact hostname"
+            exit 1
+          }
           if [[ ! "${ARCHON_CLOUDFRONT_WAF_LOG_KEY_ARN}" =~ ^arn:aws:kms:us-east-1:${EXPECTED_ACCOUNT_ID}:key/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::production edge stack returned an invalid account-owned us-east-1 KMS key ARN"
             exit 1
@@ -5774,6 +6126,9 @@ jobs:
               --parameters "${stack_name}:CiRunId=${CI_RUN_ID}" \
               --parameters "${stack_name}:ReleaseSha=${RELEASE_SHA}" \
               --parameters "${stack_name}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
+              --parameters "${stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${stack_name}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${stack_name}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --parameters "${stack_name}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
               --parameters "${stack_name}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
@@ -5787,6 +6142,128 @@ jobs:
               --parameters "${stack_name}:WorkerDesiredCount=0" \
               --outputs-file "${stack_outputs}"
           )
+
+          distribution_id="$(jq -er --arg stack "${stack_name}" \
+            '.[$stack].ArchonCloudFrontDistributionId' "${stack_outputs}")"
+          canonical_function_name="archon-production-canonical-host"
+          canonical_function_json="$(
+            aws cloudfront describe-function \
+              --name "${canonical_function_name}" \
+              --stage LIVE \
+              --output json
+          )"
+          canonical_function_arn="$(
+            jq -er '.FunctionSummary.FunctionMetadata.FunctionARN' \
+              <<<"${canonical_function_json}"
+          )"
+          expected_canonical_function_code="$(
+            cat <<EOF
+          function handler(event) {
+            var request = event.request;
+            var host = (request.headers.host && request.headers.host.value || "").toLowerCase();
+            if (host !== "${ARCHON_CLOUDFRONT_DOMAIN_NAME}") {
+              return {
+                statusCode: 421,
+                statusDescription: "Misdirected Request",
+                headers: {
+                  "cache-control": { value: "no-store" },
+                  "content-type": { value: "text/plain; charset=utf-8" }
+                }
+              };
+            }
+            return request;
+          }
+          EOF
+          )"
+          jq -e \
+            --arg name "${canonical_function_name}" \
+            --arg arn "${canonical_function_arn}" \
+            '
+              .FunctionSummary.Name == $name and
+              .FunctionSummary.Status == "PUBLISHED" and
+              .FunctionSummary.FunctionConfig.Runtime ==
+                "cloudfront-js-2.0" and
+              .FunctionSummary.FunctionMetadata.FunctionARN == $arn and
+              .FunctionSummary.FunctionMetadata.Stage == "LIVE"
+            ' <<<"${canonical_function_json}" >/dev/null || {
+            echo "::error::production canonical-host CloudFront Function is not published at LIVE"
+            exit 1
+          }
+          canonical_function_code_sha="$(
+            (
+              canonical_function_temp_dir="$(
+                mktemp -d \
+                  "${RUNNER_TEMP}/archon-production-canonical-function.XXXXXX"
+              )"
+              trap 'rm -rf -- "${canonical_function_temp_dir}"' EXIT
+              canonical_function_code_file="${canonical_function_temp_dir}/function.js"
+              aws cloudfront get-function \
+                --name "${canonical_function_name}" \
+                --stage LIVE \
+                "${canonical_function_code_file}" >/dev/null
+              cmp --silent \
+                <(printf '%s' "${expected_canonical_function_code}") \
+                "${canonical_function_code_file}" || {
+                echo "::error::production live canonical-host function code does not match the exact 421 handler"
+                exit 1
+              }
+              sha256sum "${canonical_function_code_file}" | awk '{print $1}'
+            )
+          )"
+          [[ "${canonical_function_code_sha}" =~ ^[a-f0-9]{64}$ ]]
+          deployed_distribution="$(
+            aws cloudfront get-distribution-config \
+              --id "${distribution_id}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg certificate "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            --arg functionArn "${canonical_function_arn}" \
+            --arg webAcl "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
+            '
+              def exact_canonical_association:
+                .FunctionAssociations.Quantity == 1 and
+                (
+                  [
+                    .FunctionAssociations.Items[]? |
+                    select(
+                      .EventType == "viewer-request" and
+                      .FunctionARN == $functionArn
+                    )
+                  ] |
+                  length
+                ) == 1;
+              .DistributionConfig |
+              .Enabled == true and
+              .IsIPV6Enabled == true and
+              .HttpVersion == "http2and3" and
+              .Aliases.Quantity == 1 and
+              ((.Aliases.Items // []) == [$domain]) and
+              .ViewerCertificate.ACMCertificateArn == $certificate and
+              .ViewerCertificate.SSLSupportMethod == "sni-only" and
+              .ViewerCertificate.MinimumProtocolVersion == "TLSv1.3_2025" and
+              .WebACLId == $webAcl and
+              .DefaultCacheBehavior.ViewerProtocolPolicy ==
+                "redirect-to-https" and
+              (.DefaultCacheBehavior | exact_canonical_association) and
+              .CacheBehaviors.Quantity == 2 and
+              ((.CacheBehaviors.Items // []) | length) == 2 and
+              (
+                [(.CacheBehaviors.Items // [])[].PathPattern] |
+                sort
+              ) == ["api/*", "runtime-config.json"] and
+              all(
+                .CacheBehaviors.Items[]?;
+                .ViewerProtocolPolicy == "https-only" and
+                exact_canonical_association
+              ) and
+              .Logging.Enabled == true and
+              any(.Origins.Items[]?; (.OriginAccessControlId // "") != "")
+            ' <<<"${deployed_distribution}" >/dev/null || {
+            echo "::error::production CloudFront runtime configuration violates the TLS, alias, canonical-host, WAF, or origin-access contract"
+            exit 1
+          }
 
           live_security_group_contract="$(
             ARCHON_STACK_NAME="${stack_name}" \
@@ -5832,6 +6309,9 @@ jobs:
           api_origin_contract="$(
             ARCHON_STACK_NAME="${stack_name}" \
             ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+            ARCHON_CLOUDFRONT_DOMAIN_NAME="${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-api-origin-contract.sh
           )"
@@ -5848,10 +6328,37 @@ jobs:
           distribution_domain="$(jq -er --arg stack "${stack_name}" \
             '.[$stack].ArchonCloudFrontDomainName' "${stack_outputs}")"
           [[ "${distribution_domain}" =~ ^d[a-z0-9]+[.]cloudfront[.]net$ ]]
-          test "${application_url}" = "https://${distribution_domain}"
-          test "${api_url}" = "https://${distribution_domain}/api"
-          test "${application_url}" != "${STAGING_APPLICATION_URL}" || {
-            echo "::error::production and staging must use distinct CloudFront distributions"
+          test "${application_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+          test "${api_url}" = \
+            "https://${ARCHON_CLOUDFRONT_DOMAIN_NAME}/api"
+          route53_records="$(
+            aws route53 list-resource-record-sets \
+              --hosted-zone-id "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --output json
+          )"
+          jq -e \
+            --arg domain "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            --arg target "${distribution_domain}" \
+            '
+              [
+                .ResourceRecordSets[] |
+                select(
+                  (.Name | rtrimstr(".")) == $domain and
+                  (.Type == "A" or .Type == "AAAA")
+                )
+              ] as $aliases |
+              ($aliases | length) == 2 and
+              (([$aliases[].Type] | sort) == ["A", "AAAA"]) and
+              all(
+                $aliases[];
+                (has("SetIdentifier") | not) and
+                .AliasTarget.HostedZoneId == "Z2FDTNDATAQYW2" and
+                (.AliasTarget.DNSName | rtrimstr(".")) == $target and
+                .AliasTarget.EvaluateTargetHealth == false
+              )
+            ' <<<"${route53_records}" >/dev/null || {
+            echo "::error::production Route 53 dual-stack aliases violate the edge contract"
             exit 1
           }
           edge_outputs_sha="$(sha256sum "${edge_outputs}" | awk '{print $1}')"
@@ -5859,18 +6366,46 @@ jobs:
             jq -cnS \
               --arg stackName "${edge_stack_name}" \
               --arg cdkOutputsSha256 "${edge_outputs_sha}" \
-              --arg domainName "${distribution_domain}" \
+              --arg domainName "${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --arg distributionDomainName "${distribution_domain}" \
+              --arg hostedZoneId "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
+              --arg certificateArn "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --arg certificateAlgorithm "${certificate_algorithm}" \
+              --arg canonicalFunctionName "${canonical_function_name}" \
+              --arg canonicalFunctionArn "${canonical_function_arn}" \
+              --arg canonicalFunctionCodeSha256 "${canonical_function_code_sha}" \
               --arg webAclArn "${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --argjson logging "${edge_waf_log_contract}" \
               --argjson rateLimit 1000 \
               '{
-                schemaVersion: "archon.edge-security-contract/v3",
+                schemaVersion: "archon.edge-security-contract/v4",
                 stackName: $stackName,
                 cdkOutputsSha256: $cdkOutputsSha256,
                 viewerEndpoint: {
                   domainName: $domainName,
-                  certificateMode: "CLOUDFRONT_DEFAULT",
-                  httpsOnly: true
+                  distributionDomainName: $distributionDomainName,
+                  certificateMode: "ACM_SNI",
+                  certificateArn: $certificateArn,
+                  certificateType: "AMAZON_ISSUED",
+                  certificateKeyAlgorithm: $certificateAlgorithm,
+                  certificateTransparencyLogging: "ENABLED",
+                  certificateExport: "DISABLED",
+                  sslSupportMethod: "sni-only",
+                  minimumProtocolVersion: "TLSv1.3_2025",
+                  httpsOnly: true,
+                  canonicalHostFunction: {
+                    name: $canonicalFunctionName,
+                    arn: $canonicalFunctionArn,
+                    codeSha256: $canonicalFunctionCodeSha256,
+                    stage: "LIVE",
+                    everyBehavior: true
+                  }
+                },
+                dns: {
+                  hostedZoneId: $hostedZoneId,
+                  recordTypes: ["A", "AAAA"],
+                  cloudFrontAliasHostedZoneId: "Z2FDTNDATAQYW2",
+                  validation: "passed"
                 },
                 webAcl: {
                   arn: $webAclArn,
@@ -5955,7 +6490,10 @@ jobs:
             echo "stack_outputs=${stack_outputs}"
             echo "edge_stack_name=${edge_stack_name}"
             echo "edge_outputs=${edge_outputs}"
-            echo "cloudfront_domain=${distribution_domain}"
+            echo "cloudfront_domain=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"
+            echo "cloudfront_distribution_domain=${distribution_domain}"
+            echo "cloudfront_certificate_arn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"
+            echo "cloudfront_hosted_zone_id=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"
             echo "cloudfront_web_acl_arn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}"
             echo "s3_prefix_list_id=${S3_PREFIX_LIST_ID}"
             echo "dynamodb_prefix_list_id=${DYNAMODB_PREFIX_LIST_ID}"
@@ -6121,6 +6659,9 @@ jobs:
           DATAHUB_DEMO_QUERY: ${{ vars.DATAHUB_DEMO_QUERY }}
           DATAHUB_WRITE_GMS_URL: ${{ vars.DATAHUB_WRITE_GMS_URL }}
           DATAHUB_WRITE_MCP_URL: ${{ vars.DATAHUB_WRITE_MCP_URL }}
+          ARCHON_CLOUDFRONT_DOMAIN_NAME: ${{ steps.deploy.outputs.cloudfront_domain }}
+          ARCHON_CLOUDFRONT_CERTIFICATE_ARN: ${{ steps.deploy.outputs.cloudfront_certificate_arn }}
+          ARCHON_CLOUDFRONT_HOSTED_ZONE_ID: ${{ steps.deploy.outputs.cloudfront_hosted_zone_id }}
           ARCHON_CLOUDFRONT_WEB_ACL_ARN: ${{ steps.deploy.outputs.cloudfront_web_acl_arn }}
           S3_PREFIX_LIST_ID: ${{ steps.deploy.outputs.s3_prefix_list_id }}
           DYNAMODB_PREFIX_LIST_ID: ${{ steps.deploy.outputs.dynamodb_prefix_list_id }}
@@ -6147,6 +6688,9 @@ jobs:
           : "${DATAHUB_DEMO_QUERY:?production DATAHUB_DEMO_QUERY is required}"
           : "${DATAHUB_WRITE_GMS_URL:?production DATAHUB_WRITE_GMS_URL is required}"
           : "${DATAHUB_WRITE_MCP_URL:?production DATAHUB_WRITE_MCP_URL is required}"
+          : "${ARCHON_CLOUDFRONT_DOMAIN_NAME:?production ARCHON_CLOUDFRONT_DOMAIN_NAME is required}"
+          : "${ARCHON_CLOUDFRONT_CERTIFICATE_ARN:?production ARCHON_CLOUDFRONT_CERTIFICATE_ARN is required}"
+          : "${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID:?production ARCHON_CLOUDFRONT_HOSTED_ZONE_ID is required}"
           : "${ARCHON_CLOUDFRONT_WEB_ACL_ARN:?production ARCHON_CLOUDFRONT_WEB_ACL_ARN is required}"
           : "${S3_PREFIX_LIST_ID:?production S3_PREFIX_LIST_ID is required}"
           : "${DYNAMODB_PREFIX_LIST_ID:?production DYNAMODB_PREFIX_LIST_ID is required}"
@@ -6183,6 +6727,9 @@ jobs:
               --parameters "${STACK_NAME}:CiRunId=${CI_RUN_ID}" \
               --parameters "${STACK_NAME}:ReleaseSha=${RELEASE_SHA}" \
               --parameters "${STACK_NAME}:DemoQuery=${DATAHUB_DEMO_QUERY}" \
+              --parameters "${STACK_NAME}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+              --parameters "${STACK_NAME}:CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+              --parameters "${STACK_NAME}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
               --parameters "${STACK_NAME}:CloudFrontWebAclArn=${ARCHON_CLOUDFRONT_WEB_ACL_ARN}" \
               --parameters "${STACK_NAME}:S3PrefixListId=${S3_PREFIX_LIST_ID}" \
               --parameters "${STACK_NAME}:DynamoDbPrefixListId=${DYNAMODB_PREFIX_LIST_ID}" \
@@ -6222,6 +6769,9 @@ jobs:
           final_api_origin_contract="$(
             ARCHON_STACK_NAME="${STACK_NAME}" \
             ARCHON_STACK_OUTPUTS="${STACK_OUTPUTS}" \
+            ARCHON_CLOUDFRONT_DOMAIN_NAME="${ARCHON_CLOUDFRONT_DOMAIN_NAME}" \
+            ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}" \
+            ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}" \
             AWS_REGION="${AWS_REGION}" \
               bash scripts/validate-aws-api-origin-contract.sh
           )"

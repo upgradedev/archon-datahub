@@ -169,9 +169,34 @@ describe("Archon AWS reference architecture", () => {
       );
       expect(json.Parameters[parameter].Default).toBeUndefined();
     }
-    expect(json.Parameters.CloudFrontDomainName).toBeUndefined();
-    expect(json.Parameters.CloudFrontCertificateArn).toBeUndefined();
-    expect(json.Parameters.CloudFrontHostedZoneId).toBeUndefined();
+    expect(json.Parameters.CloudFrontDomainName).toEqual(
+      expect.objectContaining({
+        Type: "String",
+        MinLength: 4,
+        MaxLength: 253,
+        AllowedPattern:
+          "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+      })
+    );
+    expect(json.Parameters.CloudFrontDomainName.Default).toBeUndefined();
+    expect(json.Parameters.CloudFrontCertificateArn).toEqual(
+      expect.objectContaining({
+        Type: "String",
+        AllowedPattern:
+          "^arn:aws:acm:us-east-1:[0-9]{12}:certificate/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      })
+    );
+    expect(json.Parameters.CloudFrontCertificateArn.Default).toBeUndefined();
+    expect(json.Parameters.CloudFrontHostedZoneId).toEqual(
+      expect.objectContaining({
+        Type: "String",
+        AllowedPattern: "^Z[A-Z0-9]{1,31}$"
+      })
+    );
+    expect(json.Parameters.CloudFrontHostedZoneId.Description).toContain(
+      "public hosted-zone"
+    );
+    expect(json.Parameters.CloudFrontHostedZoneId.Default).toBeUndefined();
     expect(json.Parameters.CloudFrontWebAclArn).toEqual(
       expect.objectContaining({
         Default:
@@ -401,21 +426,48 @@ describe("Archon AWS reference architecture", () => {
   test("serves the private SPA through CloudFront OAC and routes same-origin API", () => {
     const { platform } = templates();
     platform.resourceCountIs("AWS::CloudFront::OriginAccessControl", 1);
-    platform.resourceCountIs("AWS::CloudFront::Function", 0);
-    platform.resourceCountIs("AWS::Route53::RecordSet", 0);
+    platform.resourceCountIs("AWS::CloudFront::Function", 1);
+    platform.resourceCountIs("AWS::Route53::RecordSet", 2);
+    platform.hasResourceProperties("AWS::CloudFront::Function", {
+      AutoPublish: true,
+      FunctionConfig: Match.objectLike({
+        Runtime: "cloudfront-js-2.0",
+        Comment: "Reject non-canonical Archon staging viewer hosts"
+      })
+    });
+    const canonicalHostFunction = Object.values(
+      platform.findResources("AWS::CloudFront::Function")
+    )[0] as any;
+    expect(canonicalHostFunction.Properties.Name).toBe(
+      "archon-staging-canonical-host"
+    );
+    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
+      "CloudFrontDomainName"
+    );
+    expect(JSON.stringify(canonicalHostFunction.Properties.FunctionCode)).toContain(
+      "421"
+    );
     platform.hasResourceProperties("AWS::CloudFront::Distribution", {
       DistributionConfig: Match.objectLike({
         DefaultRootObject: "index.html",
         HttpVersion: "http2and3",
         Enabled: true,
-        Aliases: Match.absent(),
+        Aliases: [{ Ref: "CloudFrontDomainName" }],
         WebACLId: { Ref: "CloudFrontWebAclArn" },
-        ViewerCertificate: {
-          CloudFrontDefaultCertificate: true
-        },
+        ViewerCertificate: Match.objectLike({
+          AcmCertificateArn: { Ref: "CloudFrontCertificateArn" },
+          SslSupportMethod: "sni-only",
+          MinimumProtocolVersion: "TLSv1.3_2025",
+          CloudFrontDefaultCertificate: Match.absent()
+        }),
         DefaultCacheBehavior: Match.objectLike({
           ViewerProtocolPolicy: "redirect-to-https",
-          FunctionAssociations: Match.absent()
+          FunctionAssociations: [
+            Match.objectLike({
+              EventType: "viewer-request",
+              FunctionARN: Match.anyValue()
+            })
+          ]
         }),
         Origins: Match.arrayWith([
           Match.objectLike({
@@ -433,6 +485,17 @@ describe("Archon AWS reference architecture", () => {
         CustomErrorResponses: Match.absent()
       })
     });
+    for (const recordType of ["A", "AAAA"]) {
+      platform.hasResourceProperties("AWS::Route53::RecordSet", {
+        Type: recordType,
+        Name: { Ref: "CloudFrontDomainName" },
+        HostedZoneId: { Ref: "CloudFrontHostedZoneId" },
+        AliasTarget: Match.objectLike({
+          HostedZoneId: "Z2FDTNDATAQYW2",
+          EvaluateTargetHealth: false
+        })
+      });
+    }
     const distribution = Object.values(
       platform.findResources("AWS::CloudFront::Distribution")
     )[0] as any;
@@ -442,7 +505,9 @@ describe("Archon AWS reference architecture", () => {
       );
     expect(
       distribution.Properties.DistributionConfig.CacheBehaviors.every(
-        (behavior: any) => behavior.FunctionAssociations === undefined
+        (behavior: any) =>
+          behavior.FunctionAssociations?.length === 1 &&
+          behavior.FunctionAssociations[0].EventType === "viewer-request"
       )
     ).toBe(true);
     expect(runtimeConfigBehavior).toEqual(
@@ -456,6 +521,16 @@ describe("Archon AWS reference architecture", () => {
       distribution.Properties.DistributionConfig.DefaultCacheBehavior
         .TargetOriginId
     );
+    const outputs = platform.toJSON().Outputs;
+    expect(outputs.ArchonApplicationUrl.Value).toEqual({
+      "Fn::Join": ["", ["https://", { Ref: "CloudFrontDomainName" }]]
+    });
+    expect(outputs.ArchonApiUrl.Value).toEqual({
+      "Fn::Join": [
+        "",
+        ["https://", { Ref: "CloudFrontDomainName" }, "/api"]
+      ]
+    });
   });
 
   test("uses workload-specific egress and an isolated Bedrock Mantle PrivateLink boundary", () => {
@@ -1174,9 +1249,6 @@ describe("Archon AWS reference architecture", () => {
     const [clientLogicalId, client] = Object.entries(
       platform.findResources("AWS::Cognito::UserPoolClient")
     )[0] as [string, any];
-    const distributionLogicalId = Object.keys(
-      platform.findResources("AWS::CloudFront::Distribution")
-    )[0]!;
     const resourceServerLogicalId = Object.keys(
       platform.findResources("AWS::Cognito::UserPoolResourceServer")
     )[0]!;
@@ -1194,11 +1266,7 @@ describe("Archon AWS reference architecture", () => {
       {
         "Fn::Join": [
           "",
-          [
-            "https://",
-            { "Fn::GetAtt": [distributionLogicalId, "DomainName"] },
-            "/"
-          ]
+          ["https://", { Ref: "CloudFrontDomainName" }, "/"]
         ]
       }
     ]);
@@ -1264,11 +1332,7 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonAuthRedirectUri.Value).toEqual({
       "Fn::Join": [
         "",
-        [
-          "https://",
-          { "Fn::GetAtt": [distributionLogicalId, "DomainName"] },
-          "/"
-        ]
+        ["https://", { Ref: "CloudFrontDomainName" }, "/"]
       ]
     });
     expect(outputs.ArchonApprovalOAuthScope.Value).toBe("archon/approve");
@@ -1687,6 +1751,7 @@ describe("Archon AWS reference architecture", () => {
   test("has private Fargate services, WAF, observability, and stable outputs", () => {
     const { platform } = templates();
     platform.hasResourceProperties("AWS::ECS::Cluster", {
+      ClusterName: "archon-staging",
       ClusterSettings: [
         {
           Name: "containerInsights",
@@ -1699,6 +1764,13 @@ describe("Archon AWS reference architecture", () => {
     });
     platform.resourceCountIs("AWS::ECS::Service", 3);
     const services = Object.values(platform.findResources("AWS::ECS::Service")) as any[];
+    expect(
+      services.map((service) => service.Properties.ServiceName).sort()
+    ).toEqual([
+      "archon-staging-api",
+      "archon-staging-audit-worker",
+      "archon-staging-remediation-worker"
+    ]);
     for (const service of services) {
       expect(
         service.Properties.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp
@@ -1950,6 +2022,14 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonUserPoolArn.Value).toEqual({
       "Fn::GetAtt": [userPoolLogicalIds[0], "Arn"]
     });
+    expect(outputs.ArchonEcsClusterName.Value).toBe("archon-staging");
+    expect(outputs.ArchonApiServiceName.Value).toBe("archon-staging-api");
+    expect(outputs.ArchonAuditWorkerServiceName.Value).toBe(
+      "archon-staging-audit-worker"
+    );
+    expect(outputs.ArchonRemediationWorkerServiceName.Value).toBe(
+      "archon-staging-remediation-worker"
+    );
     for (const [outputName, parameterName] of [
       ["ArchonContainerArchiveSha256", "ContainerArchiveSha256"],
       ["ArchonLambdaArchiveSha256", "LambdaArchiveSha256"],

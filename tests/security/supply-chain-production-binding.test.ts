@@ -213,6 +213,10 @@ test("OpenVEX renewal is bounded and enforced before dependency tooling", () => 
 });
 
 test("scheduled rescans bind exact live deployment, CI run, and subjects", () => {
+  assert.equal(
+    workflow.match(/role\/archon-production-runtime-read/gu)?.length,
+    2
+  );
   const resolverStart = workflow.indexOf("\n  resolve-production:");
   const scanStart = workflow.indexOf("\n  scan:");
   const revalidateStart = workflow.indexOf("\n  revalidate-production:");

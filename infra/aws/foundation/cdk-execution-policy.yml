@@ -9,6 +9,20 @@ Parameters:
     AllowedValues:
       - staging
       - production
+  CloudFrontDomainName:
+    Type: String
+    MinLength: 4
+    MaxLength: 253
+    AllowedPattern: '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    ConstraintDescription: >-
+      Must be the exact lowercase stage hostname without a wildcard or
+      trailing dot.
+  CloudFrontHostedZoneId:
+    Type: String
+    AllowedPattern: '^Z[A-Z0-9]{1,31}$'
+    ConstraintDescription: >-
+      Must be the exact public Route 53 hosted-zone ID without the
+      /hostedzone/ prefix.
 
 Conditions:
   IsStaging: !Equals [!Ref DeploymentEnvironment, staging]
@@ -349,6 +363,11 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-foundation
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-staging-deploy
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-datahub-github-production-deploy
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-staging-judge-user
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-production-judge-user
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-production-posture-observer
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-production-runtime-read
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-production-paging-test
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-cdk-*-staging
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-cdk-*-production
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-runtime-boundary-staging
@@ -1187,8 +1206,8 @@ Resources:
     Properties:
       ManagedPolicyName: !Sub archon-datahub-cdk-delivery-${DeploymentEnvironment}
       Description: !Sub >-
-        Exact CloudFront and regional WAF control-plane permissions for
-        Archon ${DeploymentEnvironment}.
+        Exact CloudFront, viewer-alias, and regional WAF control-plane
+        permissions for Archon ${DeploymentEnvironment}.
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -1253,6 +1272,80 @@ Resources:
               - cloudfront:GetResponseHeadersPolicyConfig
               - cloudfront:UpdateResponseHeadersPolicy
             Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:response-headers-policy/*
+          - Sid: CreateOnlyTaggedStageCloudFrontFunctions
+            Effect: Allow
+            Action: cloudfront:CreateFunction
+            Resource: "*"
+            Condition:
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestTag/ManagedBy: aws-cdk
+          - Sid: TagOnlyExactCanonicalHostFunction
+            Effect: Allow
+            Action: cloudfront:TagResource
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/archon-${DeploymentEnvironment}-canonical-host
+            Condition:
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestTag/ManagedBy: aws-cdk
+          - Sid: ReconcileOnlyExactCanonicalHostFunction
+            Effect: Allow
+            Action:
+              - cloudfront:DeleteFunction
+              - cloudfront:DescribeFunction
+              - cloudfront:GetFunction
+              - cloudfront:ListTagsForResource
+              - cloudfront:PublishFunction
+              - cloudfront:UntagResource
+              - cloudfront:UpdateFunction
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/archon-${DeploymentEnvironment}-canonical-host
+          - Sid: DenyCanonicalHostOwnershipTagRemoval
+            Effect: Deny
+            Action: cloudfront:UntagResource
+            Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/archon-${DeploymentEnvironment}-canonical-host
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+          - Sid: ReadExactPublicHostedZoneForAliases
+            Effect: Allow
+            Action:
+              - route53:GetHostedZone
+              - route53:ListResourceRecordSets
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${CloudFrontHostedZoneId}
+          - Sid: ReconcileOnlyExactStageViewerAliases
+            Effect: Allow
+            Action: route53:ChangeResourceRecordSets
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${CloudFrontHostedZoneId}
+            Condition:
+              ForAllValues:StringEquals:
+                route53:ChangeResourceRecordSetsActions:
+                  - CREATE
+                  - DELETE
+                  - UPSERT
+                route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                  - !Ref CloudFrontDomainName
+                route53:ChangeResourceRecordSetsRecordTypes:
+                  - A
+                  - AAAA
+          - Sid: ReadExactViewerAliasChanges
+            Effect: Allow
+            Action: route53:GetChange
+            Resource: !Sub arn:${AWS::Partition}:route53:::change/*
           - Sid: CreateOnlyTaggedStageRegionalWebAcl
             Effect: Allow
             Action:
@@ -1285,11 +1378,97 @@ Resources:
     Properties:
       ManagedPolicyName: !Sub archon-datahub-cdk-edge-${DeploymentEnvironment}
       Description: !Sub >-
-        Exact us-east-1 KMS, log, and CloudFront-scope WAF permissions for
-        Archon ${DeploymentEnvironment}.
+        Exact us-east-1 certificate, DNS-validation, KMS, log, and
+        CloudFront-scope WAF permissions for Archon ${DeploymentEnvironment}.
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          - Sid: RequestOnlyExactStageViewerCertificate
+            Effect: Allow
+            Action: acm:RequestCertificate
+            Resource: "*"
+            Condition:
+              ForAllValues:StringEquals:
+                acm:DomainNames:
+                  - !Ref CloudFrontDomainName
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+              StringEquals:
+                acm:CertificateTransparencyLogging: ENABLED
+                acm:Export: DISABLED
+                acm:KeyAlgorithm: EC_prime256v1
+                acm:ValidationMethod: DNS
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestTag/ManagedBy: aws-cdk
+                aws:RequestedRegion: us-east-1
+          - Sid: TagOnlyExactStageViewerCertificateAtCreate
+            Effect: Allow
+            Action: acm:AddTagsToCertificate
+            Resource: !Sub arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*
+            Condition:
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestTag/ManagedBy: aws-cdk
+                aws:RequestedRegion: us-east-1
+          - Sid: ReconcileOnlyTaggedStageViewerCertificates
+            Effect: Allow
+            Action:
+              - acm:AddTagsToCertificate
+              - acm:DeleteCertificate
+              - acm:DescribeCertificate
+              - acm:ListTagsForCertificate
+              - acm:RemoveTagsFromCertificate
+              - acm:UpdateCertificateOptions
+            Resource: !Sub arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Application: archon-datahub
+                aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+                aws:ResourceTag/ManagedBy: aws-cdk
+          - Sid: DenyViewerCertificateOwnershipTagRemoval
+            Effect: Deny
+            Action: acm:RemoveTagsFromCertificate
+            Resource: !Sub arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*
+            Condition:
+              ForAnyValue:StringEquals:
+                aws:TagKeys:
+                  - Application
+                  - Environment
+                  - ManagedBy
+          - Sid: ReadExactPublicHostedZoneForDnsValidation
+            Effect: Allow
+            Action:
+              - route53:GetHostedZone
+              - route53:ListResourceRecordSets
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${CloudFrontHostedZoneId}
+          - Sid: ReconcileOnlyExactStageDnsValidation
+            Effect: Allow
+            Action: route53:ChangeResourceRecordSets
+            Resource: !Sub arn:${AWS::Partition}:route53:::hostedzone/${CloudFrontHostedZoneId}
+            Condition:
+              ForAllValues:StringEquals:
+                route53:ChangeResourceRecordSetsActions:
+                  - CREATE
+                  - DELETE
+                  - UPSERT
+                route53:ChangeResourceRecordSetsRecordTypes:
+                  - CNAME
+              ForAllValues:StringLike:
+                route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                  - !Sub '_*.${CloudFrontDomainName}'
+          - Sid: ReadExactDnsValidationChanges
+            Effect: Allow
+            Action: route53:GetChange
+            Resource: !Sub arn:${AWS::Partition}:route53:::change/*
           - Sid: CreateTaggedStageEdgeKey
             Effect: Allow
             Action:

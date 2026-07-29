@@ -554,6 +554,48 @@ let cloudfront_distributions = Resources.*[
   Type == 'AWS::CloudFront::Distribution'
 ]
 
+let cloudfront_aliases = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.Aliases.*
+
+let cloudfront_functions = Resources.*[
+  Type == 'AWS::CloudFront::Function'
+]
+
+let cloudfront_cache_behaviors = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.CacheBehaviors.*
+
+let cloudfront_runtime_config_behaviors = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.CacheBehaviors[
+  PathPattern == 'runtime-config.json'
+]
+
+let cloudfront_default_function_associations = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.DefaultCacheBehavior.FunctionAssociations.*
+
+let cloudfront_cache_function_associations = Resources.*[
+  Type == 'AWS::CloudFront::Distribution'
+].Properties.DistributionConfig.CacheBehaviors.*.FunctionAssociations.*
+
+let cloudfront_default_function_refs =
+  %cloudfront_default_function_associations.FunctionARN.'Fn::GetAtt'[0]
+
+let cloudfront_cache_function_refs =
+  %cloudfront_cache_function_associations.FunctionARN.'Fn::GetAtt'[0]
+
+let referenced_cloudfront_default_functions =
+  Resources[
+    KEYS IN %cloudfront_default_function_refs
+  ]
+
+let referenced_cloudfront_cache_functions =
+  Resources[
+    KEYS IN %cloudfront_cache_function_refs
+  ]
+
 let cloudfront_origin_request_policies = Resources.*[
   Type == 'AWS::CloudFront::OriginRequestPolicy'
 ]
@@ -1623,18 +1665,68 @@ rule cloudfront_origin_key_uses_dedicated_cmk
 
 rule cloudfront_distributions_enforce_tls_logging_and_oac
   when %cloudfront_distributions !empty {
+  let cloudfront_distribution_count = count(%cloudfront_distributions)
+  let cloudfront_alias_count = count(%cloudfront_aliases)
+  let cloudfront_function_count = count(%cloudfront_functions)
+  let cloudfront_cache_behavior_count = count(%cloudfront_cache_behaviors)
+  let api_cache_behavior_count = count(%api_cache_behaviors)
+  let runtime_config_behavior_count =
+    count(%cloudfront_runtime_config_behaviors)
+  let default_function_association_count =
+    count(%cloudfront_default_function_associations)
+  let cache_function_association_count =
+    count(%cloudfront_cache_function_associations)
+  let referenced_default_function_count =
+    count(%referenced_cloudfront_default_functions)
+  let referenced_cache_function_count =
+    count(%referenced_cloudfront_cache_functions)
+
+  %cloudfront_distribution_count == 1
+  %cloudfront_alias_count == 1
+  %cloudfront_function_count == 1
+  %cloudfront_cache_behavior_count == 2
+  %api_cache_behavior_count == 1
+  %runtime_config_behavior_count == 1
+  %default_function_association_count == 1
+  %cache_function_association_count == 2
+  %referenced_default_function_count == 1
+  %referenced_cache_function_count == 1
+  %cloudfront_functions {
+    Properties {
+      Name == /^archon-(staging|production)-canonical-host$/
+      AutoPublish == true
+      FunctionConfig.Runtime == 'cloudfront-js-2.0'
+      FunctionCode exists
+    }
+  }
+  %referenced_cloudfront_default_functions {
+    Type == 'AWS::CloudFront::Function'
+  }
+  %referenced_cloudfront_cache_functions {
+    Type == 'AWS::CloudFront::Function'
+  }
   %cloudfront_distributions.Properties.DistributionConfig {
     Enabled == true
     Logging.Bucket exists
-    Aliases not exists
+    Aliases exists
+    Aliases !empty
     WebACLId exists
-    ViewerCertificate.CloudFrontDefaultCertificate == true
-    ViewerCertificate.AcmCertificateArn not exists
-    ViewerCertificate.SslSupportMethod not exists
-    DefaultCacheBehavior.FunctionAssociations not exists
+    ViewerCertificate.CloudFrontDefaultCertificate not exists
+    ViewerCertificate.AcmCertificateArn exists
+    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.3_2025'
+    ViewerCertificate.SslSupportMethod == 'sni-only'
+    DefaultCacheBehavior.FunctionAssociations !empty
+    DefaultCacheBehavior.FunctionAssociations[*] {
+      EventType == 'viewer-request'
+      FunctionARN.'Fn::GetAtt'[1] == 'FunctionARN'
+    }
     CacheBehaviors[*] {
       ViewerProtocolPolicy == 'https-only'
-      FunctionAssociations not exists
+      FunctionAssociations !empty
+      FunctionAssociations[*] {
+        EventType == 'viewer-request'
+        FunctionARN.'Fn::GetAtt'[1] == 'FunctionARN'
+      }
     }
     DefaultCacheBehavior.ViewerProtocolPolicy IN [
       'https-only',

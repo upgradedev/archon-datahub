@@ -63,6 +63,83 @@
         "stackName": "Archon-GitHub-Production-Deploy-Role"
       }
     },
+    "operationalRoles": {
+      "judgeAccess": {
+        "staging": {
+          "environment": "judge-access-staging",
+          "roleName": "archon-staging-judge-user",
+          "variable": "AWS_JUDGE_USER_ROLE_ARN"
+        },
+        "production": {
+          "environment": "judge-access-production",
+          "roleName": "archon-production-judge-user",
+          "variable": "AWS_JUDGE_USER_ROLE_ARN"
+        }
+      },
+      "productionObserver": {
+        "environment": "production-observer",
+        "roleName": "archon-production-posture-observer",
+        "variable": "AWS_READ_ROLE_ARN"
+      },
+      "productionRuntimeRead": {
+        "environment": "production-observer",
+        "roleName": "archon-production-runtime-read",
+        "variable": "AWS_RUNTIME_READ_ROLE_ARN"
+      },
+      "productionPagingTest": {
+        "environment": "production-paging-test",
+        "roleName": "archon-production-paging-test",
+        "variable": "AWS_PAGING_TEST_ROLE_ARN"
+      },
+      "managedPolicyCountPerRole": 0,
+      "maximumSessionDurationSeconds": 3600
+    },
+    "publicViewerDns": {
+      "certificateRegion": "us-east-1",
+      "certificateKeyAlgorithm": "EC_prime256v1",
+      "certificateTransparencyLogging": "ENABLED",
+      "certificateExport": "DISABLED",
+      "certificateValidation": "DNS",
+      "cloudFrontMinimumProtocolVersion": "TLSv1.3_2025",
+      "foundationVariables": {
+        "stagingDomainName": "STAGING_CLOUDFRONT_DOMAIN_NAME",
+        "stagingHostedZoneId": "STAGING_CLOUDFRONT_HOSTED_ZONE_ID",
+        "productionDomainName": "PRODUCTION_CLOUDFRONT_DOMAIN_NAME",
+        "productionHostedZoneId": "PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID"
+      },
+      "deploymentVariables": {
+        "domainName": "ARCHON_CLOUDFRONT_DOMAIN_NAME",
+        "hostedZoneId": "ARCHON_CLOUDFRONT_HOSTED_ZONE_ID"
+      },
+      "executionPolicyFamilies": {
+        "certificateAndValidation": "edge",
+        "aliasesAndCanonicalHost": "delivery"
+      },
+      "aliasRecordTypes": [
+        "A",
+        "AAAA"
+      ],
+      "validationRecordTypes": [
+        "CNAME"
+      ],
+      "acmActions": [
+        "acm:AddTagsToCertificate",
+        "acm:DeleteCertificate",
+        "acm:DescribeCertificate",
+        "acm:ListTagsForCertificate",
+        "acm:RemoveTagsFromCertificate",
+        "acm:RequestCertificate",
+        "acm:UpdateCertificateOptions"
+      ],
+      "route53Actions": [
+        "route53:ChangeResourceRecordSets",
+        "route53:GetChange",
+        "route53:GetHostedZone",
+        "route53:ListResourceRecordSets"
+      ],
+      "route53DomainsAllowed": false,
+      "requiresDistinctStageHostnames": true
+    },
     "governedCanaryRoles": {
       "stackName": "Archon-Governed-Canary-Roles",
       "region": "eu-west-1",
@@ -267,6 +344,12 @@
     "deploySubjects": [
       "repo:upgradedev/archon-datahub:environment:production",
       "repo:upgradedev/archon-datahub:environment:staging"
+    ],
+    "operationalSubjects": [
+      "repo:upgradedev/archon-datahub:environment:judge-access-production",
+      "repo:upgradedev/archon-datahub:environment:judge-access-staging",
+      "repo:upgradedev/archon-datahub:environment:production-observer",
+      "repo:upgradedev/archon-datahub:environment:production-paging-test"
     ],
     "governedCanarySubjects": [
       "repo:upgradedev/archon-datahub:environment:governed-canary-prepare",

@@ -104,6 +104,11 @@ Configure:
 | `JUDGE_USERNAME` | protected environment secret | Fixed exact lower-case judge email for the selected environment. It is used only after approval and never appears in dispatch metadata. |
 | `JUDGE_PASSWORD` | protected environment secret | Stable pipeline-managed judge credential used only by `provision`, `rotate`, and `reactivate`; at least 14 characters with lower-case, upper-case, digit, and symbol and no whitespace. |
 
+The AWS foundation creates the two exact
+`archon-staging-judge-user` and `archon-production-judge-user` roles. Map each
+foundation output to its matching protected environment; do not create or
+broaden a second hand-managed role.
+
 Do not define organization- or repository-level values named
 `AWS_JUDGE_USER_ROLE_ARN`, `AWS_ACCOUNT_ID`, `AWS_REGION`,
 `JUDGE_REVIEWER_USER_ID`, `JUDGE_USERNAME`, or `JUDGE_PASSWORD`. GitHub resolves

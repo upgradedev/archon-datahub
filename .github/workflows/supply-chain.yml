@@ -121,6 +121,12 @@ jobs:
             echo "::error::AWS_RUNTIME_READ_ROLE_ARN must be an IAM role in AWS_ACCOUNT_ID"
             exit 1
           }
+          partition="$(cut -d: -f2 <<<"${READ_ROLE_ARN}")"
+          test "${READ_ROLE_ARN}" = \
+            "arn:${partition}:iam::${EXPECTED_ACCOUNT_ID}:role/archon-production-runtime-read" || {
+            echo "::error::AWS_RUNTIME_READ_ROLE_ARN must name archon-production-runtime-read"
+            exit 1
+          }
           test "${GITHUB_REF}" = "refs/heads/master" || {
             echo "::error::Scheduled production rescans must execute from master"
             exit 1
@@ -2304,6 +2310,9 @@ jobs:
           [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
           [[ "${DEPLOY_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
           [[ "${READ_ROLE_ARN}" =~ ^arn:aws[a-z-]*:iam::${EXPECTED_ACCOUNT_ID}:role/[^[:space:]]+$ ]]
+          partition="$(cut -d: -f2 <<<"${READ_ROLE_ARN}")"
+          test "${READ_ROLE_ARN}" = \
+            "arn:${partition}:iam::${EXPECTED_ACCOUNT_ID}:role/archon-production-runtime-read"
           [[ "${EXPECTED_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${EXPECTED_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${EXPECTED_BINDING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]

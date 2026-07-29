@@ -11,6 +11,9 @@ mkdir -p "${work_root}/bin"
 
 stack_outputs="${work_root}/stack-outputs.json"
 datahub_service_name="com.amazonaws.vpce.eu-west-1.vpce-svc-ccccccccccccccccc"
+cloudfront_domain_name="staging.archon.example"
+cloudfront_certificate_arn="arn:aws:acm:us-east-1:111111111111:certificate/12345678-1234-4234-8234-1234567890ab"
+cloudfront_hosted_zone_id="Z0123456789ABCDEFGHIJ"
 cat >"${stack_outputs}" <<'JSON'
 {
   "Archon-staging": {
@@ -78,6 +81,31 @@ api_key_id="key1234567890abcdef"
 usage_plan_id="plan123456"
 origin_request_policy_id="11111111-2222-4333-8444-555555555555"
 distribution_id="E123456789ABCD"
+distribution_domain="d111111abcdef8.cloudfront.net"
+viewer_domain="staging.archon.example"
+hosted_zone_id="Z0123456789ABCDEFGHIJ"
+certificate_arn="arn:aws:acm:us-east-1:111111111111:certificate/12345678-1234-4234-8234-1234567890ab"
+canonical_function_name="archon-staging-canonical-host"
+canonical_function_arn="arn:aws:cloudfront::111111111111:function/${canonical_function_name}"
+expected_canonical_function_code="$(
+  cat <<EOF
+function handler(event) {
+  var request = event.request;
+  var host = (request.headers.host && request.headers.host.value || "").toLowerCase();
+  if (host !== "${viewer_domain}") {
+    return {
+      statusCode: 421,
+      statusDescription: "Misdirected Request",
+      headers: {
+        "cache-control": { value: "no-store" },
+        "content-type": { value: "text/plain; charset=utf-8" }
+      }
+    };
+  }
+  return request;
+}
+EOF
+)"
 control_start_request_template="$(
   cat <<'VTL'
 {
@@ -453,6 +481,11 @@ JSON
       cat <<JSON
 {
   "TemplateBody":{
+    "Parameters":{
+      "CloudFrontDomainName":{"Type":"String"},
+      "CloudFrontCertificateArn":{"Type":"String"},
+      "CloudFrontHostedZoneId":{"Type":"String"}
+    },
     "Resources":{
       "RestApiLogical":{
         "Type":"AWS::ApiGateway::RestApi",
@@ -499,12 +532,39 @@ JSON
       "OriginPolicyLogical":{
         "Type":"AWS::CloudFront::OriginRequestPolicy"
       },
+      "CanonicalHostLogical":{
+        "Type":"AWS::CloudFront::Function",
+        "Properties":{
+          "Name":"archon-staging-canonical-host",
+          "AutoPublish":true,
+          "FunctionConfig":{
+            "Comment":"Reject non-canonical Archon staging viewer hosts",
+            "Runtime":"cloudfront-js-2.0"
+          },
+          "FunctionCode":"function handler(event) { return event.request; }"
+        }
+      },
       "DistributionLogical":{
         "Type":"AWS::CloudFront::Distribution",
         "DependsOn":["OriginSecretLogical"],
         "Properties":{
           "DistributionConfig":{
             "Enabled":true,
+            "Aliases":[{"Ref":"CloudFrontDomainName"}],
+            "ViewerCertificate":{
+              "AcmCertificateArn":{"Ref":"CloudFrontCertificateArn"},
+              "MinimumProtocolVersion":"TLSv1.3_2025",
+              "SslSupportMethod":"sni-only"
+            },
+            "DefaultCacheBehavior":{
+              "ViewerProtocolPolicy":"redirect-to-https",
+              "FunctionAssociations":[{
+                "EventType":"viewer-request",
+                "FunctionARN":{
+                  "Fn::GetAtt":["CanonicalHostLogical","FunctionARN"]
+                }
+              }]
+            },
             "Origins":[{
               "Id":"api-origin",
               "DomainName":{
@@ -543,6 +603,12 @@ JSON
               "ViewerProtocolPolicy":"https-only",
               "CachePolicyId":"4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
               "OriginRequestPolicyId":{"Ref":"OriginPolicyLogical"},
+              "FunctionAssociations":[{
+                "EventType":"viewer-request",
+                "FunctionARN":{
+                  "Fn::GetAtt":["CanonicalHostLogical","FunctionARN"]
+                }
+              }],
               "Compress":true,
               "AllowedMethods":[
                 "HEAD",
@@ -554,7 +620,43 @@ JSON
                 "PATCH"
               ],
               "CachedMethods":["OPTIONS","HEAD","GET"]
+            },{
+              "PathPattern":"runtime-config.json",
+              "TargetOriginId":"spa-origin",
+              "ViewerProtocolPolicy":"https-only",
+              "FunctionAssociations":[{
+                "EventType":"viewer-request",
+                "FunctionARN":{
+                  "Fn::GetAtt":["CanonicalHostLogical","FunctionARN"]
+                }
+              }]
             }]
+          }
+        }
+      },
+      "CloudFrontAliasALogical":{
+        "Type":"AWS::Route53::RecordSet",
+        "Properties":{
+          "Name":{"Ref":"CloudFrontDomainName"},
+          "Type":"A",
+          "HostedZoneId":{"Ref":"CloudFrontHostedZoneId"},
+          "AliasTarget":{
+            "DNSName":{"Fn::GetAtt":["DistributionLogical","DomainName"]},
+            "EvaluateTargetHealth":false,
+            "HostedZoneId":"Z2FDTNDATAQYW2"
+          }
+        }
+      },
+      "CloudFrontAliasAAAALogical":{
+        "Type":"AWS::Route53::RecordSet",
+        "Properties":{
+          "Name":{"Ref":"CloudFrontDomainName"},
+          "Type":"AAAA",
+          "HostedZoneId":{"Ref":"CloudFrontHostedZoneId"},
+          "AliasTarget":{
+            "DNSName":{"Fn::GetAtt":["DistributionLogical","DomainName"]},
+            "EvaluateTargetHealth":false,
+            "HostedZoneId":"Z2FDTNDATAQYW2"
           }
         }
       }
@@ -665,7 +767,211 @@ JSON
           <<<"${response}"
       )"
     fi
+    response="$(
+      jq \
+        --arg functionCode "${expected_canonical_function_code}" \
+        '.TemplateBody.Resources.CanonicalHostLogical.Properties
+          .FunctionCode = $functionCode' \
+        <<<"${response}"
+    )"
+    if [[ "${FAKE_CUSTOM_DOMAIN_TEMPLATE_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.DistributionLogical.Properties
+            .DistributionConfig.ViewerCertificate.MinimumProtocolVersion =
+              "TLSv1.2_2021"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_CANONICAL_FUNCTION_TEMPLATE_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.CanonicalHostLogical.Properties
+            .FunctionCode =
+              "function handler(event) { return event.request; }"' \
+          <<<"${response}"
+      )"
+    fi
+    if [[ "${FAKE_CUSTOM_DOMAIN_TEMPLATE_BEHAVIOR_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.TemplateBody.Resources.DistributionLogical.Properties
+            .DistributionConfig.CacheBehaviors |=
+              map(select(.PathPattern != "runtime-config.json"))' \
+          <<<"${response}"
+      )"
+    fi
     printf '%s\n' "${response}"
+    ;;
+  route53:get-hosted-zone)
+    private_zone=false
+    if [[ "${FAKE_HOSTED_ZONE_DRIFT:-0}" == "1" ]]; then
+      private_zone=true
+    fi
+    cat <<JSON
+{
+  "HostedZone":{
+    "Id":"/hostedzone/${hosted_zone_id}",
+    "Name":"archon.example.",
+    "Config":{"PrivateZone":${private_zone}}
+  }
+}
+JSON
+    ;;
+  acm:describe-certificate)
+    certificate_status="ISSUED"
+    if [[ "${FAKE_CERTIFICATE_DRIFT:-0}" == "1" ]]; then
+      certificate_status="EXPIRED"
+    fi
+    cat <<JSON
+{
+  "Certificate":{
+    "CertificateArn":"${certificate_arn}",
+    "DomainName":"${viewer_domain}",
+    "SubjectAlternativeNames":["${viewer_domain}"],
+    "Status":"${certificate_status}",
+    "Type":"AMAZON_ISSUED",
+    "KeyAlgorithm":"EC_prime256v1",
+    "InUseBy":[
+      "arn:aws:cloudfront::111111111111:distribution/${distribution_id}"
+    ],
+    "Options":{
+      "CertificateTransparencyLoggingPreference":"ENABLED",
+      "Export":"DISABLED"
+    }
+  }
+}
+JSON
+    ;;
+  cloudfront:describe-function)
+    function_status="PUBLISHED"
+    if [[ "${FAKE_CANONICAL_FUNCTION_DRIFT:-0}" == "1" ]]; then
+      function_status="UNPUBLISHED"
+    fi
+    cat <<JSON
+{
+  "FunctionSummary":{
+    "Name":"${canonical_function_name}",
+    "Status":"${function_status}",
+    "FunctionConfig":{"Runtime":"cloudfront-js-2.0"},
+    "FunctionMetadata":{
+      "FunctionARN":"${canonical_function_arn}",
+      "Stage":"LIVE"
+    }
+  },
+  "ETag":"fixture"
+}
+JSON
+    ;;
+  cloudfront:get-function)
+    function_code="${expected_canonical_function_code}"
+    if [[ "${FAKE_CANONICAL_FUNCTION_CODE_DRIFT:-0}" == "1" ]]; then
+      function_code='function handler(event) { return event.request; }'
+    fi
+    output_file="${!#}"
+    printf '%s' "${function_code}" >"${output_file}"
+    printf '{"ETag":"fixture","ContentType":"application/octet-stream"}\n'
+    ;;
+  cloudfront:get-distribution-config)
+    minimum_protocol="TLSv1.3_2025"
+    if [[ "${FAKE_CLOUDFRONT_TLS_DRIFT:-0}" == "1" ]]; then
+      minimum_protocol="TLSv1.2_2021"
+    fi
+    response="$(
+      cat <<JSON
+{
+  "DistributionConfig":{
+    "Enabled":true,
+    "IsIPV6Enabled":true,
+    "HttpVersion":"http2and3",
+    "Aliases":{"Quantity":1,"Items":["${viewer_domain}"]},
+    "ViewerCertificate":{
+      "ACMCertificateArn":"${certificate_arn}",
+      "SSLSupportMethod":"sni-only",
+      "MinimumProtocolVersion":"${minimum_protocol}"
+    },
+    "DefaultCacheBehavior":{
+      "ViewerProtocolPolicy":"redirect-to-https",
+      "FunctionAssociations":{
+        "Quantity":1,
+        "Items":[{
+          "EventType":"viewer-request",
+          "FunctionARN":"${canonical_function_arn}"
+        }]
+      }
+    },
+    "CacheBehaviors":{
+      "Quantity":2,
+      "Items":[{
+        "PathPattern":"api/*",
+        "ViewerProtocolPolicy":"https-only",
+        "FunctionAssociations":{
+          "Quantity":1,
+          "Items":[{
+            "EventType":"viewer-request",
+            "FunctionARN":"${canonical_function_arn}"
+          }]
+        }
+      },{
+        "PathPattern":"runtime-config.json",
+        "ViewerProtocolPolicy":"https-only",
+        "FunctionAssociations":{
+          "Quantity":1,
+          "Items":[{
+            "EventType":"viewer-request",
+            "FunctionARN":"${canonical_function_arn}"
+          }]
+        }
+      }]
+    }
+  }
+}
+JSON
+    )"
+    if [[ "${FAKE_CLOUDFRONT_BEHAVIOR_DRIFT:-0}" == "1" ]]; then
+      response="$(
+        jq \
+          '.DistributionConfig.CacheBehaviors = {
+            Quantity: 1,
+            Items: [
+              .DistributionConfig.CacheBehaviors.Items[] |
+              select(.PathPattern == "api/*")
+            ]
+          }' \
+          <<<"${response}"
+      )"
+    fi
+    printf '%s\n' "${response}"
+    ;;
+  route53:list-resource-record-sets)
+    aaaa_target="${distribution_domain}."
+    if [[ "${FAKE_ROUTE53_ALIAS_DRIFT:-0}" == "1" ]]; then
+      aaaa_target="attacker.example."
+    fi
+    cat <<JSON
+{
+  "ResourceRecordSets":[
+    {
+      "Name":"${viewer_domain}.",
+      "Type":"A",
+      "AliasTarget":{
+        "HostedZoneId":"Z2FDTNDATAQYW2",
+        "DNSName":"${distribution_domain}.",
+        "EvaluateTargetHealth":false
+      }
+    },
+    {
+      "Name":"${viewer_domain}.",
+      "Type":"AAAA",
+      "AliasTarget":{
+        "HostedZoneId":"Z2FDTNDATAQYW2",
+        "DNSName":"${aaaa_target}",
+        "EvaluateTargetHealth":false
+      }
+    }
+  ]
+}
+JSON
     ;;
   cloudfront:get-origin-request-policy-config)
     response="$(
@@ -1460,12 +1766,15 @@ done
 api_origin_contract="$(
   ARCHON_STACK_NAME="Archon-staging" \
   ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+  ARCHON_CLOUDFRONT_DOMAIN_NAME="${cloudfront_domain_name}" \
+  ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${cloudfront_certificate_arn}" \
+  ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${cloudfront_hosted_zone_id}" \
   AWS_REGION="eu-west-1" \
     bash "${repository_root}/scripts/validate-aws-api-origin-contract.sh"
 )"
 jq --exit-status \
   '
-    .schemaVersion == "archon.api-origin-contract/v1" and
+    .schemaVersion == "archon.api-origin-contract/v2" and
     (.deployedTemplateSha256 | test("^[a-f0-9]{64}$")) and
     .apiGateway.stage == "staging" and
     .apiGateway.endpointType == "REGIONAL" and
@@ -1498,6 +1807,29 @@ jq --exit-status \
     .originCredential.enabled == true and
     .originCredential.materialHandling == "not-retrieved" and
     .originCredential.usagePlan.association == "validated" and
+    .cloudFront.customDomain.certificateType == "AMAZON_ISSUED" and
+    .cloudFront.customDomain.certificateKeyAlgorithm ==
+      "EC_prime256v1" and
+    .cloudFront.customDomain.certificateTransparencyLogging ==
+      "ENABLED" and
+    .cloudFront.customDomain.certificateExport == "DISABLED" and
+    .cloudFront.customDomain.recordTypes == ["A", "AAAA"] and
+    .cloudFront.customDomain.sslSupportMethod == "sni-only" and
+    .cloudFront.customDomain.minimumProtocolVersion ==
+      "TLSv1.3_2025" and
+    .cloudFront.customDomain.canonicalHostFunction.name ==
+      "archon-staging-canonical-host" and
+    (.cloudFront.customDomain.certificateArnSha256 |
+      test("^[a-f0-9]{64}$")) and
+    (.cloudFront.customDomain.hostedZoneIdSha256 |
+      test("^[a-f0-9]{64}$")) and
+    (.cloudFront.customDomain.canonicalHostFunction.arnSha256 |
+      test("^[a-f0-9]{64}$")) and
+    (.cloudFront.customDomain.canonicalHostFunction.codeSha256 |
+      test("^[a-f0-9]{64}$")) and
+    .cloudFront.customDomain.canonicalHostFunction.stage == "LIVE" and
+    .cloudFront.customDomain.canonicalHostFunction.everyBehavior == true and
+    .cloudFront.customDomain.validation == "passed" and
     .cloudFront.apiBehavior.cachePolicy == "CachingDisabled" and
     .cloudFront.apiOrigin.credentialBinding ==
       "deployed-template-unresolved-dynamic-reference" and
@@ -1519,6 +1851,9 @@ for raw_identifier in \
   "key1234567890abcdef" \
   "plan123456" \
   "E123456789ABCD" \
+  "${cloudfront_certificate_arn}" \
+  "${cloudfront_hosted_zone_id}" \
+  "arn:aws:cloudfront::111111111111:function/archon-staging-canonical-host" \
   "11111111-2222-4333-8444-555555555555"; do
   if grep -Fq "${raw_identifier}" <<<"${api_origin_contract}"; then
     echo "::error::API-origin evidence contains a raw resource identifier" >&2
@@ -1552,6 +1887,16 @@ for drift_variable in \
   FAKE_ORIGIN_SECRET_DEPENDENCY_DRIFT \
   FAKE_ORIGIN_POLICY_BINDING_DRIFT \
   FAKE_ORIGIN_POLICY_DRIFT \
+  FAKE_CUSTOM_DOMAIN_TEMPLATE_DRIFT \
+  FAKE_CANONICAL_FUNCTION_TEMPLATE_DRIFT \
+  FAKE_CUSTOM_DOMAIN_TEMPLATE_BEHAVIOR_DRIFT \
+  FAKE_HOSTED_ZONE_DRIFT \
+  FAKE_CERTIFICATE_DRIFT \
+  FAKE_CANONICAL_FUNCTION_DRIFT \
+  FAKE_CANONICAL_FUNCTION_CODE_DRIFT \
+  FAKE_CLOUDFRONT_TLS_DRIFT \
+  FAKE_CLOUDFRONT_BEHAVIOR_DRIFT \
+  FAKE_ROUTE53_ALIAS_DRIFT \
   FAKE_DIRECT_NO_KEY_DRIFT \
   FAKE_DIRECT_BOGUS_KEY_DRIFT \
   FAKE_CLOUDFRONT_SPOOF_DRIFT; do
@@ -1559,6 +1904,9 @@ for drift_variable in \
     "${drift_variable}=1" \
     ARCHON_STACK_NAME="Archon-staging" \
     ARCHON_STACK_OUTPUTS="${stack_outputs}" \
+    ARCHON_CLOUDFRONT_DOMAIN_NAME="${cloudfront_domain_name}" \
+    ARCHON_CLOUDFRONT_CERTIFICATE_ARN="${cloudfront_certificate_arn}" \
+    ARCHON_CLOUDFRONT_HOSTED_ZONE_ID="${cloudfront_hosted_zone_id}" \
     AWS_REGION="eu-west-1" \
       bash "${repository_root}/scripts/validate-aws-api-origin-contract.sh" \
         >/dev/null 2>&1; then
@@ -1566,6 +1914,42 @@ for drift_variable in \
     exit 1
   fi
 done
+
+deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
+test "$(
+  grep -Fc -- \
+    '--parameters "${edge_stack_name}:CloudFrontDomainName=${ARCHON_CLOUDFRONT_DOMAIN_NAME}"' \
+    "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc -- \
+    '--parameters "${edge_stack_name}:CloudFrontHostedZoneId=${ARCHON_CLOUDFRONT_HOSTED_ZONE_ID}"' \
+    "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc -- \
+    ':CloudFrontCertificateArn=${ARCHON_CLOUDFRONT_CERTIFICATE_ARN}"' \
+    "${deploy_workflow}"
+)" -eq 4
+test "$(
+  grep -Fc 'ArchonCloudFrontCertificateArn' "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'aws cloudfront describe-function' "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'aws cloudfront get-function' "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'aws cloudfront get-distribution-config' "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'aws route53 list-resource-record-sets' "${deploy_workflow}"
+)" -eq 2
+test "$(
+  grep -Fc 'schemaVersion: "archon.edge-security-contract/v4"' \
+    "${deploy_workflow}"
+)" -eq 2
 
 waf_association_log="${work_root}/waf-associations.log"
 waf_contract="$(

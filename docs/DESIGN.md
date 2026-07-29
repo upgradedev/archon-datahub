@@ -247,12 +247,11 @@ The AWS CDK app separates a retained shared registry, an environment-specific gl
 stack, and an environment-specific regional platform stack:
 
 - `Archon-Registry`: immutable KMS ECR repository;
-- `Archon-<stage>-Edge` in `us-east-1`: CloudFront-scope WAF and KMS-encrypted retained
-  WAF logs;
+- `Archon-<stage>-Edge` in `us-east-1`: exact-name, DNS-validated P-256 ACM certificate,
+  CloudFront-scope WAF, and KMS-encrypted retained WAF logs;
 - `Archon-<stage>` in the selected platform region: private versioned KMS S3 SPA with
-  CloudFront OAC, the edge-stack WAF handoff, the distribution's provider-managed
-  `*.cloudfront.net` hostname and default certificate, HTTPS enforcement, and access
-  logging;
+  CloudFront OAC, the edge-stack certificate/WAF handoff, one account-owned Route 53
+  alias, SNI with `TLSv1.3_2025`, canonical-host enforcement, and access logging;
 - same-origin API Gateway and the exact Cognito user pool with one shared regional WAF,
   strict request models, throttling, access logs, active X-Ray, a CloudFront-only origin
   gate whose credential never reaches a backend, and an encrypted two-second cache
@@ -282,17 +281,18 @@ is served by a caching-disabled behavior with `no-store`, and is smoke-verified 
 byte. The SPA pre-fills that scope; both the runtime-config proof and the live audit smoke
 bind it to the same protected-environment value.
 
-The regional stack creates a distribution without aliases and uses CloudFront's generated
-`*.cloudfront.net` hostname and default viewer certificate. It requires no custom domain,
-Route 53 hosted-zone input, ACM certificate input or resource, or viewer-request
-CloudFront Function. The default SPA behavior redirects HTTP to HTTPS; the API and runtime
+The regional stack creates exactly one distribution alias inside the configured
+account-owned public Route 53 zone. The `us-east-1` edge stack issues a DNS-validated,
+exact-name P-256 certificate and creates the CloudFront-scope WAF plus retained
+KMS-encrypted logs; the deployment workflow validates and passes both ARNs to the
+regional platform. The distribution requires SNI and `TLSv1.3_2025`. One viewer-request
+CloudFront Function is associated with every behavior and returns `421` for any
+non-canonical Host. The default SPA behavior redirects HTTP to HTTPS; the API and runtime
 configuration behaviors are HTTPS-only. CloudFront OAC restricts the private SPA origin,
-and CloudFront plus S3 server-access logs are retained. The Cognito callback and logout
-URLs are derived from that exact distribution hostname. The `us-east-1` edge stack creates
-only the CloudFront-scope WAF and its retained KMS-encrypted logs, and the deployment
-workflow passes the validated Web ACL ARN to the regional platform. The account remains
-CDK-bootstrapped in both `us-east-1` and the selected workload region. The CloudFront WAF
-protects every cache behavior, while the separate regional WAF remains bound to both API
+and CloudFront plus S3 server-access logs are retained. Cognito callback and logout URLs
+are derived from the canonical alias. The account remains CDK-bootstrapped in both
+`us-east-1` and the selected workload region. The CloudFront WAF protects every cache
+behavior, while the separate regional WAF remains bound to both API
 Gateway for direct callers and the exact Cognito user pool for managed-login and
 unauthenticated Cognito endpoints. The live deployment contract rejects promotion unless
 both regional resources resolve to that same ACL.
