@@ -33,6 +33,20 @@ const overrideVerifier = readFileSync(
   new URL("../../scripts/verify-exact-npm-overrides.mjs", import.meta.url),
   "utf8"
 );
+const parentLockCandidateVerifier = readFileSync(
+  new URL(
+    "../../scripts/verify-parent-lock-candidate-adoption.sh",
+    import.meta.url
+  ),
+  "utf8"
+);
+const lockCandidateSetDigest = readFileSync(
+  new URL(
+    "../../scripts/compute-lock-candidate-set-digest.sh",
+    import.meta.url
+  ),
+  "utf8"
+);
 const mcpMaterializer = readFileSync(
   new URL("../../scripts/materialize-datahub-mcp-lock.sh", import.meta.url),
   "utf8"
@@ -569,11 +583,30 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
     ciWorkflow,
     /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u
   );
+  assert.match(
+    lockCandidateJob,
+    /permissions:\s+contents: read/u
+  );
+  assert.doesNotMatch(lockCandidateJob, /actions: read/u);
+  assert.doesNotMatch(lockCandidateJob, /GH_TOKEN/u);
+  assert.match(lockCandidateJob, /fetch-depth: 2/u);
+  assert.match(
+    lockCandidateJob,
+    /Verify exact parent-run lock candidate adoption[\s\S]+id: parent_candidate[\s\S]+bash scripts\/verify-parent-lock-candidate-adoption\.sh/u
+  );
+  assert.equal(
+    [
+      ...lockCandidateJob.matchAll(
+        /if: steps\.parent_candidate\.outputs\.adopted != 'true'/gu
+      ),
+    ].length,
+    8
+  );
   assert.match(ciWorkflow, /Seal candidate provenance before validation/u);
   assert.match(ciWorkflow, /clean-lock-generation/u);
   assert.match(ciWorkflow, /NPM_CONFIG_USERCONFIG: \/dev\/null/u);
   assert.match(ciWorkflow, /NPM_CONFIG_REGISTRY: https:\/\/registry\.npmjs\.org\//u);
-  assert.equal(lockCandidateJob.match(/cmp --silent/gu)?.length, 3);
+  assert.equal(lockCandidateJob.match(/cmp --silent/gu)?.length, 6);
   assert.match(
     ciWorkflow,
     /Committed root lock differs from clean npm 10\.9\.8 resolution/u
@@ -587,14 +620,59 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
     /Committed web lock differs from clean npm 10\.9\.8 resolution/u
   );
   assert.match(ciWorkflow, /pullRequestHeadSha: \$headSha/u);
+  assert.match(ciWorkflow, /\.source\.pullRequestBaseSha == \$baseSha/u);
   assert.match(ciWorkflow, /headRepository: \$headRepository/u);
   assert.match(ciWorkflow, /pullRequestNumber: \$pullRequestNumber/u);
+  assert.match(ciWorkflow, /\.source\.eventMergeSha == \$eventSha/u);
   assert.match(ciWorkflow, /workflowRef: \$workflowRef/u);
   assert.match(ciWorkflow, /workflowSha: \$workflowSha/u);
   assert.match(ciWorkflow, /packageJsonSha256: \$infraManifestSha256/u);
   assert.match(ciWorkflow, /lockSha256: \$infraLockSha256/u);
   assert.match(ciWorkflow, /packageJsonSha256: \$webManifestSha256/u);
   assert.match(ciWorkflow, /lockSha256: \$webLockSha256/u);
+  assert.match(
+    lockCandidateJob,
+    /root-package-lock\.json" \|[\s\S]+cut -d' ' -f1[\s\S]+\)\" = \"\$\{root_lock_sha\}\"/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /\.candidates\.root\.lockSha256 == \$rootLockSha256/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /\.candidates\.infrastructure\.lockSha256 == \$infraLockSha256/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /\.candidates\.web\.lockSha256 == \$webLockSha256/u
+  );
+  assert.match(lockCandidateJob, /id: sealed_candidates/u);
+  assert.match(lockCandidateJob, /id: validated_candidates/u);
+  assert.match(
+    lockCandidateJob,
+    /candidate_inventory_sha256=%s[\s\S]+\$\{candidate_inventory_sha256\}[\s\S]+>>"\$\{GITHUB_OUTPUT\}"/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /test "\$\(bash scripts\/compute-lock-candidate-set-digest\.sh\)" = \\\n\s+"\$\{SEALED_CANDIDATE_SET_DIGEST\}"/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /SHA256SUMS" \| cut -d' ' -f1[\s\S]+\)\" = \"\$\{SEALED_CANDIDATE_INVENTORY_SHA256\}\"/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /--arg candidateSetDigest "\$\{SEALED_CANDIDATE_SET_DIGEST\}"/u
+  );
+  assert.match(
+    lockCandidateJob,
+    /sealedInventorySha256: \$sealedInventorySha256/u
+  );
+  assert.match(lockCandidateJob, /candidateSetDigest: \$candidateSetDigest/u);
+  assert.match(
+    lockCandidateJob,
+    /name: validated-lock-candidates-\$\{\{ github\.event\.pull_request\.head\.sha \}\}-\$\{\{ steps\.sealed_candidates\.outputs\.candidate_set_digest \}\}/u
+  );
 
   const infraStart = ciWorkflow.indexOf("\n  infra:");
   const publisherStart = ciWorkflow.indexOf(
@@ -698,6 +776,157 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
   assert.match(
     infraDocumentation,
     /must be removed, rather than broadened/u
+  );
+});
+
+test("lock adoption reuses only an exact validated parent-run artifact", () => {
+  assert.match(
+    parentLockCandidateVerifier,
+    /test "\$\{GITHUB_REPOSITORY\}" = "upgradedev\/archon-datahub"/u
+  );
+  assert.match(parentLockCandidateVerifier, /git rev-list --parents -n 1/u);
+  assert.match(parentLockCandidateVerifier, /git diff --name-status --no-renames/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /\[\[ "\$\{status\}" != "M" \|\| -n "\$\{extra:-\}" \]\]/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /package-lock\.json\|infra\/aws\/package-lock\.json\|web\/package-lock\.json/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /git diff --quiet "\$\{parent_sha\}" "\$\{PR_HEAD_SHA\}" --/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /actions\/workflows\/ci\.yml\/runs/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /https:\/\/api\.github\.com\$\{path\}/u
+  );
+  assert.match(parentLockCandidateVerifier, /curl[\s\S]+--proto '=https'/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /User-Agent: archon-public-lock-candidate-verifier/u
+  );
+  assert.doesNotMatch(parentLockCandidateVerifier, /GH_TOKEN/u);
+  assert.doesNotMatch(parentLockCandidateVerifier, /gh api/u);
+  assert.doesNotMatch(parentLockCandidateVerifier, /Authorization:/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /\.base\.sha == \$baseSha/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /\.head_repository\.full_name == \$headRepository/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /actions\/runs\/\$\{run_id\}\/jobs/u
+  );
+  assert.match(parentLockCandidateVerifier, /\.run_id == \$runId/u);
+  assert.match(parentLockCandidateVerifier, /\.run_attempt == \$runAttempt/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /successful\("Validate the root candidate exactly"\)/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /successful\("Validate the infrastructure candidate exactly"\)/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /successful\("Validate the web candidate exactly"\)/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /actions\/runs\/\$\{run_id\}\/artifacts/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /The parent run did not complete an eligible candidate validation/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /The eligible parent run has no candidate artifact/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /The exact parent-run candidate artifact has expired/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /candidate_set_digest="\$\(bash scripts\/compute-lock-candidate-set-digest\.sh\)"/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /artifact_name="validated-lock-candidates-\$\{parent_sha\}-\$\{candidate_set_digest\}"/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /actions\/artifacts\/\$\{artifact_id\}/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /\[\[ "\$\{artifact_digest\}" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/u
+  );
+  assert.match(parentLockCandidateVerifier, /artifact_size.*2097152/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /\.size_in_bytes == \$sizeInBytes/u
+  );
+  assert.doesNotMatch(
+    parentLockCandidateVerifier,
+    /actions\/artifacts\/\$\{artifact_id\}\/zip/u
+  );
+  assert.doesNotMatch(parentLockCandidateVerifier, /zipfile\.ZipFile/u);
+  assert.doesNotMatch(parentLockCandidateVerifier, /os\.O_NOFOLLOW/u);
+  assert.doesNotMatch(parentLockCandidateVerifier, /cmp --silent/u);
+  assert.match(parentLockCandidateVerifier, /adopted=false/u);
+  assert.match(parentLockCandidateVerifier, /adopted=true/u);
+  assert.match(
+    parentLockCandidateVerifier,
+    /Public GitHub run metadata is unavailable/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /Public GitHub artifact metadata is unavailable/u
+  );
+});
+
+test("lock candidate identity is a CI-only canonical manifest and lock digest", () => {
+  assert.match(
+    lockCandidateSetDigest,
+    /Lock-candidate set digests are computed only by CI\/CD/u
+  );
+  for (const file of [
+    "package.json",
+    "package-lock.json",
+    "infra/aws/package.json",
+    "infra/aws/package-lock.json",
+    "web/package.json",
+    "web/package-lock.json",
+  ]) {
+    assert.match(
+      lockCandidateSetDigest,
+      new RegExp(file.replaceAll("/", "\\/"), "u")
+    );
+  }
+  assert.match(lockCandidateSetDigest, /test ! -L "\$\{file\}"/u);
+  assert.match(
+    lockCandidateSetDigest,
+    /schemaVersion: "archon\.lock-candidate-set\/v1"/u
+  );
+  assert.match(lockCandidateSetDigest, /jq -cnS/u);
+  assert.equal(
+    [...lockCandidateSetDigest.matchAll(/sha256sum [^\n|]+/gu)].length,
+    6
+  );
+  assert.match(
+    lockCandidateSetDigest,
+    /\}\s*'\s*\|\s*sha256sum\s*\|\s*awk '\{print \$1\}'/u
   );
 });
 

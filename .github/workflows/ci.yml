@@ -242,10 +242,13 @@ jobs:
     needs: secret-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -259,7 +262,16 @@ jobs:
           test "$(git rev-parse HEAD)" = "${PR_HEAD_SHA}"
           test "$(node --version)" = "v${INFRA_NODE_VERSION}"
           test "$(npm --version)" = "10.9.8"
+      - name: Verify exact parent-run lock candidate adoption
+        id: parent_candidate
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/verify-parent-lock-candidate-adoption.sh
       - name: Resolve all reviewed dependency policies into candidate locks
+        if: steps.parent_candidate.outputs.adopted != 'true'
         id: resolve-locks
         env:
           NPM_CONFIG_AUDIT: "false"
@@ -335,6 +347,8 @@ jobs:
             web/package-lock.json
           printf 'drift=%s\n' "${lock_drift}" >>"${GITHUB_OUTPUT}"
       - name: Seal candidate provenance before validation
+        if: steps.parent_candidate.outputs.adopted != 'true'
+        id: sealed_candidates
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
@@ -428,7 +442,21 @@ jobs:
               web-package-lock.json >SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
+          candidate_set_digest="$(
+            bash scripts/compute-lock-candidate-set-digest.sh
+          )"
+          candidate_inventory_sha256="$(
+            sha256sum "${candidate_dir}/SHA256SUMS" | cut -d' ' -f1
+          )"
+          [[ "${candidate_set_digest}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${candidate_inventory_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            printf 'candidate_set_digest=%s\n' "${candidate_set_digest}"
+            printf 'candidate_inventory_sha256=%s\n' \
+              "${candidate_inventory_sha256}"
+          } >>"${GITHUB_OUTPUT}"
       - name: Validate the root candidate exactly
+        if: steps.parent_candidate.outputs.adopted != 'true'
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
@@ -440,6 +468,7 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
             --audit-level=moderate
       - name: Validate the infrastructure candidate exactly
+        if: steps.parent_candidate.outputs.adopted != 'true'
         run: |
           set -euo pipefail
           npm --prefix infra/aws ci --ignore-scripts
@@ -449,6 +478,7 @@ jobs:
           npm --prefix infra/aws test -- --ci --coverage
           bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
       - name: Validate the web candidate exactly
+        if: steps.parent_candidate.outputs.adopted != 'true'
         working-directory: web
         env:
           VITE_ARCHON_RELEASE_SHA: ${{ github.event.pull_request.head.sha }}
@@ -464,10 +494,16 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh" \
             --audit-level=moderate
       - name: Mark the exact candidates as remotely validated
+        if: steps.parent_candidate.outputs.adopted != 'true'
+        id: validated_candidates
         env:
+          EVENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          SEALED_CANDIDATE_INVENTORY_SHA256: ${{ steps.sealed_candidates.outputs.candidate_inventory_sha256 }}
+          SEALED_CANDIDATE_SET_DIGEST: ${{ steps.sealed_candidates.outputs.candidate_set_digest }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
@@ -475,12 +511,47 @@ jobs:
           candidate_dir="${RUNNER_TEMP}/lock-candidates"
           checkout_sha="$(git rev-parse HEAD)"
           test "${checkout_sha}" = "${PR_HEAD_SHA}"
+          [[ "${SEALED_CANDIDATE_SET_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SEALED_CANDIDATE_INVENTORY_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test "$(bash scripts/compute-lock-candidate-set-digest.sh)" = \
+            "${SEALED_CANDIDATE_SET_DIGEST}"
+          test "$(
+            sha256sum "${candidate_dir}/SHA256SUMS" | cut -d' ' -f1
+          )" = "${SEALED_CANDIDATE_INVENTORY_SHA256}"
           (
             cd "${candidate_dir}"
             sha256sum --check --strict SHA256SUMS
           )
+          cmp --silent \
+            "${candidate_dir}/root-package-lock.json" \
+            package-lock.json
+          cmp --silent \
+            "${candidate_dir}/infra-package-lock.json" \
+            infra/aws/package-lock.json
+          cmp --silent \
+            "${candidate_dir}/web-package-lock.json" \
+            web/package-lock.json
+          root_lock_sha="$(sha256sum package-lock.json | cut -d' ' -f1)"
+          infra_lock_sha="$(
+            sha256sum infra/aws/package-lock.json | cut -d' ' -f1
+          )"
+          web_lock_sha="$(sha256sum web/package-lock.json | cut -d' ' -f1)"
+          test "$(
+            sha256sum "${candidate_dir}/root-package-lock.json" |
+              cut -d' ' -f1
+          )" = "${root_lock_sha}"
+          test "$(
+            sha256sum "${candidate_dir}/infra-package-lock.json" |
+              cut -d' ' -f1
+          )" = "${infra_lock_sha}"
+          test "$(
+            sha256sum "${candidate_dir}/web-package-lock.json" |
+              cut -d' ' -f1
+          )" = "${web_lock_sha}"
           jq --exit-status \
             --arg repository "${GITHUB_REPOSITORY}" \
+            --arg baseSha "${PR_BASE_SHA}" \
+            --arg eventSha "${EVENT_SHA}" \
             --arg headRepository "${PR_HEAD_REPOSITORY}" \
             --arg headSha "${checkout_sha}" \
             --arg pullRequestNumber "${PR_NUMBER}" \
@@ -489,15 +560,20 @@ jobs:
             --arg workflowRef "${WORKFLOW_REF}" \
             --arg workflowSha "${WORKFLOW_SHA}" \
             --arg rootManifestSha256 "$(sha256sum package.json | cut -d' ' -f1)" \
+            --arg rootLockSha256 "${root_lock_sha}" \
             --arg infraManifestSha256 "$(sha256sum infra/aws/package.json | cut -d' ' -f1)" \
+            --arg infraLockSha256 "${infra_lock_sha}" \
             --arg webManifestSha256 "$(sha256sum web/package.json | cut -d' ' -f1)" \
+            --arg webLockSha256 "${web_lock_sha}" \
             '
               .schemaVersion == 1 and
               .repository == $repository and
               .source.checkoutSha == $headSha and
               .source.headRepository == $headRepository and
               .source.pullRequestHeadSha == $headSha and
+              .source.pullRequestBaseSha == $baseSha and
               .source.pullRequestNumber == $pullRequestNumber and
+              .source.eventMergeSha == $eventSha and
               .source.workflowRef == $workflowRef and
               .source.workflowSha == $workflowSha and
               .generator.runId == $runId and
@@ -505,19 +581,29 @@ jobs:
               .generator.nodeVersion == "v22.23.1" and
               .generator.npmVersion == "10.9.8" and
               .candidates.root.packageJsonSha256 == $rootManifestSha256 and
+              .candidates.root.lockFile == "root-package-lock.json" and
+              .candidates.root.lockSha256 == $rootLockSha256 and
               .candidates.infrastructure.packageJsonSha256 == $infraManifestSha256 and
-              .candidates.web.packageJsonSha256 == $webManifestSha256
+              .candidates.infrastructure.lockFile == "infra-package-lock.json" and
+              .candidates.infrastructure.lockSha256 == $infraLockSha256 and
+              .candidates.web.packageJsonSha256 == $webManifestSha256 and
+              .candidates.web.lockFile == "web-package-lock.json" and
+              .candidates.web.lockSha256 == $webLockSha256
             ' "${candidate_dir}/provenance.json" >/dev/null
           jq -nS \
             --arg headSha "${checkout_sha}" \
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg candidateSetDigest "${SEALED_CANDIDATE_SET_DIGEST}" \
+            --arg sealedInventorySha256 "${SEALED_CANDIDATE_INVENTORY_SHA256}" \
             '{
               schemaVersion: 1,
               result: "root-infrastructure-and-web-candidates-validated",
               headSha: $headSha,
               runId: $runId,
               runAttempt: $runAttempt,
+              candidateSetDigest: $candidateSetDigest,
+              sealedInventorySha256: $sealedInventorySha256,
               gates: [
                 "root-typecheck-build-test-coverage-sca",
                 "infra-typecheck-test-coverage-exact-compensated-sca",
@@ -529,16 +615,21 @@ jobs:
             sha256sum validation.json >>SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
+          candidate_set_digest="$(
+            jq -er '.candidateSetDigest' "${candidate_dir}/validation.json"
+          )"
+          test "${candidate_set_digest}" = "${SEALED_CANDIDATE_SET_DIGEST}"
       - name: Upload short-lived, source-bound validated lock candidates
+        if: steps.parent_candidate.outputs.adopted != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: validated-lock-candidates-${{ github.event.pull_request.head.sha }}
+          name: validated-lock-candidates-${{ github.event.pull_request.head.sha }}-${{ steps.sealed_candidates.outputs.candidate_set_digest }}
           path: ${{ runner.temp }}/lock-candidates/
           if-no-files-found: error
           retention-days: 1
           overwrite: true
       - name: Require adoption of the remotely validated lock candidates
-        if: steps.resolve-locks.outputs.drift == 'true'
+        if: steps.parent_candidate.outputs.adopted != 'true' && steps.resolve-locks.outputs.drift == 'true'
         run: |
           echo "::error::Committed locks differ from the remotely validated npm 10.9.8 candidates"
           exit 1

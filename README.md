@@ -402,7 +402,14 @@ Workflows:
 - [CI](.github/workflows/ci.yml) — root, coverage-ratcheted web, Playwright/Axe
   desktop/mobile browser journey, AWS CDK, policy, security, load, benchmark, reproducible
   judge evidence, exact-upstream DataHub MCP contribution tests, and immutable artifact
-  gates.
+  gates. Mutable-registry lock refresh is deliberately two-phase: a drift run emits and
+  fully validates short-lived candidate locks, while the immediately following commit may
+  modify only those locks. The producer seals provenance, inventory, and checksums before
+  validating every candidate. The adopter then rechecks the exact parent run/job, public
+  artifact metadata, base/head identity, and a canonical digest over all three manifests
+  and all three committed locks. The public verification path uses no Actions-read token;
+  an absent, expired, unavailable, or ineligible parent receipt falls back to a fresh
+  pipeline resolution.
 - [CodeQL](.github/workflows/codeql.yml) — JavaScript/TypeScript and Python SAST on pull
   requests, `master`, and schedule.
 - [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
