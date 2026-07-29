@@ -410,7 +410,9 @@ describe("Archon AWS reference architecture", () => {
         Enabled: true,
         Aliases: Match.absent(),
         WebACLId: { Ref: "CloudFrontWebAclArn" },
-        ViewerCertificate: Match.absent(),
+        ViewerCertificate: {
+          CloudFrontDefaultCertificate: true
+        },
         DefaultCacheBehavior: Match.objectLike({
           ViewerProtocolPolicy: "redirect-to-https",
           FunctionAssociations: Match.absent()

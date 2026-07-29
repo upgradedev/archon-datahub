@@ -328,7 +328,8 @@ require_text "${foundation_bootstrap}" \
   'aws iam update-assume-role-policy' \
   'aws iam update-role-description' \
   'aws iam tag-role' \
-  '.Role.AssumeRolePolicyDocument == $trust' \
+  '(.Role.AssumeRolePolicyDocument | normalize_actions) ==' \
+  '($trust | normalize_actions)' \
   '($expected | index($actual)) != null' \
   '(10 - (.AttachedPolicies | length)) >= 6' \
   'aws iam attach-role-policy'

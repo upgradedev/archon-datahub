@@ -2031,6 +2031,16 @@ export class ArchonPlatformStack extends Stack {
       },
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100
     });
+    const cfnDistribution = distribution.node
+      .defaultChild as cloudfront.CfnDistribution;
+    // CDK omits this object because CloudFront treats the default certificate
+    // as implicit. Keep the synthesized and read-back contract explicit so
+    // preventive controls can distinguish it from a drifting custom
+    // certificate or legacy TLS configuration.
+    cfnDistribution.addPropertyOverride(
+      "DistributionConfig.ViewerCertificate",
+      { CloudFrontDefaultCertificate: true }
+    );
     distribution.node.addDependency(cloudFrontOriginApiKeySecret);
     const applicationRootUrl = Fn.join("", [
       "https://",
