@@ -9,7 +9,11 @@ function stackSynthesizer(stage: string): DefaultStackSynthesizer {
   });
 }
 
-function templates(): { registry: Template; platform: Template } {
+function templates(): {
+  registry: Template;
+  platform: Template;
+  platformStack: ArchonPlatformStack;
+} {
   const app = new App();
   const env = { account: "111111111111", region: "eu-west-1" };
   const registryStack = new ArchonRegistryStack(app, "TestRegistry", {
@@ -24,7 +28,8 @@ function templates(): { registry: Template; platform: Template } {
   });
   return {
     registry: Template.fromStack(registryStack),
-    platform: Template.fromStack(platformStack)
+    platform: Template.fromStack(platformStack),
+    platformStack
   };
 }
 
@@ -278,7 +283,11 @@ describe("Archon AWS reference architecture", () => {
   });
 
   test("uses exactly the two provider-supported availability zones from preflight", () => {
-    const { platform } = templates();
+    const { platform, platformStack } = templates();
+    expect(platformStack.resolve(platformStack.availabilityZones)).toEqual([
+      { Ref: "DataHubPrivateLinkAzOne" },
+      { Ref: "DataHubPrivateLinkAzTwo" }
+    ]);
     const subnets = Object.values(
       platform.findResources("AWS::EC2::Subnet")
     ) as any[];

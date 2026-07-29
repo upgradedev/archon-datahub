@@ -696,7 +696,12 @@ JSON
     printf '%s\n' "${response}"
     ;;
   sts:get-caller-identity)
-    printf '{"Account":"111111111111","Arn":"arn:aws:sts::111111111111:assumed-role/test/test","UserId":"test"}\n'
+    if [[ " $* " == *" --query Account "* &&
+          " $* " == *" --output text "* ]]; then
+      printf '111111111111\n'
+    else
+      printf '{"Account":"111111111111","Arn":"arn:aws:sts::111111111111:assumed-role/test/test","UserId":"test"}\n'
+    fi
     ;;
   ec2:describe-availability-zones)
     cat <<'JSON'

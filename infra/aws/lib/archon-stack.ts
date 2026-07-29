@@ -105,6 +105,22 @@ export interface ArchonPlatformStackProps extends StackProps {
 }
 
 export class ArchonPlatformStack extends Stack {
+  private dataHubPrivateLinkAvailabilityZones?: string[];
+
+  public override get availabilityZones(): string[] {
+    // The base Stack getter performs an account/region context lookup for
+    // concrete environments. Once the deployment parameters exist, every
+    // construct uses the exact provider-supported AZ pair selected by
+    // preflight. The deploy-time fallback keeps any earlier construction-time
+    // access context-free.
+    return (
+      this.dataHubPrivateLinkAvailabilityZones ?? [
+        Fn.select(0, Fn.getAzs()),
+        Fn.select(1, Fn.getAzs())
+      ]
+    );
+  }
+
   constructor(scope: Construct, id: string, props: ArchonPlatformStackProps) {
     super(scope, id, props);
 
@@ -276,6 +292,10 @@ export class ArchonPlatformStack extends Stack {
       this,
       "DataHubPrivateLinkAzTwo"
     );
+    this.dataHubPrivateLinkAvailabilityZones = [
+      dataHubPrivateLinkAzOne.valueAsString,
+      dataHubPrivateLinkAzTwo.valueAsString
+    ];
     const requireDistinctDataHubPrivateLinkAvailabilityZones = new CfnRule(
       this,
       "RequireDistinctDataHubPrivateLinkAvailabilityZones",
@@ -354,10 +374,7 @@ export class ArchonPlatformStack extends Stack {
 
     const vpc = new ec2.Vpc(this, "Vpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.42.0.0/16"),
-      availabilityZones: [
-        dataHubPrivateLinkAzOne.valueAsString,
-        dataHubPrivateLinkAzTwo.valueAsString
-      ],
+      availabilityZones: this.availabilityZones,
       natGateways: isProduction ? 2 : 1,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [

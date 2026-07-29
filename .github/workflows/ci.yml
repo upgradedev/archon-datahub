@@ -771,7 +771,6 @@ jobs:
             (
               cd infra/aws
               npm run synth -- \
-                --all \
                 --no-lookups \
                 --output "${RUNNER_TEMP}/cdk.out/${stage}" \
                 --context "stage=${stage}"

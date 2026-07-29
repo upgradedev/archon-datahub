@@ -331,7 +331,6 @@ Do not pipe an unpinned installer from the default branch into a shell.
    npm --prefix infra/aws run build
    npm --prefix infra/aws test -- --ci --coverage
    npm --prefix infra/aws run synth -- \
-     --all \
      --no-lookups \
      --output "${RUNNER_TEMP}/cdk.out"
 
@@ -393,7 +392,9 @@ Do not pipe an unpinned installer from the default branch into a shell.
    inner deterministic `archon-web.tar.gz` digest, not the GitHub ZIP envelope. The
    pipeline resolves the two AWS service prefix lists, preflights the configured DataHub
    PrivateLink service and selects its exact supported AZ pair, deploys the edge stack
-   first, and passes those validated values to the platform stack. Normal releases must use
+   first, and passes those validated values to the platform stack. The stack-wide CDK
+   availability-zone strategy uses the same two parameters, so `--no-lookups` synthesis
+   never depends on cached account context. Normal releases must use
    `.github/workflows/deploy.yml`; the following is the pipeline contract, not a manual
    operator bypass. `CONTAINER_ARCHIVE_SHA256`, `LAMBDA_ARCHIVE_SHA256`,
    `DEPLOYMENT_WORKFLOW_RUN_ID`, `DEPLOYMENT_WORKFLOW_RUN_ATTEMPT`, and `CI_RUN_ID` must

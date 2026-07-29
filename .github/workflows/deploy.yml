@@ -1146,7 +1146,6 @@ jobs:
           (
             cd infra/aws
             ./node_modules/.bin/cdk synth \
-              --all \
               --no-lookups \
               --output "${assembly}" \
               --context stage=staging
@@ -5104,7 +5103,6 @@ jobs:
           (
             cd infra/aws
             ./node_modules/.bin/cdk synth \
-              --all \
               --no-lookups \
               --output "${assembly}" \
               --context stage=production
