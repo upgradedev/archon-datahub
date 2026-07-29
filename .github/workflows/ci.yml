@@ -591,6 +591,7 @@ jobs:
               .candidates.web.lockSha256 == $webLockSha256
             ' "${candidate_dir}/provenance.json" >/dev/null
           jq -nS \
+            --arg baseSha "${PR_BASE_SHA}" \
             --arg headSha "${checkout_sha}" \
             --arg runId "${GITHUB_RUN_ID}" \
             --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
@@ -599,6 +600,7 @@ jobs:
             '{
               schemaVersion: 1,
               result: "root-infrastructure-and-web-candidates-validated",
+              baseSha: $baseSha,
               headSha: $headSha,
               runId: $runId,
               runAttempt: $runAttempt,
@@ -623,7 +625,7 @@ jobs:
         if: steps.parent_candidate.outputs.adopted != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: validated-lock-candidates-${{ github.event.pull_request.head.sha }}-${{ steps.sealed_candidates.outputs.candidate_set_digest }}
+          name: validated-lock-candidates-${{ github.event.pull_request.head.sha }}-${{ github.event.pull_request.base.sha }}-${{ steps.sealed_candidates.outputs.candidate_set_digest }}
           path: ${{ runner.temp }}/lock-candidates/
           if-no-files-found: error
           retention-days: 1

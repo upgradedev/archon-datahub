@@ -669,9 +669,10 @@ test("CDK bundled advisory is repaired and admitted only by an exact CI receipt"
     /sealedInventorySha256: \$sealedInventorySha256/u
   );
   assert.match(lockCandidateJob, /candidateSetDigest: \$candidateSetDigest/u);
+  assert.match(lockCandidateJob, /baseSha: \$baseSha/u);
   assert.match(
     lockCandidateJob,
-    /name: validated-lock-candidates-\$\{\{ github\.event\.pull_request\.head\.sha \}\}-\$\{\{ steps\.sealed_candidates\.outputs\.candidate_set_digest \}\}/u
+    /name: validated-lock-candidates-\$\{\{ github\.event\.pull_request\.head\.sha \}\}-\$\{\{ github\.event\.pull_request\.base\.sha \}\}-\$\{\{ steps\.sealed_candidates\.outputs\.candidate_set_digest \}\}/u
   );
 
   const infraStart = ciWorkflow.indexOf("\n  infra:");
@@ -814,13 +815,21 @@ test("lock adoption reuses only an exact validated parent-run artifact", () => {
   assert.doesNotMatch(parentLockCandidateVerifier, /GH_TOKEN/u);
   assert.doesNotMatch(parentLockCandidateVerifier, /gh api/u);
   assert.doesNotMatch(parentLockCandidateVerifier, /Authorization:/u);
-  assert.match(
+  assert.doesNotMatch(
     parentLockCandidateVerifier,
     /\.base\.sha == \$baseSha/u
   );
   assert.match(
     parentLockCandidateVerifier,
     /\.head_repository\.full_name == \$headRepository/u
+  );
+  assert.match(
+    parentLockCandidateVerifier,
+    /\.head\.repo\.url == \$headRepositoryUrl/u
+  );
+  assert.doesNotMatch(
+    parentLockCandidateVerifier,
+    /\.head\.sha == \$headSha/u
   );
   assert.match(
     parentLockCandidateVerifier,
@@ -862,7 +871,7 @@ test("lock adoption reuses only an exact validated parent-run artifact", () => {
   );
   assert.match(
     parentLockCandidateVerifier,
-    /artifact_name="validated-lock-candidates-\$\{parent_sha\}-\$\{candidate_set_digest\}"/u
+    /artifact_name="validated-lock-candidates-\$\{parent_sha\}-\$\{PR_BASE_SHA\}-\$\{candidate_set_digest\}"/u
   );
   assert.match(
     parentLockCandidateVerifier,

@@ -94,12 +94,16 @@ if ! runs_json="$(
 )"; then
   not_adopted "Public GitHub run metadata is unavailable"
 fi
+# GitHub updates the nested pull_requests[] head/base SHAs to the PR's current
+# projection even on an older run. The run's top-level head_sha is the immutable
+# historical source. Producer-time base identity is separately embedded in the
+# immutable artifact name.
 run_count=""
 if ! run_count="$(
   jq -er \
     --arg baseRepositoryUrl "https://api.github.com/repos/${GITHUB_REPOSITORY}" \
-    --arg baseSha "${PR_BASE_SHA}" \
     --arg headRepository "${PR_HEAD_REPOSITORY}" \
+    --arg headRepositoryUrl "https://api.github.com/repos/${PR_HEAD_REPOSITORY}" \
     --arg headSha "${parent_sha}" \
     --argjson pullRequestNumber "${PR_NUMBER}" \
     '[
@@ -115,8 +119,7 @@ if ! run_count="$(
           .pull_requests[];
           .number == $pullRequestNumber and
           .base.repo.url == $baseRepositoryUrl and
-          .base.sha == $baseSha and
-          .head.sha == $headSha
+          .head.repo.url == $headRepositoryUrl
         )
       )
     ] | length' <<<"${runs_json}"
@@ -130,8 +133,8 @@ run_json=""
 if ! run_json="$(
   jq -ce \
     --arg baseRepositoryUrl "https://api.github.com/repos/${GITHUB_REPOSITORY}" \
-    --arg baseSha "${PR_BASE_SHA}" \
     --arg headRepository "${PR_HEAD_REPOSITORY}" \
+    --arg headRepositoryUrl "https://api.github.com/repos/${PR_HEAD_REPOSITORY}" \
     --arg headSha "${parent_sha}" \
     --argjson pullRequestNumber "${PR_NUMBER}" \
     '[
@@ -147,8 +150,7 @@ if ! run_json="$(
           .pull_requests[];
           .number == $pullRequestNumber and
           .base.repo.url == $baseRepositoryUrl and
-          .base.sha == $baseSha and
-          .head.sha == $headSha
+          .head.repo.url == $headRepositoryUrl
         )
       )
     ] |
@@ -242,7 +244,7 @@ fi
 
 candidate_set_digest="$(bash scripts/compute-lock-candidate-set-digest.sh)"
 [[ "${candidate_set_digest}" =~ ^[0-9a-f]{64}$ ]]
-artifact_name="validated-lock-candidates-${parent_sha}-${candidate_set_digest}"
+artifact_name="validated-lock-candidates-${parent_sha}-${PR_BASE_SHA}-${candidate_set_digest}"
 artifacts_json=""
 if ! artifacts_json="$(
   api \
