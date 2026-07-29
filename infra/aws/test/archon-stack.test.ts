@@ -2014,7 +2014,11 @@ describe("Archon AWS reference architecture", () => {
     const userPoolLogicalIds = Object.keys(
       platform.findResources("AWS::Cognito::UserPool")
     );
+    const clusterLogicalIds = Object.keys(
+      platform.findResources("AWS::ECS::Cluster")
+    );
     expect(userPoolLogicalIds).toHaveLength(1);
+    expect(clusterLogicalIds).toHaveLength(1);
     const outputs = platform.toJSON().Outputs;
     expect(outputs.ArchonUserPoolId.Value).toEqual({
       Ref: userPoolLogicalIds[0]
@@ -2022,7 +2026,9 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonUserPoolArn.Value).toEqual({
       "Fn::GetAtt": [userPoolLogicalIds[0], "Arn"]
     });
-    expect(outputs.ArchonEcsClusterName.Value).toBe("archon-staging");
+    expect(outputs.ArchonEcsClusterName.Value).toEqual({
+      Ref: clusterLogicalIds[0]
+    });
     expect(outputs.ArchonApiServiceName.Value).toBe("archon-staging-api");
     expect(outputs.ArchonAuditWorkerServiceName.Value).toBe(
       "archon-staging-audit-worker"

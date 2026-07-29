@@ -590,14 +590,7 @@ if ! awk '
     next
   }
   in_statement && /^[[:space:]]*-[[:space:]]+Sid:/ {
-    exit (
-      found_action &&
-      found_resource &&
-      found_application &&
-      found_environment &&
-      found_managed_by &&
-      found_region
-    ) ? 0 : 1
+    exit (found_action && found_resource && found_application && found_environment && found_managed_by && found_region) ? 0 : 1
   }
   in_statement &&
     /^[[:space:]]+Action:[[:space:]]+acm:AddTagsToCertificate[[:space:]]*$/ {
@@ -625,14 +618,7 @@ if ! awk '
     }
   END {
     if (in_statement) {
-      exit (
-        found_action &&
-        found_resource &&
-        found_application &&
-        found_environment &&
-        found_managed_by &&
-        found_region
-      ) ? 0 : 1
+      exit (found_action && found_resource && found_application && found_environment && found_managed_by && found_region) ? 0 : 1
     }
   }
 ' "${execution_policy}"; then
