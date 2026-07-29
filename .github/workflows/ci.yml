@@ -40,6 +40,7 @@ jobs:
           tar --extract --gzip --file "${RUNNER_TEMP}/gitleaks.tar.gz" --directory "${RUNNER_TEMP}" gitleaks
           "${RUNNER_TEMP}/gitleaks" detect \
             --source . \
+            --config .gitleaks.toml \
             --redact \
             --verbose \
             --no-banner
