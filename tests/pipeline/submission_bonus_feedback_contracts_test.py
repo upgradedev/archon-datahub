@@ -33,7 +33,7 @@ EXPECTED_STEPS = {
         "Check out the exact protected producer",
         "Resolve exact current-attempt candidate artifact",
         "Download exact immutable feedback candidate",
-        "Revalidate private-reference candidate and public rules",
+        "Independently revalidate private-reference candidate and public rules",
         "Assemble exact protected BONUS-FEEDBACK facts",
         "Recheck candidate approval and master before retention",
         "Retain exact checksum-sealed feedback subjects",
