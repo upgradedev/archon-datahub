@@ -55,10 +55,6 @@ Resources:
               - ec2:RevokeSecurityGroupEgress
               - ec2:RevokeSecurityGroupIngress
             Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
-          - Sid: DiscoverDefaultStageSecurityGroup
-            Effect: Allow
-            Action: ec2:DescribeSecurityGroups
-            Resource: "*"
           - Sid: AuthenticateRuntimeImagePull
             Effect: Allow
             Action: ecr:GetAuthorizationToken
@@ -140,10 +136,6 @@ Resources:
               - sqs:ReceiveMessage
               - sqs:SendMessage
             Resource: !Sub arn:${AWS::Partition}:sqs:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
-          - Sid: PublishOnlyStageAlarms
-            Effect: Allow
-            Action: sns:Publish
-            Resource: !Sub arn:${AWS::Partition}:sns:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
           - Sid: UseOnlyStageStateMachine
             Effect: Allow
             Action:

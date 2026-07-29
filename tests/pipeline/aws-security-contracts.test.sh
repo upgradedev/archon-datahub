@@ -1784,7 +1784,7 @@ for registry_read_contract in \
   'select(.OutputKey == "ArchonEcrRepositoryUri")' \
   'select(.OutputKey == "ArchonEcrRepositoryName")' \
   'test "${image_digest}" = "${STAGING_IMAGE_DIGEST}"'; do
-  grep -Fq "${registry_read_contract}" <<<"${production_deployment_contract}"
+  grep -Fq -- "${registry_read_contract}" <<<"${production_deployment_contract}"
 done
 
 cdk_app="${repository_root}/infra/aws/bin/archon.ts"
