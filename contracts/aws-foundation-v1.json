@@ -258,14 +258,6 @@
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
-        ],
-        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy": [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:BatchGetImage",
-          "ecr:GetAuthorizationToken",
-          "ecr:GetDownloadUrlForLayer",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
         ]
       }
     }

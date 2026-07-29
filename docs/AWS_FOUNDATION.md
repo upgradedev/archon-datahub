@@ -84,10 +84,13 @@ The CDK stage applies the exact runtime boundary to every synthesized
 `AWS::IAM::Role`. Each role still needs its own narrow identity policy; the
 boundary is only an upper limit.
 
-The only approved AWS managed policies are:
+The only approved AWS managed policy is:
 
 - `AWSLambdaBasicExecutionRole`
-- `AmazonECSTaskExecutionRolePolicy`
+
+ECS task execution roles use the narrower CDK-synthesized inline ECR, logging,
+and secret-access statements; they do not attach
+`AmazonECSTaskExecutionRolePolicy`.
 
 [`verify-aws-runtime-boundary.mjs`](../scripts/verify-aws-runtime-boundary.mjs)
 compares the complete synthesized role-action inventory with the contract. It

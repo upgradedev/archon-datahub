@@ -211,8 +211,7 @@ jq --exit-status '
     keys |
     sort
   ) == [
-    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-    "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
   ] and
   (
     [.aws.runtimeBoundary.allowedActions[] |

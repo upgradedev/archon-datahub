@@ -197,7 +197,7 @@ validate_tenant_url DATAHUB_READ_MCP_URL "${DATAHUB_READ_MCP_URL}"
 validate_tenant_url DATAHUB_WRITE_GMS_URL "${DATAHUB_WRITE_GMS_URL}"
 validate_tenant_url DATAHUB_WRITE_MCP_URL "${DATAHUB_WRITE_MCP_URL}"
 
-jq --compact-output --sort-keys \
+jq --null-input --compact-output --sort-keys \
   --arg deploymentAccountId "${EXPECTED_ACCOUNT_ID}" \
   --arg region "${AWS_REGION}" \
   --arg tenantOrigin "https://${private_dns_name}" \
