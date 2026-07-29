@@ -1,6 +1,6 @@
 # Submission Readiness — Archon DataHub
 
-Current source review: **2026-07-28**. Submission deadline: **2026-08-10,
+Current source review: **2026-07-29**. Submission deadline: **2026-08-10,
 17:00 EDT**.
 
 This document is deliberately evidence-based. It does not assign a predicted judge score,
@@ -8,12 +8,13 @@ green-CI state, live-DataHub state, or deployment state without the correspondin
 run or public endpoint. The machine report's percentage is only equal-weight evidence
 coverage, as defined below.
 
-Remote source validation for this review is successful: [CI run
-30335616309](https://github.com/upgradedev/archon-datahub/actions/runs/30335616309),
+Remote source validation for revision
+`13bb4aaddc5ab97c76ea246cc46156b238d5d8b1` is successful: [CI run
+30336582832](https://github.com/upgradedev/archon-datahub/actions/runs/30336582832),
 [CodeQL run
-30335616310](https://github.com/upgradedev/archon-datahub/actions/runs/30335616310), and
+30336583192](https://github.com/upgradedev/archon-datahub/actions/runs/30336583192), and
 [Workflow Security run
-30335616369](https://github.com/upgradedev/archon-datahub/actions/runs/30335616369).
+30336583604](https://github.com/upgradedev/archon-datahub/actions/runs/30336583604).
 This validates the source and static contracts plus the retained CI artifacts; it does not
 claim a live AWS deployment, live DataHub result, GitHub-posture receipt, reviewer gate,
 public URL, upstream merge, feedback submission, video, or Devpost entry.

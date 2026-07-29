@@ -189,8 +189,8 @@ For emergency deactivation, `sessionRevocation` is
 `response-confirmed` only when global sign-out returned success. An ambiguous response
 is recorded as `contained-by-disabled-state`; the run can still prove the disabled,
 group-free containment boundary without overclaiming session-revocation confirmation.
-The future project-access evidence pipeline must accept four distinct exact production
-run IDs and independently verify their artifacts and attestations. It is responsible for
+The project-access evidence pipeline accepts four distinct exact production
+run IDs and independently verifies their artifacts and attestations. It is responsible for
 enforcing the strictly ordered
 `provision → rotate → deactivate → reactivate` chain, a common release, opaque identity,
 and application origin. An individual judge-user run never asserts that aggregate.

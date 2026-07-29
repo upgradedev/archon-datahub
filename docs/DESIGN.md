@@ -405,8 +405,9 @@ No local scan is accepted as release evidence.
 Source implementation is not synonymous with remote proof. The remaining authoritative
 gates are tracked in [READINESS.md](READINESS.md):
 
-- accept the current commit through remote CI, CodeQL, workflow-security, benchmark, judge
-  evidence, and supply-chain workflows;
+- retain matching remote CI, CodeQL, workflow-security, benchmark, judge-evidence, and
+  supply-chain receipts for the exact promotion SHA; the current feature revision has
+  passed its source gates, while default-branch signing and promotion remain gated;
 - add a trusted second collaborator to the pre-created GitHub environment skeletons and
   enable their independent reviewer rules plus code-owner enforcement;
 - configure AWS OIDC/account/secrets and retain deployment smoke evidence;

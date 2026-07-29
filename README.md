@@ -466,6 +466,14 @@ Workflows:
   master workflow/run and recomputes its V3-sealed receipt before and after OIDC. The
   least-privilege operating contract is documented in
   [docs/JUDGE_ACCESS.md](docs/JUDGE_ACCESS.md).
+- [Submission judge journey](.github/workflows/submission-judge-journey.yml) —
+  independently exercises the exact production release through the provisioned judge
+  identity and retains a checksum-bound, attested journey receipt without exporting
+  credentials.
+- [Submission project access](.github/workflows/submission-project-access.yml) —
+  reconstructs the ordered judge-account lifecycle and fresh production journey from
+  exact run IDs, verifies their artifacts and attestations, and produces the protected
+  `SQ3`–`SQ5` project-access evidence.
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
   digests, then `APPROVE → VERIFIED`, followed by a separately approved exact rollback
@@ -483,6 +491,13 @@ Workflows:
   explicitly labeled as sanitized synthetic fixture evidence rather than live
   proof. Its operating contract is in
   [docs/SUBMISSION_JUDGE_PACK.md](docs/SUBMISSION_JUDGE_PACK.md).
+- [Submission evidence](.github/workflows/submission-evidence.yml) — fetches only
+  registered same-repository evidence runs, independently verifies their exact artifacts,
+  checksums, attestations, semantics, and freshness, and emits the canonical aggregate
+  without turning missing proof into a pass.
+- [Submission readiness](.github/workflows/submission-readiness.yml) — protected
+  independent review and revalidation of the exact aggregate followed by a checksum-bound
+  readiness seal; the post-submit `SQ11` confirmation remains deliberately separate.
 - [Submission content review](.github/workflows/submission-content-review.yml) —
   protected independent review of the exact final Devpost copy, public
   under-three-minute video, complete repository history, prior-work/media
