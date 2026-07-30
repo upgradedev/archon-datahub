@@ -3,7 +3,7 @@
 //
 // THE PROBLEM IT SOLVES (the D-1 credibility hole). DataHub aspects are single-valued:
 // the MCP read tools (`search` / `get_entities` / `get_lineage`) return one CURRENT view
-// per aspect. So when two ingestion runs — a Snowflake connector and a dbt manifest —
+// per aspect. So when two ingestion pipelines — a Snowflake connector and a dbt manifest —
 // write different owners for the same dataset, latest-write-wins collapses the conflict
 // and the MCP read surface can never see it. The contradiction is real; it is just no
 // longer queryable through the read tools.
@@ -12,8 +12,10 @@
 // `systemMetadata` with the `runId` that produced it (OpenAPI v3
 // `GET /openapi/v3/entity/{entityName}/batchGet?systemMetadata=true`, or the Timeline
 // API `/openapi/v2/timeline/v1/{urn}`). Reading an aspect's VERSION HISTORY therefore
-// re-exposes the conflicting values AND which ingestion run asserted each — exactly the
-// cross-source disagreement the current view hid.
+// re-exposes the conflicting values and their write provenance. A run id alone is NOT a
+// source identity: DataHub creates a new run id whenever the same ingestion pipeline runs
+// again. We therefore resolve a stable pipeline/source identity before classifying a
+// disagreement as cross-source.
 //
 // HONESTY — WHAT SURFACE THIS IS. Version history is a DIRECT GMS read (OpenAPI v3 /
 // Timeline), NOT one of the DataHub MCP read tools. We never claim contradiction fires
@@ -23,12 +25,13 @@
 // shapes DataHub's own docs publish.
 //
 // THE SEMANTIC GUARD (why this is not just "the value changed"). A value that merely
-// changed across successive writes from the SAME run is a benign correction — drift, not
-// a contradiction. A true cross-source conflict is a history that FLIP-FLOPS between
-// DISTINCT `runId`s. So `auditVersionHistory` runs the shared consistency engine with
-// `requireDistinctSources: true`: monotonic single-source edits produce ZERO
-// contradictions; two runs disagreeing produce exactly one. The negative case is a
-// first-class tested property (tests/unit/version-history.test.ts).
+// changed across successive executions of the SAME ingestion pipeline is drift, not a
+// contradiction. A true cross-source conflict requires DIFFERENT stable source identities.
+// We use `systemMetadata.pipelineName` when present, or an explicitly resolved
+// run-id→source map supplied by the caller. Unresolved provenance fails closed to the
+// single identity `unknown-source`; distinct run ids alone can never manufacture a
+// conflict. `auditVersionHistory` then runs the shared consistency engine with
+// `requireDistinctSources: true`.
 
 import type { AuditFact } from "../types.js";
 import { auditConsistency, type ConsistencyReport } from "../audit/consistency.js";
@@ -39,14 +42,16 @@ import { auditConsistency, type ConsistencyReport } from "../audit/consistency.j
 // systemMetadata block. Verbatim example (globalTags) is captured in
 // tests/cassettes/openapi-v3-versioned-aspects.json.
 
-// systemMetadata as GMS returns it. `runId` = "the original run id that produced the
-// metadata"; `version` = the aspect version ordinal; `lastObserved` = epoch-ms of the
-// write (0 when never set). These three are the provenance axis for the recovery.
+// systemMetadata as GMS returns it. `runId` identifies the ingestion EXECUTION that wrote
+// the metadata; `pipelineName` identifies the stable ingestion pipeline when the source
+// enables DataHub's `set_system_metadata_pipeline_name`; `version` is the aspect version
+// ordinal; `lastObserved` is the write's epoch-ms timestamp.
 export interface DhSystemMetadata {
   version?: string;
   lastObserved?: number;
   runId?: string;
   lastRunId?: string;
+  pipelineName?: string;
   properties?: Record<string, unknown> | null;
 }
 
@@ -63,6 +68,10 @@ export interface AspectVersionHistory {
   urn: string;
   aspect: MutableAspectName;
   versions: DhVersionedAspect[];
+  // Optional trusted resolution assembled by the GMS adapter from
+  // DataHubExecutionRequest/DataHubIngestionSource metadata. It exists for deployments
+  // whose historical systemMetadata predates `pipelineName`.
+  sourceIdentityByRunId?: Readonly<Record<string, string>>;
 }
 
 // The mutable governance aspects whose history the recovery reads. Each maps to a
@@ -115,25 +124,56 @@ function isoOf(sm: DhSystemMetadata | null | undefined): string {
   return new Date(ms).toISOString();
 }
 
-// Stable source label for a version = its runId (the ingestion run that wrote it). A
-// missing/placeholder runId collapses to "unknown-run" — two such versions share ONE
-// source, so the distinct-source gate correctly treats them as drift, not a conflict.
-function sourceOf(sm: DhSystemMetadata | null | undefined): string {
-  const r = sm?.runId;
-  return r && r !== "no-run-id-provided" ? r : "unknown-run";
+const PLACEHOLDER_IDENTITIES = new Set([
+  "",
+  "no-run-id-provided",
+  "unknown",
+  "unknown-run",
+  "unknown-source",
+]);
+
+function meaningfulIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return PLACEHOLDER_IDENTITIES.has(normalized.toLowerCase()) ? null : normalized;
+}
+
+function runOf(sm: DhSystemMetadata | null | undefined): string | null {
+  return meaningfulIdentity(sm?.runId);
+}
+
+// Resolve the stable SOURCE independently from the per-execution run id. Provenance is
+// fail-closed: if neither pipelineName nor an explicit trusted mapping is available, every
+// unresolved write shares `unknown-source` and cannot pass the distinct-source gate.
+function sourceOf(
+  history: AspectVersionHistory,
+  sm: DhSystemMetadata | null | undefined
+): string {
+  const pipeline = meaningfulIdentity(sm?.pipelineName);
+  if (pipeline) return pipeline;
+
+  const runId = runOf(sm);
+  const resolved = runId
+    ? meaningfulIdentity(history.sourceIdentityByRunId?.[runId])
+    : null;
+  return resolved ?? "unknown-source";
 }
 
 // ── History → neutral AuditFact stream ─────────────────────────────────────────
 // One fact per (version × comparable attribute). Facts are tagged with the version's
-// `runId` as their source and `lastObserved` as `createdAt`, so the consistency engine
-// sees which run asserted each value and can recommend by recency.
+// stable pipeline/source identity as `source`, its execution `runId` as `scan`, and
+// `lastObserved` as `createdAt`, so the consistency engine compares true sources while
+// retaining the exact write execution as evidence.
 export function versionHistoryToFacts(history: AspectVersionHistory): AuditFact[] {
   const { urn, aspect, versions } = history;
   const facts: AuditFact[] = [];
-  for (const v of versions) {
+  for (const [index, v] of versions.entries()) {
     const sm = v.systemMetadata ?? null;
-    const source = sourceOf(sm);
-    const scan = sm?.version ? `v${sm.version}` : null;
+    const source = sourceOf(history, sm);
+    const runId = runOf(sm);
+    const scan = runId;
+    const version = meaningfulIdentity(sm?.version) ?? String(index + 1);
+    const evidenceId = `v${version}:${runId ?? "unknown-run"}`;
     const createdAt = isoOf(sm);
     const base = { source, scan, createdAt } as const;
 
@@ -142,10 +182,10 @@ export function versionHistoryToFacts(history: AspectVersionHistory): AuditFact[
       if (owner !== null) {
         facts.push({
           ...base,
-          id: `${urn}:ownership:${scan ?? source}`,
+          id: `${urn}:ownership:${evidenceId}`,
           kind: "ownership",
           sourceRef: urn,
-          content: `${urn} owned by ${owner} (run ${source})`,
+          content: `${urn} owned by ${owner} (source ${source}; run ${runId ?? "unknown"})`,
           metadata: { record: urn, owner },
         });
       }
@@ -154,10 +194,10 @@ export function versionHistoryToFacts(history: AspectVersionHistory): AuditFact[
       if (domain !== null) {
         facts.push({
           ...base,
-          id: `${urn}:domain:${scan ?? source}`,
+          id: `${urn}:domain:${evidenceId}`,
           kind: "domain",
           sourceRef: urn,
-          content: `${urn} in domain ${domain} (run ${source})`,
+          content: `${urn} in domain ${domain} (source ${source}; run ${runId ?? "unknown"})`,
           metadata: { record: urn, domain },
         });
       }
@@ -166,23 +206,23 @@ export function versionHistoryToFacts(history: AspectVersionHistory): AuditFact[
       if (deprecated !== null) {
         facts.push({
           ...base,
-          id: `${urn}:deprecation:${scan ?? source}`,
+          id: `${urn}:deprecation:${evidenceId}`,
           kind: "deprecation",
           sourceRef: urn,
-          content: `${urn} deprecated=${deprecated} (run ${source})`,
+          content: `${urn} deprecated=${deprecated} (source ${source}; run ${runId ?? "unknown"})`,
           metadata: { record: urn, deprecated },
         });
       }
     } else {
-      // schemaMetadata → one fact per typed field, keyed on the FIELD, so two runs typing
+      // schemaMetadata → one fact per typed field, keyed on the FIELD, so two sources typing
       // one column differently contradict at the field level (the silent schema break).
       for (const { path, type } of schemaFieldTypesOf(v.value)) {
         facts.push({
           ...base,
-          id: `${urn}#${path}:schema:${scan ?? source}`,
+          id: `${urn}#${path}:schema:${evidenceId}`,
           kind: "schema",
           sourceRef: `${urn}#${path}`,
-          content: `${urn}.${path} : ${type} (run ${source})`,
+          content: `${urn}.${path} : ${type} (source ${source}; run ${runId ?? "unknown"})`,
           metadata: { record: `${urn}#${path}`, fieldType: type },
         });
       }
@@ -194,7 +234,8 @@ export function versionHistoryToFacts(history: AspectVersionHistory): AuditFact[
 // Audit a set of aspect version histories for CROSS-SOURCE contradictions recovered from
 // history. Runs the SAME pure consistency engine that ships (the "self-auditing" claim is
 // measured on the identical code), with the distinct-source gate ON so that only genuine
-// cross-run disagreements — not benign single-run edits — are reported.
+// cross-source disagreements — not changes between executions of one pipeline — are
+// reported.
 export function auditVersionHistory(histories: AspectVersionHistory[]): ConsistencyReport {
   const facts = histories.flatMap(versionHistoryToFacts);
   return auditConsistency(facts, { requireDistinctSources: true });

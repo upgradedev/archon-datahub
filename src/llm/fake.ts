@@ -13,7 +13,15 @@
 
 import type { ChatCreateArgs, ChatResponse, LlmClient, ToolCall } from "./client.js";
 
+export const DETERMINISTIC_FIXTURE_MODEL =
+  "archon-deterministic-fixture-narrator-v1";
+
 export class FakeLlmClient implements LlmClient {
+  readonly runtime = {
+    source: "deterministic-fixture",
+    provider: "fixture",
+  } as const;
+
   chat = {
     completions: {
       create: async (args: ChatCreateArgs): Promise<ChatResponse> => {
@@ -34,20 +42,15 @@ function chooseNextTool(prompt: string): ToolCall {
   const line = lastEvidence(prompt);
   const flag = (k: string): boolean => new RegExp(`\\b${k}=true\\b`).test(line);
   if (!flag("harvested")) {
-    return call("harvest_catalog", { reasoning: "Harvest the catalog metadata + lineage before auditing." });
+    return call("harvest_catalog");
   }
   if (!flag("consistency_done")) {
-    return call("run_consistency_audit", {
-      reasoning: "Run the self-audit for cross-source contradictions and lineage gaps.",
-    });
+    return call("run_consistency_audit");
   }
   if (!flag("governance_done")) {
-    return call("run_governance_audit", { reasoning: "Check the G1–G6 governance policy rules." });
+    return call("run_governance_audit");
   }
-  return call("emit_findings", {
-    reasoning: "All read-only evidence gathered — emit the findings for a steward to disposition.",
-    confidence: 0.9,
-  });
+  return call("emit_findings");
 }
 
 function narrate(prompt: string): string {
@@ -77,6 +80,10 @@ function lastEvidence(prompt: string): string {
   return lines.length ? lines[lines.length - 1]! : "";
 }
 
-function call(name: string, args: Record<string, unknown>): ToolCall {
-  return { id: `fake-${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } };
+function call(name: string): ToolCall {
+  return {
+    id: `fake-${name}`,
+    type: "function",
+    function: { name, arguments: "{}" },
+  };
 }
