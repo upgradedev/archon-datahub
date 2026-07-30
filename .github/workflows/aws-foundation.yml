@@ -549,7 +549,7 @@ jobs:
             ReadStageIamDriftDetection \
             ReadAndDetectExactProductionStacks \
             ReadStackDriftDetectionStatus; do
-            grep -Fq "- Sid: ${sid}" \
+            grep -Fq -- "- Sid: ${sid}" \
               infra/aws/foundation/github-actions-deploy-role.yml
           done
 
