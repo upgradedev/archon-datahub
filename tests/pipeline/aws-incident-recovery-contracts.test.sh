@@ -19,6 +19,7 @@ reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
 ci="${repository_root}/.github/workflows/ci.yml"
 behavior_test="${repository_root}/tests/pipeline/aws-incident-recovery-driver.test.sh"
 validator_test="${repository_root}/tests/pipeline/aws-incident-recovery-validator.test.mjs"
+runbook="${repository_root}/docs/AWS_INCIDENT_RECOVERY.md"
 
 fail() { echo "::error::$*" >&2; exit 1; }
 require_text() {
@@ -47,7 +48,7 @@ for path in "${entry}" "${driver_workflow}" "${cleanup_workflow}" \
   "${foundation_workflow}" "${deploy_workflow}" "${canary_workflow}" \
   "${canary_recovery_workflow}" "${fixture_workflow}" "${contract}" "${foundation_contract}" \
   "${canary_roles}" "${driver}" "${validator}" "${reconciler}" "${ci}" \
-  "${behavior_test}" "${validator_test}"; do
+  "${behavior_test}" "${validator_test}" "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
@@ -59,6 +60,7 @@ jq --exit-status '
   .status == "implemented-not-executed" and
   .controlPlane.inputs == ["expected_head_sha", "confirmation"] and
   .controlPlane.secretForwarding == "none" and
+  .controlPlane.runbook == "docs/AWS_INCIDENT_RECOVERY.md" and
   .controlPlane.approvalEnvironments == {
     deleteOnce: "governed-canary-recovery",
     prepareAndRevoke: "aws-foundation"
@@ -216,6 +218,8 @@ for workflow in "${entry}" "${driver_workflow}" "${cleanup_workflow}"; do
     [[ "${ref}" =~ ^[0-9a-f]{40}$ ]] || fail "${workflow#${repository_root}/} has a non-SHA action pin: ${action}"
   done < <(sed -nE 's/^[[:space:]]*(- )?uses:[[:space:]]+([^#[:space:]]+).*/\2/p' "${workflow}")
 done
+require_text "${cleanup_workflow}" \
+  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
 require_text "${driver_workflow}" \
   'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
   'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' \
@@ -295,3 +299,8 @@ require_text "${ci}" \
   'node --test tests/pipeline/aws-incident-recovery-validator.test.mjs' \
   'bash tests/pipeline/aws-incident-recovery-contracts.test.sh' \
   'bash tests/pipeline/aws-incident-recovery-driver.test.sh'
+require_text "${runbook}" \
+  'Status: **implemented, not executed**' \
+  'PutRolePolicy' \
+  'eventually consistent' \
+  'success or the exact AWS `NoSuchEntity`'

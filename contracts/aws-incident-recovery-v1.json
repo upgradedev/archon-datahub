@@ -7,6 +7,7 @@
     "entryWorkflow": ".github/workflows/aws-incident-recovery.yml",
     "driverWorkflow": ".github/workflows/aws-incident-recovery-driver.yml",
     "cleanupWorkflow": ".github/workflows/aws-incident-recovery-cleanup.yml",
+    "runbook": "docs/AWS_INCIDENT_RECOVERY.md",
     "driver": "scripts/run-aws-incident-recovery.sh",
     "validator": "scripts/aws-incident-recovery.mjs",
     "secretForwarding": "none",

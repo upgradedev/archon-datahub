@@ -54,7 +54,11 @@ uploaded and the solo owner approves the protected `datahub-demo-seed` job with 
 run ID, run attempt, action, release SHA, and plan SHA-256 shown in the job summary. The
 fixture workflow uses the same non-cancelling
 `archon-governed-canary-mutation-recovery` concurrency group as the live canary and its
-compensator, so fixture maintenance cannot race a tag write or rollback.
+compensator, so fixture maintenance cannot race a tag write or rollback. Foundation and
+explicit AWS incident recovery hold `archon-aws-control-plane` first and acquire this
+inner lock only in the job that can reconcile or use the canary roles. Deploy holds the
+outer lock while synchronously dispatching the inner-only canary. This single
+outer-to-inner order prevents overlap without a parent-child lock cycle.
 
 Configure the environments with dedicated fixture bindings, not the general demo or
 governed-canary credentials:
