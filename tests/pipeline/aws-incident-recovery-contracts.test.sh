@@ -168,7 +168,8 @@ jq --exit-status '
     runAttempt: "1",
     runId: "30571619440"
   } and
-  .execution.temporaryPolicyInstalled == false and
+  .execution.temporaryPolicyInstalledDuringSuccessfulRun == true and
+  .execution.temporaryPolicyPresentAfterRun == false and
   .execution.temporaryPolicyAbsent == "proven" and
   .execution.deleteStackExecuted == true and
   .controlPlane.inputs == ["expected_head_sha", "confirmation"] and
