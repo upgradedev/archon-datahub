@@ -573,6 +573,8 @@ test("posture evidence is checksum-sealed, signed, retained, and documented", ()
 
   assert.match(documentation, /production-observer/u);
   assert.match(documentation, /cloudformation:DetectStackDrift/u);
+  assert.match(documentation, /cloudformation:DetectStackResourceDrift/u);
+  assert.match(documentation, /cloudformation:BatchDescribeTypeConfigurations/u);
   assert.match(documentation, /cloudformation:ListStackResources/u);
   assert.match(documentation, /cloudwatch:DescribeAlarms/u);
   const alarmIamStart = documentation.indexOf(
