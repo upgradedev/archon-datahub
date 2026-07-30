@@ -74,6 +74,22 @@ jq --exit-status '
     runAttempt: "1",
     runId: "30571830902"
   } and
+  .execution.classifiedRecoveryRun == {
+    artifact: {
+      id: "8773039467",
+      name: "aws-incident-recovery-30576390064-1",
+      zipDigest: "sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e"
+    },
+    canonicalAbsenceProof: "proven",
+    deleteStack: "skipped",
+    diagnosticCode: "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+    headSha: "9b9ed35e4c5a5bf0bfed4aa0b049ff654ad2d0b9",
+    mandatoryRevocation: "success",
+    putRolePolicy: "not-reached",
+    result: "prepare-classified-delete-complete-no-physical-id",
+    runAttempt: "1",
+    runId: "30576390064"
+  } and
   .execution.cleanupRun == {
     artifact: {
       attestationUrl: "https://github.com/upgradedev/archon-datahub/attestations/38026442",
@@ -121,11 +137,14 @@ jq --exit-status '
     "CREATE_FAILED-without-PhysicalResourceId",
     "DELETE_COMPLETE"
   ] and
+  .target.preconditions.resourceStatuses.paginationToken == "forbidden" and
   .target.preconditions.incidentResourceCurrentState == {
-    acceptanceChange: "none-pending-classified-rerun",
-    acceptedClass: "CREATE_FAILED-without-PhysicalResourceId",
+    acceptanceChange: "narrow-reviewed-after-classified-run-30576390064",
+    acceptedClasses: [
+      "CREATE_FAILED-without-PhysicalResourceId",
+      "exact-logical-id-and-type-DELETE_COMPLETE-without-PhysicalResourceId"
+    ],
     diagnosticOnlyRejectedClasses: [
-      "DELETE_COMPLETE-without-PhysicalResourceId",
       "DELETE_COMPLETE-with-PhysicalResourceId"
     ],
     rejectionPoint: "before-PutRolePolicy"
@@ -171,7 +190,6 @@ jq --exit-status '
   } and
   .validator.cliFailureCodes == [
     "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
     "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
@@ -179,6 +197,7 @@ jq --exit-status '
     "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
     "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+    "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
     "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
     "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
     "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
@@ -193,13 +212,13 @@ jq --exit-status '
     "AWS_RECOVERY_VALIDATOR_FAILED"
   ] and
   .validator.diagnosticOnlyCodes == [
-    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
+    "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
     "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID"
   ] and
   .validator.diagnosticOnlySemantics ==
-    "fail-closed-preauthorization-classification-without-acceptance-change" and
+    "remaining-nonaccepted-classes-fail-closed-before-authorization" and
   .validator.fallbackCliFailureCode == "AWS_RECOVERY_VALIDATOR_FAILED" and
   .validator.rawErrorMessages == false and
   .validator.rawPaths == false and
@@ -413,18 +432,34 @@ require_text "${ci}" \
 require_text "${runbook}" \
   'Status: **attempted; `DeleteStack` not executed; cleanup proof successful**' \
   'Cleanup-only run `30571619440` proved canonical temporary-policy absence' \
-  'recovery run `30571830902` failed during prepare with the historical' \
+  'first recovery run `30571830902` stopped on the historical generic' \
+  'Classified recovery run | `30576390064`' \
   '`AWS_RECOVERY_INCIDENT_RECORD_MISMATCH`' \
+  '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`' \
   '`sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0`' \
   '`8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2`' \
   'https://github.com/upgradedev/archon-datahub/attestations/38026442' \
   '`sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878`' \
+  '`sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e`' \
   'ResourceStatus` as the resource' \
   '`ROLLBACK_COMPLETE`' \
-  '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`' \
+  '`DELETE_SKIPPED`' \
   '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID`' \
-  'Both `DELETE_COMPLETE` classes still fail before `PutRolePolicy`' \
+  '`AWS_RECOVERY_RESOURCE_STATE_PAGINATED`' \
+  'Any remaining `NextToken` fails before private outputs or' \
+  'authorization. The incident record must occur once' \
+  'Missing `PhysicalResourceId` alone is never treated as proof' \
+  'retired from the current failure-code allowlist' \
+  'does not alter the workflow, IAM policy' \
   'eventually consistent' \
   'lists inline policies before mutation' \
   'The opaque request response is never treated as proof' \
   'Upload runs only when at least'
+forbid_text "${validator}" \
+  'AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID'
+forbid_text "${driver}" \
+  '--no-paginate' \
+  '--max-items' \
+  '--max-results' \
+  '--next-token' \
+  '--starting-token'
