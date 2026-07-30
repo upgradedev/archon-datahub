@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'
+foundation_phase='startup'
+
+report_foundation_error() {
+  local exit_code="$1"
+  local source_line="$2"
+  trap - ERR
+  set +e
+  printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\n' \
+    "${FOUNDATION_DIAGNOSTIC_SOURCE}" "${source_line}" \
+    "${foundation_phase}" "${exit_code}" >&2
+  exit "${exit_code}"
+}
+
+trap 'report_foundation_error "$?" "$LINENO"' ERR
+shopt -s inherit_errexit
 
 : "${EXPECTED_ACCOUNT_ID:?EXPECTED_ACCOUNT_ID is required}"
 : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
@@ -382,8 +399,10 @@ deployed_template_sha() {
     awk '{print $1}'
 }
 
+foundation_phase='preflight:revalidate-master'
 echo "::group::Fail-closed AWS foundation preflight"
 revalidate_master
+foundation_phase='preflight:validate-templates'
 for template in \
   infra/aws/foundation/api-gateway-account.yml \
   "${IAM_FOUNDATION_TEMPLATE}" \
@@ -399,6 +418,7 @@ for template in \
     --template-body "file://${template}" >/dev/null
 done
 
+foundation_phase='preflight:legacy-role'
 legacy_error="${RUNNER_TEMP}/legacy-deploy-role.error"
 if aws iam get-role \
   --role-name "${LEGACY_DEPLOY_ROLE}" \
@@ -408,6 +428,7 @@ if aws iam get-role \
 fi
 grep -q 'NoSuchEntity' "${legacy_error}"
 
+foundation_phase='preflight:legacy-stacks'
 legacy_stacks="$(
   aws cloudformation list-stacks \
     --region "${PRIMARY_REGION}" \
@@ -430,6 +451,7 @@ jq -e '
   length == 0
 ' <<<"${legacy_stacks}" >/dev/null
 
+foundation_phase='preflight:foundation-stack-role-bindings'
 for stage in staging production; do
   assert_stack_role_is_null_if_present \
     "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
@@ -442,7 +464,9 @@ for stage in staging production; do
 done
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+foundation_phase='preflight:shared-api-gateway'
 assert_api_gateway_no_clobber
+foundation_phase='preflight:application-stack-role-bindings'
 staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
@@ -457,6 +481,7 @@ assert_application_stack_role_exact_if_present \
   production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
 assert_application_stack_role_exact_if_present \
   production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
+foundation_phase='preflight:application-stack-role-transition'
 application_stack_role_transition_json="$(
   jq -cnS \
     --argjson entries "${application_stack_roles_json}" '
@@ -506,6 +531,7 @@ if [[ "${application_stack_role_transition_state}" == \
 fi
 echo "::endgroup::"
 
+foundation_phase='stage-iam'
 echo "::group::Reconcile stage IAM foundations"
 for stage in staging production; do
   revalidate_master
@@ -686,6 +712,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='shared-api-gateway'
 echo "::group::Reconcile the shared API Gateway logging account"
 revalidate_master
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
@@ -786,6 +813,7 @@ shared_role_binding_sha="$(
 )"
 echo "::endgroup::"
 
+foundation_phase='governed-canary-roles'
 echo "::group::Reconcile the three governed-canary read roles"
 revalidate_master
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
@@ -993,6 +1021,7 @@ canary_template_sha="$(
 )"
 echo "::endgroup::"
 
+foundation_phase='bootstrap'
 echo "::group::Bootstrap both isolated stages in both regions"
 for stage in staging production; do
   for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
@@ -1019,6 +1048,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='deploy-roles'
 echo "::group::Reconcile the two environment-bound deploy roles"
 for stage in staging production; do
   revalidate_master
@@ -1050,6 +1080,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='drift-verification'
 echo "::group::Require all ten foundation stacks to be IN_SYNC"
 revalidate_master
 drift_file="${RUNNER_TEMP}/aws-foundation-drift.json"
@@ -1128,6 +1159,7 @@ jq -e 'length == 10 and all(.[]; .stackDriftStatus == "IN_SYNC")' \
 drift_sha="$(sha256sum "${drift_file}" | awk '{print $1}')"
 echo "::endgroup::"
 
+foundation_phase='evidence'
 echo "::group::Verify live stage bindings and author sanitized evidence"
 rm -rf -- "${EVIDENCE_DIR}"
 mkdir -p "${EVIDENCE_DIR}"

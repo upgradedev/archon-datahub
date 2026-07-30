@@ -1014,3 +1014,33 @@ require_text "${runbook}" \
   '`foundation-complete-deploy-migration-required`' \
   '`requires-explicit-deploy-migration`' \
   '`ready-for-deploy`'
+require_text "${reconciler}" \
+  'set -Eeuo pipefail' \
+  "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
+  "foundation_phase='startup'" \
+  'report_foundation_error() {' \
+  "trap 'report_foundation_error \"\$?\" \"\$LINENO\"' ERR" \
+  'shopt -s inherit_errexit' \
+  "printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\\n'" \
+  "foundation_phase='preflight:revalidate-master'" \
+  "foundation_phase='preflight:validate-templates'" \
+  "foundation_phase='preflight:legacy-role'" \
+  "foundation_phase='preflight:legacy-stacks'" \
+  "foundation_phase='preflight:foundation-stack-role-bindings'" \
+  "foundation_phase='preflight:shared-api-gateway'" \
+  "foundation_phase='preflight:application-stack-role-bindings'" \
+  "foundation_phase='preflight:application-stack-role-transition'" \
+  "foundation_phase='stage-iam'" \
+  "foundation_phase='shared-api-gateway'" \
+  "foundation_phase='governed-canary-roles'" \
+  "foundation_phase='bootstrap'" \
+  "foundation_phase='deploy-roles'" \
+  "foundation_phase='drift-verification'" \
+  "foundation_phase='evidence'"
+forbid_text "${reconciler}" \
+  'BASH_COMMAND' \
+  'set -x' \
+  'printenv' \
+  'declare -p'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 16 ||
+  fail 'reconciler diagnostic phases must be the 16 reviewed public labels'
