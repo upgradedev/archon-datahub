@@ -28,6 +28,8 @@ import type { SourceReport } from "../../src/audit/harvest.js";
 import type { CatalogEntity } from "../../src/datahub/models.js";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 
@@ -101,12 +103,16 @@ test("prompt-injection: audit_catalog over MCP on a poisoned catalog returns rea
   const { server } = await buildMcpServer({
     datahub: new FakeDataHubMcpClient(poisonedReports, []),
     pipeline: new AuditPipeline(),
+    demoQuery: "injected_asset",
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const res = (await client.callTool({ name: "audit_catalog", arguments: {} })) as {
+    const res = (await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "injected_asset" },
+    })) as {
       isError?: boolean;
       content: Array<{ text: string }>;
     };
