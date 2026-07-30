@@ -382,6 +382,8 @@ jq --exit-status '
     artifactRetentionDays: 90,
     artifactUpload: "explicit-files-only",
     autoRecovery: "forbidden",
+    explicitIncidentRecoveryContract: "contracts/aws-incident-recovery-v1.json",
+    explicitIncidentRecoveryStatus: "implemented-not-executed",
     canonicalJson: true,
     credentialClearProofRequired: true,
     diagnosticCount: 1,
@@ -457,6 +459,7 @@ done
 require_text "${foundation_workflow}" \
   'name: Bootstrap AWS foundation' \
   'group: archon-aws-control-plane' \
+  'group: archon-governed-canary-mutation-recovery' \
   'cancel-in-progress: false' \
   'name: aws-foundation' \
   'id-token: write' \

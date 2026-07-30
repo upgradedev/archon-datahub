@@ -38,6 +38,9 @@ defaults:
 jobs:
   foundation:
     name: Reconcile and attest AWS foundation
+    concurrency:
+      group: archon-governed-canary-mutation-recovery
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     environment:

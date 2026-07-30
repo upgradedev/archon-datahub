@@ -478,3 +478,19 @@ diagnostic fails closed and is not uploaded.
 This evidence is observational only. The workflow does not delete, recreate, or
 continue rollback for a failed stack. Recovery remains a separate, explicit
 operator decision after the exact state and sanitized evidence are reviewed.
+## Explicit sealed-incident recovery
+
+Foundation failure diagnostics remain observational: this workflow never
+automatically deletes, recreates, or continues rollback. The one reviewed
+historical `staging-iam` exception is a separate CI-only, two-environment
+control plane with immutable incident coordinates, short-lived exact-stack
+authorization, mandatory revocation, and sanitized attested evidence. Its
+status is `implemented-not-executed`; see
+[`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
+`contracts/aws-incident-recovery-v1.json`.
+
+Foundation holds the outer `archon-aws-control-plane` lock and its reconciliation
+job also holds `archon-governed-canary-mutation-recovery`. This outer-to-inner
+order prevents its governed-canary role-stack reconciliation from racing
+fixture, canary, compensation, or explicit incident recovery mutations without
+the parent-child deadlock an inner child would create by taking the outer lock.

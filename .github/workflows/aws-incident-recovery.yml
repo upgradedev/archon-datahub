@@ -1,0 +1,40 @@
+name: Recover sealed AWS staging IAM incident
+
+run-name: Recover sealed staging IAM incident at ${{ inputs.expected_head_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: Exact fixed lowercase 40-character current master SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type DELETE SEALED STAGING IAM INCIDENT
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-aws-control-plane
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Hold AWS control-plane lock through sealed recovery
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      inputs.confirmation == 'DELETE SEALED STAGING IAM INCIDENT'
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/aws-incident-recovery-driver.yml
+    with:
+      operation: recover
+      expected_head_sha: ${{ inputs.expected_head_sha }}
+      confirmation: ${{ inputs.confirmation }}
