@@ -23,6 +23,32 @@ case "${1:-}:${2:-}" in
   sts:get-caller-identity)
     printf '{"Account":"%s","Arn":"arn:aws:sts::%s:assumed-role/archon-datahub-github-foundation/test-session","UserId":"fixture"}\n' "${FAKE_ACCOUNT_ID}" "${FAKE_ACCOUNT_ID}"
     ;;
+  iam:get-role-policy)
+    if [[ "$#" -ne 8 || "$3" != "--role-name" ||
+      "$4" != "archon-datahub-github-governed-canary-recovery" ||
+      "$5" != "--policy-name" ||
+      "$6" != "archon-incident-30546241677-delete" ||
+      "$7" != "--output" || "$8" != "json" ]]; then
+      echo "unexpected GetRolePolicy arguments" >&2
+      exit 94
+    fi
+    increment get-role-policy >/dev/null
+    case "${FAKE_POLICY_READ_MODE:-exact}" in
+      exact)
+        printf '%s\n' '{"RoleName":"archon-datahub-github-governed-canary-recovery","PolicyName":"archon-incident-30546241677-delete","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Sid":"Delete","Resource":"sealed","Effect":"Allow","Action":"cloudformation:DeleteStack"}]}}'
+        ;;
+      mismatch)
+        printf '{"RoleName":"archon-datahub-github-governed-canary-recovery","PolicyName":"archon-incident-30546241677-delete","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Sid":"Delete","Resource":"%s","Effect":"Allow","Action":"cloudformation:DeleteStack"}]}}\n' "${FAKE_PRIVATE_MARKER}"
+        ;;
+      malformed)
+        printf '%s' '{"RoleName":"archon-datahub-github-governed-canary-recovery","PolicyName":"archon-incident-30546241677-delete","PolicyDocument":'
+        ;;
+      wrong-shape)
+        printf '%s\n' '{"RoleName":"archon-datahub-github-governed-canary-recovery","PolicyName":"archon-incident-30546241677-delete","PolicyDocument":[]}'
+        ;;
+      *) exit 93 ;;
+    esac
+    ;;
   iam:list-role-policies)
     if [[ "$#" -ne 6 || "$3" != "--role-name" ||
       "$4" != "archon-datahub-github-governed-canary-recovery" ||
@@ -214,6 +240,90 @@ mkdir -p "${shape_root}"
 : >"${shape_root}/output"
 GITHUB_ACTIONS=true RUNNER_TEMP="${shape_root}" GITHUB_OUTPUT="${shape_root}/output" \
   source "${driver}"
+
+readback_root="${test_root}/policy-readback"
+mkdir -p "${readback_root}/exact/state"
+
+node --input-type=module - \
+  "${repository_root}/scripts/aws-incident-recovery.mjs" \
+  "${readback_root}/validator-policy.json" <<'NODE_CANONICAL_POLICY'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const validatorPath = process.argv[2];
+const outputPath = process.argv[3];
+const { canonicalJson } = await import(pathToFileURL(validatorPath).href);
+const policy = {
+  Version: "2012-10-17",
+  Statement: [{
+    Sid: "Delete",
+    Resource: "sealed",
+    Effect: "Allow",
+    Action: "cloudformation:DeleteStack"
+  }]
+};
+writeFileSync(outputPath, canonicalJson(policy), {
+  encoding: "utf8",
+  flag: "wx",
+  mode: 0o600
+});
+NODE_CANONICAL_POLICY
+
+printf '%s\n' \
+  '{"PolicyName":"archon-incident-30546241677-delete","PolicyDocument":{"Version":"2012-10-17","Statement":[{"Sid":"Delete","Resource":"sealed","Effect":"Allow","Action":"cloudformation:DeleteStack"}]},"RoleName":"archon-datahub-github-governed-canary-recovery"}' \
+  >"${readback_root}/aws-readback.json"
+jq_policy_canonical="$(
+  jq -ceS '.PolicyDocument | select(type == "object")' \
+    "${readback_root}/aws-readback.json"
+)"
+printf '%s' "${jq_policy_canonical}" >"${readback_root}/jq-policy.json"
+cmp -s "${readback_root}/validator-policy.json" "${readback_root}/jq-policy.json" ||
+  fail 'validator and IAM readback canonical bytes differ'
+
+canonical_policy="$(<"${readback_root}/validator-policy.json")"
+expected_policy_digest="$(printf '%s' "${canonical_policy}" | sha256sum | awk '{print $1}')"
+newline_policy_digest="$(printf '%s\n' "${canonical_policy}" | sha256sum | awk '{print $1}')"
+test "${expected_policy_digest}" != "${newline_policy_digest}" ||
+  fail 'policy digest domains must distinguish the trailing newline'
+if ! (
+  export PATH="${test_root}/bin:${PATH}"
+  export FAKE_AWS_STATE="${readback_root}/exact/state"
+  export FAKE_POLICY_READ_MODE=exact
+  export FAKE_PRIVATE_MARKER=PRIVATE_AWS_ERROR_MARKER
+  wait_for_policy_digest "${expected_policy_digest}" "${readback_root}/exact/policy.json"
+); then
+  fail 'canonical IAM readback must hash the same no-newline bytes as the validator'
+fi
+test "$(call_count "${readback_root}/exact/state/get-role-policy.count")" = 1 ||
+  fail 'exact canonical policy must pass on the first read'
+test -f "${readback_root}/exact/policy.json" || fail 'canonical policy readback is missing'
+test ! -L "${readback_root}/exact/policy.json" || fail 'canonical policy readback is a link'
+
+for rejection in mismatch malformed wrong-shape newline-domain; do
+  rejection_root="${readback_root}/${rejection}"
+  mkdir -p "${rejection_root}/state"
+  policy_mode="${rejection}"
+  policy_digest="${expected_policy_digest}"
+  if [[ "${rejection}" == "newline-domain" ]]; then
+    policy_mode=exact
+    policy_digest="${newline_policy_digest}"
+  fi
+  if (
+    export PATH="${test_root}/bin:${PATH}"
+    export FAKE_AWS_STATE="${rejection_root}/state"
+    export FAKE_POLICY_READ_MODE="${policy_mode}"
+    export FAKE_PRIVATE_MARKER=PRIVATE_AWS_ERROR_MARKER
+    wait_for_policy_digest "${policy_digest}" "${rejection_root}/policy.json"
+  ) >"${rejection_root}/stdout" 2>"${rejection_root}/stderr"; then
+    fail "${rejection} policy readback must fail closed"
+  fi
+  test "$(call_count "${rejection_root}/state/get-role-policy.count")" = 12 ||
+    fail "${rejection} must exhaust bounded policy-readback attempts"
+  grep -Fq 'not canonically readable after bounded IAM propagation retries' \
+    "${rejection_root}/stderr" || fail "${rejection} failure is not generic"
+  assert_no_raw_error "${rejection_root}"
+done
+
 retry_safe_aws() {
   local _label="$1" output="$2"
   printf '%s\n' '{"Stacks":[{"StackId":"arn:aws:cloudformation:eu-west-1:123456789012:stack/Archon-Staging-IAM-Foundation/11111111-2222-3333-4444-555555555555"}]}' >"${output}"
