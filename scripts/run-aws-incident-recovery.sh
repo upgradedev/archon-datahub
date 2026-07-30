@@ -500,6 +500,7 @@ cleanup() {
   revoke_policy
   local evidence_dir="${WORK_ROOT}/cleanup-evidence"
   mkdir -p "${evidence_dir}"
+  chmod 0700 "${evidence_dir}"
   jq -cnS \
     --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
     --arg trigger "${GITHUB_EVENT_NAME}" '
@@ -517,10 +518,23 @@ cleanup() {
     cd "${evidence_dir}"
     sha256sum cleanup.json >SHA256SUMS
   )
-  chmod 0600 "${evidence_dir}/SHA256SUMS"
-  echo "evidence_dir=${evidence_dir}" >>"${GITHUB_OUTPUT}"
+  jq -cnS \
+    --arg cleanupSha256 "$(sha256sum "${evidence_dir}/cleanup.json" | awk '{print $1}')" '
+      {
+        schemaVersion: "archon.aws-incident-recovery-cleanup-attestation/v1",
+        cleanupSha256: $cleanupSha256,
+        result: "temporary-policy-absent"
+      }
+    ' >"${evidence_dir}/attestation-predicate.json"
+  chmod 0600 \
+    "${evidence_dir}/SHA256SUMS" \
+    "${evidence_dir}/attestation-predicate.json"
+  {
+    printf 'evidence_dir=%s\n' "${evidence_dir}"
+    printf 'checksums=%s\n' "${evidence_dir}/SHA256SUMS"
+    printf 'predicate=%s\n' "${evidence_dir}/attestation-predicate.json"
+  } >>"${GITHUB_OUTPUT}"
 }
-
 case "${1:-}" in
   prepare)
     prepare

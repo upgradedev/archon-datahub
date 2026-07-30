@@ -273,29 +273,38 @@ export function buildRecoveryPlan({
     resourceStateSha256 = preparedResourceStateSha256;
   }
 
+  const exactReadConditions = {
+    DateLessThan: { "aws:CurrentTime": expiresAt },
+    StringEquals: {
+      "aws:RequestedRegion": TARGET.region,
+      "aws:ResourceTag/Application": TARGET.tags.Application,
+      "aws:ResourceTag/Environment": TARGET.tags.Environment,
+      "aws:ResourceTag/ManagedBy": TARGET.tags.ManagedBy,
+      "aws:ResourceTag/Purpose": TARGET.tags.Purpose,
+    },
+  };
   const policyDocument = {
     Version: "2012-10-17",
     Statement: [
+      {
+        Sid: "ReadExactSealedIncidentStackBeforeExpiry",
+        Effect: "Allow",
+        Action: "cloudformation:DescribeStacks",
+        Resource: stack.StackId,
+        Condition: exactReadConditions,
+      },
       {
         Sid: "DeleteExactSealedIncidentStackBeforeExpiry",
         Effect: "Allow",
         Action: "cloudformation:DeleteStack",
         Resource: stack.StackId,
         Condition: {
-          DateLessThan: { "aws:CurrentTime": expiresAt },
+          ...exactReadConditions,
           Null: { "cloudformation:RoleArn": "true" },
-          StringEquals: {
-            "aws:RequestedRegion": TARGET.region,
-            "aws:ResourceTag/Application": TARGET.tags.Application,
-            "aws:ResourceTag/Environment": TARGET.tags.Environment,
-            "aws:ResourceTag/ManagedBy": TARGET.tags.ManagedBy,
-            "aws:ResourceTag/Purpose": TARGET.tags.Purpose,
-          },
         },
       },
     ],
-  };
-  const policyDocumentSha256 = sha256(canonicalJson(policyDocument));
+  };  const policyDocumentSha256 = sha256(canonicalJson(policyDocument));
   const clientRequestToken = `archon-${INCIDENT.runId}-a${INCIDENT.runAttempt}-${controlPlaneSha.slice(0, 12)}`;
   const stackIdSha256 = sha256(stack.StackId);
   const plan = {
