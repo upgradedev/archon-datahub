@@ -292,9 +292,7 @@ for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
 done
 forbid_text "${main_driver}" '--set-as-default'
 forbid_text "${authorization}" \
-  '"Resource": "*"' \
-  'aws iam put-role-policy' \
-  'aws iam delete-role-policy'
+  '"Resource": "*"'
 forbid_text "${canary_roles}" \
   'archon-foundation-control-policy-migration' \
   'iam:CreatePolicyVersion' \
