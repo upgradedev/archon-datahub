@@ -181,6 +181,8 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
           for path in \
             contracts/aws-foundation-v1.json \
+            infra/aws/package.json \
+            infra/aws/package-lock.json \
             infra/aws/foundation/api-gateway-account.yml \
             infra/aws/foundation/cdk-execution-policy.yml \
             infra/aws/foundation/github-actions-deploy-role.yml \
@@ -188,13 +190,16 @@ jobs:
             infra/aws/foundation/github-actions-foundation-role.yml \
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/patch-cdk-brace-expansion.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
             scripts/render-canonical-flow-yaml.mjs \
             scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/render-aws-foundation-policy.mjs \
-            scripts/verify-aws-runtime-boundary.mjs; do
+            scripts/verify-aws-runtime-boundary.mjs \
+            scripts/verify-cdk-npm-audit-compensation.sh \
+            scripts/verify-exact-npm-overrides.mjs; do
             test -f "${path}"
             test ! -L "${path}"
           done
@@ -207,6 +212,13 @@ jobs:
             .workflow.confirmation == "BOOTSTRAP_CDK_FOUNDATION" and
             .aws.primaryRegion == "eu-west-1" and
             .aws.regions == ["eu-west-1", "us-east-1"] and
+            .aws.toolchain == {
+              awsCdkCliVersionSource:
+                "infra/aws/package-lock.json#packages/node_modules/aws-cdk/version",
+              installedAwsCdkCliMatchesLock: true,
+              nodeVersion: "22.23.1",
+              npmVersion: "10.9.8"
+            } and
             .aws.foundationRoleName == "archon-datahub-github-foundation" and
             .aws.foundationRoleAdoption == {
               allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
@@ -428,15 +440,37 @@ jobs:
       - name: Install and verify locked AWS CDK dependencies
         run: |
           set -euo pipefail
-          test "$(npm --version)" = "${NPM_VERSION}"
+          contract_node_version="$(
+            jq -er '.aws.toolchain.nodeVersion' \
+              contracts/aws-foundation-v1.json
+          )"
+          contract_npm_version="$(
+            jq -er '.aws.toolchain.npmVersion' \
+              contracts/aws-foundation-v1.json
+          )"
+          test "${NODE_VERSION}" = "${contract_node_version}"
+          test "${NPM_VERSION}" = "${contract_npm_version}"
+          test "$(node --version)" = "v${contract_node_version}"
+          test "$(npm --version)" = "${contract_npm_version}"
           npm ci --prefix infra/aws --ignore-scripts
+          locked_cdk_version="$(
+            jq -er '
+              .packages["node_modules/aws-cdk"].version |
+              select(
+                type == "string" and
+                test("^[0-9]+\\.[0-9]+\\.[0-9]+$")
+              )
+            ' infra/aws/package-lock.json
+          )"
+          installed_cdk_version="$(
+            node -p \
+              "require('./infra/aws/node_modules/aws-cdk/package.json').version"
+          )"
+          test "${installed_cdk_version}" = "${locked_cdk_version}"
+          printf 'Verified locked AWS CDK CLI %s\n' "${locked_cdk_version}"
           node scripts/verify-exact-npm-overrides.mjs infra/aws
           bash scripts/patch-cdk-brace-expansion.sh infra/aws
           bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
-          test "$(
-            node -p \
-              "require('./infra/aws/node_modules/aws-cdk/package.json').version"
-          )" = "2.1133.0"
 
       - name: Seal the pinned modern bootstrap template
         id: bootstrap_template

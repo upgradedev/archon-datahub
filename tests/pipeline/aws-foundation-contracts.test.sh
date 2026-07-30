@@ -9,6 +9,8 @@ foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
 deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
+infra_package_manifest="${repository_root}/infra/aws/package.json"
+infra_package_lock="${repository_root}/infra/aws/package-lock.json"
 foundation_policy="${repository_root}/infra/aws/foundation/github-actions-foundation-policy.json"
 foundation_role="${repository_root}/infra/aws/foundation/github-actions-foundation-role.yml"
 deploy_role="${repository_root}/infra/aws/foundation/github-actions-deploy-role.yml"
@@ -21,6 +23,9 @@ canonical_flow_renderer="${repository_root}/scripts/render-canonical-flow-yaml.m
 inline_template_renderer="${repository_root}/scripts/render-inline-cloudformation-template.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
+dependency_patcher="${repository_root}/scripts/patch-cdk-brace-expansion.sh"
+dependency_audit_verifier="${repository_root}/scripts/verify-cdk-npm-audit-compensation.sh"
+dependency_override_verifier="${repository_root}/scripts/verify-exact-npm-overrides.mjs"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
@@ -56,6 +61,8 @@ for path in \
   "${deploy_workflow}" \
   "${ci_workflow}" \
   "${contract}" \
+  "${infra_package_manifest}" \
+  "${infra_package_lock}" \
   "${foundation_policy}" \
   "${foundation_role}" \
   "${deploy_role}" \
@@ -67,6 +74,9 @@ for path in \
   "${inline_template_renderer}" \
   "${foundation_renderer}" \
   "${foundation_bootstrap}" \
+  "${dependency_patcher}" \
+  "${dependency_audit_verifier}" \
+  "${dependency_override_verifier}" \
   "${reconciler}" \
   "${runtime_verifier}" \
   "${runbook}"; do
@@ -86,6 +96,13 @@ jq --exit-status '
   .aws.partition == "aws" and
   .aws.primaryRegion == "eu-west-1" and
   .aws.regions == ["eu-west-1", "us-east-1"] and
+  .aws.toolchain == {
+    awsCdkCliVersionSource:
+      "infra/aws/package-lock.json#packages/node_modules/aws-cdk/version",
+    installedAwsCdkCliMatchesLock: true,
+    nodeVersion: "22.23.1",
+    npmVersion: "10.9.8"
+  } and
   .aws.foundationRoleName == "archon-datahub-github-foundation" and
   .aws.foundationRoleAdoption == {
     allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
@@ -372,6 +389,24 @@ require_text "${foundation_workflow}" \
   'retention-days: 90'
 require_text "${foundation_workflow}" \
   '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
+require_text "${foundation_workflow}" \
+  'test "${NODE_VERSION}" = "${contract_node_version}"' \
+  'test "${NPM_VERSION}" = "${contract_npm_version}"' \
+  'test "$(node --version)" = "v${contract_node_version}"' \
+  'test "$(npm --version)" = "${contract_npm_version}"' \
+  '.packages["node_modules/aws-cdk"].version' \
+  'test("^[0-9]+\\.[0-9]+\\.[0-9]+$")' \
+  'test "${installed_cdk_version}" = "${locked_cdk_version}"' \
+  "printf 'Verified locked AWS CDK CLI %s\\n'"
+require_text "${reconciler}" \
+  'infra/aws/package.json' \
+  'infra/aws/package-lock.json' \
+  'scripts/patch-cdk-brace-expansion.sh' \
+  'scripts/seal-cdk-bootstrap-templates.sh' \
+  'scripts/verify-cdk-npm-audit-compensation.sh' \
+  'scripts/verify-exact-npm-overrides.mjs'
+forbid_text "${foundation_workflow}" \
+  '2.1133.0'
 forbid_text "${foundation_workflow}" \
   '"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"'
 require_text "${execution_policy}" \
@@ -951,7 +986,8 @@ if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
 fi
 
 require_text "${runbook}" \
-  'pinned CDK CLI `2.1133.0`' \
+  'exact committed `infra/aws/package-lock.json` entry' \
+  'installed CLI version must exactly match that decoded lock entry' \
   'version `32`' \
   'ten CloudFormation stack instances' \
   '`Archon-Governed-Canary-Roles`' \
