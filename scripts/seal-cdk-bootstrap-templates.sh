@@ -79,7 +79,7 @@ if ! template_version="$(
   awk '
     $1 == "CdkBootstrapVersion:" { in_version = 1; next }
     in_version && $1 == "Value:" {
-      gsub(/\047/, "", $2)
+      gsub(/["\047]/, "", $2)
       print $2
       exit
     }

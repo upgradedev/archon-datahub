@@ -352,6 +352,7 @@ require_text "${bootstrap_sealer}" \
   'CDK bootstrap seal failed:' \
   'EXPECTED_BOOTSTRAP_VERSION is required' \
   'expected one CdkBootstrapVersion resource' \
+  'gsub(/["\047]/, "", $2)' \
   'required logical ID is missing:' \
   'node "${patcher}"' \
   'template is missing its isolation marker' \
