@@ -9,6 +9,10 @@ fi
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
+# Preserve the runner command stream across command/process substitutions. Values
+# written to fd 3 are masked without contaminating captured function stdout.
+exec 3>&1
+
 readonly INCIDENT_RUN_ID="30546241677"
 readonly INCIDENT_RUN_ATTEMPT="1"
 readonly TARGET_REGION="eu-west-1"
@@ -31,6 +35,10 @@ chmod 0700 "${WORK_ROOT}"
 fail() {
   printf '::error::%s\n' "$1" >&2
   return 1
+}
+
+mask_value() {
+  printf '::add-mask::%s\n' "$1" >&3
 }
 
 safe_aws() {
@@ -126,12 +134,12 @@ validate_common() {
   : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
   [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || fail "AWS account binding is invalid"
   [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "Control-plane SHA is invalid"
-  echo "::add-mask::${AWS_ACCOUNT_ID}"
+  mask_value "${AWS_ACCOUNT_ID}"
   if [[ -n "${AWS_FOUNDATION_ROLE_ARN:-}" ]]; then
-    echo "::add-mask::${AWS_FOUNDATION_ROLE_ARN}"
+    mask_value "${AWS_FOUNDATION_ROLE_ARN}"
   fi
   if [[ -n "${AWS_CANARY_RECOVERY_ROLE_ARN:-}" ]]; then
-    echo "::add-mask::${AWS_CANARY_RECOVERY_ROLE_ARN}"
+    mask_value "${AWS_CANARY_RECOVERY_ROLE_ARN}"
   fi
 }
 
@@ -175,7 +183,7 @@ snapshot_target() {
     --stack-name "${TARGET_STACK_NAME}" \
     --output json
   stack_id="$(jq -er '.Stacks[0].StackId' "${stack}")"
-  echo "::add-mask::${stack_id}"
+  mask_value "${stack_id}"
   safe_aws "Unable to inspect the sealed incident resources" "${resources}" \
     cloudformation list-stack-resources \
     --region "${TARGET_REGION}" \
@@ -203,7 +211,7 @@ snapshot_stack_only() {
     --output json
   local stack_id
   stack_id="$(jq -er '.Stacks[0].StackId' "${stack}")"
-  echo "::add-mask::${stack_id}"
+  mask_value "${stack_id}"
   printf '%s\n' "${stack}"
 }
 validate_recovery_role() {
@@ -417,7 +425,7 @@ delete_once() {
 
   local stack_id
   stack_id="$(jq -er '.target.stackId' "${plan}")"
-  echo "::add-mask::${stack_id}"
+  mask_value "${stack_id}"
   # Deliberately the only DeleteStack call in this repository-owned recovery path.
   if ! aws cloudformation delete-stack \
     --region "${TARGET_REGION}" \
@@ -441,16 +449,22 @@ revoke_policy() {
       "archon-staging-stack-read"
     ]
   ' "${before}" >/dev/null || fail "Recovery-role policy inventory differs before revocation"
-  if jq -e --arg policy "${TEMP_POLICY_NAME}" '
-    .PolicyNames | index($policy) != null
-  ' "${before}" >/dev/null; then
-    if ! aws iam delete-role-policy \
-      --role-name "${RECOVERY_ROLE_NAME}" \
-      --policy-name "${TEMP_POLICY_NAME}" \
-      >/dev/null 2>&1; then
-      fail "Unable to revoke the observed temporary recovery authorization"
+  local delete_error="${WORK_ROOT}/delete-role-policy.error"
+  if ! aws iam delete-role-policy \
+    --role-name "${RECOVERY_ROLE_NAME}" \
+    --policy-name "${TEMP_POLICY_NAME}" \
+    >/dev/null 2>"${delete_error}"; then
+    test -f "${delete_error}"
+    test ! -L "${delete_error}"
+    chmod 0600 "${delete_error}"
+    if ! LC_ALL=C grep -Eq \
+      '^An error occurred \(NoSuchEntity\) when calling the DeleteRolePolicy operation: .+$' \
+      "${delete_error}"; then
+      rm -f -- "${delete_error}"
+      fail "Unable to revoke the exact temporary recovery authorization"
     fi
   fi
+  rm -f -- "${delete_error}"
   wait_for_policy_absence "${after}"
 }
 postverify() {
@@ -470,7 +484,7 @@ postverify() {
       cloudformation list-stacks --region "${TARGET_REGION}" --output json
     while IFS=$'\t' read -r candidate_id candidate_status; do
       [[ -n "${candidate_id}" ]] || continue
-      echo "::add-mask::${candidate_id}"
+      mask_value "${candidate_id}"
       if test "$(printf '%s' "${candidate_id}" | sha256sum | awk '{print $1}')" = \
         "${expected_hash}"; then
         original_id="${candidate_id}"
@@ -505,12 +519,10 @@ postverify() {
   jq -e '
     .Stacks | length == 1 and .[0].StackStatus == "DELETE_COMPLETE"
   ' "${deleted}" >/dev/null || fail "The original stack ID is not DELETE_COMPLETE"
-  if aws cloudformation describe-stacks \
-    --region "${TARGET_REGION}" \
-    --stack-name "${TARGET_STACK_NAME}" \
-    --output json >/dev/null 2>&1; then
-    fail "The deleted stack name is still addressable"
-  fi
+  jq -e --arg name "${TARGET_STACK_NAME}" '
+    ([.StackSummaries[] |
+      select(.StackName == $name and .StackStatus != "DELETE_COMPLETE")] | length) == 0
+  ' "${summaries}" >/dev/null || fail "An active stack still uses the sealed target name"
 
   : "${PLAN_DIGEST:?PLAN_DIGEST is required}"
   : "${POLICY_SHA256:?POLICY_SHA256 is required}"
@@ -542,7 +554,7 @@ postverify() {
           runId: "30546241677"
         },
         planDigest: $planDigest,
-        result: "original-id-delete-complete-and-name-absent",
+        result: "original-id-delete-complete-and-no-active-name",
         target: {label: "staging-iam"}
       }
     ' >"${evidence_dir}/recovery.json"

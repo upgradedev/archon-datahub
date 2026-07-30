@@ -6,8 +6,6 @@ on:
       - Recover sealed AWS staging IAM incident
     types:
       - completed
-  schedule:
-    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       expected_head_sha:
@@ -23,10 +21,6 @@ permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: archon-aws-control-plane
-  cancel-in-progress: false
-
 jobs:
   validate:
     name: Bind safe cleanup retry to current master
@@ -34,7 +28,6 @@ jobs:
       github.repository == 'upgradedev/archon-datahub' &&
       github.ref == 'refs/heads/master' &&
       (
-        github.event_name == 'schedule' ||
         (
           github.event_name == 'workflow_run' &&
           github.event.workflow_run.path ==
@@ -43,7 +36,11 @@ jobs:
             'upgradedev/archon-datahub' &&
           github.event.workflow_run.head_branch == 'master' &&
           github.event.workflow_run.event == 'workflow_dispatch' &&
-          github.event.workflow_run.status == 'completed'
+          github.event.workflow_run.status == 'completed' &&
+          (
+            github.event.workflow_run.conclusion == 'failure' ||
+            github.event.workflow_run.conclusion == 'cancelled'
+          )
         ) ||
         (
           github.event_name == 'workflow_dispatch' &&
@@ -86,8 +83,11 @@ jobs:
           echo "control_plane_sha=${CONTROL_PLANE_SHA}" >>"${GITHUB_OUTPUT}"
 
   cleanup:
-    name: Hold recovery-role lock through cleanup
+    name: Hold AWS and recovery-role locks through cleanup
     needs: validate
+    concurrency:
+      group: archon-aws-control-plane
+      cancel-in-progress: false
     permissions:
       actions: read
       attestations: write
