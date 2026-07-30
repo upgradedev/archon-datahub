@@ -85,11 +85,10 @@ wait_for_temp_digest() {
         .PolicyName == "archon-foundation-control-policy-migration" and
         (.PolicyDocument | type) == "object"
       ' "${output}" >/dev/null; then
-        observed_sha="$(
-          jq -cS '.PolicyDocument' "${output}" |
-            sha256sum |
-            awk '{print $1}'
-        )"
+        observed_sha="$(iam_policy_sha "${output}" '.PolicyDocument')" || {
+          fail "Unable to canonicalize temporary migration authorization"
+          return 1
+        }
         if [[ "${observed_sha}" == "${expected_sha}" ]]; then
           return 0
         fi
@@ -99,7 +98,7 @@ wait_for_temp_digest() {
       sleep "${RETRY_DELAY_SECONDS}"
     fi
   done
-  fail "The temporary migration authorization was not canonically readable"
+  fail \
 }
 
 install_temp_policy() {
@@ -115,13 +114,14 @@ install_temp_policy() {
   local temporary="${WORK_ROOT}/temporary-policy-${mode}.json"
   build_temp_policy "${mode}" "${expires_at}" "${temporary}"
   local temp_sha
-  temp_sha="$(json_sha "${temporary}")"
+  temp_sha="$(iam_policy_sha "${temporary}")" || return 1
   if ! aws iam put-role-policy \
     --role-name "${RECOVERY_ROLE_NAME}" \
     --policy-name "${TEMP_POLICY_NAME}" \
     --policy-document "file://${temporary}" \
     >/dev/null 2>/dev/null; then
     fail "Unable to install the temporary migration authorization"
+    return 1
   fi
   wait_for_temp_digest "${temp_sha}"
   TEMP_POLICY_SHA="${temp_sha}"
@@ -157,15 +157,13 @@ verify_live_temp_policy() {
   expires="${first_expiry}"
   local expected="${WORK_ROOT}/temporary-policy-expected-${expected_mode}.json"
   build_temp_policy "${expected_mode}" "${expires}" "${expected}"
-  test "$(jq -cS '.PolicyDocument' "${observed}")" = \
-    "$(jq -cS . "${expected}")" ||
+  local expected_document_sha observed_sha
+  expected_document_sha="$(iam_policy_sha "${expected}")" || return 1
+  observed_sha="$(iam_policy_sha "${observed}" '.PolicyDocument')" || return 1
+  test "${observed_sha}" = "${expected_document_sha}" || {
     fail "The live temporary migration authorization differs"
-  local observed_sha
-  observed_sha="$(
-    jq -cS '.PolicyDocument' "${observed}" |
-      sha256sum |
-      awk '{print $1}'
-  )"
+    return 1
+  }
   if [[ -n "${expected_sha}" ]]; then
     test "${observed_sha}" = "${expected_sha}" ||
       fail "Temporary authorization digest differs"
@@ -175,8 +173,11 @@ verify_live_temp_policy() {
   expiry_epoch="$(date --utc --date="${expires}" '+%s')" ||
     fail "Temporary authorization expiry is invalid"
   remaining=$((expiry_epoch - now_epoch))
-  ((remaining >= 90)) ||
+  local minimum_remaining=180
+  ((remaining >= minimum_remaining)) || {
     fail "Temporary migration authorization has insufficient lifetime"
+    return 1
+  }
   LIVE_TEMP_EXPIRES_AT="${expires}"
   LIVE_TEMP_POLICY_SHA="${observed_sha}"
 }
@@ -219,5 +220,5 @@ revoke_temp_policy() {
       sleep "${RETRY_DELAY_SECONDS}"
     fi
   done
-  fail "Temporary authorization lacks three consecutive exact-baseline absence reads"
+  fail \
 }

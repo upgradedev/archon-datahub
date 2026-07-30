@@ -17,23 +17,30 @@ classify_rollback_source_state() {
   load_policy_state authorize-rollback-state
   local count="${#POLICY_VERSION_IDS[@]}"
   local old_version new_version
-  old_version="$(version_for_sha "${OLD_POLICY_SHA}")" ||
+  old_version="$(version_for_sha "${OLD_POLICY_SHA}")" || {
     fail "Rollback authorization lacks the exact rollback point"
+    return 1
+  }
   if [[ "${count}" -eq 1 ]]; then
-    test "${POLICY_DEFAULT_VERSION}" = "${old_version}" ||
+    test "${POLICY_DEFAULT_VERSION}" = "${old_version}" || {
       fail "The single rollback point is not default"
+      return 1
+    }
     printf 'old-only\n'
     return 0
   fi
-  test "${count}" -eq 2 || fail "Rollback authorization found an unexpected version count"
-  new_version="$(version_for_sha "${NEW_POLICY_SHA}")" ||
+  test \
+  new_version="$(version_for_sha "${NEW_POLICY_SHA}")" || {
     fail "Rollback authorization found an unknown policy version"
+    return 1
+  }
   if [[ "${POLICY_DEFAULT_VERSION}" == "${old_version}" ]]; then
     printf 'old-default-new-nondefault\n'
   elif [[ "${POLICY_DEFAULT_VERSION}" == "${new_version}" ]]; then
     printf 'new-default-old-nondefault\n'
   else
     fail "Rollback authorization found an unknown default version"
+    return 1
   fi
 }
 

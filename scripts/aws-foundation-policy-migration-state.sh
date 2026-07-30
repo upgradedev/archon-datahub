@@ -68,10 +68,8 @@ load_policy_state() {
         return 1
       }
     POLICY_VERSION_SHAS+=("$(
-      jq -cS '.PolicyVersion.Document' "${response}" |
-        sha256sum |
-        awk '{print $1}'
-    )")
+      iam_policy_sha "${response}" '.PolicyVersion.Document'
+    )") || return 1
     response_default="$(
       jq -er '.PolicyVersion.IsDefaultVersion | tostring' "${response}"
     )" || return 1
@@ -269,6 +267,8 @@ rollback_exact_migration() {
       mapfile -t before_switch <<<"${pending}"
       test "${before_switch[0]}" = "${old_version}" || return 1
       test "${before_switch[1]}" = "${new_version}" || return 1
+      verify_live_temp_policy \
+        "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
       if ! aws iam set-default-policy-version \
         --policy-arn "${CONTROL_POLICY_ARN}" \
         --version-id "${old_version}" \
@@ -303,6 +303,8 @@ rollback_exact_migration() {
     mapfile -t before_delete <<<"${pending}"
     test "${before_delete[0]}" = "${old_version}" || return 1
     test "${before_delete[1]}" = "${new_version}" || return 1
+    verify_live_temp_policy \
+      "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
     if ! aws iam delete-policy-version \
       --policy-arn "${CONTROL_POLICY_ARN}" \
       --version-id "${new_version}" \
