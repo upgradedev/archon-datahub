@@ -42,14 +42,40 @@ safe_aws() {
   shift 2
   if ! aws "$@" >"${output}" 2>/dev/null; then
     fail "${label}"
+    return 1
   fi
-  test -f "${output}"
-  test ! -L "${output}"
-  chmod 0600 "${output}"
+  test -f "${output}" || {
+    fail "${label}: response is not a regular file"
+    return 1
+  }
+  test ! -L "${output}" || {
+    fail "${label}: response is a symlink"
+    return 1
+  }
+  chmod 0600 "${output}" || return 1
 }
 
-json_sha() {
-  jq -cS . "$1" | sha256sum | awk '{print $1}'
+canonical_iam_policy() {
+  local input="$1"
+  local filter="${2:-.}"
+  jq -cS "
+    ${filter} |
+    .Version as \$version |
+    (.Statement |
+      map(
+        .Action |= (if type == \"array\" then sort else . end) |
+        .Resource |= (if type == \"array\" then sort else . end)
+      ) |
+      sort_by(.Sid)
+    ) as \$statements |
+    {Version: \$version, Statement: \$statements}
+  " "${input}"
+}
+
+iam_policy_sha() {
+  canonical_iam_policy "$1" "${2:-.}" |
+    sha256sum |
+    awk '{print $1}'
 }
 
 validate_common() {
@@ -172,7 +198,10 @@ render_policy_documents() {
     --input "${SOURCE_POLICY}" \
     --account "${AWS_ACCOUNT_ID}" \
     --stdout-group control >"${raw}" || fail "Unable to render the exact control policy"
-  jq -cS . "${raw}" >"${NEW_POLICY}" || fail "Rendered control policy is invalid"
+  canonical_iam_policy "${raw}" >"${NEW_POLICY}" || {
+    fail "Rendered control policy is invalid"
+    return 1
+  }
   chmod 0600 "${raw}" "${NEW_POLICY}"
   jq -e \
     --arg account "${AWS_ACCOUNT_ID}" '
@@ -190,6 +219,7 @@ render_policy_documents() {
       (tostring | contains("${AWS::AccountId}") | not) and
       (tostring | contains("${aws:PrincipalAccount}") | not)
     ' "${NEW_POLICY}" >/dev/null || fail "The rendered control policy delta is invalid"
+  local old_raw="${WORK_ROOT}/control-old.raw.json"
   jq -cS '
     .Statement |= map(
       if .Sid == "ReconcileExactFoundationStacks" then
@@ -198,10 +228,14 @@ render_policy_documents() {
         .Action |= map(select(. != "cloudformation:BatchDescribeTypeConfigurations"))
       else . end
     )
-  ' "${NEW_POLICY}" >"${OLD_POLICY}" || fail "Unable to derive the exact previous policy"
-  chmod 0600 "${OLD_POLICY}"
-  NEW_POLICY_SHA="$(json_sha "${NEW_POLICY}")"
-  OLD_POLICY_SHA="$(json_sha "${OLD_POLICY}")"
+  ' "${NEW_POLICY}" >"${old_raw}" || {
+    fail "Unable to derive the exact previous policy"
+    return 1
+  }
+  canonical_iam_policy "${old_raw}" >"${OLD_POLICY}" || return 1
+  chmod 0600 "${old_raw}" "${OLD_POLICY}"
+  NEW_POLICY_SHA="$(iam_policy_sha "${NEW_POLICY}")"
+  OLD_POLICY_SHA="$(iam_policy_sha "${OLD_POLICY}")"
   [[ "${NEW_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
   [[ "${OLD_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" || fail "The migration delta is empty"
