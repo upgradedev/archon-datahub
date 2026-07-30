@@ -189,6 +189,7 @@ jobs:
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/render-aws-foundation-policy.mjs \
             scripts/verify-aws-runtime-boundary.mjs; do
@@ -410,72 +411,7 @@ jobs:
 
       - name: Seal the pinned modern bootstrap template
         id: bootstrap_template
-        run: |
-          set -euo pipefail
-          template="${RUNNER_TEMP}/cdk-bootstrap-template.yml"
-          infra/aws/node_modules/.bin/cdk bootstrap \
-            --show-template \
-            --no-notices >"${template}"
-          test -s "${template}"
-          test -f "${template}"
-          test ! -L "${template}"
-          template_version="$(
-            awk '
-              $1 == "CdkBootstrapVersion:" { in_version = 1; next }
-              in_version && $1 == "Value:" {
-                gsub(/\047/, "", $2)
-                print $2
-                exit
-              }
-            ' "${template}"
-          )"
-          test "${template_version}" = "${EXPECTED_BOOTSTRAP_VERSION}"
-          for logical_id in \
-            StagingBucket \
-            StagingBucketPolicy \
-            ContainerAssetsRepository \
-            FilePublishingRole \
-            ImagePublishingRole \
-            LookupRole \
-            DeploymentActionRole \
-            CloudFormationExecutionRole \
-            CdkBootstrapVersion; do
-            grep -Eq "^[[:space:]]{2}${logical_id}:" "${template}"
-          done
-          template_sha="$(sha256sum "${template}" | awk '{print $1}')"
-          for stage in staging production; do
-            for region_slot in primary edge; do
-              if [[ "${region_slot}" == "primary" ]]; then
-                region="eu-west-1"
-              else
-                region="us-east-1"
-              fi
-              stage_template="$(
-                printf '%s/cdk-bootstrap-%s-%s.yml' \
-                  "${RUNNER_TEMP}" "${stage}" "${region}"
-              )"
-              node scripts/patch-cdk-bootstrap-template.mjs \
-                --input "${template}" \
-                --output "${stage_template}" \
-                --stage "${stage}" \
-                --region "${region}"
-              test -s "${stage_template}"
-              test ! -L "${stage_template}"
-              grep -Fq \
-                "Archon DataHub ${stage} ${region} isolated bootstrap v1" \
-                "${stage_template}"
-              stage_sha="$(sha256sum "${stage_template}" | awk '{print $1}')"
-              {
-                echo "${stage}_${region_slot}_path=${stage_template}"
-                echo "${stage}_${region_slot}_sha=${stage_sha}"
-              } >>"${GITHUB_OUTPUT}"
-            done
-          done
-          {
-            echo "path=${template}"
-            echo "sha=${template_sha}"
-            echo "version=${template_version}"
-          } >>"${GITHUB_OUTPUT}"
+        run: bash scripts/seal-cdk-bootstrap-templates.sh
 
       - name: Prove exact synthesized runtime action equality for both stages
         run: |
