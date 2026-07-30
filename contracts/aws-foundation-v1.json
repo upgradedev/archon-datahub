@@ -61,6 +61,12 @@
       "sameBytesForValidationAndDeploy": true,
       "deployedOriginalMatchesSemanticSha256": true,
       "format": "canonical-flow-yaml",
+      "iamPolicyResourceArnValidation": {
+        "directStrings": true,
+        "intrinsicSubStrings": true,
+        "verifier": "scripts/verify-iam-policy-resource-arns.mjs",
+        "wildcardServiceSegments": "forbidden"
+      },
       "semanticRoundTrip": "rain-json-canonical-equality",
       "flowEmitter": {
         "name": "scripts/render-canonical-flow-yaml.mjs",

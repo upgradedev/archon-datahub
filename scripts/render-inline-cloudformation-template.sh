@@ -80,6 +80,8 @@ jq -cS \
   )' \
   "${pretty_json}" >"${canonical_json}"
 test -s "${canonical_json}"
+node "${workspace_root}/scripts/verify-iam-policy-resource-arns.mjs" \
+  "${canonical_json}"
 
 node "${workspace_root}/scripts/render-canonical-flow-yaml.mjs" \
   "${canonical_json}" >"${flow_yaml}"

@@ -259,6 +259,12 @@ jobs:
                 scalarPolicy: "strict-ascii-plain-or-json-quoted"
               },
               format: "canonical-flow-yaml",
+              iamPolicyResourceArnValidation: {
+                directStrings: true,
+                intrinsicSubStrings: true,
+                verifier: "scripts/verify-iam-policy-resource-arns.mjs",
+                wildcardServiceSegments: "forbidden"
+              },
               maximumTemplateBodyBytes: 51200,
               outputRoot: "RUNNER_TEMP",
               renderer: "scripts/render-inline-cloudformation-template.sh",
