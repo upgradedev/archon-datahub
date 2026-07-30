@@ -1,0 +1,40 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/upgradedev/archon-datahub/security/vex/datahub-mcp-v0.6.0/setuptools-81.0.0/CVE-2026-59890",
+  "author": "https://github.com/upgradedev/archon-datahub",
+  "role": "Document Creator",
+  "timestamp": "2026-07-23T11:30:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-59890",
+        "name": "CVE-2026-59890",
+        "aliases": [
+          "BIT-setuptools-2026-59890",
+          "GHSA-h35f-9h28-mq5c",
+          "PYSEC-2026-3447"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/mcp-server-datahub@0.6.0",
+          "hashes": {
+            "sha-256": "2679dcfafc0ae12724efbf0fc6a73014f9085a4e1303cba9b1e41776dab8f001"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:pypi/setuptools@81.0.0",
+              "hashes": {
+                "sha-256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6"
+              }
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "DataHub requires setuptools below 82 at runtime. This sealed Linux graph installs only hash-bound wheels with source builds and source-distribution creation forbidden. The affected macOS APFS/HFS+ MANIFEST.in source-distribution path cannot execute in this Linux wheel-only runtime, regardless of DataHub authentication. CI separately imports the MCP runtime and completes an uncredentialed stdio initialize/ping/tools-list smoke exposing only the exact read-only tool set."
+    }
+  ]
+}

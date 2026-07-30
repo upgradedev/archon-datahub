@@ -1,0 +1,94 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: javascript-typescript,python
+          queries: security-and-quality
+      - name: Analyze and upload CodeQL SARIF
+        id: codeql
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          output: ${{ runner.temp }}/codeql-results
+          upload: always
+      - name: Fail on any CodeQL finding or malformed scan evidence
+        env:
+          CODEQL_SARIF_DIR: ${{ steps.codeql.outputs.sarif-output }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' sarif_files < <(
+            find "${CODEQL_SARIF_DIR}" -type f -name '*.sarif' -print0
+          )
+          test "${#sarif_files[@]}" -gt 0 || {
+            echo "::error::CodeQL produced no SARIF evidence"
+            exit 1
+          }
+          for sarif in "${sarif_files[@]}"; do
+            jq --exit-status \
+              '
+                .version == "2.1.0" and
+                (.runs | type == "array" and length > 0) and
+                all(
+                  .runs[];
+                  (.tool.driver.name | ascii_downcase | contains("codeql")) and
+                  (.results | type == "array")
+                )
+              ' "${sarif}" >/dev/null
+            finding_count="$(
+              jq --raw-output '[.runs[].results[]] | length' "${sarif}"
+            )"
+            [[ "${finding_count}" =~ ^[0-9]+$ ]]
+            if (( finding_count > 0 )); then
+              echo "CodeQL findings in $(basename "${sarif}"):"
+              jq --compact-output \
+                '
+                  .runs[].results[] |
+                  {
+                    ruleId,
+                    message: .message.text,
+                    location: (
+                      .locations[0].physicalLocation |
+                      {
+                        path: .artifactLocation.uri,
+                        line: .region.startLine
+                      }
+                    )
+                  }
+                ' "${sarif}"
+              echo "::error::CodeQL reported ${finding_count} blocking finding(s)"
+              exit 1
+            fi
+          done
+      - name: Retain CodeQL SARIF evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codeql-results/**/*.sarif
+          if-no-files-found: error
+          retention-days: 30

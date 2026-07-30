@@ -1,0 +1,12 @@
+# Default ownership. Repository rules must require code-owner review and prevent
+# self-review before this becomes an enforcement boundary.
+* @upgradedev
+
+# Release, security, and infrastructure control planes.
+/.github/workflows/ @upgradedev
+/.github/dependabot.yml @upgradedev
+/Dockerfile @upgradedev
+/infra/aws/ @upgradedev
+/scripts/validate-*.sh @upgradedev
+/tests/pipeline/ @upgradedev
+/tests/security/ @upgradedev
