@@ -100,6 +100,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/datahub_canary_fixture_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/datahub_canary_fixture_workflow_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/github_repository_posture_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_evidence_contracts_test.py
@@ -1458,6 +1462,51 @@ jobs:
             echo "- Observed resolved lock SHA-256: \`${observed}\`"
             echo "- Contract resolved lock SHA-256: \`${expected}\`"
           } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Validate governed-canary fixture proposals in the locked SDK
+        env:
+          FIXTURE_RUNTIME: ${{ steps.lock.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation="${RUNNER_TEMP}/fixture-runtime-validation-ci.json"
+          canonical="${RUNNER_TEMP}/fixture-runtime-validation-ci.canonical.json"
+          test ! -e "${validation}"
+          test ! -e "${canonical}"
+          trap 'rm -f -- "${validation}" "${canonical}"' EXIT
+          if ! env -i \
+              PYTHONDONTWRITEBYTECODE=1 \
+              "${FIXTURE_RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py validate-runtime \
+              --contract contracts/datahub-canary-fixture-v1.json \
+              >"${validation}" 2>/dev/null; then
+            echo "::error::credentialless fixture runtime validation failed"
+            exit 1
+          fi
+          test -f "${validation}"
+          test ! -L "${validation}"
+          test "$(stat --format=%s "${validation}")" -le 1024
+          expected_contract_sha256="$(
+            jq -cS . contracts/datahub-canary-fixture-v1.json |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg contractSha256 "${expected_contract_sha256}" '
+              (keys | sort) == [
+                "proposalCount",
+                "proposalSetSha256",
+                "schemaVersion",
+                "stateContractSha256"
+              ] and
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-runtime-validation/v1" and
+              .proposalCount == 6 and
+              .stateContractSha256 == $contractSha256 and
+              (.stateContractSha256 | test("^[0-9a-f]{64}$")) and
+              (.proposalSetSha256 | test("^[0-9a-f]{64}$"))
+            ' "${validation}" >/dev/null
+          jq -cS . "${validation}" >"${canonical}"
+          cmp --silent "${validation}" "${canonical}"
       - name: Exercise the credentialless read-only MCP protocol
         shell: bash
         env:

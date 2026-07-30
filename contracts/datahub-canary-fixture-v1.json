@@ -1,0 +1,65 @@
+{
+  "schemaVersion": "archon.datahub-canary-fixture/v1",
+  "owner": "https://github.com/upgradedev/archon-datahub",
+  "binding": {
+    "query": "archon_governed_canary_fixture",
+    "targetUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)",
+    "domainUrn": "urn:li:domain:archonGovernedCanaryFixture",
+    "platformUrn": "urn:li:dataPlatform:snowflake",
+    "ownerUrn": "urn:li:corpuser:upgradedev",
+    "sensitiveFieldPath": "email",
+    "piiTagUrn": "urn:li:tag:PII",
+    "piiTermUrns": [
+      "urn:li:glossaryTerm:Classification.PII"
+    ],
+    "ownedUrns": [
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)",
+      "urn:li:domain:archonGovernedCanaryFixture"
+    ]
+  },
+  "provenance": {
+    "contractSha256Property": "archonFixtureContractSha256",
+    "customProperties": {
+      "archonFixtureOwner": "https://github.com/upgradedev/archon-datahub",
+      "archonFixturePurpose": "governed-canary-write-rollback",
+      "archonFixtureSchema": "archon.datahub-canary-fixture/v1"
+    }
+  },
+  "state": {
+    "domain": {
+      "name": "Archon Governed Canary",
+      "description": "Archon-owned non-production domain for the governed write-and-rollback canary."
+    },
+    "dataset": {
+      "name": "archon_governed_canary_fixture",
+      "description": "Disposable TEST dataset for proving Archon's human-approved PII tag write and exact rollback.",
+      "qualifiedName": "archon_governed_canary_fixture",
+      "schemaName": "archon_governed_canary_fixture",
+      "fields": [
+        {
+          "path": "customer_id",
+          "nativeType": "VARCHAR",
+          "logicalType": "string",
+          "nullable": false,
+          "isPartOfKey": true
+        },
+        {
+          "path": "email",
+          "nativeType": "VARCHAR",
+          "logicalType": "string",
+          "nullable": false,
+          "isPartOfKey": false
+        },
+        {
+          "path": "amount",
+          "nativeType": "NUMBER",
+          "logicalType": "number",
+          "nullable": false,
+          "isPartOfKey": false
+        }
+      ]
+    },
+    "ownerType": "DATAOWNER"
+  },
+  "resetConfirmation": "RESET ARCHON GOVERNED CANARY FIXTURE"
+}

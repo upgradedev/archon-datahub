@@ -1,0 +1,1522 @@
+name: DataHub governed-canary fixture
+
+run-name: ${{ inputs.action }} governed-canary fixture at ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Read-only plan, idempotent seed, or explicitly confirmed reset and reseed
+        required: true
+        type: choice
+        options:
+          - plan
+          - seed
+          - reset
+      release_sha:
+        description: Current master 40-character commit SHA
+        required: true
+        type: string
+      confirmation:
+        description: Reset only — type RESET ARCHON GOVERNED CANARY FIXTURE
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-governed-canary-mutation-recovery
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.31"
+  FIXTURE_CONTRACT: contracts/datahub-canary-fixture-v1.json
+  FIXTURE_QUERY: archon_governed_canary_fixture
+
+jobs:
+  plan:
+    name: Read-only inspection and sealed fixture plan
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: datahub-demo
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      mutation_required: ${{ steps.seal.outputs.mutation_required }}
+      operation: ${{ steps.seal.outputs.operation }}
+      plan_sha256: ${{ steps.seal.outputs.plan_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind current master, green control plane, and environment posture
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REQUESTED_ACTION: ${{ inputs.action }}
+          RESET_CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release_sha must be a full lowercase commit SHA"
+            exit 1
+          }
+          [[ "${REQUESTED_ACTION}" =~ ^(plan|seed|reset)$ ]]
+          if [[ "${REQUESTED_ACTION}" == "reset" ]]; then
+            test "${RESET_CONFIRMATION}" = \
+              "RESET ARCHON GOVERNED CANARY FIXTURE" || {
+              echo "::error::reset requires the exact reviewed confirmation"
+              exit 1
+            }
+          else
+            test -z "${RESET_CONFIRMATION}" || {
+              echo "::error::plan and seed do not accept reset confirmation"
+              exit 1
+            }
+          fi
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+          repository_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
+          default_ref="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}")"
+          test "$(jq -er '.object.sha' <<<"${default_ref}")" = "${RELEASE_SHA}" || {
+            echo "::error::dispatch SHA is no longer the current master head"
+            exit 1
+          }
+
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f per_page=100)"
+            jq -ce \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  . != null and
+                  .status == "completed" and
+                  .conclusion == "success"
+                ) |
+                {
+                  path,
+                  workflowId: .workflow_id,
+                  runId: .id,
+                  runAttempt: .run_attempt,
+                  headSha: .head_sha,
+                  conclusion
+                }
+              ' <<<"${response}"
+          }
+
+          environment_posture() {
+            local environment_name="$1"
+            local posture="$2"
+            local environment_json
+            local branch_policies
+            environment_json="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}")"
+            branch_policies="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}/deployment-branch-policies?per_page=100")"
+            jq -e \
+              --arg name "${environment_name}" \
+              --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+              --arg posture "${posture}" '
+                .name == $name and
+                .deployment_branch_policy.protected_branches == false and
+                .deployment_branch_policy.custom_branch_policies == true and
+                (
+                  [
+                    .protection_rules[]? |
+                    select(.type == "required_reviewers")
+                  ] as $rules |
+                  if $posture == "reader" then
+                    ($rules | length) == 0
+                  else
+                    ($rules | length) == 1 and
+                    $rules[0].prevent_self_review == false and
+                    ($rules[0].reviewers | length) == 1 and
+                    $rules[0].reviewers[0].type == "User" and
+                    ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+                    $rules[0].reviewers[0].reviewer.id > 0 and
+                    (
+                      $rules[0].reviewers[0].reviewer.login |
+                      ascii_downcase
+                    ) == ($owner | ascii_downcase)
+                  end
+                )
+              ' <<<"${environment_json}" >/dev/null || {
+                echo "::error::${environment_name} protection differs from the reviewed ${posture} posture"
+                exit 1
+              }
+            jq -e --arg branch "${default_branch}" '
+              .total_count == 1 and
+              (.branch_policies | length) == 1 and
+              .branch_policies[0].name == $branch
+            ' <<<"${branch_policies}" >/dev/null || {
+              echo "::error::${environment_name} must allow only master"
+              exit 1
+            }
+          }
+
+          evidence_dir="${RUNNER_TEMP}/datahub-canary-fixture-plan"
+          test ! -e "${evidence_dir}"
+          mkdir --mode=0700 "${evidence_dir}"
+          ci="$(workflow_success ci.yml)" || {
+            echo "::error::latest exact-SHA CI is not green"
+            exit 1
+          }
+          codeql="$(workflow_success codeql.yml)" || {
+            echo "::error::latest exact-SHA CodeQL is not green"
+            exit 1
+          }
+          workflow_security="$(workflow_success workflow-security.yml)" || {
+            echo "::error::latest exact-SHA Workflow security is not green"
+            exit 1
+          }
+          environment_posture datahub-demo reader
+          environment_posture datahub-demo-seed writer
+          controller_action="seed"
+          if [[ "${REQUESTED_ACTION}" == "reset" ]]; then
+            controller_action="reset"
+          fi
+          jq -cnS \
+            --arg controllerAction "${controller_action}" \
+            --arg defaultBranch "${default_branch}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg requestedAction "${REQUESTED_ACTION}" \
+            --argjson ci "${ci}" \
+            --argjson codeql "${codeql}" \
+            --argjson workflowSecurity "${workflow_security}" '
+              {
+                schemaVersion:
+                  "archon.datahub-canary-fixture-control-plane/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                defaultBranch: $defaultBranch,
+                requestedAction: $requestedAction,
+                controllerAction: $controllerAction,
+                readerEnvironment: {
+                  name: "datahub-demo",
+                  requiredReviewers: false,
+                  onlyDefaultBranch: true
+                },
+                writerEnvironment: {
+                  name: "datahub-demo-seed",
+                  requiredReviewers: true,
+                  individualUserReviewersOnly: true,
+                  preventSelfReview: false,
+                  onlyDefaultBranch: true,
+                  exactApprovalReceiptRequiredAtApply: true
+                },
+                successfulRuns: [$ci, $codeql, $workflowSecurity]
+              }
+            ' >"${evidence_dir}/control-plane.json"
+          chmod 0600 "${evidence_dir}/control-plane.json"
+          echo "controller_action=${controller_action}" >>"${GITHUB_OUTPUT}"
+          echo "evidence_dir=${evidence_dir}" >>"${GITHUB_OUTPUT}"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Materialize the exact wheel-only DataHub runtime
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        run: bash scripts/materialize-datahub-mcp-lock.sh "${RUNTIME}"
+
+      - name: Credentialless validation of the exact fixture SDK proposals
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation="${RUNNER_TEMP}/fixture-runtime-validation-plan.json"
+          canonical="${RUNNER_TEMP}/fixture-runtime-validation-plan.canonical.json"
+          test ! -e "${validation}"
+          test ! -e "${canonical}"
+          trap 'rm -f -- "${validation}" "${canonical}"' EXIT
+          if ! env -i \
+              PYTHONDONTWRITEBYTECODE=1 \
+              "${RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py validate-runtime \
+              --contract "${FIXTURE_CONTRACT}" \
+              >"${validation}" 2>/dev/null; then
+            echo "::error::credentialless fixture runtime validation failed"
+            exit 1
+          fi
+          test -f "${validation}"
+          test ! -L "${validation}"
+          test "$(stat --format=%s "${validation}")" -le 1024
+          expected_contract_sha256="$(
+            jq -cS . "${FIXTURE_CONTRACT}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg contractSha256 "${expected_contract_sha256}" '
+              (keys | sort) == [
+                "proposalCount",
+                "proposalSetSha256",
+                "schemaVersion",
+                "stateContractSha256"
+              ] and
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-runtime-validation/v1" and
+              .proposalCount == 6 and
+              .stateContractSha256 == $contractSha256 and
+              (.stateContractSha256 | test("^[0-9a-f]{64}$")) and
+              (.proposalSetSha256 | test("^[0-9a-f]{64}$"))
+            ' "${validation}" >/dev/null
+          jq -cS . "${validation}" >"${canonical}"
+          cmp --silent "${validation}" "${canonical}"
+
+      - name: Inspect live state and author the immutable plan
+        env:
+          CANARY_FIXTURE_READ_GMS_TOKEN: ${{ secrets.CANARY_FIXTURE_READ_GMS_TOKEN }}
+          CANARY_FIXTURE_READ_GMS_URL: ${{ vars.CANARY_FIXTURE_READ_GMS_URL }}
+          CANARY_FIXTURE_ISOLATION_MARKER: ${{ vars.CANARY_FIXTURE_ISOLATION_MARKER }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          CONTROLLER_ACTION: ${{ steps.gate.outputs.controller_action }}
+          PLAN_DIR: ${{ steps.gate.outputs.evidence_dir }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CANARY_FIXTURE_READ_GMS_URL:?read GMS URL is required}"
+          : "${CANARY_FIXTURE_READ_GMS_TOKEN:?read GMS token is required}"
+          : "${CANARY_FIXTURE_ISOLATION_MARKER:?isolation marker is required}"
+          if ! env -i \
+              GITHUB_ACTIONS=true \
+              RUNNER_TEMP="${RUNNER_TEMP}" \
+              CANARY_ISOLATION_MARKER="${CANARY_FIXTURE_ISOLATION_MARKER}" \
+              DATAHUB_GMS_URL="${CANARY_FIXTURE_READ_GMS_URL}" \
+              DATAHUB_GMS_TOKEN="${CANARY_FIXTURE_READ_GMS_TOKEN}" \
+              "${RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py plan \
+              --contract "${FIXTURE_CONTRACT}" \
+              --action "${CONTROLLER_ACTION}" \
+              --confirmation "${CONFIRMATION}" \
+              --query "${FIXTURE_QUERY}" \
+              --release-sha "${RELEASE_SHA}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --output "${PLAN_DIR}/plan.json" \
+              >/dev/null 2>&1; then
+            echo "::error::sanitized fixture inspection or planning failed"
+            exit 1
+          fi
+          unset CANARY_FIXTURE_READ_GMS_TOKEN CANARY_FIXTURE_READ_GMS_URL
+          chmod 0600 "${PLAN_DIR}/plan.json"
+
+      - name: Verify and seal the pre-mutation evidence
+        id: seal
+        env:
+          CONTROLLER_ACTION: ${{ steps.gate.outputs.controller_action }}
+          PLAN_DIR: ${{ steps.gate.outputs.evidence_dir }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REQUESTED_ACTION: ${{ inputs.action }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLAN_DIR}"
+          for path in control-plane.json plan.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          jq -cS . plan.json >"${RUNNER_TEMP}/canonical-plan.json"
+          cmp --silent plan.json "${RUNNER_TEMP}/canonical-plan.json" || {
+            echo "::error::fixture plan is not canonical JSON"
+            exit 1
+          }
+          jq -cS . control-plane.json \
+            >"${RUNNER_TEMP}/canonical-control-plane.json"
+          cmp --silent \
+            control-plane.json \
+            "${RUNNER_TEMP}/canonical-control-plane.json" || {
+            echo "::error::control-plane receipt is not canonical JSON"
+            exit 1
+          }
+          contract_sha256="$(
+            jq -cS . "${GITHUB_WORKSPACE}/${FIXTURE_CONTRACT}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg action "${CONTROLLER_ACTION}" \
+            --arg contractSha256 "${contract_sha256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg requestedAction "${REQUESTED_ACTION}" \
+            --arg query "${FIXTURE_QUERY}" \
+            --arg targetUrn "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-plan/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .stateContractSha256 == $contractSha256 and
+              (.gmsEndpointFingerprint | test("^[0-9a-f]{64}$")) and
+              (.isolationMarkerSha256 | test("^[0-9a-f]{64}$")) and
+              .queryBinding == {
+                query: $query,
+                targetUrn: $targetUrn
+              } and
+              .ownedUrns == [
+                $targetUrn,
+                "urn:li:domain:archonGovernedCanaryFixture"
+              ] and
+              .action == $action and
+              (.before | keys | sort) == [
+                "classification",
+                "digest",
+                "exactQueryMatchCount",
+                "mismatches",
+                "ownedUrnPresence",
+                "piiTagPresent",
+                "provenance",
+                "rawAspectSnapshotSha256"
+              ] and
+              .before.piiTagPresent == true and
+              (.before.digest | test("^[0-9a-f]{64}$")) and
+              (
+                .before.rawAspectSnapshotSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              (.before.ownedUrnPresence | length) == 2 and
+              (.before.provenance | length) == 2 and
+              (
+                .before as $before |
+                $before.ownedUrnPresence == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.provenance[0].present
+                  },
+                  {
+                    urn:
+                      "urn:li:domain:archonGovernedCanaryFixture",
+                    present: $before.provenance[1].present
+                  }
+                ] and
+                $before.provenance == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.ownedUrnPresence[0].present,
+                    markerExact: $before.provenance[0].markerExact
+                  },
+                  {
+                    urn:
+                      "urn:li:domain:archonGovernedCanaryFixture",
+                    present: $before.ownedUrnPresence[1].present,
+                    markerExact: $before.provenance[1].markerExact
+                  }
+                ] and
+                all(
+                  $before.provenance[];
+                  (.present | type) == "boolean" and
+                  (.markerExact | type) == "boolean" and
+                  .markerExact == .present
+                )
+              ) and
+              (
+                if .action == "seed" then
+                  (
+                    (
+                      .operation == "seed" and
+                      .mutationRequired == true and
+                      .before.classification == "absent"
+                    ) or (
+                      .operation == "noop" and
+                      .mutationRequired == false and
+                      .before.classification == "exact"
+                    )
+                  ) and
+                  .resetConfirmationSha256 == null
+                else
+                  .operation == "reset" and
+                  .mutationRequired == true and
+                  (.resetConfirmationSha256 | test("^[0-9a-f]{64}$"))
+                end
+              )
+            ' plan.json >/dev/null
+          if [[ "${CONTROLLER_ACTION}" == "reset" ]]; then
+            expected_reset_sha256="$(
+              printf '%s' "RESET ARCHON GOVERNED CANARY FIXTURE" |
+                sha256sum |
+                awk '{print $1}'
+            )"
+            test "$(jq -er '.resetConfirmationSha256' plan.json)" = \
+              "${expected_reset_sha256}"
+          fi
+          jq -e \
+            --arg controllerAction "${CONTROLLER_ACTION}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg requestedAction "${REQUESTED_ACTION}" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-control-plane/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .defaultBranch == "master" and
+              .requestedAction == $requestedAction and
+              .controllerAction == $controllerAction and
+              .readerEnvironment == {
+                name: "datahub-demo",
+                requiredReviewers: false,
+                onlyDefaultBranch: true
+              } and
+              .writerEnvironment == {
+                name: "datahub-demo-seed",
+                requiredReviewers: true,
+                individualUserReviewersOnly: true,
+                preventSelfReview: false,
+                onlyDefaultBranch: true,
+                exactApprovalReceiptRequiredAtApply: true
+              } and
+              (.successfulRuns | map(.path)) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ] and
+              all(
+                .successfulRuns[];
+                .headSha == $releaseSha and
+                .conclusion == "success" and
+                (.runId | type) == "number" and
+                (.runAttempt | type) == "number"
+              )
+            ' control-plane.json >/dev/null
+          sha256sum control-plane.json plan.json >SHA256SUMS
+          chmod 0600 SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          expected_inventory="$(
+            printf '%s\n' SHA256SUMS control-plane.json plan.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          plan_sha256="$(sha256sum plan.json | awk '{print $1}')"
+          mutation_required="$(jq -er '.mutationRequired | tostring' plan.json)"
+          operation="$(jq -er '.operation' plan.json)"
+          [[ "${plan_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${mutation_required}" =~ ^(true|false)$ ]]
+          [[ "${operation}" =~ ^(noop|seed|reset)$ ]]
+          {
+            echo "mutation_required=${mutation_required}"
+            echo "operation=${operation}"
+            echo "plan_sha256=${plan_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Governed-canary fixture plan sealed"
+            echo
+            echo "- Requested action: \`${REQUESTED_ACTION}\`"
+            echo "- Exact operation: \`${operation}\`"
+            echo "- Mutation required: \`${mutation_required}\`"
+            echo "- Plan SHA-256: \`${plan_sha256}\`"
+            echo "- Before-state SHA-256: \`$(jq -r '.before.digest' plan.json)\`"
+            if [[ "${REQUESTED_ACTION}" != "plan" ]]; then
+              approval_phrase="APPROVE ARCHON CANARY FIXTURE run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=${REQUESTED_ACTION} release_sha=${RELEASE_SHA} plan_sha256=${plan_sha256}"
+              echo "- Required approval comment: \`${approval_phrase}\`"
+            fi
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the immutable fixture plan
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-canary-fixture-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.gate.outputs.evidence_dir }}
+          if-no-files-found: error
+          retention-days: 90
+
+  apply:
+    name: Solo-owner-approved fixture apply ${{ needs.plan.outputs.plan_sha256 }}
+    needs: plan
+    if: ${{ needs.plan.result == 'success' && inputs.action != 'plan' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: datahub-demo-seed
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      receipt_artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      receipt_artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      receipt_sha256: ${{ steps.apply.outputs.receipt_sha256 }}
+    steps:
+      - name: Bind the exact solo-owner environment approval
+        id: approval
+        env:
+          ACTION: ${{ inputs.action }}
+          GH_TOKEN: ${{ github.token }}
+          PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ACTION}" =~ ^(seed|reset)$ ]]
+          [[ "${PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          expected_approval="APPROVE ARCHON CANARY FIXTURE run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=${ACTION} release_sha=${RELEASE_SHA} plan_sha256=${PLAN_SHA256}"
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed")"
+          environment_id="$(jq -er '
+            select(
+              .name == "datahub-demo-seed" and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true and
+              (.id | type) == "number"
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" '
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] as $rules |
+              if (
+                ($rules | length) == 1 and
+                $rules[0].prevent_self_review == false and
+                ($rules[0].reviewers | length) == 1 and
+                $rules[0].reviewers[0].type == "User" and
+                ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+                $rules[0].reviewers[0].reviewer.id > 0 and
+                (
+                  $rules[0].reviewers[0].reviewer.login |
+                  ascii_downcase
+                ) == ($owner | ascii_downcase)
+              )
+              then [$rules[0].reviewers[0].reviewer.id]
+              else error("invalid solo-owner reviewer posture")
+              end
+            ' <<<"${environment_json}")" || {
+              echo "::error::datahub-demo-seed reviewer posture changed"
+              exit 1
+            }
+          branch_policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed/deployment-branch-policies?per_page=100")"
+          jq -e '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == "master"
+          ' <<<"${branch_policies}" >/dev/null
+          approvals="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
+          matched_approval="$(jq -ce \
+            --arg environment "datahub-demo-seed" \
+            --arg expected "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" '
+              if type != "array" then
+                error("approval response is not an array")
+              else
+                [
+                  .[] |
+                  select(
+                    .state == "approved" and
+                    .comment == $expected and
+                    (.environments | type) == "array" and
+                    (.environments | length) == 1 and
+                    .environments[0].name == $environment and
+                    .environments[0].id == $environmentId and
+                    (.user.id as $userId |
+                      ($reviewerIds | index($userId)) != null) and
+                    (.user.login | ascii_downcase) ==
+                      ($owner | ascii_downcase)
+                  )
+                ] |
+                if length == 1 then
+                  .[0]
+                else
+                  error("expected exactly one matching approval")
+                end
+              end
+            ' <<<"${approvals}")" || {
+              echo "::error::missing exact solo-owner approval comment"
+              exit 1
+            }
+          approval_dir="${RUNNER_TEMP}/datahub-canary-fixture-approval"
+          test ! -e "${approval_dir}"
+          mkdir --mode=0700 "${approval_dir}"
+          jq -cnS \
+            --arg action "${ACTION}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched_approval}")" \
+            --arg environment "datahub-demo-seed" \
+            --arg planSha256 "${PLAN_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg userLogin "$(jq -er '.user.login' <<<"${matched_approval}")" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --argjson configuredReviewerIds "${reviewer_ids}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson userId "$(jq -er '.user.id' <<<"${matched_approval}")" '
+              {
+                schemaVersion:
+                  "archon.datahub-canary-fixture-approval/v1",
+                repository: $repository,
+                workflowRunId: $workflowRunId,
+                workflowRunAttempt: $workflowRunAttempt,
+                action: $action,
+                releaseSha: $releaseSha,
+                planSha256: $planSha256,
+                configuredReviewerIds: $configuredReviewerIds,
+                environment: {
+                  id: $environmentId,
+                  name: $environment
+                },
+                approval: {
+                  state: "approved",
+                  comment: $comment,
+                  user: {
+                    id: $userId,
+                    login: $userLogin
+                  }
+                }
+              }
+            ' >"${approval_dir}/approval-receipt.json"
+          chmod 0600 "${approval_dir}/approval-receipt.json"
+          echo "receipt=${approval_dir}/approval-receipt.json" \
+            >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate current master and green control plane after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          default_sha="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          test "${default_sha}" = "${RELEASE_SHA}" || {
+            echo "::error::master changed while the fixture plan awaited approval"
+            exit 1
+          }
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f branch=master \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+          workflow_success ci.yml
+          workflow_success codeql.yml
+          workflow_success workflow-security.yml
+
+      - name: Verify immutable plan artifact metadata
+        env:
+          ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --argjson id "${ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $id and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${artifact}" >/dev/null
+
+      - name: Download the exact sealed plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/datahub-canary-fixture-approved-plan
+
+      - name: Verify the approved plan handoff
+        env:
+          ACTION: ${{ inputs.action }}
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          PLAN_DIR: ${{ runner.temp }}/datahub-canary-fixture-approved-plan
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLAN_DIR}"
+          expected_inventory="$(
+            printf '%s\n' SHA256SUMS control-plane.json plan.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          for path in SHA256SUMS control-plane.json plan.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          sha256sum --check --strict SHA256SUMS
+          test "$(sha256sum plan.json | awk '{print $1}')" = \
+            "${EXPECTED_PLAN_SHA256}"
+          jq -cS . plan.json >"${RUNNER_TEMP}/approved-canonical-plan.json"
+          cmp --silent \
+            plan.json \
+            "${RUNNER_TEMP}/approved-canonical-plan.json"
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg domainUrn "urn:li:domain:archonGovernedCanaryFixture" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg targetUrn "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)" '
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .action == $action and
+              (
+                .before.rawAspectSnapshotSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              (.before.ownedUrnPresence | length) == 2 and
+              (.before.provenance | length) == 2 and
+              (
+                .before as $before |
+                $before.ownedUrnPresence == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.provenance[0].present
+                  },
+                  {
+                    urn: $domainUrn,
+                    present: $before.provenance[1].present
+                  }
+                ] and
+                $before.provenance == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.ownedUrnPresence[0].present,
+                    markerExact: $before.provenance[0].markerExact
+                  },
+                  {
+                    urn: $domainUrn,
+                    present: $before.ownedUrnPresence[1].present,
+                    markerExact: $before.provenance[1].markerExact
+                  }
+                ] and
+                all(
+                  $before.provenance[];
+                  (.present | type) == "boolean" and
+                  (.markerExact | type) == "boolean" and
+                  .markerExact == .present
+                )
+              ) and
+              (
+                if $action == "seed" then
+                  (
+                    (.operation == "seed" and .mutationRequired == true) or
+                    (.operation == "noop" and .mutationRequired == false)
+                  )
+                else
+                  .operation == "reset" and
+                  .mutationRequired == true
+                end
+              )
+            ' plan.json >/dev/null
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .requestedAction == $action and
+              .controllerAction == $action
+            ' control-plane.json >/dev/null
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Recreate the exact wheel-only DataHub runtime
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        run: bash scripts/materialize-datahub-mcp-lock.sh "${RUNTIME}"
+
+      - name: Revalidate exact fixture SDK proposals before mutation
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation="${RUNNER_TEMP}/fixture-runtime-validation-apply.json"
+          canonical="${RUNNER_TEMP}/fixture-runtime-validation-apply.canonical.json"
+          test ! -e "${validation}"
+          test ! -e "${canonical}"
+          trap 'rm -f -- "${validation}" "${canonical}"' EXIT
+          if ! env -i \
+              PYTHONDONTWRITEBYTECODE=1 \
+              "${RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py validate-runtime \
+              --contract "${FIXTURE_CONTRACT}" \
+              >"${validation}" 2>/dev/null; then
+            echo "::error::credentialless fixture runtime validation failed"
+            exit 1
+          fi
+          test -f "${validation}"
+          test ! -L "${validation}"
+          test "$(stat --format=%s "${validation}")" -le 1024
+          expected_contract_sha256="$(
+            jq -cS . "${FIXTURE_CONTRACT}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg contractSha256 "${expected_contract_sha256}" '
+              (keys | sort) == [
+                "proposalCount",
+                "proposalSetSha256",
+                "schemaVersion",
+                "stateContractSha256"
+              ] and
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-runtime-validation/v1" and
+              .proposalCount == 6 and
+              .stateContractSha256 == $contractSha256 and
+              (.stateContractSha256 | test("^[0-9a-f]{64}$")) and
+              (.proposalSetSha256 | test("^[0-9a-f]{64}$"))
+            ' "${validation}" >/dev/null
+          jq -cS . "${validation}" >"${canonical}"
+          cmp --silent "${validation}" "${canonical}"
+
+      - name: Final exact-SHA gate immediately before writer credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f branch=master \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+          workflow_success ci.yml
+          workflow_success codeql.yml
+          workflow_success workflow-security.yml
+
+      - name: Apply exact plan and prove read-after-write
+        id: apply
+        env:
+          ACTION: ${{ inputs.action }}
+          APPROVAL_RECEIPT: ${{ steps.approval.outputs.receipt }}
+          CANARY_FIXTURE_ISOLATION_MARKER: ${{ vars.CANARY_FIXTURE_ISOLATION_MARKER }}
+          CANARY_FIXTURE_WRITE_GMS_TOKEN: ${{ secrets.CANARY_FIXTURE_WRITE_GMS_TOKEN }}
+          CANARY_FIXTURE_WRITE_GMS_URL: ${{ vars.CANARY_FIXTURE_WRITE_GMS_URL }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          PLAN_DIR: ${{ runner.temp }}/datahub-canary-fixture-approved-plan
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          RECEIPT_DIR: ${{ runner.temp }}/datahub-canary-fixture-receipt
+          RUNTIME: ${{ runner.temp }}/datahub-canary-fixture-runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CANARY_FIXTURE_WRITE_GMS_URL:?write GMS URL is required}"
+          : "${CANARY_FIXTURE_WRITE_GMS_TOKEN:?write GMS token is required}"
+          : "${CANARY_FIXTURE_ISOLATION_MARKER:?isolation marker is required}"
+          test ! -e "${RECEIPT_DIR}"
+          mkdir --mode=0700 "${RECEIPT_DIR}"
+          if ! env -i \
+              GITHUB_ACTIONS=true \
+              RUNNER_TEMP="${RUNNER_TEMP}" \
+              CANARY_ISOLATION_MARKER="${CANARY_FIXTURE_ISOLATION_MARKER}" \
+              DATAHUB_GMS_URL="${CANARY_FIXTURE_WRITE_GMS_URL}" \
+              DATAHUB_GMS_TOKEN="${CANARY_FIXTURE_WRITE_GMS_TOKEN}" \
+              "${RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py apply \
+              --contract "${FIXTURE_CONTRACT}" \
+              --plan "${PLAN_DIR}/plan.json" \
+              --expected-plan-sha256 "${EXPECTED_PLAN_SHA256}" \
+              --confirmation "${CONFIRMATION}" \
+              --release-sha "${RELEASE_SHA}" \
+              --repository "${GITHUB_REPOSITORY}" \
+              --workflow-run-id "${GITHUB_RUN_ID}" \
+              --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+              --receipt "${RECEIPT_DIR}/receipt.json" \
+              >/dev/null 2>&1; then
+            echo "::error::sanitized fixture apply or post-read proof failed"
+            exit 1
+          fi
+          unset CANARY_FIXTURE_WRITE_GMS_TOKEN CANARY_FIXTURE_WRITE_GMS_URL
+          cp -- "${APPROVAL_RECEIPT}" \
+            "${RECEIPT_DIR}/approval-receipt.json"
+          cp -- "${PLAN_DIR}/control-plane.json" \
+            "${RECEIPT_DIR}/control-plane.json"
+          cp -- "${PLAN_DIR}/plan.json" "${RECEIPT_DIR}/plan.json"
+          chmod 0600 "${RECEIPT_DIR}"/*.json
+          cd "${RECEIPT_DIR}"
+          for path in \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+            jq -cS . "${path}" >"${RUNNER_TEMP}/canonical-${path}"
+            cmp --silent "${path}" "${RUNNER_TEMP}/canonical-${path}"
+          done
+          contract_sha256="$(
+            jq -cS . "${GITHUB_WORKSPACE}/${FIXTURE_CONTRACT}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg contractSha256 "${contract_sha256}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --slurpfile plan plan.json '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-receipt/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .workflowRunId == $workflowRunId and
+              .workflowRunAttempt == $workflowRunAttempt and
+              .stateContractSha256 == $contractSha256 and
+              .planSha256 == $planSha256 and
+              .gmsEndpointFingerprint ==
+                $plan[0].gmsEndpointFingerprint and
+              .queryBinding == $plan[0].queryBinding and
+              .ownedUrns == $plan[0].ownedUrns and
+              .action == $action and
+              .exactQueryMatchCount == 1 and
+              (.g1ToG5 | keys | sort) ==
+                ["G1", "G2", "G3", "G4", "G5"] and
+              all(.g1ToG5[]; . == true) and
+              .g6Gap == {
+                classificationState: "absent",
+                fieldPath: "email",
+                piiClassificationAbsent: true
+              } and
+              (.beforeStateSha256 | test("^[0-9a-f]{64}$")) and
+              (.postStateSha256 | test("^[0-9a-f]{64}$")) and
+              (
+                if $plan[0].operation == "noop" then
+                  .outcome == "unchanged"
+                elif $plan[0].operation == "seed" then
+                  .outcome == "seeded"
+                else
+                  .outcome == "reset" and
+                  (.resetDeletes | length) == 2 and
+                  (.resetDeletes | map(.urn)) == .ownedUrns
+                end
+              ) and
+              (
+                if .action == "reset" then
+                  all(
+                    .resetDeletes[];
+                    .outcome == "deleted" or
+                    .outcome == "already-absent"
+                  )
+                else
+                  .resetDeletes == []
+                end
+              ) and
+              (
+                .observedAt |
+                test(
+                  "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                )
+              )
+            ' receipt.json >/dev/null
+          sha256sum \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json >SHA256SUMS
+          chmod 0600 SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              approval-receipt.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          receipt_sha256="$(sha256sum receipt.json | awk '{print $1}')"
+          [[ "${receipt_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=${receipt_sha256}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Governed-canary fixture verified"
+            echo
+            echo "- Outcome: \`$(jq -r '.outcome' receipt.json)\`"
+            echo "- Plan SHA-256: \`${EXPECTED_PLAN_SHA256}\`"
+            echo "- Receipt SHA-256: \`${receipt_sha256}\`"
+            echo "- Post-state SHA-256: \`$(jq -r '.postStateSha256' receipt.json)\`"
+            echo "- Exact query matches: \`$(jq -r '.exactQueryMatchCount' receipt.json)\`"
+            echo "- G6 remains intentionally open: \`$(jq -r '.g6Gap.piiClassificationAbsent' receipt.json)\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the canonical sanitized fixture receipt
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-canary-fixture-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/datahub-canary-fixture-receipt
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    name: Secretless GitHub attestation of the fixture receipt
+    needs:
+      - plan
+      - apply
+    if: ${{ needs.apply.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Verify receipt artifact metadata before download
+        env:
+          ARTIFACT_DIGEST: ${{ needs.apply.outputs.receipt_artifact_digest }}
+          ARTIFACT_ID: ${{ needs.apply.outputs.receipt_artifact_id }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for key in \
+            CANARY_FIXTURE_READ_GMS_TOKEN \
+            CANARY_FIXTURE_READ_GMS_URL \
+            CANARY_FIXTURE_WRITE_GMS_TOKEN \
+            CANARY_FIXTURE_WRITE_GMS_URL \
+            DATAHUB_GMS_TOKEN \
+            DATAHUB_GMS_URL; do
+            test -z "${!key:-}"
+          done
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --argjson id "${ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $id and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${artifact}" >/dev/null
+
+      - name: Download the exact canonical receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.apply.outputs.receipt_artifact_id }}
+          path: ${{ runner.temp }}/datahub-canary-fixture-attestation
+
+      - name: Verify sealed bindings and create canonical predicate
+        id: predicate
+        env:
+          ACTION: ${{ inputs.action }}
+          ARTIFACT_DIGEST: ${{ needs.apply.outputs.receipt_artifact_digest }}
+          EVIDENCE: ${{ runner.temp }}/datahub-canary-fixture-attestation
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          EXPECTED_RECEIPT_SHA256: ${{ needs.apply.outputs.receipt_sha256 }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${EVIDENCE}"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              approval-receipt.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          for path in \
+            SHA256SUMS \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          sha256sum --check --strict SHA256SUMS
+          test "$(sha256sum plan.json | awk '{print $1}')" = \
+            "${EXPECTED_PLAN_SHA256}"
+          test "$(sha256sum receipt.json | awk '{print $1}')" = \
+            "${EXPECTED_RECEIPT_SHA256}"
+          for path in \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            jq -cS . "${path}" >"${RUNNER_TEMP}/attested-canonical-${path}"
+            cmp --silent "${path}" "${RUNNER_TEMP}/attested-canonical-${path}"
+          done
+          jq -e \
+            --arg domainUrn "urn:li:domain:archonGovernedCanaryFixture" \
+            --arg targetUrn "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)" '
+              (
+                .before.rawAspectSnapshotSha256 |
+                test("^[0-9a-f]{64}$")
+              ) and
+              (.before.ownedUrnPresence | length) == 2 and
+              (.before.provenance | length) == 2 and
+              (
+                .before as $before |
+                $before.ownedUrnPresence == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.provenance[0].present
+                  },
+                  {
+                    urn: $domainUrn,
+                    present: $before.provenance[1].present
+                  }
+                ] and
+                $before.provenance == [
+                  {
+                    urn: $targetUrn,
+                    present: $before.ownedUrnPresence[0].present,
+                    markerExact: $before.provenance[0].markerExact
+                  },
+                  {
+                    urn: $domainUrn,
+                    present: $before.ownedUrnPresence[1].present,
+                    markerExact: $before.provenance[1].markerExact
+                  }
+                ] and
+                all(
+                  $before.provenance[];
+                  (.present | type) == "boolean" and
+                  (.markerExact | type) == "boolean" and
+                  .markerExact == .present
+                )
+              )
+            ' plan.json >/dev/null
+          expected_approval="APPROVE ARCHON CANARY FIXTURE run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=${ACTION} release_sha=${RELEASE_SHA} plan_sha256=${EXPECTED_PLAN_SHA256}"
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg comment "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-approval/v1" and
+              .repository == $repository and
+              .workflowRunId == $workflowRunId and
+              .workflowRunAttempt == $workflowRunAttempt and
+              .action == $action and
+              .releaseSha == $releaseSha and
+              .planSha256 == $planSha256 and
+              .configuredReviewerIds == [.approval.user.id] and
+              .environment.name == "datahub-demo-seed" and
+              .approval.state == "approved" and
+              .approval.comment == $comment and
+              (.approval.user.id | type) == "number" and
+              (.approval.user.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
+            ' approval-receipt.json >/dev/null
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg receiptSha256 "${EXPECTED_RECEIPT_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-receipt/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .workflowRunId == env.GITHUB_RUN_ID and
+              .workflowRunAttempt == env.GITHUB_RUN_ATTEMPT and
+              .action == $action and
+              .planSha256 == $planSha256 and
+              .exactQueryMatchCount == 1 and
+              all(.g1ToG5[]; . == true) and
+              .g6Gap == {
+                classificationState: "absent",
+                fieldPath: "email",
+                piiClassificationAbsent: true
+              } and
+              (
+                if .action == "reset" then
+                  (.resetDeletes | length) == 2 and
+                  all(
+                    .resetDeletes[];
+                    .outcome == "deleted" or
+                    .outcome == "already-absent"
+                  )
+                else
+                  .resetDeletes == []
+                end
+              ) and
+              (.postStateSha256 | test("^[0-9a-f]{64}$")) and
+              (
+                $receiptSha256 |
+                test("^[0-9a-f]{64}$")
+              )
+            ' receipt.json >/dev/null
+          approval_sha256="$(
+            sha256sum approval-receipt.json |
+              awk '{print $1}'
+          )"
+          control_plane_sha256="$(
+            sha256sum control-plane.json |
+              awk '{print $1}'
+          )"
+          sums_sha256="$(sha256sum SHA256SUMS | awk '{print $1}')"
+          post_state_sha256="$(jq -er '.postStateSha256' receipt.json)"
+          state_contract_sha256="$(
+            jq -er '.stateContractSha256' receipt.json
+          )"
+          predicate="${RUNNER_TEMP}/datahub-canary-fixture-attestation-predicate.json"
+          jq -cnS \
+            --arg action "${ACTION}" \
+            --arg approvalReceiptSha256 "${approval_sha256}" \
+            --arg artifactDigest "${ARTIFACT_DIGEST}" \
+            --arg controlPlaneSha256 "${control_plane_sha256}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg postStateSha256 "${post_state_sha256}" \
+            --arg receiptSha256 "${EXPECTED_RECEIPT_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha256sumsSha256 "${sums_sha256}" \
+            --arg stateContractSha256 "${state_contract_sha256}" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" '
+              {
+                schemaVersion:
+                  "archon.datahub-canary-fixture-attestation/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflowRunId: $workflowRunId,
+                workflowRunAttempt: $workflowRunAttempt,
+                action: $action,
+                result: "exact-fixture-ready",
+                artifactDigest: $artifactDigest,
+                stateContractSha256: $stateContractSha256,
+                controlPlaneSha256: $controlPlaneSha256,
+                approvalReceiptSha256: $approvalReceiptSha256,
+                planSha256: $planSha256,
+                receiptSha256: $receiptSha256,
+                sha256sumsSha256: $sha256sumsSha256,
+                postStateSha256: $postStateSha256
+              }
+            ' >"${predicate}"
+          chmod 0600 "${predicate}"
+          jq -cS . "${predicate}" >"${RUNNER_TEMP}/canonical-predicate.json"
+          cmp --silent "${predicate}" "${RUNNER_TEMP}/canonical-predicate.json"
+          echo "path=${predicate}" >>"${GITHUB_OUTPUT}"
+
+      - name: Attest the canonical sanitized fixture receipt
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/datahub-canary-fixture-attestation/SHA256SUMS
+            ${{ runner.temp }}/datahub-canary-fixture-attestation/approval-receipt.json
+            ${{ runner.temp }}/datahub-canary-fixture-attestation/control-plane.json
+            ${{ runner.temp }}/datahub-canary-fixture-attestation/plan.json
+            ${{ runner.temp }}/datahub-canary-fixture-attestation/receipt.json
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-canary-fixture/v1
+          predicate-path: ${{ steps.predicate.outputs.path }}
+
+      - name: Publish exact promote-only fixture coordinates
+        env:
+          ARTIFACT_DIGEST: ${{ needs.apply.outputs.receipt_artifact_digest }}
+          ARTIFACT_ID: ${{ needs.apply.outputs.receipt_artifact_id }}
+          RECEIPT_SHA256: ${{ needs.apply.outputs.receipt_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          fixture_coordinates="$(jq -cnS \
+            --arg fixtureArtifactDigest "${ARTIFACT_DIGEST}" \
+            --arg fixtureArtifactId "${ARTIFACT_ID}" \
+            --arg fixtureReceiptSha256 "${RECEIPT_SHA256}" \
+            --arg fixtureRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg fixtureRunId "${GITHUB_RUN_ID}" '
+              {
+                fixture_artifact_digest: $fixtureArtifactDigest,
+                fixture_artifact_id: $fixtureArtifactId,
+                fixture_receipt_sha256: $fixtureReceiptSha256,
+                fixture_run_attempt: $fixtureRunAttempt,
+                fixture_run_id: $fixtureRunId
+              }
+            ')"
+          {
+            echo "### Attested fixture coordinates for \`deployment_mode=promote\`"
+            echo
+            echo "- \`fixture_coordinates=${fixture_coordinates}\`"
+            echo "- \`fixture_run_id=${GITHUB_RUN_ID}\`"
+            echo "- \`fixture_run_attempt=${GITHUB_RUN_ATTEMPT}\`"
+            echo "- \`fixture_artifact_id=${ARTIFACT_ID}\`"
+            echo "- \`fixture_artifact_digest=${ARTIFACT_DIGEST}\`"
+            echo "- \`fixture_receipt_sha256=${RECEIPT_SHA256}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
