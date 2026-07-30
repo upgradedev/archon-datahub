@@ -1,0 +1,15 @@
+{
+  "name": "@archon/datahub-approval-lambda",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runtime dependencies for the governed Archon approval callback",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1090.0",
+    "@aws-sdk/client-sfn": "3.1090.0"
+  }
+}
