@@ -57,22 +57,40 @@ jq --exit-status '
   .schemaVersion == "archon.aws-incident-recovery/v1" and
   .repository == "upgradedev/archon-datahub" and
   .defaultBranch == "master" and
-  .status == "attempted-delete-not-executed-cleanup-proof-pending" and
-  .execution == {
-    cleanupRun: {
-      canonicalAbsenceProof: "pending",
-      result: "failure",
-      runId: "30567949203"
+  .status == "attempted-delete-not-executed-cleanup-proven" and
+  .execution.recoveryRun == {
+    artifact: {
+      id: "8771158101",
+      name: "aws-incident-recovery-30571830902-1",
+      zipDigest: "sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878"
     },
-    deleteStackExecuted: false,
-    recoveryRun: {
-      deleteStack: "skipped",
-      result: "prepare-build-plan-failed",
-      runId: "30567769601"
-    },
-    temporaryPolicyAbsent: "not-proven",
-    temporaryPolicyInstalled: "not-proven"
+    canonicalAbsenceProof: "proven",
+    deleteStack: "skipped",
+    diagnosticCode: "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    headSha: "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
+    mandatoryRevocation: "success",
+    putRolePolicy: "not-reached",
+    result: "prepare-incident-record-mismatch",
+    runAttempt: "1",
+    runId: "30571830902"
   } and
+  .execution.cleanupRun == {
+    artifact: {
+      attestationUrl: "https://github.com/upgradedev/archon-datahub/attestations/38026442",
+      cleanupPayloadSha256: "8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2",
+      id: "8771042311",
+      name: "aws-incident-recovery-cleanup-30571619440-1",
+      zipDigest: "sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0"
+    },
+    canonicalAbsenceProof: "proven",
+    headSha: "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
+    result: "success",
+    runAttempt: "1",
+    runId: "30571619440"
+  } and
+  .execution.temporaryPolicyInstalled == false and
+  .execution.temporaryPolicyAbsent == "proven" and
+  .execution.deleteStackExecuted == false and
   .controlPlane.inputs == ["expected_head_sha", "confirmation"] and
   .controlPlane.secretForwarding == "none" and
   .controlPlane.runbook == "docs/AWS_INCIDENT_RECOVERY.md" and
@@ -103,6 +121,15 @@ jq --exit-status '
     "CREATE_FAILED-without-PhysicalResourceId",
     "DELETE_COMPLETE"
   ] and
+  .target.preconditions.incidentResourceCurrentState == {
+    acceptanceChange: "none-pending-classified-rerun",
+    acceptedClass: "CREATE_FAILED-without-PhysicalResourceId",
+    diagnosticOnlyRejectedClasses: [
+      "DELETE_COMPLETE-without-PhysicalResourceId",
+      "DELETE_COMPLETE-with-PhysicalResourceId"
+    ],
+    rejectionPoint: "before-PutRolePolicy"
+  } and
   .recoveryRole.stackTemplateSourceSha256 == "0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4" and
   .recoveryRole.baselinePolicyUnchanged == true and
   .recoveryRole.foundationRolePolicyBroadening == "forbidden" and
@@ -144,13 +171,16 @@ jq --exit-status '
   } and
   .validator.cliFailureCodes == [
     "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-    "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+    "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
     "AWS_RECOVERY_INVALID_INVOCATION",
     "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
     "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
     "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+    "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
     "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
     "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
     "AWS_RECOVERY_STACK_ID_INVALID",
@@ -162,6 +192,14 @@ jq --exit-status '
     "AWS_RECOVERY_TTL_INVALID",
     "AWS_RECOVERY_VALIDATOR_FAILED"
   ] and
+  .validator.diagnosticOnlyCodes == [
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
+    "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
+    "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID"
+  ] and
+  .validator.diagnosticOnlySemantics ==
+    "fail-closed-preauthorization-classification-without-acceptance-change" and
   .validator.fallbackCliFailureCode == "AWS_RECOVERY_VALIDATOR_FAILED" and
   .validator.rawErrorMessages == false and
   .validator.rawPaths == false and
@@ -183,7 +221,7 @@ jq --exit-status '
   .evidence.failureDiagnostics.explicitIncidentRecoveryContract ==
     "contracts/aws-incident-recovery-v1.json" and
   .evidence.failureDiagnostics.explicitIncidentRecoveryStatus ==
-    "attempted-delete-not-executed-cleanup-proof-pending"
+    "attempted-delete-not-executed-cleanup-proven"
 ' "${foundation_contract}" >/dev/null
 
 require_count 2 "${entry}" '        type: string'
@@ -373,10 +411,19 @@ require_text "${ci}" \
   'bash tests/pipeline/aws-incident-recovery-contracts.test.sh' \
   'bash tests/pipeline/aws-incident-recovery-driver.test.sh'
 require_text "${runbook}" \
-  'Status: **attempted; `DeleteStack` not executed; cleanup proof pending**' \
-  'run `30567769601` failed during prepare/build-plan' \
-  'Cleanup run `30567949203` also failed' \
-  'PutRolePolicy' \
+  'Status: **attempted; `DeleteStack` not executed; cleanup proof successful**' \
+  'Cleanup-only run `30571619440` proved canonical temporary-policy absence' \
+  'recovery run `30571830902` failed during prepare with the historical' \
+  '`AWS_RECOVERY_INCIDENT_RECORD_MISMATCH`' \
+  '`sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0`' \
+  '`8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2`' \
+  'https://github.com/upgradedev/archon-datahub/attestations/38026442' \
+  '`sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878`' \
+  'ResourceStatus` as the resource' \
+  '`ROLLBACK_COMPLETE`' \
+  '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`' \
+  '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID`' \
+  'Both `DELETE_COMPLETE` classes still fail before `PutRolePolicy`' \
   'eventually consistent' \
   'lists inline policies before mutation' \
   'The opaque request response is never treated as proof' \

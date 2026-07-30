@@ -71,14 +71,21 @@ const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 
 export const CLI_FAILURE_CODES = Object.freeze({
   ARTIFACT_VALIDATION_FAILED: "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-  INCIDENT_RECORD_MISMATCH: "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+  INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID:
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+  INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID:
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
   INCIDENT_RECORD_NOT_UNIQUE: "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+  INCIDENT_RESOURCE_TYPE_MISMATCH:
+    "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
   INVALID_INVOCATION: "AWS_RECOVERY_INVALID_INVOCATION",
   PLAN_VALIDATION_FAILED: "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
   RESOURCE_CREATE_FAILED_PHYSICAL_ID:
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
   RESOURCE_STATE_EMPTY: "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
   RESOURCE_STATE_UNAVAILABLE: "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+  RESOURCE_SUMMARY_SHAPE_INVALID:
+    "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
   RESOURCE_UNSUPPORTED_STATUS: "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
   STACK_AUTHORITY_INVALID: "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
   STACK_ID_INVALID: "AWS_RECOVERY_STACK_ID_INVALID",
@@ -264,11 +271,28 @@ function validateResourceSummaries(resources) {
     "stack resource inventory is empty",
     CLI_FAILURE_CODES.RESOURCE_STATE_EMPTY
   );
-  let incidentRecordCount = 0;
   const sanitized = resources.StackResourceSummaries.map((resource) => {
-    const hasPhysicalResourceId =
-      typeof resource.PhysicalResourceId === "string" &&
-      resource.PhysicalResourceId.length > 0;
+    const shapeCode = CLI_FAILURE_CODES.RESOURCE_SUMMARY_SHAPE_INVALID;
+    invariant(
+      resource !== null && typeof resource === "object" && !Array.isArray(resource),
+      "a stack resource summary has an invalid shape",
+      shapeCode
+    );
+    for (const field of ["LogicalResourceId", "ResourceStatus", "ResourceType"]) {
+      invariant(
+        typeof resource[field] === "string" && resource[field].length > 0,
+        "a stack resource summary field is invalid",
+        shapeCode
+      );
+    }
+    const hasPhysicalResourceId = Object.hasOwn(resource, "PhysicalResourceId");
+    invariant(
+      !hasPhysicalResourceId ||
+        (typeof resource.PhysicalResourceId === "string" &&
+          resource.PhysicalResourceId.length > 0),
+      "a stack resource physical ID is invalid",
+      shapeCode
+    );
     const isDeleted = resource.ResourceStatus === "DELETE_COMPLETE";
     const isCreateFailed = resource.ResourceStatus === "CREATE_FAILED";
     invariant(
@@ -281,16 +305,6 @@ function validateResourceSummaries(resources) {
       "an unsupported stack resource status was observed",
       CLI_FAILURE_CODES.RESOURCE_UNSUPPORTED_STATUS
     );
-    if (resource.LogicalResourceId === EXPECTED_FAILURE.logicalResourceId) {
-      invariant(
-        resource.ResourceType === EXPECTED_FAILURE.resourceType &&
-          resource.ResourceStatus === EXPECTED_FAILURE.resourceStatus &&
-          !hasPhysicalResourceId,
-        "the incident resource record differs",
-        CLI_FAILURE_CODES.INCIDENT_RECORD_MISMATCH
-      );
-      incidentRecordCount += 1;
-    }
     return {
       hasPhysicalResourceId,
       logicalResourceId: resource.LogicalResourceId,
@@ -298,11 +312,35 @@ function validateResourceSummaries(resources) {
       resourceType: resource.ResourceType,
     };
   });
+
+  const incidentRecords = sanitized.filter(
+    (resource) =>
+      resource.logicalResourceId === EXPECTED_FAILURE.logicalResourceId
+  );
   invariant(
-    incidentRecordCount === 1,
+    incidentRecords.length === 1,
     "the exact incident resource record is not unique",
     CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE
   );
+  const incidentRecord = incidentRecords[0];
+  invariant(
+    incidentRecord.resourceType === EXPECTED_FAILURE.resourceType,
+    "the incident resource type differs",
+    CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH
+  );
+  if (incidentRecord.resourceStatus === "DELETE_COMPLETE") {
+    invariant(
+      !incidentRecord.hasPhysicalResourceId,
+      "the DELETE_COMPLETE incident resource retains a physical ID",
+      CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID
+    );
+    invariant(
+      false,
+      "the incident resource is DELETE_COMPLETE without a physical ID",
+      CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID
+    );
+  }
+
   return sanitized.sort((left, right) =>
     canonicalJson(left).localeCompare(canonicalJson(right), "en")
   );

@@ -425,8 +425,8 @@
       "artifactRetentionDays": 90,
       "artifactUpload": "explicit-files-only",
       "autoRecovery": "forbidden",
-    "explicitIncidentRecoveryContract": "contracts/aws-incident-recovery-v1.json",
-    "explicitIncidentRecoveryStatus": "attempted-delete-not-executed-cleanup-proof-pending",
+      "explicitIncidentRecoveryContract": "contracts/aws-incident-recovery-v1.json",
+      "explicitIncidentRecoveryStatus": "attempted-delete-not-executed-cleanup-proven",
       "canonicalJson": true,
       "credentialClearProofRequired": true,
       "diagnosticCount": 1,
@@ -466,7 +466,6 @@
         "staging-iam"
       ],
       "fields": [
-
         "diagnosticSha256",
         "logicalResourceId",
         "reasonCategory",

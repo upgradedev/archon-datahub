@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   rmSync,
   symlinkSync,
@@ -206,6 +207,98 @@ test("fails closed for every surviving or non-create failed resource state", () 
   assert.throws(() => build({ resourcesResponse: physicalCreateFailure }));
 });
 
+test("classifies every incident type, status, and physical-ID combination", () => {
+  const cases = [
+    {
+      expected: null,
+      resourceStatus: "CREATE_FAILED",
+      resourceType: "AWS::IAM::ManagedPolicy",
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID,
+      physicalResourceId: "physical-id",
+      resourceStatus: "CREATE_FAILED",
+      resourceType: "AWS::IAM::ManagedPolicy",
+    },
+    {
+      expected:
+        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID,
+      resourceStatus: "DELETE_COMPLETE",
+      resourceType: "AWS::IAM::ManagedPolicy",
+    },
+    {
+      expected:
+        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID,
+      physicalResourceId: "physical-id",
+      resourceStatus: "DELETE_COMPLETE",
+      resourceType: "AWS::IAM::ManagedPolicy",
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
+      resourceStatus: "CREATE_FAILED",
+      resourceType: "AWS::IAM::Role",
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID,
+      physicalResourceId: "physical-id",
+      resourceStatus: "CREATE_FAILED",
+      resourceType: "AWS::IAM::Role",
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
+      resourceStatus: "DELETE_COMPLETE",
+      resourceType: "AWS::IAM::Role",
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
+      physicalResourceId: "physical-id",
+      resourceStatus: "DELETE_COMPLETE",
+      resourceType: "AWS::IAM::Role",
+    },
+  ];
+
+  for (const testCase of cases) {
+    const resources = resourcesResponse();
+    const incident = resources.StackResourceSummaries[0];
+    incident.ResourceStatus = testCase.resourceStatus;
+    incident.ResourceType = testCase.resourceType;
+    if (testCase.physicalResourceId !== undefined) {
+      incident.PhysicalResourceId = testCase.physicalResourceId;
+    }
+    if (testCase.expected === null) {
+      assert.doesNotThrow(() => build({ resourcesResponse: resources }));
+    } else {
+      assert.throws(
+        () => build({ resourcesResponse: resources }),
+        (error) => error.publicCode === testCase.expected
+      );
+    }
+  }
+});
+
+test("rejects malformed resource-summary fields instead of treating them as absent", () => {
+  const cases = [
+    (resource) => {
+      resource.ResourceType = 42;
+    },
+    (resource) => {
+      resource.PhysicalResourceId = null;
+    },
+    (resource) => {
+      resource.PhysicalResourceId = "";
+    },
+  ];
+  for (const mutate of cases) {
+    const resources = resourcesResponse();
+    mutate(resources.StackResourceSummaries[0]);
+    assert.throws(
+      () => build({ resourcesResponse: resources }),
+      (error) =>
+        error.publicCode === CLI_FAILURE_CODES.RESOURCE_SUMMARY_SHAPE_INVALID
+    );
+  }
+});
+
 test("fails closed on target identity, authority, tags, source, and TTL drift", () => {
   const invalidStacks = [
     { StackStatus: "DELETE_FAILED" },
@@ -348,13 +441,16 @@ test("CLI exposes only allowlisted failure codes and never raw values or paths",
 test("CLI failure-code sanitizer rejects raw and spoofed error properties", () => {
   assert.deepEqual(Object.values(CLI_FAILURE_CODES), [
     "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-    "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+    "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
     "AWS_RECOVERY_INVALID_INVOCATION",
     "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
     "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
     "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+    "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
     "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
     "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
     "AWS_RECOVERY_STACK_ID_INVALID",
@@ -456,9 +552,45 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
       },
     },
     {
-      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_MISMATCH,
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
       mutateResources(resources) {
         resources.StackResourceSummaries[0].ResourceType = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
+        resources.StackResourceSummaries[0].ResourceType = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RESOURCE_TYPE_MISMATCH,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
+        resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
+        resources.StackResourceSummaries[0].ResourceType = privateMarker;
+      },
+    },
+    {
+      expected:
+        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
+      },
+    },
+    {
+      expected:
+        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
+        resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_SUMMARY_SHAPE_INVALID,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].PhysicalResourceId = "";
       },
     },
     {
@@ -466,6 +598,24 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
       mutateResources(resources) {
         resources.StackResourceSummaries.push({
           ...resources.StackResourceSummaries[0],
+        });
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE,
+      mutateResources(resources) {
+        resources.StackResourceSummaries.push({
+          ...resources.StackResourceSummaries[0],
+          ResourceType: privateMarker,
+        });
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE,
+      mutateResources(resources) {
+        resources.StackResourceSummaries.unshift({
+          ...resources.StackResourceSummaries[0],
+          ResourceType: privateMarker,
         });
       },
     },
@@ -505,6 +655,8 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
         result.stderr,
         /DELETE_FAILED|PhysicalResourceId|UPDATE_FAILED|ENOENT/u
       );
+      assert.equal(existsSync(planPath), false);
+      assert.equal(existsSync(policyPath), false);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
