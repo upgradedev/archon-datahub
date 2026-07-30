@@ -63,8 +63,8 @@ canonical_iam_policy() {
     .Version as \$version |
     (.Statement |
       map(
-        .Action |= (if type == \"array\" then sort else . end) |
-        .Resource |= (if type == \"array\" then sort else . end)
+        .Action |= (if type == \"array\" then sort else [.] end) |
+        .Resource |= (if type == \"array\" then sort else [.] end)
       ) |
       sort_by(.Sid)
     ) as \$statements |
