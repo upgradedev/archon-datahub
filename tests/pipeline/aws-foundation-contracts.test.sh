@@ -752,11 +752,20 @@ require_text "${inline_template_renderer}" \
   'RAIN_VERSION="v1.24.4"' \
   'RAIN_LINUX_AMD64_ARCHIVE_SHA256="5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"' \
   'CLOUDFORMATION_TEMPLATE_BODY_MAX_BYTES=51200' \
+  'test ! -L "$1"' \
   'sha256sum --check --strict' \
   '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
   'jq -cS' \
   'cmp -s "${compact_json}" "${round_trip}"' \
   '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
+test "$(
+  grep -nF 'test ! -L "$1"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" -lt "$(
+  grep -nF 'source_path="$(realpath "$1")"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" ||
+  fail "renderer must reject a source symlink before realpath resolution"
 require_text "${reconciler}" \
   'IAM_FOUNDATION_TEMPLATE' \
   'IAM_FOUNDATION_TEMPLATE_SHA' \

@@ -18,6 +18,8 @@ if [[ "$#" -ne 2 ]]; then
   exit 1
 fi
 
+test -f "$1"
+test ! -L "$1"
 source_path="$(realpath "$1")"
 workspace_root="$(realpath "${GITHUB_WORKSPACE}")"
 runner_temp_root="$(realpath "${RUNNER_TEMP}")"
@@ -27,7 +29,6 @@ output_parent="$(dirname "${output_path}")"
 [[ "${source_path}" == "${workspace_root}/"* ]]
 [[ "${output_path}" == "${runner_temp_root}/"* ]]
 test -f "${source_path}"
-test ! -L "${source_path}"
 test ! -e "${output_path}"
 mkdir -p "${output_parent}"
 
