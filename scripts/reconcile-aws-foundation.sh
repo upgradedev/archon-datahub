@@ -74,6 +74,7 @@ readonly SHARED_API_ROLE="archon-datahub-apigateway-cloudwatch-logs"
 readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"
 readonly LEGACY_DEPLOY_ROLE="archon-datahub-github-deploy"
 readonly EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-evidence"
+readonly FAILURE_EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-failure"
 shared_api_gateway_mode=""
 shared_api_gateway_observed_role_arn=""
 shared_api_gateway_observed_binding_sha=""
@@ -230,11 +231,144 @@ revalidate_master() {
   done
 }
 
+assert_diagnostic_stack_allowlisted() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  case "${stack_label}|${region}|${stack_name}" in
+    "staging-iam|${PRIMARY_REGION}|${IAM_STACK[staging]}" | \
+      "production-iam|${PRIMARY_REGION}|${IAM_STACK[production]}" | \
+      "staging-deploy|${PRIMARY_REGION}|${DEPLOY_STACK[staging]}" | \
+      "production-deploy|${PRIMARY_REGION}|${DEPLOY_STACK[production]}" | \
+      "staging-bootstrap-primary|${PRIMARY_REGION}|${BOOTSTRAP_STACK[staging]}" | \
+      "staging-bootstrap-edge|${EDGE_REGION}|${BOOTSTRAP_STACK[staging]}" | \
+      "production-bootstrap-primary|${PRIMARY_REGION}|${BOOTSTRAP_STACK[production]}" | \
+      "production-bootstrap-edge|${EDGE_REGION}|${BOOTSTRAP_STACK[production]}" | \
+      "shared-api-gateway|${PRIMARY_REGION}|${SHARED_API_STACK}" | \
+      "governed-canary-roles|${PRIMARY_REGION}|${CANARY_ROLE_STACK}")
+      return 0
+      ;;
+  esac
+  echo "::error::Refusing CloudFormation diagnostics for a non-allowlisted stack label" >&2
+  return 1
+}
+
+capture_managed_stack_failure() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  local stack_status="${4:-}"
+  local diagnostic_tmp
+
+  assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"
+  if [[ -z "${stack_status}" ]]; then
+    if ! stack_status="$(
+      aws cloudformation describe-stacks \
+        --region "${region}" \
+        --stack-name "${stack_name}" \
+        --query 'Stacks[0].StackStatus' \
+        --output text 2>/dev/null
+    )"; then
+      stack_status="UNKNOWN"
+    fi
+  fi
+  case "${stack_status}" in
+    CREATE_COMPLETE | CREATE_FAILED | CREATE_IN_PROGRESS | \
+      DELETE_COMPLETE | DELETE_FAILED | DELETE_IN_PROGRESS | \
+      IMPORT_COMPLETE | IMPORT_IN_PROGRESS | IMPORT_ROLLBACK_COMPLETE | \
+      IMPORT_ROLLBACK_FAILED | IMPORT_ROLLBACK_IN_PROGRESS | \
+      REVIEW_IN_PROGRESS | ROLLBACK_COMPLETE | ROLLBACK_FAILED | \
+      ROLLBACK_IN_PROGRESS | UPDATE_COMPLETE | \
+      UPDATE_COMPLETE_CLEANUP_IN_PROGRESS | UPDATE_FAILED | \
+      UPDATE_IN_PROGRESS | UPDATE_ROLLBACK_COMPLETE | \
+      UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS | \
+      UPDATE_ROLLBACK_FAILED | UPDATE_ROLLBACK_IN_PROGRESS)
+      ;;
+    *)
+      stack_status="UNKNOWN"
+      ;;
+  esac
+
+  if [[ -e "${FAILURE_EVIDENCE_DIR}" ]]; then
+    echo "::error::Sanitized CloudFormation failure evidence already exists" >&2
+    return 1
+  fi
+  install -d -m 0700 "${FAILURE_EVIDENCE_DIR}"
+  diagnostic_tmp="${FAILURE_EVIDENCE_DIR}/.cfn-failure.json.tmp"
+  if ! aws cloudformation describe-stack-events \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --max-items 25 \
+    --output json 2>/dev/null |
+    node scripts/sanitize-cloudformation-failure.mjs \
+      --stack-label "${stack_label}" \
+      --stack-status "${stack_status}" >"${diagnostic_tmp}"; then
+    rm -f "${diagnostic_tmp}"
+    rmdir "${FAILURE_EVIDENCE_DIR}" 2>/dev/null || true
+    echo "::error::Unable to author sanitized CloudFormation failure evidence for the allowlisted stack label" >&2
+    return 1
+  fi
+  test "$(wc -c <"${diagnostic_tmp}")" -le 2048
+  jq -e '
+    (keys | sort) == [
+      "deniedAwsAction",
+      "logicalResourceId",
+      "rawReasonSha256",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ] and
+    .schemaVersion == "archon.aws-foundation-cfn-failure/v1" and
+    (.rawReasonSha256 | test("^[0-9a-f]{64}$"))
+  ' "${diagnostic_tmp}" >/dev/null
+  mv "${diagnostic_tmp}" "${FAILURE_EVIDENCE_DIR}/cfn-failure.json"
+  (
+    cd "${FAILURE_EVIDENCE_DIR}"
+    sha256sum cfn-failure.json >SHA256SUMS
+    sha256sum --check --strict SHA256SUMS
+  )
+  test "$(
+    find "${FAILURE_EVIDENCE_DIR}" \
+      -mindepth 1 -maxdepth 1 -type f | wc -l
+  )" -eq 2
+  echo "::notice::Sealed sanitized CloudFormation failure evidence for stack label ${stack_label}"
+}
+
+run_managed_stack_command() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  local command_status
+  shift 3
+
+  assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"
+  if "$@"; then
+    return 0
+  else
+    command_status="$?"
+  fi
+  if ! capture_managed_stack_failure \
+    "${stack_label}" "${region}" "${stack_name}"; then
+    echo "::error::Managed stack command failed and sanitized diagnostic capture was unavailable" >&2
+  fi
+  return "${command_status}"
+}
+
 assert_stack_role_is_null_if_present() {
-  local region="$1"
-  local stack_name="$2"
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
   local output="${RUNNER_TEMP}/stack-role-${region}-${stack_name}.json"
   local error="${output}.error"
+  local stack_status
+
+  assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"
   if aws cloudformation describe-stacks \
     --region "${region}" \
     --stack-name "${stack_name}" \
@@ -243,6 +377,28 @@ assert_stack_role_is_null_if_present() {
       (.Stacks | length) == 1 and
       ((.Stacks[0].RoleARN // "") == "")
     ' "${output}" >/dev/null
+    stack_status="$(jq -er '.Stacks[0].StackStatus' "${output}")"
+    case "${stack_status}" in
+      CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE | \
+        IMPORT_COMPLETE | IMPORT_ROLLBACK_COMPLETE)
+        ;;
+      ROLLBACK_COMPLETE | *_FAILED)
+        if ! capture_managed_stack_failure \
+          "${stack_label}" "${region}" "${stack_name}" "${stack_status}"; then
+          echo "::error::Blocked managed stack state could not be sanitized" >&2
+        fi
+        printf \
+          '::error title=Blocked managed foundation stack state::stackLabel=%s; stackStatus=%s\n' \
+          "${stack_label}" "${stack_status}" >&2
+        return 1
+        ;;
+      *)
+        printf \
+          '::error title=Managed foundation stack is not update-safe::stackLabel=%s; stackStatus=%s\n' \
+          "${stack_label}" "${stack_status}" >&2
+        return 1
+        ;;
+    esac
   else
     grep -Eq 'does not exist|ValidationError' "${error}"
   fi
@@ -535,25 +691,25 @@ jq -e '
 ' <<<"${legacy_stacks}" >/dev/null
 
 foundation_phase='preflight:foundation-stack-role-binding:staging:iam'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-iam" "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-bootstrap-primary" "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'
-assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-bootstrap-edge" "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:iam'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[production]}"
+assert_stack_role_is_null_if_present "production-iam" "${PRIMARY_REGION}" "${IAM_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:deploy'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
+assert_stack_role_is_null_if_present "production-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
+assert_stack_role_is_null_if_present "production-bootstrap-primary" "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'
-assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
+assert_stack_role_is_null_if_present "production-bootstrap-edge" "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:shared-api'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+assert_stack_role_is_null_if_present "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}"
 foundation_phase='preflight:foundation-stack-role-binding:governed-canary'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+assert_stack_role_is_null_if_present "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
 foundation_phase='preflight:shared-api-gateway'
 inspect_api_gateway_binding
 shared_api_gateway_preflight_mode="${shared_api_gateway_mode}"
@@ -632,8 +788,10 @@ echo "::group::Reconcile stage IAM foundations"
 for stage in staging production; do
   revalidate_master
   assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
-  aws cloudformation deploy \
+    "${stage}-iam" "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  run_managed_stack_command \
+    "${stage}-iam" "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${IAM_STACK[${stage}]}" \
     --template-file "${IAM_FOUNDATION_TEMPLATE}" \
@@ -841,8 +999,10 @@ if [[ "${shared_api_gateway_mode}" == "external-pinned" ]]; then
       '
   )"
 else
-  assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
-  aws cloudformation deploy \
+  assert_stack_role_is_null_if_present "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+  run_managed_stack_command \
+    "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${SHARED_API_STACK}" \
     --template-file infra/aws/foundation/api-gateway-account.yml \
@@ -946,8 +1106,10 @@ echo "::endgroup::"
 foundation_phase='governed-canary-roles'
 echo "::group::Reconcile the three governed-canary read roles"
 revalidate_master
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
-aws cloudformation deploy \
+assert_stack_role_is_null_if_present "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+run_managed_stack_command \
+  "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}" \
+  aws cloudformation deploy \
   --region "${PRIMARY_REGION}" \
   --stack-name "${CANARY_ROLE_STACK}" \
   --template-file infra/aws/foundation/governed-canary-roles.yml \
@@ -1156,10 +1318,16 @@ echo "::group::Bootstrap both isolated stages in both regions"
 for stage in staging production; do
   for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
     target="${stage}:${region}"
+    bootstrap_label="${stage}-bootstrap-primary"
+    if [[ "${region}" == "${EDGE_REGION}" ]]; then
+      bootstrap_label="${stage}-bootstrap-edge"
+    fi
     revalidate_master
     assert_stack_role_is_null_if_present \
-      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
-    infra/aws/node_modules/.bin/cdk bootstrap \
+      "${bootstrap_label}" "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+    run_managed_stack_command \
+      "${bootstrap_label}" "${region}" "${BOOTSTRAP_STACK[${stage}]}" \
+      infra/aws/node_modules/.bin/cdk bootstrap \
       "aws://${EXPECTED_ACCOUNT_ID}/${region}" \
       --template "${BOOTSTRAP_TEMPLATE_BY_TARGET[${target}]}" \
       --toolkit-stack-name "${BOOTSTRAP_STACK[${stage}]}" \
@@ -1183,8 +1351,10 @@ echo "::group::Reconcile the two environment-bound deploy roles"
 for stage in staging production; do
   revalidate_master
   assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
-  aws cloudformation deploy \
+    "${stage}-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  run_managed_stack_command \
+    "${stage}-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${DEPLOY_STACK[${stage}]}" \
     --template-file infra/aws/foundation/github-actions-deploy-role.yml \

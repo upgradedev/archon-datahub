@@ -200,6 +200,7 @@ jobs:
             scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/sanitize-cloudformation-failure.mjs \
             scripts/render-aws-foundation-policy.mjs \
             scripts/verify-aws-runtime-boundary.mjs \
             scripts/verify-cdk-npm-audit-compensation.sh \
@@ -428,6 +429,39 @@ jobs:
               migrationRequiredState:
                 "foundation-complete-deploy-migration-required",
               readyState: "ready-for-deploy"
+            } and
+            .evidence.failureDiagnostics == {
+              allowlistedStackLabels: [
+                "governed-canary-roles",
+                "production-bootstrap-edge",
+                "production-bootstrap-primary",
+                "production-deploy",
+                "production-iam",
+                "shared-api-gateway",
+                "staging-bootstrap-edge",
+                "staging-bootstrap-primary",
+                "staging-deploy",
+                "staging-iam"
+              ],
+              artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
+              artifactRetentionDays: 90,
+              autoRecovery: "forbidden",
+              diagnosticCount: 1,
+              fields: [
+                "deniedAwsAction",
+                "logicalResourceId",
+                "rawReasonSha256",
+                "reasonCategory",
+                "resourceStatus",
+                "resourceType",
+                "schemaVersion",
+                "stackLabel",
+                "stackStatus"
+              ],
+              maxRecentEvents: 25,
+              rawReasonRetention: false,
+              schemaVersion: "archon.aws-foundation-cfn-failure/v1",
+              stackIdentity: "allowlisted-label-only"
             }
           ' contracts/aws-foundation-v1.json >/dev/null
           jq -e '
@@ -830,6 +864,7 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Clear AWS credentials before artifact handling
+        if: ${{ always() }}
         run: |
           set -euo pipefail
           {
@@ -838,6 +873,102 @@ jobs:
             echo "AWS_SESSION_TOKEN="
             echo "AWS_SECURITY_TOKEN="
           } >>"${GITHUB_ENV}"
+
+      - name: Validate checksum-sealed sanitized failure evidence
+        id: failure_evidence
+        if: ${{ failure() }}
+        env:
+          FAILURE_EVIDENCE_DIR: ${{ runner.temp }}/aws-foundation-failure
+        run: |
+          set -euo pipefail
+          if [[ ! -e "${FAILURE_EVIDENCE_DIR}" ]]; then
+            echo "available=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          test -d "${FAILURE_EVIDENCE_DIR}"
+          test ! -L "${FAILURE_EVIDENCE_DIR}"
+          for path in cfn-failure.json SHA256SUMS; do
+            test -f "${FAILURE_EVIDENCE_DIR}/${path}"
+            test ! -L "${FAILURE_EVIDENCE_DIR}/${path}"
+          done
+          test "$(
+            find "${FAILURE_EVIDENCE_DIR}" \
+              -mindepth 1 -maxdepth 1 -type f | wc -l
+          )" -eq 2
+          (
+            cd "${FAILURE_EVIDENCE_DIR}"
+            test "$(wc -l <SHA256SUMS)" -eq 1
+            grep -Eq '^[0-9a-f]{64}  cfn-failure.json$' SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(wc -c <"${FAILURE_EVIDENCE_DIR}/cfn-failure.json")" -le 2048
+          jq -e '
+            (keys | sort) == [
+              "deniedAwsAction",
+              "logicalResourceId",
+              "rawReasonSha256",
+              "reasonCategory",
+              "resourceStatus",
+              "resourceType",
+              "schemaVersion",
+              "stackLabel",
+              "stackStatus"
+            ] and
+            .schemaVersion == "archon.aws-foundation-cfn-failure/v1" and
+            (.stackLabel | IN(
+              "governed-canary-roles",
+              "production-bootstrap-edge",
+              "production-bootstrap-primary",
+              "production-deploy",
+              "production-iam",
+              "shared-api-gateway",
+              "staging-bootstrap-edge",
+              "staging-bootstrap-primary",
+              "staging-deploy",
+              "staging-iam"
+            )) and
+            (.stackStatus | IN(
+              "CREATE_COMPLETE", "CREATE_FAILED", "CREATE_IN_PROGRESS",
+              "DELETE_COMPLETE", "DELETE_FAILED", "DELETE_IN_PROGRESS",
+              "IMPORT_COMPLETE", "IMPORT_IN_PROGRESS",
+              "IMPORT_ROLLBACK_COMPLETE", "IMPORT_ROLLBACK_FAILED",
+              "IMPORT_ROLLBACK_IN_PROGRESS", "REVIEW_IN_PROGRESS",
+              "ROLLBACK_COMPLETE", "ROLLBACK_FAILED", "ROLLBACK_IN_PROGRESS",
+              "UNKNOWN", "UPDATE_COMPLETE",
+              "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_FAILED",
+              "UPDATE_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE",
+              "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+              "UPDATE_ROLLBACK_FAILED", "UPDATE_ROLLBACK_IN_PROGRESS"
+            )) and
+            (.logicalResourceId | test("^[A-Za-z][A-Za-z0-9]{0,254}$")) and
+            (.resourceType | test("^(AWS::[A-Za-z0-9]+::[A-Za-z0-9]+|Custom::[A-Za-z0-9._-]+)$")) and
+            (.resourceStatus | IN(
+              "CREATE_FAILED", "DELETE_FAILED", "IMPORT_ROLLBACK_FAILED",
+              "ROLLBACK_FAILED", "UPDATE_FAILED", "UPDATE_ROLLBACK_FAILED"
+            )) and
+            (.reasonCategory | IN(
+              "access-denied", "already-exists", "dependency-failure",
+              "invalid-request", "quota-exceeded", "resource-conflict",
+              "service-failure", "timeout", "unknown"
+            )) and
+            (.rawReasonSha256 | test("^[0-9a-f]{64}$")) and
+            (
+              .deniedAwsAction == null or
+              (.deniedAwsAction | test("^[a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127}$"))
+            )
+          ' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" >/dev/null
+          echo "available=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Retain checksum-sealed sanitized foundation failure evidence
+        if: ${{ failure() && steps.failure_evidence.outputs.available == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-foundation-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aws-foundation-failure/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: false
 
       - name: Reverify sanitized foundation evidence
         env:
