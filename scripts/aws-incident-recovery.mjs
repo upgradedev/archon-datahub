@@ -186,7 +186,7 @@ function validateResourceSummaries(resources) {
     const isDeleted = resource.ResourceStatus === "DELETE_COMPLETE";
     const isNonCreatedFailure =
       typeof resource.ResourceStatus === "string" &&
-      resource.ResourceStatus.endsWith("_FAILED") &&
+      resource.ResourceStatus === "CREATE_FAILED" &&
       !hasPhysicalResourceId;
     invariant(isDeleted || isNonCreatedFailure, "a surviving stack resource was observed");
     if (resource.LogicalResourceId === EXPECTED_FAILURE.logicalResourceId) {
