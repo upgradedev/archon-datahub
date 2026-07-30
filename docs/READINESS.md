@@ -409,17 +409,21 @@ UI layout.
 - Treat every security result as a pipeline result. Security verification and release
   evidence are produced exclusively by CI/CD; workstation builds, local synths, manual
   scanners, and copied reports must not substitute for or supplement a CI/CD gate.
-- The GitHub-posture workflow and source contracts are CI-validated; run
-  `.github/workflows/github-repository-posture.yml` on `master` and retain its first live
-  normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks only the
-  repository/merge lifecycle values, public `master` protection signal, Apache-2.0
-  detection, private vulnerability reporting, exact 17-environment inventory,
-  `can_admins_bypass=false`, and each environment's exact `master`-only deployment policy.
-  It must report detailed branch-protection rules, the Actions allowlist/SHA-pinning
-  controls, and all environment secret-name inventories as unverified. No elevated
-  credential is currently configured; a future tier would require the reviewed
-  least-privilege set `Actions:read`, `Administration:read`, `Environments:read`, and
-  `Metadata:read`. Never export or copy a workstation `gh` token into GitHub Actions.
+- The GitHub-posture workflow and source contracts require a fresh remote CI review; after
+  merge, run `.github/workflows/github-repository-posture.yml` on `master` and retain its
+  first successful normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks
+  only token-visible repository identity/public-state fields, the public `master`
+  protection signal, Apache-2.0 detection, private vulnerability reporting, the exact
+  17-environment inventory, `can_admins_bypass=false`, reviewer posture, and each
+  environment's exact `master`-only deployment policy. Repository merge/lifecycle
+  expectations, detailed branch-protection rules, the Actions allowlist/SHA-pinning
+  controls, and all environment secret-name inventories remain unverified. The receipt
+  binds lifecycle expectations only by SHA-256 digest with `verification: not-performed`,
+  emits no lifecycle values, and makes no secret-emptiness assertion because protected
+  runtime environments intentionally require live secrets. No elevated credential is
+  configured; a future tier would require `Actions:read`, `Administration:read`,
+  `Environments:read`, and `Metadata:read`. Never export or copy a workstation `gh` token
+  into GitHub Actions.
 
 ### 2. Real DataHub evidence
 
@@ -444,8 +448,12 @@ UI layout.
   canary environments in
   [`docs/GOVERNED_CANARY.md`](GOVERNED_CANARY.md). The immutable deployment pipeline
   dispatches `.github/workflows/governed-canary.yml` after staging and blocks production
-  until its exact signed rollback proof is verified. It fails closed unless the exact
-  staging release, disposable TEST/DEV fixture, dedicated tenant endpoints,
+  until its exact signed rollback proof is verified. First run the protected
+  `.github/workflows/datahub-canary-fixture.yml` `seed` (or deliberately confirmed `reset`)
+  action for the same release and retain its run ID, run attempt, receipt artifact ID,
+  GitHub artifact digest, and inner `receipt.json` SHA-256. The canary fails closed unless
+  those coordinates resolve to the exact attested Snowflake `TEST` fixture, the exact
+  staging release, dedicated tenant endpoints,
   pre-approval sealed plan/recovery digests, Cognito PKCE approval, terminal receipt,
   separately approved inverse, and read-after-rollback are all bound.
   Never expose write tools on the public Archon MCP/API surface.
@@ -458,7 +466,8 @@ UI layout.
   and foundation role already exist; no local bootstrap is accepted as evidence.
 - Deploy the application in two pipeline phases. First dispatch
   `.github/workflows/deploy.yml` with `deployment_mode=staging-bootstrap`, an exact
-  successful default-branch CI run/SHA, and the protected demo-state receipt. This runs the
+  successful default-branch CI run/SHA, the protected demo-state receipt, and the optional
+  `fixture_coordinates` input left exactly empty. This runs the
   immutable source and control-plane gates, deploys and verifies staging, stops before the
   governed canary/production, and emits only
   `staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`.
@@ -467,8 +476,11 @@ UI layout.
   `CANARY_COGNITO_CLIENT_ID`, `CANARY_COGNITO_HOSTED_UI_ORIGIN`,
   `CANARY_CHROME_VERSION`, and `CANARY_CHROME_BINARY_SHA256`, together with the
   separately protected canary credentials and explicit solo-owner reviewer rules. Finally dispatch
-  `deployment_mode=promote` for the selected immutable release; it repeats staging
-  verification, requires the signed governed write/rollback canary, and only then permits
+  `deployment_mode=promote` for the selected immutable release with the exact bounded
+  canonical `fixture_coordinates` JSON emitted by the fixture attestation summary. Its
+  only five keys are `fixture_run_id`, `fixture_run_attempt`, `fixture_artifact_id`,
+  `fixture_artifact_digest`, and `fixture_receipt_sha256`; it repeats staging verification,
+  requires the signed fixture-bound governed write/rollback canary, and only then permits
   protected production promotion. The bootstrap artifact is a bound configuration handoff,
   never a credential carrier. Its static/source contract is CI-validated; the actual
   `staging-bootstrap` and `promote` dispatches remain externally blocked and unexecuted.
@@ -586,11 +598,13 @@ preflight and live endpoint evidence, staging deployment, versioned secret refre
 runtime-config publication, control-Lambda dependency/SCA gates, fail-closed hosted
 start/status smoke contracts, protected OWASP
 ZAP DAST, production approval, same-digest promotion, rollback selection, and
-retained deployment evidence plus a scheduled public availability proof. The repository
-control plane now has all 17 exact `master`-only environments, administrator bypass
-disabled, strict app-bound `master` protection, a SHA-pinned explicit Actions allowlist,
-private vulnerability reporting, and exact sole-owner approval on all 12 protected
-mutation/approval environments. It is **not operationally proven yet** because the
+retained deployment evidence plus a scheduled public availability proof. The secretless tier can observe all 17 exact `master`-only environments, administrator
+bypass disabled, the public `master` protection signal, private vulnerability reporting,
+and exact sole-owner approval on all 12 protected mutation/approval environments. The
+SHA-pinned Actions allowlist and repository merge/lifecycle settings remain expected only
+inside the administration contract with `verification: not-performed`; this receipt does
+not prove them or inspect environment secret names. It is **not operationally proven yet**
+because the
 protected AWS foundation/bootstrap pipeline, DataHub credential/endpoint configuration,
 hosted URL, and production promotion receipt are still pending. Therefore Archon has a comparable CD design,
 but not yet the same proven end-to-end posture as the referenced Nebius, Qwen, or OpenAI

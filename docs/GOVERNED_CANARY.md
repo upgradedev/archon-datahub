@@ -15,8 +15,8 @@ must still be the current `master` commit, and the deployment's canonical CI / C
 workflow-security receipt must still be the latest successful exact-SHA control plane:
 
 ```text
-dataset name: archon_governed_canary_fixture[...]
-environment:  DEV or TEST (PROD is rejected)
+dataset URN:  urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)
+environment:  TEST exactly (DEV and PROD are rejected)
 query:        archon_governed_canary_fixture
 field:        email
 tag:          urn:li:tag:PII
@@ -28,9 +28,90 @@ The isolated tenant must return exactly one entity for the query. Its `email` fi
 without the `urn:li:tag:PII` classification (unrelated pre-existing tags are preserved), and
 the `urn:li:tag:PII` tag already exists in the tenant. Every configured
 DataHub endpoint hostname must contain the dedicated tenant marker as a complete DNS label,
-not a substring. These controls, the
-TEST/DEV URN rule, the exact immutable plan check, and the hard-coded staging stack prevent
+not a substring. These controls, the exact Snowflake `TEST` URN, the exact immutable plan
+check, and the hard-coded staging stack prevent
 the workflow from approving a production or caller-selected dataset.
+
+## Fixture lifecycle pipeline
+
+`.github/workflows/datahub-canary-fixture.yml` is the repository-owned lifecycle controller
+for that exact disposable dataset and domain. It is manual-only and accepts three actions:
+
+- `plan` performs the same live read used by `seed`, seals a seed/no-op plan, uploads it,
+  and stops without entering a writer environment;
+- `seed` creates the fixture only when both owned URNs are absent, or proves an exact
+  idempotent no-op when the complete fixture is already present;
+- `reset` requires the literal `RESET ARCHON GOVERNED CANARY FIXTURE`, deletes only the
+  two contract-owned URNs, and recreates the exact reviewed state. A present URN must
+  carry the exact contract-derived Archon provenance marker before deletion; reset
+  receipts accept only `deleted` or `already-absent`.
+
+Every action first checks out the supplied full SHA, requires it to remain the current
+`master` head, and requires the latest exact-SHA CI, CodeQL, and workflow-security push
+runs to be successful. The read-only plan runs in `datahub-demo`. A `seed` or `reset`
+cannot start its credential-bearing step until the immutable plan artifact has been
+uploaded and the solo owner approves the protected `datahub-demo-seed` job with the exact
+run ID, run attempt, action, release SHA, and plan SHA-256 shown in the job summary. The
+fixture workflow uses the same non-cancelling
+`archon-governed-canary-mutation-recovery` concurrency group as the live canary and its
+compensator, so fixture maintenance cannot race a tag write or rollback.
+
+Configure the environments with dedicated fixture bindings, not the general demo or
+governed-canary credentials:
+
+| Environment | Variables | Secret | Authority |
+| --- | --- | --- | --- |
+| `datahub-demo` | `CANARY_FIXTURE_READ_GMS_URL`, `CANARY_FIXTURE_ISOLATION_MARKER` | `CANARY_FIXTURE_READ_GMS_TOKEN` | Read only for the exact fixture, query, PII-tag prerequisite, and typed aspects |
+| `datahub-demo-seed` | `CANARY_FIXTURE_WRITE_GMS_URL`, `CANARY_FIXTURE_ISOLATION_MARKER` | `CANARY_FIXTURE_WRITE_GMS_TOKEN` | Read the exact fixture, emit the reviewed aspects, and hard-delete only the two owned URNs |
+
+Both URLs must normalize to the same dedicated canary endpoint; the plan stores only its
+SHA-256 fingerprint, and the apply controller rejects any endpoint or isolation-marker
+change after approval. Tokens and raw DataHub command output are never written to logs,
+summaries, job outputs, or artifacts. The writer token is not available to the plan job,
+and the reader token is not available to the writer job.
+
+Every exact wheel-only runtime materialization is immediately followed by a credentialless
+SDK-model validation before a live read or mutation can begin. The locked CI job performs
+the same validation. Only a canonical, four-field
+`archon.datahub-canary-fixture-runtime-validation/v1` result is accepted: exactly six
+validated proposals, the exact contract SHA-256, and a 64-hex proposal-set SHA-256. The
+sanitized validation file is bounded, never uploaded, and removed from `RUNNER_TEMP`.
+
+The plan artifact and final sanitized receipt each carry a canonical `SHA256SUMS` manifest
+and are retained for 90 days. After an apply, a separate secretless job verifies the exact
+artifact ID, GitHub-recorded archive digest, inner checksums, canonical JSON, approval
+binding, the raw-aspect snapshot SHA-256, the exact dataset/domain provenance projection,
+G1-G5 passes, and G6's explicit `classificationState: absent` field-classification gap.
+It then
+creates a GitHub artifact attestation with predicate type
+`https://github.com/upgradedev/archon-datahub/attestations/datahub-canary-fixture/v1`.
+No provisioned-state claim is valid until a default-branch `seed` or `reset` run and this
+attestation have succeeded.
+
+Promotion carries five content-addressed coordinates from that successful fixture run:
+`fixture_run_id`, `fixture_run_attempt`, `fixture_artifact_id`,
+`fixture_artifact_digest`, and `fixture_receipt_sha256`. The deployment workflow accepts
+them only as one bounded, exact-key, unpadded canonical `fixture_coordinates` JSON input,
+then dispatches the governed-canary workflow with five required typed scalar inputs.
+Before installing dependencies, assuming AWS trust, or exposing mutation authority, the
+canary verifies the exact same-repository workflow
+attempt, `master`/release SHA, artifact ID/name/digest, bounded five-file inventory,
+canonical JSON and checksums, local fixture-contract digest, exact G1-G5/G6 `TEST`
+semantics, normalized GMS endpoint fingerprint, isolation-marker digest, GitHub signer and
+predicate type, and the complete attested subject set. It then creates a sanitized canonical
+`archon.governed-canary-fixture-binding/v1` object. No raw endpoint, marker, credential, or
+provider response enters that binding.
+The successful secretless attestation job prints the ready-to-copy canonical bundle and
+its five sanitized values in the GitHub Actions summary, so no workstation artifact
+parsing is required.
+
+The repository can prove endpoint isolation, exact query/URN allowlists, plan integrity,
+read-after-write state, and that only the protected writer job receives the write token.
+DataHub does not expose a portable API that proves the provider-side policy attached to a
+PAT. Limiting `CANARY_FIXTURE_READ_GMS_TOKEN` to reads and
+`CANARY_FIXTURE_WRITE_GMS_TOKEN` to this fixture's aspects and two-URN delete allowlist
+therefore remains a tenant-administrator configuration prerequisite and must not be
+represented as pipeline-verified RBAC.
 
 ## Protected environment contract
 
@@ -52,10 +133,13 @@ and its `planDigest` / `recoveryDigest` job outputs. The artifact also seals an
 `authBindingsDigest` derived from the staging CloudFormation application URL, Cognito user
 pool client ID, Hosted UI origin, and exact authorization/token endpoints. It additionally
 stores `controlPlaneGatesSha256` inside the content-addressed
-`archon.governed-canary-recovery/v2` manifest and carries the exact canonical
-`control-plane-security-gates.json` beside it. This historical receipt remains recoverable
-even if a later rerun for the old SHA fails. Version 2 is the first supported
-default-branch recovery format; no legacy v1 canary was deployed.
+`archon.governed-canary-recovery/v3` manifest and carries the exact canonical
+`control-plane-security-gates.json` plus `fixture-binding.json` beside it. The fixture object
+and its digest are inside both the recovery digest and the normal or independent recovery
+attestation. This historical receipt remains recoverable even if a later rerun for the old
+SHA fails. Version 3 is the first fixture-bound supported default-branch recovery format;
+older recovery manifests are deliberately rejected and cannot be represented as
+fixture-bound proof.
 
 `governed-canary` owns the write approval and contains:
 
@@ -88,7 +172,7 @@ movement without accepting a different control plane.
 `governed-canary-rollback` owns the separately approved inverse; the same solo owner must
 approve its exact sealed digest in a separate environment action. It contains:
 
-- the same application, release-independent fixture, isolation, endpoint, and
+- the same application, release-bound fixture, isolation, endpoint, and
   `CANARY_EVIDENCE_BUCKET` variables;
 - secrets `CANARY_DATAHUB_READ_TOKEN` and `CANARY_DATAHUB_WRITE_TOKEN`.
 
@@ -126,15 +210,17 @@ to match before it reads the password or starts Chrome.
 1. The unprivileged preparation job validates the current `master` ref, the latest exact-SHA
    CI / CodeQL / workflow-security attempts, environment protection, and either the
    successful deployment run or the same active deployment attempt with completed,
-   successful staging and production not started. It then validates CloudFormation
-   release/URL/endpoints, the isolated fixture contract, and the exact deployed
-   application binding.
+   successful staging and production not started. It then validates the five exact fixture
+   coordinates and their GitHub artifact attestation before installing dependencies or
+   assuming AWS trust. Finally, it validates CloudFormation release/URL/endpoints, the
+   isolated fixture contract, and the exact deployed application binding.
 2. Archon starts `GOVERNED`, reaches `AWAITING_APPROVAL`, and exposes the immutable audit
    evidence digest. The driver validates the exact dossier, plan, pre-state, and inverse.
-3. A content-addressed recovery manifest and its exact canonical deployment-gate receipt
-   are uploaded **before** any protected approval or mutation. The gate-file hash is inside
-   the manifest and therefore inside `recoveryDigest`. The completed prepare-job summary
-   shows the fixed target, tag, inverse, and pre/post-state digests.
+3. A content-addressed recovery manifest, its exact fixture binding, and its exact canonical
+   deployment-gate receipt are uploaded **before** any protected approval or mutation. The
+   gate-file hash is inside the manifest and therefore inside `recoveryDigest`. The
+   completed prepare-job summary shows the fixed target, tag, inverse, and pre/post-state
+   digests.
 4. The first environment gate is created only after preparation. Its pending job name
    includes the exact `planDigest` and `recoveryDigest`; the solo owner therefore approves
    the sealed plan, not an earlier generic workflow dispatch. After approval, the job
@@ -159,8 +245,8 @@ to match before it reads the password or starts Chrome.
 9. The deployment gate waits for that exact workflow run, requires a successful
    default-branch/exact-control-plane result, safely extracts the unique rollback
    artifact, verifies its GitHub-recorded archive digest, subject checksum, predicate
-   bindings, and GitHub attestation, and seals those digests into final production
-   deployment evidence.
+   bindings (including the full verified fixture object and digest), and GitHub attestation,
+   and seals those digests into final production deployment evidence.
 
 Rollback is deliberately idempotent. Even when a verified rollback manifest is present,
 an observed digest already equal to its sealed exact pre-state succeeds as
