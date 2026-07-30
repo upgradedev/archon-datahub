@@ -902,7 +902,6 @@ require_text "${reconciler}" \
   'externalBindingCount:' \
   'test "${compact_policy_size}" -le 6144' \
   'test "${boundary_compact_size}" -le 6144' \
-
   'sourceTemplateSha256: $sourceTemplateSha256' \
   'canary_role_binding_sha=${combined_canary_binding_sha}' \
   'operational_role_binding_sha=${combined_operational_binding_sha}' \
