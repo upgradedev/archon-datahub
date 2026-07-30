@@ -20,22 +20,6 @@ export const ALLOWLISTED_STACK_LABELS = Object.freeze([
   "staging-iam",
 ]);
 
-const allowedActionServices = new Set([
-  "acm",
-  "apigateway",
-  "cloudformation",
-  "cloudfront",
-  "ecr",
-  "iam",
-  "kms",
-  "lambda",
-  "logs",
-  "route53",
-  "s3",
-  "sqs",
-  "ssm",
-  "sts",
-]);
 const stackLabels = new Set(ALLOWLISTED_STACK_LABELS);
 const stackStatuses = new Set([
   "CREATE_COMPLETE",
@@ -73,8 +57,6 @@ const resourceFailureStatuses = new Set([
 ]);
 const logicalIdPattern = /^[A-Za-z][A-Za-z0-9]{0,254}$/;
 const resourceTypePattern = /^(?:AWS::[A-Za-z0-9]+::[A-Za-z0-9]+|Custom::[A-Za-z0-9._-]+)$/;
-const deniedActionGrammar = /\b(?:is\s+)?not authorized to perform\s*:\s*([a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127})(?=$|[\s,.;)])/gi;
-const deniedActionPattern = /^([a-z0-9][a-z0-9-]{1,62}):([A-Z][A-Za-z0-9]{1,127})$/;
 
 function classifyReason(reason) {
   if (/access\s*denied|accessdenied|not authorized|unauthori[sz]ed|explicit deny/i.test(reason)) {
@@ -104,18 +86,6 @@ function classifyReason(reason) {
   return "unknown";
 }
 
-function extractDeniedAction(reason, category) {
-  if (category !== "access-denied") {
-    return null;
-  }
-  for (const match of reason.matchAll(deniedActionGrammar)) {
-    const action = deniedActionPattern.exec(match[1]);
-    if (action && allowedActionServices.has(action[1])) {
-      return match[1];
-    }
-  }
-  return null;
-}
 
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -175,7 +145,7 @@ export function sanitizeCloudFormationFailure(document, options) {
   const rawReason = event.ResourceStatusReason;
   const reasonCategory = classifyReason(rawReason);
   const canonicalSafeFields = Object.freeze({
-    deniedAwsAction: extractDeniedAction(rawReason, reasonCategory),
+
     logicalResourceId,
     reasonCategory,
     resourceStatus,
@@ -185,7 +155,7 @@ export function sanitizeCloudFormationFailure(document, options) {
     stackStatus,
   });
   const diagnostic = Object.freeze({
-    deniedAwsAction: canonicalSafeFields.deniedAwsAction,
+
     diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields)),
     logicalResourceId,
     reasonCategory,

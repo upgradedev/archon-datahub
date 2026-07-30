@@ -28,11 +28,13 @@ const options = {
   stackStatus: "ROLLBACK_COMPLETE",
 };
 
-test("emits one canonical access-denied diagnostic bound only to safe fields", () => {
-  const rawReason = "Caller is not authorized to perform: iam:CreatePolicy on protected material";
+test("emits one canonical diagnostic without raw action details", () => {
+  const rawReason = [
+    "Caller is not authorized to perform: iam:Abc123Secret; ",
+    "requestToken=TopSecretValue",
+  ].join("");
   const diagnostic = sanitizeCloudFormationFailure(eventDocument(rawReason), options);
   const canonicalSafeFields = {
-    deniedAwsAction: "iam:CreatePolicy",
     logicalResourceId: "GuardPolicy",
     reasonCategory: "access-denied",
     resourceStatus: "CREATE_FAILED",
@@ -43,7 +45,6 @@ test("emits one canonical access-denied diagnostic bound only to safe fields", (
   };
 
   assert.deepEqual(Object.keys(diagnostic), [
-    "deniedAwsAction",
     "diagnosticSha256",
     "logicalResourceId",
     "reasonCategory",
@@ -53,35 +54,37 @@ test("emits one canonical access-denied diagnostic bound only to safe fields", (
     "stackLabel",
     "stackStatus",
   ]);
-  assert.equal(diagnostic.deniedAwsAction, "iam:CreatePolicy");
+  assert.equal(diagnostic.reasonCategory, "access-denied");
   assert.equal(
     diagnostic.diagnosticSha256,
     createHash("sha256").update(JSON.stringify(canonicalSafeFields), "utf8").digest("hex"),
   );
-  assert.equal(serializeCloudFormationFailure(diagnostic).endsWith("\n"), true);
-});
-
-test("rejects secret-like namespaces even when denial grammar matches", () => {
-  const rawReason = [
-    "Caller is not authorized to perform: token:Abc123; ",
-    "Caller is not authorized to perform: secret:TopSecret",
-  ].join("");
-  const diagnostic = sanitizeCloudFormationFailure(eventDocument(rawReason), options);
   const serialized = serializeCloudFormationFailure(diagnostic);
-  assert.equal(diagnostic.deniedAwsAction, null);
-  assert.equal(serialized.includes("token:Abc123"), false);
-  assert.equal(serialized.includes("secret:TopSecret"), false);
+  assert.equal(serialized, `${JSON.stringify(diagnostic)}\n`);
+  assert.equal(serialized.includes("iam:Abc123Secret"), false);
+  assert.equal(serialized.includes("TopSecretValue"), false);
 });
 
-test("does not emit wildcard or non-denial actions", () => {
+test("raw reason variants cannot alter a diagnostic beyond the safe category", () => {
+  const first = sanitizeCloudFormationFailure(
+    eventDocument("Not authorized to perform: iam:Abc123Secret"),
+    options,
+  );
+  const second = sanitizeCloudFormationFailure(
+    eventDocument("AccessDenied password=DifferentSecretValue"),
+    options,
+  );
+  assert.deepEqual(first, second);
+});
+
+test("does not emit wildcard or non-denial action details", () => {
   const diagnostic = sanitizeCloudFormationFailure(
     eventDocument("Service quota exceeded while evaluating iam:*"),
     options,
   );
-  assert.equal(diagnostic.deniedAwsAction, null);
   assert.equal(diagnostic.reasonCategory, "quota-exceeded");
+  assert.equal(serializeCloudFormationFailure(diagnostic).includes("iam:*"), false);
 });
-
 test("selects the newest failed resource event from the bounded event set", () => {
   const document = eventDocument("not authorized to perform: iam:PutRolePolicy");
   document.StackEvents.unshift({

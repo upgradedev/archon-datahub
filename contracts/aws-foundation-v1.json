@@ -414,11 +414,25 @@
         "cfn-failure.json"
       ],
       "artifactRetentionDays": 90,
+      "artifactUpload": "explicit-files-only",
       "autoRecovery": "forbidden",
+      "canonicalJson": true,
       "diagnosticCount": 1,
+      "digestFields": [
+        "logicalResourceId",
+        "reasonCategory",
+        "resourceStatus",
+        "resourceType",
+        "schemaVersion",
+        "stackLabel",
+        "stackStatus"
+      ],
+      "managedCommandOutput": "suppressed",
       "maxRecentEvents": 25,
+      "postCredentialDigestRecomputed": true,
       "rawReasonHashing": false,
       "rawReasonRetention": false,
+      "recursiveInventory": "exact-two-root-regular-files",
       "stackIdentity": "allowlisted-label-only",
       "allowlistedStackLabels": [
         "governed-canary-roles",
@@ -433,7 +447,7 @@
         "staging-iam"
       ],
       "fields": [
-        "deniedAwsAction",
+
         "diagnosticSha256",
         "logicalResourceId",
         "reasonCategory",

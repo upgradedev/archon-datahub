@@ -438,19 +438,25 @@ or API key and is attested before retention.
 
 A managed foundation stack rejected in a failed preflight state, or a managed
 stack command that fails, triggers a bounded diagnostic query for that exact
-allowlisted stack only. The reconciler reads at most 25 recent CloudFormation
-events and writes exactly one canonical `cfn-failure.json` record containing
-only an allowlisted stack label, stack status, logical resource ID, resource
-type and status, a safe reason category, an optional regex-safe denied AWS
-action, and a SHA-256 over only those canonical allowlisted diagnostic fields.
+allowlisted stack only. Original managed CloudFormation and CDK command stdout
+and stderr are suppressed before capture. The reconciler reads at most 25
+recent CloudFormation events and writes exactly one canonical
+`cfn-failure.json` record containing only an allowlisted stack label, stack
+status, logical resource ID, resource type and status, a safe reason category,
+and a SHA-256 over exactly those canonical allowlisted diagnostic fields.
 
-The diagnostic path never stores, prints, or hashes the raw CloudFormation reason, stack
-name or ARN, account identifier, URL, request token, or physical resource ID.
-The two-file artifact (`cfn-failure.json` and `SHA256SUMS`) is revalidated after
-AWS credentials are cleared, checksum-sealed, and retained for 90 days. A
-missing, malformed, oversized, or non-allowlisted diagnostic fails closed and
-is not uploaded.
+The diagnostic path never stores, prints, or hashes the raw CloudFormation
+reason, stack name or ARN, account identifier, URL, request token, physical
+resource ID, or denied action. It seals inside a private staging directory,
+requires the exact recursive inventory of two root regular non-symlink files,
+and only then atomically publishes the final directory.
 
+After AWS credentials are cleared, the workflow repeats the exact recursive
+inventory and checksum checks, requires canonical JSON bytes, and recomputes the
+diagnostic digest from the seven safe fields. Only `cfn-failure.json` and
+`SHA256SUMS` are passed as explicit upload paths and retained for 90 days. A
+missing, malformed, oversized, non-canonical, non-allowlisted, or digest-mismatched
+diagnostic fails closed and is not uploaded.
 This evidence is observational only. The workflow does not delete, recreate, or
 continue rollback for a failed stack. Recovery remains a separate, explicit
 operator decision after the exact state and sanitized evidence are reviewed.
