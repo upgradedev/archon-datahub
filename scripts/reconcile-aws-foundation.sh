@@ -355,15 +355,24 @@ inspect_api_gateway_binding() {
     echo "::add-mask::${observed}"
   fi
   observed_sha="$(printf '%s' "${observed}" | sha256sum | awk '{print $1}')"
-  if [[ -z "${observed}" || "${observed}" == "${expected_arn}" ]]; then
+  if [[ -z "${observed}" ]]; then
     if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
       echo "::error::clear the stale external API Gateway binding pin before managed reconciliation"
       return 1
     fi
     shared_api_gateway_mode="foundation-managed"
+  elif [[ "${observed}" == "${expected_arn}" ]]; then
+    if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+      echo "::error::clear the stale external API Gateway binding pin before managed reconciliation"
+      return 1
+    fi
+    assert_stack_complete_without_service_role \
+      "${PRIMARY_REGION}" \
+      "${SHARED_API_STACK}" \
+      "${RUNNER_TEMP}/managed-shared-api-stack-preflight.json"
+    shared_api_gateway_mode="foundation-managed"
   else
-    if [[ ! "${observed}" =~ ^arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]{1,512}$ ]] ||
-      [[ "${observed}" == *'//'* || "${observed}" == */ ]]; then
+    if [[ ! "${observed}" =~ ^arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/([A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]{1,64}$ ]]; then
       echo "::error::the existing API Gateway CloudWatch role is not one same-account role ARN"
       return 1
     fi
@@ -804,9 +813,9 @@ echo "::group::Reconcile or pin the shared API Gateway logging account"
 revalidate_master
 inspect_api_gateway_binding
 test "${shared_api_gateway_mode}" = "${shared_api_gateway_preflight_mode}"
+test "${shared_api_gateway_observed_binding_sha}" = \
+  "${shared_api_gateway_preflight_binding_sha}"
 if [[ "${shared_api_gateway_mode}" == "external-pinned" ]]; then
-  test "${shared_api_gateway_observed_binding_sha}" = \
-    "${shared_api_gateway_preflight_binding_sha}"
   shared_role_binding_sha="${shared_api_gateway_observed_binding_sha}"
   shared_api_gateway_json="$(
     jq -cnS \
@@ -816,14 +825,18 @@ if [[ "${shared_api_gateway_mode}" == "external-pinned" ]]; then
             bindingSha256: $bindingSha256,
             bindingSha256Variable:
               "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+            bindingState: "UNCHANGED",
             managedStackAbsent: true,
+            mutation: "none",
+            roleArnTemplate:
+              "arn:aws:iam::<AWS_ACCOUNT_ID>:role/<PINNED_EXTERNAL_ROLE_PATH_AND_NAME>",
             sameAccountRoleArn: true
           },
           managed: null,
           mode: "external-pinned",
           roleBindingSha256: $bindingSha256,
           takeover: "forbidden",
-          validation: "passed"
+          validation: "pinned-and-unchanged"
         }
       '
   )"
@@ -923,7 +936,7 @@ else
           mode: "foundation-managed",
           roleBindingSha256: $bindingSha256,
           takeover: "forbidden",
-          validation: "passed"
+          validation: "managed-and-verified"
         }
       '
   )"
@@ -2114,8 +2127,10 @@ jq -cnS \
       },
       completedAt: $completedAt,
       drift: {
+        externalBindingCount:
+          (if $sharedApiGateway.mode == "external-pinned" then 1 else 0 end),
+        managedStackCount: $driftStackCount,
         sha256: $driftSha256,
-        stackCount: $driftStackCount,
         status: "IN_SYNC"
       },
       schemaVersion: "archon.aws-foundation-evidence/v1",
@@ -2187,9 +2202,11 @@ jq -e '
   .drift.status == "IN_SYNC" and
   (
     if .aws.sharedApiGateway.mode == "foundation-managed" then
-      .drift.stackCount == 10
+      .drift.managedStackCount == 10 and
+      .drift.externalBindingCount == 0
     else
-      .drift.stackCount == 9
+      .drift.managedStackCount == 9 and
+      .drift.externalBindingCount == 1
     end
   ) and
   (.aws.stages | map(.stage)) == ["staging", "production"] and
@@ -2224,11 +2241,11 @@ jq -e '
     "paging-test"
   ] and
   all(.aws.operationalRoles[]; .validation == "passed") and
-  .aws.sharedApiGateway.validation == "passed" and
   .aws.sharedApiGateway.takeover == "forbidden" and
   (.aws.sharedApiGateway.roleBindingSha256 | test("^[0-9a-f]{64}$")) and
   (
     if .aws.sharedApiGateway.mode == "foundation-managed" then
+      .aws.sharedApiGateway.validation == "managed-and-verified" and
       .aws.sharedApiGateway.external == null and
       .aws.sharedApiGateway.managed.stackName ==
         "Archon-Shared-ApiGateway-Logging" and
@@ -2238,12 +2255,17 @@ jq -e '
         test("^[0-9a-f]{64}$"))
     else
       .aws.sharedApiGateway.mode == "external-pinned" and
+      .aws.sharedApiGateway.validation == "pinned-and-unchanged" and
       .aws.sharedApiGateway.managed == null and
       .aws.sharedApiGateway.external == {
         bindingSha256: .aws.sharedApiGateway.roleBindingSha256,
         bindingSha256Variable:
           "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+        bindingState: "UNCHANGED",
         managedStackAbsent: true,
+        mutation: "none",
+        roleArnTemplate:
+          "arn:aws:iam::<AWS_ACCOUNT_ID>:role/<PINNED_EXTERNAL_ROLE_PATH_AND_NAME>",
         sameAccountRoleArn: true
       }
     end
