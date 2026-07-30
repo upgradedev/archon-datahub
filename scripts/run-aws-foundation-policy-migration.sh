@@ -14,7 +14,7 @@ for library in \
 done
 
 classify_rollback_source_state() {
-  load_policy_state authorize-rollback-state
+  load_policy_state authorize-rollback-state || return 1
   local count="${#POLICY_VERSION_IDS[@]}"
   local old_version new_version
   old_version="$(version_for_sha "${OLD_POLICY_SHA}")" || {
@@ -92,6 +92,7 @@ migrate() {
   local old_version
   old_version="$(require_initial_state migrate-initial)"
   test "${old_version}" = "${EXPECTED_OLD_VERSION_ID}"
+  verify_live_temp_policy migrate "${EXPECTED_TEMP_POLICY_SHA}" || return 1
   local created="${WORK_ROOT}/create-version.json"
   safe_aws "Unable to create the reviewed nondefault policy version" "${created}" \
     iam create-policy-version \
@@ -106,9 +107,11 @@ migrate() {
   ' "${created}")" || fail "The created policy version ID is invalid"
   test "$(jq -r '.PolicyVersion.IsDefaultVersion | tostring' "${created}")" = \
     "false" || fail "The reviewed policy version was unexpectedly created as default"
-  mapfile -t before_switch < <(
-    require_rollback_pending_state migrate-before-switch old
-  )
+  local pending_snapshot
+  pending_snapshot="$(
+    wait_for_rollback_pending_state migrate-before-switch old
+  )" || return 1
+  mapfile -t before_switch <<<"${pending_snapshot}"
   test "${before_switch[0]}" = "${old_version}"
   test "${before_switch[1]}" = "${new_version}" ||
     fail "Canonical readback of the new nondefault version differs"
@@ -120,7 +123,9 @@ migrate() {
     fail "Unable to perform the single reviewed default-version switch"
   fi
   wait_for_state migrated
-  mapfile -t final_versions < <(require_migrated_state migrate-final)
+  local final_snapshot
+  final_snapshot="$(require_migrated_state migrate-final)" || return 1
+  mapfile -t final_versions <<<"${final_snapshot}"
   test "${final_versions[0]}" = "${old_version}"
   test "${final_versions[1]}" = "${new_version}"
   {
@@ -132,12 +137,13 @@ migrate() {
 rollback() {
   validate_common
   : "${AUTHORIZATION_MODE:?AUTHORIZATION_MODE is required}"
+  : "${EXPECTED_TEMP_POLICY_SHA:?EXPECTED_TEMP_POLICY_SHA is required}"
   [[ "${AUTHORIZATION_MODE}" == "migrate" ||
     "${AUTHORIZATION_MODE}" == "rollback" ]] ||
     fail "Rollback authorization mode is invalid"
   render_policy_documents
   verify_caller "${RECOVERY_ROLE_NAME}"
-  verify_live_temp_policy "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}"
+  verify_live_temp_policy "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA}"
   local old_version
   old_version="$(rollback_exact_migration)"
   printf 'old_version_id=%s\n' "${old_version}" >>"${GITHUB_OUTPUT}"
@@ -149,8 +155,20 @@ write_receipt() {
   mkdir -p "${evidence_dir}"
   chmod 0700 "${evidence_dir}"
   local old_version new_version current_version result
+  if [[ "${expected_state}" == "terminal" ]]; then
+    if require_rolled_back_state receipt-terminal-old >/dev/null 2>&1; then
+      expected_state="rolled-back"
+    elif require_migrated_state receipt-terminal-migrated >/dev/null 2>&1; then
+      expected_state="migrated"
+    else
+      fail "Terminal cleanup state is neither exact old-only nor exact migrated"
+      return 1
+    fi
+  fi
   if [[ "${expected_state}" == "migrated" ]]; then
-    mapfile -t versions < <(require_migrated_state receipt-migrated)
+    local versions_snapshot
+    versions_snapshot="$(require_migrated_state receipt-migrated)" || return 1
+    mapfile -t versions <<<"${versions_snapshot}"
     old_version="${versions[0]}"
     new_version="${versions[1]}"
     current_version="${new_version}"

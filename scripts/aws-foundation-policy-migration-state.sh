@@ -67,9 +67,11 @@ load_policy_state() {
         fail "A managed-policy version response differs"
         return 1
       }
-    POLICY_VERSION_SHAS+=("$(
+    local response_sha
+    response_sha="$(
       iam_policy_sha "${response}" '.PolicyVersion.Document'
-    )") || return 1
+    )" || return 1
+    POLICY_VERSION_SHAS+=("${response_sha}")
     response_default="$(
       jq -er '.PolicyVersion.IsDefaultVersion | tostring' "${response}"
     )" || return 1
@@ -242,6 +244,25 @@ wait_for_state() {
   return 1
 }
 
+wait_for_rollback_pending_state() {
+  local prefix="$1"
+  local expected_default="$2"
+  local attempt snapshot
+  for ((attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++)); do
+    if snapshot="$(
+      require_rollback_pending_state \
+        "${prefix}-${attempt}" "${expected_default}" 2>/dev/null
+    )"; then
+      printf '%s\n' "${snapshot}"
+      return 0
+    fi
+    if ((attempt < RETRY_ATTEMPTS)); then
+      sleep "${RETRY_DELAY_SECONDS}"
+    fi
+  done
+  fail "Rollback-pending policy state was not canonically readable"
+  return 1
+}
 rollback_exact_migration() {
   load_policy_state rollback-inspect || return 1
   local count="${#POLICY_VERSION_IDS[@]}"
@@ -262,7 +283,7 @@ rollback_exact_migration() {
     }
     if [[ "${POLICY_DEFAULT_VERSION}" == "${new_version}" ]]; then
       pending="$(
-        require_rollback_pending_state rollback-before-switch new
+        wait_for_rollback_pending_state rollback-before-switch new
       )" || return 1
       mapfile -t before_switch <<<"${pending}"
       test "${before_switch[0]}" = "${old_version}" || return 1

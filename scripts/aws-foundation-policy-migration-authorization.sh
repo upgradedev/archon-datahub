@@ -24,6 +24,7 @@ build_temp_policy() {
     ]'
   else
     fail "Temporary authorization mode is invalid"
+    return 1
   fi
   jq -cnS \
     --arg expires "${expires_at}" \
@@ -67,7 +68,10 @@ build_temp_policy() {
           . == "iam:CreatePolicy" or
           . == "iam:DeletePolicy" or
           . == "iam:PassRole") | not)
-  ' "${output}" >/dev/null || fail "Temporary authorization contains prohibited privilege"
+  ' "${output}" >/dev/null || {
+    fail "Temporary authorization contains prohibited privilege"
+    return 1
+  }
 }
 
 wait_for_temp_digest() {
@@ -106,15 +110,29 @@ install_temp_policy() {
   local expires_at="$2"
   local now_epoch expiry_epoch remaining
   now_epoch="$(date --utc '+%s')"
-  expiry_epoch="$(date --utc --date="${expires_at}" '+%s')" ||
+  expiry_epoch="$(date --utc --date="${expires_at}" '+%s')" || {
     fail "Migration expiry is invalid"
+    return 1
+  }
   remaining=$((expiry_epoch - now_epoch))
-  ((remaining >= 1140 && remaining <= 1200)) ||
+  ((remaining >= 1140 && remaining <= 1200)) || {
     fail "Migration authorization TTL is not exactly bounded to twenty minutes"
+    return 1
+  }
   local temporary="${WORK_ROOT}/temporary-policy-${mode}.json"
-  build_temp_policy "${mode}" "${expires_at}" "${temporary}"
+  build_temp_policy "${mode}" "${expires_at}" "${temporary}" || return 1
   local temp_sha
   temp_sha="$(iam_policy_sha "${temporary}")" || return 1
+  now_epoch="$(date --utc '+%s')"
+  expiry_epoch="$(date --utc --date="${expires_at}" '+%s')" || {
+    fail "Migration expiry became invalid before authorization"
+    return 1
+  }
+  remaining=$((expiry_epoch - now_epoch))
+  ((remaining >= 1140 && remaining <= 1200)) || {
+    fail "Migration authorization TTL changed before installation"
+    return 1
+  }
   if ! aws iam put-role-policy \
     --role-name "${RECOVERY_ROLE_NAME}" \
     --policy-name "${TEMP_POLICY_NAME}" \
@@ -123,7 +141,7 @@ install_temp_policy() {
     fail "Unable to install the temporary migration authorization"
     return 1
   fi
-  wait_for_temp_digest "${temp_sha}"
+  wait_for_temp_digest "${temp_sha}" || return 1
   TEMP_POLICY_SHA="${temp_sha}"
 }
 
@@ -140,7 +158,10 @@ verify_live_temp_policy() {
     .RoleName == "archon-datahub-github-governed-canary-recovery" and
     .PolicyName == "archon-foundation-control-policy-migration" and
     (.PolicyDocument | type) == "object"
-  ' "${observed}" >/dev/null || fail "Temporary authorization response differs"
+  ' "${observed}" >/dev/null || {
+    fail "Temporary authorization response differs"
+    return 1
+  }
   local first_expiry second_expiry expires
   first_expiry="$(
     jq -er '.PolicyDocument.Statement[] |
@@ -152,11 +173,13 @@ verify_live_temp_policy() {
       select(.Sid == "ReadOwnTemporaryAuthorization") |
       .Condition.DateLessThan["aws:CurrentTime"]' "${observed}"
   )"
-  test "${first_expiry}" = "${second_expiry}" ||
+  test "${first_expiry}" = "${second_expiry}" || {
     fail "Temporary authorization expiry values differ"
+    return 1
+  }
   expires="${first_expiry}"
   local expected="${WORK_ROOT}/temporary-policy-expected-${expected_mode}.json"
-  build_temp_policy "${expected_mode}" "${expires}" "${expected}"
+  build_temp_policy "${expected_mode}" "${expires}" "${expected}" || return 1
   local expected_document_sha observed_sha
   expected_document_sha="$(iam_policy_sha "${expected}")" || return 1
   observed_sha="$(iam_policy_sha "${observed}" '.PolicyDocument')" || return 1
@@ -165,16 +188,20 @@ verify_live_temp_policy() {
     return 1
   }
   if [[ -n "${expected_sha}" ]]; then
-    test "${observed_sha}" = "${expected_sha}" ||
+    test "${observed_sha}" = "${expected_sha}" || {
       fail "Temporary authorization digest differs"
+      return 1
+    }
   fi
   local now_epoch expiry_epoch remaining
   now_epoch="$(date --utc '+%s')"
-  expiry_epoch="$(date --utc --date="${expires}" '+%s')" ||
+  expiry_epoch="$(date --utc --date="${expires}" '+%s')" || {
     fail "Temporary authorization expiry is invalid"
+    return 1
+  }
   remaining=$((expiry_epoch - now_epoch))
   local minimum_remaining=180
-  ((remaining >= minimum_remaining)) || {
+  ((remaining >= minimum_remaining && remaining <= 1200)) || {
     fail "Temporary migration authorization has insufficient lifetime"
     return 1
   }
