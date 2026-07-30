@@ -190,6 +190,7 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
           for path in \
             contracts/aws-foundation-v1.json \
+            contracts/aws-foundation-policy-migration-v1.json \
             infra/aws/package.json \
             infra/aws/package-lock.json \
             infra/aws/foundation/api-gateway-account.yml \
@@ -505,20 +506,52 @@ jobs:
               unknownReasonCategoryEligible: true
             }
           ' contracts/aws-foundation-v1.json >/dev/null
-          jq -e '
-            .Version == "2012-10-17" and
-            ([.Statement[].Action] | flatten | index("*") | not) and
-            (
-              [.Statement[] |
-                select(.Sid == "RejectLegacySharedDeployRole")] |
-              length
-            ) == 1 and
-            (
-              [.Statement[] |
-                select(.Sid == "ConfigureSharedApiGatewayLogging")] |
-              length
-            ) == 1
-          ' infra/aws/foundation/github-actions-foundation-policy.json >/dev/null
+          jq -e \
+            --slurpfile migration \
+              contracts/aws-foundation-policy-migration-v1.json '
+              $migration[0] as $m |
+              def statements($sid):
+                [.Statement[] | select(.Sid == $sid)];
+              def actions:
+                [.Statement[].Action] | flatten;
+              ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
+              ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
+              .Version == "2012-10-17" and
+              (actions | index("*") | not) and
+              (statements("RejectLegacySharedDeployRole") | length) == 1 and
+              (statements("ConfigureSharedApiGatewayLogging") | length) == 1 and
+              (statements($stackSid) | length) == 1 and
+              (statements($wildcardSid) | length) == 1 and
+              statements($stackSid)[0].Effect == "Allow" and
+              (statements($stackSid)[0].Resource | type) == "array" and
+              all(statements($stackSid)[0].Resource[]; . != "*") and
+              (statements($stackSid)[0].Action |
+                index("cloudformation:DetectStackResourceDrift")) != null and
+              statements($wildcardSid)[0].Effect == "Allow" and
+              statements($wildcardSid)[0].Resource == "*" and
+              (statements($wildcardSid)[0].Action |
+                index("cloudformation:BatchDescribeTypeConfigurations")) != null and
+              ([actions[] |
+                select(. == "cloudformation:DetectStackResourceDrift")] |
+                length) == 1 and
+              ([actions[] |
+                select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
+                length) == 1
+            ' infra/aws/foundation/github-actions-foundation-policy.json >/dev/null
+          test "$(grep -cF \
+            '                  - cloudformation:DetectStackResourceDrift' \
+            infra/aws/foundation/github-actions-deploy-role.yml)" = "2"
+          test "$(grep -cF \
+            '                  - cloudformation:BatchDescribeTypeConfigurations' \
+            infra/aws/foundation/github-actions-deploy-role.yml)" = "2"
+          for sid in \
+            DetectExactStageIamFoundationDrift \
+            ReadStageIamDriftDetection \
+            ReadAndDetectExactProductionStacks \
+            ReadStackDriftDetectionStatus; do
+            grep -Fq "- Sid: ${sid}" \
+              infra/aws/foundation/github-actions-deploy-role.yml
+          done
 
       - name: Use the locked Node toolchain
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
