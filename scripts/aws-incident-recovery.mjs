@@ -304,7 +304,8 @@ export function buildRecoveryPlan({
         },
       },
     ],
-  };  const policyDocumentSha256 = sha256(canonicalJson(policyDocument));
+  };
+  const policyDocumentSha256 = sha256(canonicalJson(policyDocument));
   const clientRequestToken = `archon-${INCIDENT.runId}-a${INCIDENT.runAttempt}-${controlPlaneSha.slice(0, 12)}`;
   const stackIdSha256 = sha256(stack.StackId);
   const plan = {

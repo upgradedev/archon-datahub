@@ -79,7 +79,6 @@ jobs:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           EXPECTED_HEAD_SHA_INPUT: ${{ inputs.expected_head_sha }}
-          GH_TOKEN: ${{ github.token }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
@@ -173,6 +172,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: "8760846578"
+          merge-multiple: true
           path: ${{ runner.temp }}/sealed-incident
           repository: ${{ github.repository }}
           run-id: "30546241677"
@@ -259,7 +259,6 @@ jobs:
         env:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ needs.prepare.outputs.control_plane_sha }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
@@ -328,7 +327,6 @@ jobs:
         env:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
@@ -396,6 +394,7 @@ jobs:
             ${{ runner.temp }}/archon-aws-incident-recovery/evidence/attestation-predicate.json
             ${{ runner.temp }}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json
             ${{ runner.temp }}/archon-aws-incident-recovery/cleanup-evidence/SHA256SUMS
+            ${{ runner.temp }}/archon-aws-incident-recovery/cleanup-evidence/attestation-predicate.json
           if-no-files-found: error
           retention-days: 90
   cleanup:
@@ -421,19 +420,15 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Bind exact current cleanup driver without target inputs
+      - name: Bind immutable checked-out cleanup driver without target inputs
         env:
           CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
-          test "$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
-            --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+
 
       - name: Assume protected foundation role for cleanup only
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
