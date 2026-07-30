@@ -402,21 +402,42 @@ deployed_template_sha() {
 foundation_phase='preflight:revalidate-master'
 echo "::group::Fail-closed AWS foundation preflight"
 revalidate_master
-foundation_phase='preflight:validate-templates'
-for template in \
-  infra/aws/foundation/api-gateway-account.yml \
-  "${IAM_FOUNDATION_TEMPLATE}" \
-  infra/aws/foundation/github-actions-deploy-role.yml \
-  infra/aws/foundation/github-actions-foundation-role.yml \
-  infra/aws/foundation/governed-canary-roles.yml \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:eu-west-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:us-east-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:eu-west-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:us-east-1]}"; do
-  aws cloudformation validate-template \
-    --region "${PRIMARY_REGION}" \
-    --template-body "file://${template}" >/dev/null
-done
+foundation_phase='preflight:validate-template:api-gateway-account'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/api-gateway-account.yml' >/dev/null
+foundation_phase='preflight:validate-template:iam-foundation'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${IAM_FOUNDATION_TEMPLATE}" >/dev/null
+foundation_phase='preflight:validate-template:github-actions-deploy-role'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/github-actions-deploy-role.yml' >/dev/null
+foundation_phase='preflight:validate-template:github-actions-foundation-role'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/github-actions-foundation-role.yml' >/dev/null
+foundation_phase='preflight:validate-template:governed-canary-roles'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/governed-canary-roles.yml' >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:staging:eu-west-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:eu-west-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:staging:us-east-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:us-east-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:production:eu-west-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[production:eu-west-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:production:us-east-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[production:us-east-1]}" >/dev/null
 
 foundation_phase='preflight:legacy-role'
 legacy_error="${RUNNER_TEMP}/legacy-deploy-role.error"
@@ -451,34 +472,45 @@ jq -e '
   length == 0
 ' <<<"${legacy_stacks}" >/dev/null
 
-foundation_phase='preflight:foundation-stack-role-bindings'
-for stage in staging production; do
-  assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
-  assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
-  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
-    assert_stack_role_is_null_if_present \
-      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
-  done
-done
+foundation_phase='preflight:foundation-stack-role-binding:staging:iam'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'
+assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:iam'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:deploy'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'
+assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:shared-api'
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+foundation_phase='preflight:foundation-stack-role-binding:governed-canary'
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
 foundation_phase='preflight:shared-api-gateway'
 assert_api_gateway_no_clobber
-foundation_phase='preflight:application-stack-role-bindings'
 staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 production_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
+foundation_phase='preflight:application-stack-role-binding:staging:registry'
 assert_application_stack_role_exact_if_present \
   staging "${PRIMARY_REGION}" Archon-Registry "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:primary'
 assert_application_stack_role_exact_if_present \
   staging "${PRIMARY_REGION}" Archon-staging "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:edge'
 assert_application_stack_role_exact_if_present \
   staging "${EDGE_REGION}" Archon-staging-Edge "${staging_cfn_us}"
+foundation_phase='preflight:application-stack-role-binding:production:primary'
 assert_application_stack_role_exact_if_present \
   production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:production:edge'
 assert_application_stack_role_exact_if_present \
   production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
 foundation_phase='preflight:application-stack-role-transition'

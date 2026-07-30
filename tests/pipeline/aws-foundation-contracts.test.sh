@@ -1023,12 +1023,33 @@ require_text "${reconciler}" \
   'shopt -s inherit_errexit' \
   "printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\\n'" \
   "foundation_phase='preflight:revalidate-master'" \
-  "foundation_phase='preflight:validate-templates'" \
+  "foundation_phase='preflight:validate-template:api-gateway-account'" \
+  "foundation_phase='preflight:validate-template:iam-foundation'" \
+  "foundation_phase='preflight:validate-template:github-actions-deploy-role'" \
+  "foundation_phase='preflight:validate-template:github-actions-foundation-role'" \
+  "foundation_phase='preflight:validate-template:governed-canary-roles'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:us-east-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:us-east-1'" \
   "foundation_phase='preflight:legacy-role'" \
   "foundation_phase='preflight:legacy-stacks'" \
-  "foundation_phase='preflight:foundation-stack-role-bindings'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:shared-api'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:governed-canary'" \
   "foundation_phase='preflight:shared-api-gateway'" \
-  "foundation_phase='preflight:application-stack-role-bindings'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:registry'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:edge'" \
   "foundation_phase='preflight:application-stack-role-transition'" \
   "foundation_phase='stage-iam'" \
   "foundation_phase='shared-api-gateway'" \
@@ -1042,5 +1063,5 @@ forbid_text "${reconciler}" \
   'set -x' \
   'printenv' \
   'declare -p'
-test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 16 ||
-  fail 'reconciler diagnostic phases must be the 16 reviewed public labels'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 37 ||
+  fail 'reconciler diagnostic phases must be the 37 reviewed public labels'
