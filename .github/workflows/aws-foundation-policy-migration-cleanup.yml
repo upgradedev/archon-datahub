@@ -1,0 +1,160 @@
+name: Recover AWS foundation policy migration
+
+on:
+  workflow_run:
+    workflows:
+      - Migrate AWS foundation control policy
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: Exact trusted migration source SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+concurrency:
+  group: archon-aws-control-plane
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    name: Bind cleanup to a trusted incomplete migration
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      github.actor == github.repository_owner &&
+      (
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion != 'success') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.triggering_actor == github.repository_owner &&
+         inputs.confirmation ==
+           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      target_sha: ${{ steps.source.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate cleanup and source-run provenance
+        id: source
+        env:
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CURRENT_CONTROL_PLANE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_head_sha }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          [[ "${CURRENT_CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          current_master="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          test "${current_master}" = "${CURRENT_CONTROL_PLANE_SHA}"
+          if [[ "${TRIGGER_EVENT}" == "workflow_run" ]]; then
+            [[ "${TRIGGER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${TRIGGER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+            parent="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${TRIGGER_RUN_ID}/attempts/${TRIGGER_RUN_ATTEMPT}")"
+            jq -e \
+              --arg actor "${GITHUB_REPOSITORY_OWNER}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${TARGET_SHA}" \
+              --argjson attempt "${TRIGGER_RUN_ATTEMPT}" \
+              --argjson runId "${TRIGGER_RUN_ID}" '
+                .id == $runId and
+                .run_attempt == $attempt and
+                .name == "Migrate AWS foundation control policy" and
+                .path ==
+                  ".github/workflows/aws-foundation-policy-migration.yml" and
+                .head_repository.full_name == $repository and
+                .head_branch == "master" and
+                .head_sha == $sha and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                (.conclusion == "action_required" or
+                 .conclusion == "cancelled" or
+                 .conclusion == "failure" or
+                 .conclusion == "neutral" or
+                 .conclusion == "skipped" or
+                 .conclusion == "stale" or
+                 .conclusion == "startup_failure" or
+                 .conclusion == "timed_out") and
+                .actor.login == $actor and
+                .triggering_actor.login == $actor
+              ' <<<"${parent}" >/dev/null
+          else
+            test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+            test "${CONFIRMATION_INPUT}" = \
+              "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION"
+            test "${TARGET_SHA}" = "${current_master}"
+          fi
+          target_commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}")"
+          current_commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${CURRENT_CONTROL_PLANE_SHA}")"
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${target_commit}" >/dev/null
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${current_commit}" >/dev/null
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          gate="${RUNNER_TEMP}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${CURRENT_CONTROL_PLANE_SHA}" \
+          OUTPUT_PATH="${gate}" \
+          ATTEMPTS=1 \
+            bash scripts/verify-github-control-plane.sh
+          test -f "${gate}"
+          test ! -L "${gate}"
+          echo "target_sha=${TARGET_SHA}" >>"${GITHUB_OUTPUT}"
+
+  cleanup:
+    name: Hold outer lock through fresh rollback-only recovery
+    needs: validate
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml
+    with:
+      operation: cleanup
+      expected_head_sha: ${{ needs.validate.outputs.target_sha }}
+      confirmation: RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION
