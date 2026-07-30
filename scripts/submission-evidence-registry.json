@@ -1,0 +1,346 @@
+{
+  "schemaVersion": "archon.submission-evidence-registry/v1",
+  "repository": "upgradedev/archon-datahub",
+  "aggregate": {
+    "workflowPath": ".github/workflows/submission-evidence.yml",
+    "artifactNameTemplate": "submission-evidence-{releaseSha}-{runAttempt}",
+    "predicateType": "https://archon.datahub.dev/attestations/submission-readiness/v1",
+    "predicateSchemaVersion": "archon.submission-readiness-predicate/v1"
+  },
+  "upstreamSchemaVersion": "archon.submission-upstream-proof/v1",
+  "upstreamPredicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+  "receiptSchemaVersion": "archon.submission-proof-receipt/v1",
+  "sources": [
+    {
+      "key": "live-datahub",
+      "required": true,
+      "mode": "native-live-v4",
+      "workflowPath": ".github/workflows/live-datahub-proof.yml",
+      "artifactNameTemplate": "live-datahub-proof-{releaseSha}-{runAttempt}",
+      "predicateType": "https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4",
+      "predicateSchemaVersion": "archon.live-datahub-proof-attestation/v4",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "proof-subject.sha256",
+      "proofIds": [
+        "D4",
+        "U3"
+      ],
+      "supportSubjects": {
+        "D4": [
+          {
+            "role": "live-proof",
+            "name": "proof.json"
+          },
+          {
+            "role": "deployment-evidence",
+            "name": "deployment-evidence.json"
+          }
+        ],
+        "U3": [
+          {
+            "role": "live-proof",
+            "name": "proof.json"
+          },
+          {
+            "role": "deployed-semantic-proof",
+            "name": "deployed-datahub-semantic-proof.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "project-access",
+      "required": true,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-project-access.yml",
+      "artifactNameTemplate": "submission-project-access-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-project-access/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "SQ3",
+        "SQ4",
+        "SQ5"
+      ],
+      "supportSubjects": {
+        "SQ3": [
+          {
+            "role": "deployment-verification",
+            "name": "support/SQ3/deployment-verification.json"
+          },
+          {
+            "role": "availability-verification",
+            "name": "support/SQ3/availability-verification.json"
+          },
+          {
+            "role": "public-probe",
+            "name": "support/SQ3/public-probe.json"
+          }
+        ],
+        "SQ4": [
+          {
+            "role": "deployment-verification",
+            "name": "support/SQ4/deployment-verification.json"
+          },
+          {
+            "role": "fresh-identity-lifecycle",
+            "name": "support/SQ4/fresh-identity-lifecycle.json"
+          },
+          {
+            "role": "fresh-judge-journey",
+            "name": "support/SQ4/fresh-judge-journey.json"
+          },
+          {
+            "role": "credential-rotation-recovery",
+            "name": "support/SQ4/credential-rotation-recovery.json"
+          },
+          {
+            "role": "testing-instructions",
+            "name": "support/SQ4/testing-instructions.json"
+          }
+        ],
+        "SQ5": [
+          {
+            "role": "logged-out-repository-probe",
+            "name": "support/SQ5/logged-out-repository-probe.json"
+          },
+          {
+            "role": "release-tree-inventory",
+            "name": "support/SQ5/release-tree-inventory.json"
+          },
+          {
+            "role": "license-detection",
+            "name": "support/SQ5/license-detection.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "content-review",
+      "required": true,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-content-review.yml",
+      "artifactNameTemplate": "submission-content-review-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-content-review/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "SQ6",
+        "SQ7",
+        "SQ8"
+      ],
+      "supportSubjects": {
+        "SQ6": [
+          {
+            "role": "submission-fields",
+            "name": "support/SQ6/submission-fields.json"
+          },
+          {
+            "role": "testing-instructions",
+            "name": "support/SQ6/testing-instructions.json"
+          },
+          {
+            "role": "english-review",
+            "name": "support/SQ6/english-review.json"
+          }
+        ],
+        "SQ7": [
+          {
+            "role": "provider-metadata",
+            "name": "support/SQ7/provider-metadata.json"
+          },
+          {
+            "role": "logged-out-video-probe",
+            "name": "support/SQ7/logged-out-video-probe.json"
+          },
+          {
+            "role": "functioning-footage-review",
+            "name": "support/SQ7/functioning-footage-review.json"
+          },
+          {
+            "role": "english-accessibility",
+            "name": "support/SQ7/english-accessibility.json"
+          },
+          {
+            "role": "media-rights",
+            "name": "support/SQ7/media-rights.json"
+          }
+        ],
+        "SQ8": [
+          {
+            "role": "repository-history",
+            "name": "support/SQ8/repository-history.json"
+          },
+          {
+            "role": "preexisting-work-inventory",
+            "name": "support/SQ8/preexisting-work-inventory.json"
+          },
+          {
+            "role": "cross-medium-review",
+            "name": "support/SQ8/cross-medium-review.json"
+          },
+          {
+            "role": "solo-owner-approval",
+            "name": "support/SQ8/solo-owner-approval.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "operations",
+      "required": true,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-operations.yml",
+      "artifactNameTemplate": "submission-operations-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-operations/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "SQ10"
+      ],
+      "supportSubjects": {
+        "SQ10": [
+          {
+            "role": "availability-attestation",
+            "name": "support/SQ10/availability-attestation.json"
+          },
+          {
+            "role": "posture-attestation",
+            "name": "support/SQ10/posture-attestation.json"
+          },
+          {
+            "role": "paging-delivery",
+            "name": "support/SQ10/paging-delivery.json"
+          },
+          {
+            "role": "rollback-recovery",
+            "name": "support/SQ10/rollback-recovery.json"
+          },
+          {
+            "role": "credential-rotation",
+            "name": "support/SQ10/credential-rotation.json"
+          },
+          {
+            "role": "judge-access-validity",
+            "name": "support/SQ10/judge-access-validity.json"
+          },
+          {
+            "role": "monitor-configuration",
+            "name": "support/SQ10/monitor-configuration.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "judge-pack",
+      "required": false,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-judge-pack.yml",
+      "artifactNameTemplate": "submission-judge-pack-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-judge-pack/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "SQ9"
+      ],
+      "supportSubjects": {
+        "SQ9": [
+          {
+            "role": "ci-attestation",
+            "name": "support/SQ9/ci-attestation.json"
+          },
+          {
+            "role": "judge-pack-manifest",
+            "name": "support/SQ9/judge-pack-manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "bonus-oss",
+      "required": false,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-bonus-oss.yml",
+      "artifactNameTemplate": "submission-bonus-oss-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-bonus-oss/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "BONUS-OSS"
+      ],
+      "supportSubjects": {
+        "BONUS-OSS": [
+          {
+            "role": "upstream-pr",
+            "name": "support/BONUS-OSS/upstream-pr.json"
+          },
+          {
+            "role": "ci-validation",
+            "name": "support/BONUS-OSS/ci-validation.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "bonus-feedback",
+      "required": false,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-bonus-feedback.yml",
+      "artifactNameTemplate": "submission-bonus-feedback-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-bonus-feedback/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "BONUS-FEEDBACK"
+      ],
+      "supportSubjects": {
+        "BONUS-FEEDBACK": [
+          {
+            "role": "feedback-confirmation",
+            "name": "support/BONUS-FEEDBACK/feedback-confirmation.json"
+          }
+        ]
+      }
+    },
+    {
+      "key": "devpost-confirmation",
+      "required": false,
+      "mode": "standard-v1",
+      "workflowPath": ".github/workflows/submission-devpost-confirmation.yml",
+      "artifactNameTemplate": "submission-devpost-confirmation-{releaseSha}-{runAttempt}",
+      "predicateType": "https://archon.datahub.dev/attestations/submission-devpost-confirmation/v1",
+      "predicateSchemaVersion": "archon.submission-upstream-attestation/v1",
+      "predicateFile": "attestation-predicate.json",
+      "subjectInventory": "SHA256SUMS",
+      "proofIds": [
+        "SQ11"
+      ],
+      "supportSubjects": {
+        "SQ11": [
+          {
+            "role": "pre-submit-readiness-seal",
+            "name": "support/SQ11/pre-submit-readiness-seal.json"
+          },
+          {
+            "role": "devpost-submission-confirmation",
+            "name": "support/SQ11/devpost-submission-confirmation.json"
+          },
+          {
+            "role": "public-devpost-entry",
+            "name": "support/SQ11/public-devpost-entry.json"
+          },
+          {
+            "role": "logged-out-url-probes",
+            "name": "support/SQ11/logged-out-url-probes.json"
+          }
+        ]
+      }
+    }
+  ]
+}
