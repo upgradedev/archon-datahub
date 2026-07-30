@@ -433,3 +433,24 @@ evidence for the exact nine or ten managed stacks. External mode additionally
 records one takeover-forbidden, no-mutation binding as pinned and unchanged.
 It contains no raw account ID, role ARN, secret, token, password, credential,
 or API key and is attested before retention.
+
+## Sanitized managed-stack failure evidence
+
+A managed foundation stack rejected in a failed preflight state, or a managed
+stack command that fails, triggers a bounded diagnostic query for that exact
+allowlisted stack only. The reconciler reads at most 25 recent CloudFormation
+events and writes exactly one canonical `cfn-failure.json` record containing
+only an allowlisted stack label, stack status, logical resource ID, resource
+type and status, a safe reason category, an optional regex-safe denied AWS
+action, and the SHA-256 of the raw reason.
+
+The diagnostic path never stores or prints the raw CloudFormation reason, stack
+name or ARN, account identifier, URL, request token, or physical resource ID.
+The two-file artifact (`cfn-failure.json` and `SHA256SUMS`) is revalidated after
+AWS credentials are cleared, checksum-sealed, and retained for 90 days. A
+missing, malformed, oversized, or non-allowlisted diagnostic fails closed and
+is not uploaded.
+
+This evidence is observational only. The workflow does not delete, recreate, or
+continue rollback for a failed stack. Recovery remains a separate, explicit
+operator decision after the exact state and sanitized evidence are reviewed.

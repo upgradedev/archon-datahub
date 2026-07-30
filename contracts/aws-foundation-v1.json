@@ -407,6 +407,42 @@
     "artifactRetentionDays": 90,
     "containsRawAccountId": false,
     "containsRawRoleArn": false,
+    "failureDiagnostics": {
+      "schemaVersion": "archon.aws-foundation-cfn-failure/v1",
+      "artifactFiles": [
+        "SHA256SUMS",
+        "cfn-failure.json"
+      ],
+      "artifactRetentionDays": 90,
+      "autoRecovery": "forbidden",
+      "diagnosticCount": 1,
+      "maxRecentEvents": 25,
+      "rawReasonRetention": false,
+      "stackIdentity": "allowlisted-label-only",
+      "allowlistedStackLabels": [
+        "governed-canary-roles",
+        "production-bootstrap-edge",
+        "production-bootstrap-primary",
+        "production-deploy",
+        "production-iam",
+        "shared-api-gateway",
+        "staging-bootstrap-edge",
+        "staging-bootstrap-primary",
+        "staging-deploy",
+        "staging-iam"
+      ],
+      "fields": [
+        "deniedAwsAction",
+        "logicalResourceId",
+        "rawReasonSha256",
+        "reasonCategory",
+        "resourceStatus",
+        "resourceType",
+        "schemaVersion",
+        "stackLabel",
+        "stackStatus"
+      ]
+    },
     "applicationStackRolePreflight": {
       "entryCount": 5,
       "allowedEntryValidations": [
