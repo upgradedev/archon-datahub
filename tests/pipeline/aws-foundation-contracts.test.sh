@@ -27,6 +27,8 @@ dependency_patcher="${repository_root}/scripts/patch-cdk-brace-expansion.sh"
 dependency_audit_verifier="${repository_root}/scripts/verify-cdk-npm-audit-compensation.sh"
 dependency_override_verifier="${repository_root}/scripts/verify-exact-npm-overrides.mjs"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
+failure_sanitizer="${repository_root}/scripts/sanitize-cloudformation-failure.mjs"
+failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure-sanitizer.test.mjs"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
@@ -78,11 +80,15 @@ for path in \
   "${dependency_audit_verifier}" \
   "${dependency_override_verifier}" \
   "${reconciler}" \
+  "${failure_sanitizer}" \
+  "${failure_sanitizer_test}" \
   "${runtime_verifier}" \
   "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
+
+node --test "${failure_sanitizer_test}"
 
 jq --exit-status '
   .schemaVersion == "archon.aws-foundation/v1" and
@@ -343,6 +349,39 @@ jq --exit-status '
     migrationRequiredState:
       "foundation-complete-deploy-migration-required",
     readyState: "ready-for-deploy"
+  } and
+  .evidence.failureDiagnostics == {
+    allowlistedStackLabels: [
+      "governed-canary-roles",
+      "production-bootstrap-edge",
+      "production-bootstrap-primary",
+      "production-deploy",
+      "production-iam",
+      "shared-api-gateway",
+      "staging-bootstrap-edge",
+      "staging-bootstrap-primary",
+      "staging-deploy",
+      "staging-iam"
+    ],
+    artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
+    artifactRetentionDays: 90,
+    autoRecovery: "forbidden",
+    diagnosticCount: 1,
+    fields: [
+      "deniedAwsAction",
+      "logicalResourceId",
+      "rawReasonSha256",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ],
+    maxRecentEvents: 25,
+    rawReasonRetention: false,
+    schemaVersion: "archon.aws-foundation-cfn-failure/v1",
+    stackIdentity: "allowlisted-label-only"
   }
 ' "${contract}" >/dev/null
 
@@ -408,7 +447,12 @@ require_text "${foundation_workflow}" \
   'run: bash scripts/reconcile-aws-foundation.sh' \
   'Clear AWS credentials before artifact handling' \
   'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
-  'retention-days: 90'
+  'retention-days: 90' \
+  'if: ${{ always() }}' \
+  'Validate checksum-sealed sanitized failure evidence' \
+  'if: ${{ failure() }}' \
+  'Retain checksum-sealed sanitized foundation failure evidence' \
+  'path: ${{ runner.temp }}/aws-foundation-failure/'
 require_text "${foundation_workflow}" \
   '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
 require_text "${foundation_workflow}" \
@@ -427,6 +471,19 @@ require_text "${reconciler}" \
   'scripts/seal-cdk-bootstrap-templates.sh' \
   'scripts/verify-cdk-npm-audit-compensation.sh' \
   'scripts/verify-exact-npm-overrides.mjs'
+failure_upload_line="$(
+  grep -nF 'Retain checksum-sealed sanitized foundation failure evidence' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
+credential_clear_line="$(
+  grep -nF 'Clear AWS credentials before artifact handling' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
+test "${credential_clear_line}" -lt "${failure_upload_line}" ||
+  fail "failure evidence upload must run only after AWS credentials are cleared"
+grep -Fq "steps.failure_evidence.outputs.available == 'true'" \
+  "${foundation_workflow}" ||
+  fail "failure evidence upload must require a validated diagnostic"
 forbid_text "${foundation_workflow}" \
   '2.1133.0'
 forbid_text "${foundation_workflow}" \
@@ -910,7 +967,18 @@ require_text "${reconciler}" \
   'requires-explicit-deploy-migration' \
   'deployRequirement: "explicit-role-migration"' \
   'applicationStackRoleTransition: $applicationStackRoleTransition' \
-  'application_stack_role_transition=${application_stack_role_transition_state}'
+  'application_stack_role_transition=${application_stack_role_transition_state}' \
+  'readonly FAILURE_EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-failure"' \
+  'assert_diagnostic_stack_allowlisted() {' \
+  'capture_managed_stack_failure() {' \
+  'run_managed_stack_command() {' \
+  'aws cloudformation describe-stack-events' \
+  '--max-items 25' \
+  '--output json 2>/dev/null |' \
+  'node scripts/sanitize-cloudformation-failure.mjs' \
+  'stackLabel=%s; stackStatus=%s' \
+  'ROLLBACK_COMPLETE | *_FAILED)' \
+  'sha256sum cfn-failure.json >SHA256SUMS'
 shared_api_gateway_block="$(
   sed -n \
     "/foundation_phase='shared-api-gateway'/,/foundation_phase='governed-canary-roles'/p" \
@@ -934,6 +1002,13 @@ for forbidden_external_action in \
     fail "external API Gateway mode must remain mutation- and IAM-inspection-free"
   fi
 done
+for forbidden_recovery_action in \
+  'aws cloudformation delete-stack' \
+  'aws cloudformation continue-update-rollback'; do
+  if grep -Fq "${forbidden_recovery_action}" "${reconciler}"; then
+    fail "foundation diagnostics must never mutate or recover a failed stack"
+  fi
+done
 forbid_text "${reconciler}" \
   'Require all ten foundation stacks to be IN_SYNC' \
   'stackCount: 10'
@@ -942,6 +1017,20 @@ test "$(
 )" -eq 1 ||
   fail "reconciler may reference the oversized source template only as evidence"
 
+require_text "${failure_sanitizer}" \
+  'const MAX_EVENTS = 25;' \
+  'const MAX_OUTPUT_BYTES = 2_048;' \
+  'ALLOWLISTED_STACK_LABELS' \
+  'rawReasonSha256: sha256(rawReason)' \
+  'deniedAwsAction: extractDeniedAction(rawReason, reasonCategory)' \
+  'schemaVersion: "archon.aws-foundation-cfn-failure/v1"' \
+  'process.stderr.write("CloudFormation failure sanitization failed\n")'
+forbid_text "${failure_sanitizer}" \
+  'console.log' \
+  'console.error' \
+  'process.stderr.write(error' \
+  'physicalResourceId' \
+  'StackId'
 require_text "${runtime_verifier}" \
   'const uncovered' \
   'const unusedAllowed' \
@@ -1018,6 +1107,7 @@ if grep -Eq \
   fail "deploy and operational roles contain a wildcard action"
 fi
 require_text "${foundation_policy}" \
+  'cloudformation:DescribeStackEvents' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
@@ -1084,7 +1174,12 @@ require_text "${runbook}" \
   'Every other mismatch fails closed' \
   '`foundation-complete-deploy-migration-required`' \
   '`requires-explicit-deploy-migration`' \
-  '`ready-for-deploy`'
+  '`ready-for-deploy`' \
+  'Sanitized managed-stack failure evidence' \
+  'never stores or prints the raw CloudFormation reason' \
+  'does not delete, recreate, or' \
+  '`cfn-failure.json`' \
+  'retained for 90 days'
 forbid_text "${runbook}" \
   'ten CloudFormation stack instances' \
   'reconciles all ten stacks' \
