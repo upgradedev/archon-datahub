@@ -365,10 +365,21 @@ jq --exit-status '
     ],
     artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
     artifactRetentionDays: 90,
+    artifactUpload: "explicit-files-only",
     autoRecovery: "forbidden",
+    canonicalJson: true,
     diagnosticCount: 1,
+    digestFields: [
+      "logicalResourceId",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ],
     fields: [
-      "deniedAwsAction",
+
       "diagnosticSha256",
       "logicalResourceId",
       "reasonCategory",
@@ -378,9 +389,12 @@ jq --exit-status '
       "stackLabel",
       "stackStatus"
     ],
+    managedCommandOutput: "suppressed",
     maxRecentEvents: 25,
+    postCredentialDigestRecomputed: true,
     rawReasonHashing: false,
     rawReasonRetention: false,
+    recursiveInventory: "exact-two-root-regular-files",
     schemaVersion: "archon.aws-foundation-cfn-failure/v1",
     stackIdentity: "allowlisted-label-only"
   }
@@ -453,7 +467,14 @@ require_text "${foundation_workflow}" \
   'Validate checksum-sealed sanitized failure evidence' \
   'if: ${{ failure() }}' \
   'Retain checksum-sealed sanitized foundation failure evidence' \
-  'path: ${{ runner.temp }}/aws-foundation-failure/'
+  'find -P "${FAILURE_EVIDENCE_DIR}"' \
+  'LC_ALL=C sort -z' \
+  'jq -cS .' \
+  'cmp -s' \
+  '.diagnosticSha256 == $computedDigest' \
+  'path: |' \
+  '${{ runner.temp }}/aws-foundation-failure/SHA256SUMS' \
+  '${{ runner.temp }}/aws-foundation-failure/cfn-failure.json'
 require_text "${foundation_workflow}" \
   '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
 require_text "${foundation_workflow}" \
@@ -472,6 +493,10 @@ require_text "${reconciler}" \
   'scripts/seal-cdk-bootstrap-templates.sh' \
   'scripts/verify-cdk-npm-audit-compensation.sh' \
   'scripts/verify-exact-npm-overrides.mjs'
+failure_validation_line="$(
+  grep -nF 'Validate checksum-sealed sanitized failure evidence' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
 failure_upload_line="$(
   grep -nF 'Retain checksum-sealed sanitized foundation failure evidence' \
     "${foundation_workflow}" | cut -d: -f1
@@ -480,8 +505,13 @@ credential_clear_line="$(
   grep -nF 'Clear AWS credentials before artifact handling' \
     "${foundation_workflow}" | cut -d: -f1
 )"
-test "${credential_clear_line}" -lt "${failure_upload_line}" ||
-  fail "failure evidence upload must run only after AWS credentials are cleared"
+test "${credential_clear_line}" -lt "${failure_validation_line}" &&
+  test "${failure_validation_line}" -lt "${failure_upload_line}" ||
+  fail "failure evidence must be validated after credentials clear and before upload"
+if grep -Fq 'path: ${{ runner.temp }}/aws-foundation-failure/' \
+  "${foundation_workflow}"; then
+  fail "failure evidence upload must name only the two sealed files"
+fi
 grep -Fq "steps.failure_evidence.outputs.available == 'true'" \
   "${foundation_workflow}" ||
   fail "failure evidence upload must require a validated diagnostic"
@@ -972,14 +1002,36 @@ require_text "${reconciler}" \
   'readonly FAILURE_EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-failure"' \
   'assert_diagnostic_stack_allowlisted() {' \
   'capture_managed_stack_failure() {' \
+  'cleanup_failure_evidence_staging() {' \
   'run_managed_stack_command() {' \
+  'if "$@" >/dev/null 2>&1; then' \
   'aws cloudformation describe-stack-events' \
   '--max-items 25' \
   '--output json 2>/dev/null |' \
   'node scripts/sanitize-cloudformation-failure.mjs' \
+  'find -P "${staging_dir}" -mindepth 1 -printf' \
+  'LC_ALL=C sort -z' \
+  'cmp -s "${diagnostic_tmp}" "${canonical_tmp}"' \
+  '.diagnosticSha256 == $computedDigest' \
+  'mv -T -- "${staging_dir}" "${FAILURE_EVIDENCE_DIR}"' \
   'stackLabel=%s; stackStatus=%s' \
   'ROLLBACK_COMPLETE | *_FAILED)' \
   'sha256sum cfn-failure.json >SHA256SUMS'
+test "$(grep -Ec '^[[:space:]]*run_managed_stack_command \\$' "${reconciler}")" -eq 9 ||
+  fail "all nine managed stack mutator sites must use the sanitized wrapper"
+test "$(grep -Fc 'aws cloudformation update-termination-protection' "${reconciler}")" -eq 4 ||
+  fail "expected exactly four managed termination-protection call sites"
+while IFS=: read -r update_line _; do
+  wrapper_line="$((update_line - 2))"
+  sed -n "${wrapper_line},${update_line}p" "${reconciler}" |
+    grep -Fq 'run_managed_stack_command \' ||
+    fail "termination-protection call at line ${update_line} bypasses the wrapper"
+done < <(grep -nF 'aws cloudformation update-termination-protection' "${reconciler}")
+forbid_text "${reconciler}" \
+  'Purpose=stage-iam-foundation >/dev/null' \
+  'Purpose=shared-apigateway-logging >/dev/null' \
+  'GitHubRepository=archon-datahub >/dev/null' \
+  'Purpose=github-deployment-role >/dev/null'
 shared_api_gateway_block="$(
   sed -n \
     "/foundation_phase='shared-api-gateway'/,/foundation_phase='governed-canary-roles'/p" \
@@ -1022,8 +1074,8 @@ require_text "${failure_sanitizer}" \
   'const MAX_EVENTS = 25;' \
   'const MAX_OUTPUT_BYTES = 2_048;' \
   'ALLOWLISTED_STACK_LABELS' \
+  'const canonicalSafeFields = Object.freeze({' \
   'diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields))' \
-  'deniedAwsAction: extractDeniedAction(rawReason, reasonCategory)' \
   'schemaVersion: "archon.aws-foundation-cfn-failure/v1"' \
   'process.stderr.write("CloudFormation failure sanitization failed\n")'
 forbid_text "${failure_sanitizer}" \
@@ -1177,7 +1229,10 @@ require_text "${runbook}" \
   '`requires-explicit-deploy-migration`' \
   '`ready-for-deploy`' \
   'Sanitized managed-stack failure evidence' \
-  'never stores, prints, or hashes the raw CloudFormation reason' \
+  'stdout and stderr are suppressed before capture' \
+  'exact recursive inventory of two root regular non-symlink files' \
+  'recomputes the diagnostic digest from the seven safe fields' \
+  'never stores, prints, or hashes the raw CloudFormation' \
   'does not delete, recreate, or' \
   '`cfn-failure.json`' \
   'retained for 90 days'

@@ -1050,6 +1050,7 @@ jobs:
           fi
           trap - EXIT
           echo "available=true" >>"${GITHUB_OUTPUT}"
+
       - name: Retain checksum-sealed sanitized foundation failure evidence
         if: ${{ failure() && steps.failure_evidence.outputs.available == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
