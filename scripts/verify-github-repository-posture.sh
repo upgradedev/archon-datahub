@@ -88,6 +88,7 @@ jq -e '
   (.administrationOnly | keys | sort) == [
     "actions",
     "environmentSecrets",
+    "repositoryLifecycle",
     "status"
   ] and
   (.administrationOnly.status | keys | sort) == ["reason", "value"] and
@@ -110,38 +111,47 @@ jq -e '
   .administrationOnly.actions.patternsAllowed ==
     (.administrationOnly.actions.patternsAllowed | sort | unique) and
   (.administrationOnly.environmentSecrets | keys | sort) == [
-    "expectedEmptyEnvironmentNames",
+    "reason",
     "requiredFineGrainedPermissions",
-    "status"
+    "status",
+    "verification"
   ] and
   .administrationOnly.environmentSecrets.status ==
     "unverified-requires-environments-read" and
+  .administrationOnly.environmentSecrets.verification == "not-performed" and
+  (.administrationOnly.environmentSecrets.reason | type) == "string" and
+  (.administrationOnly.environmentSecrets.reason | length) >= 80 and
   .administrationOnly.environmentSecrets.requiredFineGrainedPermissions == [
     "Actions:read",
     "Administration:read",
     "Environments:read",
     "Metadata:read"
   ] and
-  (
-    .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames |
-    length
-  ) == 13 and
-  .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames ==
-    (
-      .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames |
-      sort |
-      unique
-    ) and
+  (.administrationOnly.repositoryLifecycle | keys | sort) == [
+    "expected",
+    "requiredFineGrainedPermissions",
+    "status",
+    "verification"
+  ] and
+  .administrationOnly.repositoryLifecycle.expected == {
+    allowAutoMerge: false,
+    allowMergeCommit: false,
+    allowRebaseMerge: false,
+    allowSquashMerge: true,
+    allowUpdateBranch: true,
+    deleteBranchOnMerge: true
+  } and
+  .administrationOnly.repositoryLifecycle.requiredFineGrainedPermissions == [
+    "Administration:read",
+    "Metadata:read"
+  ] and
+  .administrationOnly.repositoryLifecycle.status ==
+    "unverified-requires-administration-read" and
+  .administrationOnly.repositoryLifecycle.verification == "not-performed" and
   (.repository | keys | sort) == [
-    "allowAutoMerge",
-    "allowMergeCommit",
-    "allowRebaseMerge",
-    "allowSquashMerge",
-    "allowUpdateBranch",
     "archived",
     "branch",
     "defaultBranch",
-    "deleteBranchOnMerge",
     "disabled",
     "fullName",
     "hasWiki",
@@ -151,18 +161,12 @@ jq -e '
     "visibility"
   ] and
   .repository == {
-    allowAutoMerge: false,
-    allowMergeCommit: false,
-    allowRebaseMerge: false,
-    allowSquashMerge: true,
-    allowUpdateBranch: true,
     archived: false,
     branch: {
       name: "master",
       protected: true
     },
     defaultBranch: "master",
-    deleteBranchOnMerge: true,
     disabled: false,
     fullName: "upgradedev/archon-datahub",
     hasWiki: false,
@@ -221,13 +225,6 @@ jq -e '
     (.environments.reviewerlessByDesign.exactNames | sort | unique) and
   .environments.soloOwnerApproval.exactNames ==
     (.environments.soloOwnerApproval.exactNames | sort | unique) and
-  .administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames ==
-    (
-      (
-        .environments.soloOwnerApproval.exactNames +
-        ["governed-canary-prepare"]
-      ) | sort
-    ) and
   (
     (
       .environments.soloOwnerApproval.exactNames +
@@ -255,11 +252,19 @@ readonly administration_pattern_count="$(
   jq -er '.administrationOnly.actions.patternsAllowed | length' \
     "${POLICY_PATH}"
 )"
+readonly repository_lifecycle_digest="$(
+  jq -cS '.administrationOnly.repositoryLifecycle.expected' "${POLICY_PATH}" |
+    sha256sum |
+    awk '{print $1}'
+)"
 readonly administration_status="$(
   jq -er '.administrationOnly.status.value' "${POLICY_PATH}"
 )"
 readonly administration_reason="$(
   jq -er '.administrationOnly.status.reason' "${POLICY_PATH}"
+)"
+readonly environment_secret_reason="$(
+  jq -er '.administrationOnly.environmentSecrets.reason' "${POLICY_PATH}"
 )"
 readonly environment_secret_status="$(
   jq -er '.administrationOnly.environmentSecrets.status' "${POLICY_PATH}"
@@ -269,10 +274,12 @@ readonly environment_secret_permissions="$(
     '.administrationOnly.environmentSecrets.requiredFineGrainedPermissions' \
     "${POLICY_PATH}"
 )"
-readonly expected_empty_environment_count="$(
-  jq -er \
-    '.administrationOnly.environmentSecrets.expectedEmptyEnvironmentNames |
-      length' \
+readonly repository_lifecycle_status="$(
+  jq -er '.administrationOnly.repositoryLifecycle.status' "${POLICY_PATH}"
+)"
+readonly repository_lifecycle_permissions="$(
+  jq -c \
+    '.administrationOnly.repositoryLifecycle.requiredFineGrainedPermissions' \
     "${POLICY_PATH}"
 )"
 
@@ -287,12 +294,6 @@ jq -e \
     .full_name == $repository and
     .visibility == "public" and
     .private == false and
-    .allow_auto_merge == false and
-    .allow_merge_commit == false and
-    .allow_rebase_merge == false and
-    .allow_squash_merge == true and
-    .allow_update_branch == true and
-    .delete_branch_on_merge == true and
     .has_wiki == false and
     .archived == false and
     .disabled == false and
@@ -507,10 +508,13 @@ jq -cnS \
     "sha256:${administration_actions_digest}" \
   --arg administrationReason "${administration_reason}" \
   --arg administrationStatus "${administration_status}" \
+  --arg environmentSecretReason "${environment_secret_reason}" \
   --arg environmentSecretStatus "${environment_secret_status}" \
   --arg eventName "${GITHUB_EVENT_NAME}" \
   --arg observedAt "${observed_at}" \
   --arg policyDigest "sha256:${policy_digest}" \
+  --arg repositoryLifecycleDigest "sha256:${repository_lifecycle_digest}" \
+  --arg repositoryLifecycleStatus "${repository_lifecycle_status}" \
   --arg ref "${GITHUB_REF}" \
   --arg repository "${GITHUB_REPOSITORY}" \
   --arg sha "${GITHUB_SHA}" \
@@ -519,8 +523,8 @@ jq -cnS \
   --argjson environments "${observed_environments}" \
   --argjson environmentSecretPermissions \
     "${environment_secret_permissions}" \
-  --argjson expectedEmptyEnvironmentCount \
-    "${expected_empty_environment_count}" \
+  --argjson repositoryLifecyclePermissions \
+    "${repository_lifecycle_permissions}" \
   --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
   --argjson runId "${GITHUB_RUN_ID}" '
     {
@@ -528,12 +532,18 @@ jq -cnS \
         expectedActionsPatternCount: $administrationPatternCount,
         expectedActionsPolicyDigest: $administrationActionsDigest,
         environmentSecrets: {
-          expectedEmptyEnvironmentCount: $expectedEmptyEnvironmentCount,
+          reason: $environmentSecretReason,
           requiredFineGrainedPermissions: $environmentSecretPermissions,
           status: $environmentSecretStatus,
           verification: "not-performed"
         },
         reason: $administrationReason,
+        repositoryLifecycle: {
+          expectedPolicyDigest: $repositoryLifecycleDigest,
+          requiredFineGrainedPermissions: $repositoryLifecyclePermissions,
+          status: $repositoryLifecycleStatus,
+          verification: "not-performed"
+        },
         status: $administrationStatus,
         verification: "not-performed"
       },
@@ -541,18 +551,12 @@ jq -cnS \
       observedAt: $observedAt,
       policyDigest: $policyDigest,
       repository: {
-        allowAutoMerge: false,
-        allowMergeCommit: false,
-        allowRebaseMerge: false,
-        allowSquashMerge: true,
-        allowUpdateBranch: true,
         archived: false,
         branch: {
           name: "master",
           protected: true
         },
         defaultBranch: "master",
-        deleteBranchOnMerge: true,
         disabled: false,
         fullName: $repository,
         hasWiki: false,

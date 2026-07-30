@@ -67,9 +67,7 @@ EXPECTED_AUTOMATED_ENVIRONMENTS = [
     "production-paging-test",
     "staging",
 ]
-EXPECTED_EMPTY_ENVIRONMENTS = sorted(
-    EXPECTED_SOLO_OWNER_ENVIRONMENTS + ["governed-canary-prepare"]
-)
+
 EXPECTED_ACTION_PATTERNS = [
     "actions/attest@*",
     "actions/cache/*@*",
@@ -131,15 +129,9 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
     require(
         policy["repository"]
         == {
-            "allowAutoMerge": False,
-            "allowMergeCommit": False,
-            "allowRebaseMerge": False,
-            "allowSquashMerge": True,
-            "allowUpdateBranch": True,
             "archived": False,
             "branch": {"name": "master", "protected": True},
             "defaultBranch": "master",
-            "deleteBranchOnMerge": True,
             "disabled": False,
             "fullName": "upgradedev/archon-datahub",
             "hasWiki": False,
@@ -242,7 +234,8 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
 
     administration = policy["administrationOnly"]
     require(
-        set(administration) == {"actions", "environmentSecrets", "status"},
+        set(administration)
+        == {"actions", "environmentSecrets", "repositoryLifecycle", "status"},
         "administration-only fields must be exact",
     )
     require(
@@ -264,13 +257,16 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
             "shaPinningRequired": True,
             "verifiedAllowed": False,
         },
-        "the sixteen observed Actions patterns must be exact expected data",
+        "the sixteen unverified Actions patterns must be exact expected data",
     )
     require(
         administration["environmentSecrets"]
         == {
-            "expectedEmptyEnvironmentNames":
-                EXPECTED_EMPTY_ENVIRONMENTS,
+            "reason": (
+                "The automatic GitHub Actions token cannot enumerate environment "
+                "secret names, and protected runtime environments intentionally "
+                "require live DataHub, Cognito, and deployment secrets."
+            ),
             "requiredFineGrainedPermissions": [
                 "Actions:read",
                 "Administration:read",
@@ -278,8 +274,29 @@ def validate_policy(policy_text: str) -> dict[str, Any]:
                 "Metadata:read",
             ],
             "status": "unverified-requires-environments-read",
+            "verification": "not-performed",
         },
-        "secret-name expectations must stay in the unverified elevated tier",
+        "secret-name inventory must remain explicitly unverified without emptiness claims",
+    )
+    require(
+        administration["repositoryLifecycle"]
+        == {
+            "expected": {
+                "allowAutoMerge": False,
+                "allowMergeCommit": False,
+                "allowRebaseMerge": False,
+                "allowSquashMerge": True,
+                "allowUpdateBranch": True,
+                "deleteBranchOnMerge": True,
+            },
+            "requiredFineGrainedPermissions": [
+                "Administration:read",
+                "Metadata:read",
+            ],
+            "status": "unverified-requires-administration-read",
+            "verification": "not-performed",
+        },
+        "merge and lifecycle expectations must remain digest-only unverified policy",
     )
     return policy
 
@@ -288,13 +305,13 @@ def validate_workflow(workflow: str) -> None:
     require(
         workflow.startswith(
             "name: GitHub repository posture "
-            "(admin/elevated-read controls unverified)\n"
+            "(public observations; admin contracts unverified)\n"
         ),
         "workflow label must disclose every unverified elevated-read control",
     )
     require(
-        "    name: Secretless posture "
-        "(admin/elevated-read controls unverified)\n" in workflow,
+        "    name: Secretless public posture "
+        "(admin contracts unverified)\n" in workflow,
         "job label must disclose the honest secretless tier",
     )
     require(
@@ -519,6 +536,10 @@ def validate_script(script: str) -> None:
             '    "unverified-requires-environments-read"'
         ),
         (
+            '.administrationOnly.repositoryLifecycle.status ==\n'
+            '    "unverified-requires-administration-read"'
+        ),
+        (
             '.administrationOnly.status.value ==\n'
             '    "unverified-requires-administration-and-environments-read"'
         ),
@@ -568,14 +589,8 @@ def validate_script(script: str) -> None:
         "each environment must allow exactly one master branch policy",
     )
     require(
-        "expectedEmptyEnvironmentNames ==\n"
-        "    (\n"
-        "      (\n"
-        "        .environments.soloOwnerApproval.exactNames +\n"
-        '        ["governed-canary-prepare"]\n'
-        "      ) | sort\n"
-        "    )" in script,
-        "unverified empty-secret expectation must bind all privileged names",
+        "expectedEmptyEnvironmentNames" not in script,
+        "secretless tier must never assert that any environment is secret-empty",
     )
     require(
         "secret_names" not in script
@@ -592,12 +607,6 @@ def validate_script(script: str) -> None:
         ".full_name == $repository",
         '.visibility == "public"',
         ".private == false",
-        ".allow_auto_merge == false",
-        ".allow_merge_commit == false",
-        ".allow_rebase_merge == false",
-        ".allow_squash_merge == true",
-        ".allow_update_branch == true",
-        ".delete_branch_on_merge == true",
         ".has_wiki == false",
         ".archived == false",
         ".disabled == false",
@@ -617,19 +626,34 @@ def validate_script(script: str) -> None:
         in script,
         "private-vulnerability-reporting observation must require enabled",
     )
-    for receipt_field in (
+    for forbidden_live_field in (
+        ".allow_auto_merge",
+        ".allow_merge_commit",
+        ".allow_rebase_merge",
+        ".allow_squash_merge",
+        ".allow_update_branch",
+        ".delete_branch_on_merge",
+    ):
+        require(
+            forbidden_live_field not in script,
+            f"automatic token must not claim lifecycle observation: {forbidden_live_field}",
+        )
+    for lifecycle_policy_field in (
         "allowAutoMerge: false,",
         "allowMergeCommit: false,",
         "allowRebaseMerge: false,",
         "allowSquashMerge: true,",
         "allowUpdateBranch: true,",
-        "deleteBranchOnMerge: true,",
-        "hasWiki: false,",
+        "deleteBranchOnMerge: true",
     ):
         require(
-            script.count(receipt_field) == 2,
-            f"policy gate and receipt must both retain: {receipt_field}",
+            script.count(lifecycle_policy_field) == 1,
+            f"lifecycle value must exist only in the unverified policy: {lifecycle_policy_field}",
         )
+    require(
+        script.count("hasWiki: false,") == 2,
+        "observable wiki state must remain in both policy gate and public receipt",
+    )
 
     require(
         (
@@ -675,8 +699,7 @@ def validate_script(script: str) -> None:
     require(
         (
             "environmentSecrets: {\n"
-            "          expectedEmptyEnvironmentCount: "
-            "$expectedEmptyEnvironmentCount,\n"
+            "          reason: $environmentSecretReason,\n"
             "          requiredFineGrainedPermissions: "
             "$environmentSecretPermissions,\n"
             "          status: $environmentSecretStatus,\n"
@@ -684,12 +707,13 @@ def validate_script(script: str) -> None:
             "        },"
         )
         in script,
-        "receipt must label secret-name inventory as unverified",
+        "receipt must label secret-name inventory as unverified without a count",
     )
     require(
         "expectedActionsPolicyDigest" in script
-        and "expectedActionsPatternCount" in script,
-        "receipt must identify the unverified admin-tier expectation",
+        and "expectedActionsPatternCount" in script
+        and "expectedPolicyDigest: $repositoryLifecycleDigest" in script,
+        "receipt must digest-bind each unverified administration-only policy",
     )
     for receipt_anchor in (
         'test ! -L "${temporary_output}"',
@@ -726,6 +750,14 @@ def mutate_policy(mutator: Callable[[dict[str, Any]], None]) -> str:
 def mutate_repository(field: str, value: Any) -> str:
     return mutate_policy(
         lambda policy: policy["repository"].__setitem__(field, value)
+    )
+
+
+def mutate_lifecycle(field: str, value: Any) -> str:
+    return mutate_policy(
+        lambda policy: policy["administrationOnly"][
+            "repositoryLifecycle"
+        ]["expected"].__setitem__(field, value)
     )
 
 
@@ -872,6 +904,15 @@ mutations: dict[str, tuple[str, str, str]] = {
             )
         ),
     ),
+    "empty secret inventory claim reintroduced": (
+        WORKFLOW_TEXT,
+        SCRIPT_TEXT,
+        mutate_policy(
+            lambda policy: policy["administrationOnly"][
+                "environmentSecrets"
+            ].update({"expectedEmptyEnvironmentNames": []})
+        ),
+    ),
     "secret inventory relabelled verified": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
@@ -1003,56 +1044,57 @@ mutations: dict[str, tuple[str, str, str]] = {
     "auto merge enabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("allowAutoMerge", True),
+        mutate_lifecycle("allowAutoMerge", True),
     ),
     "merge commits enabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("allowMergeCommit", True),
+        mutate_lifecycle("allowMergeCommit", True),
     ),
     "rebase merge enabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("allowRebaseMerge", True),
+        mutate_lifecycle("allowRebaseMerge", True),
     ),
     "squash merge disabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("allowSquashMerge", False),
+        mutate_lifecycle("allowSquashMerge", False),
     ),
     "update branch disabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("allowUpdateBranch", False),
+        mutate_lifecycle("allowUpdateBranch", False),
     ),
     "delete branch on merge disabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
-        mutate_repository("deleteBranchOnMerge", False),
+        mutate_lifecycle("deleteBranchOnMerge", False),
     ),
     "wiki enabled": (
         WORKFLOW_TEXT,
         SCRIPT_TEXT,
         mutate_repository("hasWiki", True),
     ),
-    "live merge gate weakened": (
+    "unobservable lifecycle probe introduced": (
         WORKFLOW_TEXT,
         replace_once(
             SCRIPT_TEXT,
-            ".allow_merge_commit == false",
-            "(.allow_merge_commit | type) == \"boolean\"",
+            ".private == false and\n    .has_wiki == false",
+            (
+                ".private == false and\n"
+                "    .allow_merge_commit == false and\n"
+                "    .has_wiki == false"
+            ),
         ),
         POLICY_TEXT,
     ),
-    "merge posture omitted from receipt": (
+    "lifecycle digest omitted from receipt": (
         WORKFLOW_TEXT,
         replace_once(
             SCRIPT_TEXT,
-            (
-                "      repository: {\n"
-                "        allowAutoMerge: false,\n"
-            ),
-            "      repository: {\n",
+            "          expectedPolicyDigest: $repositoryLifecycleDigest,\n",
+            "",
         ),
         POLICY_TEXT,
     ),
@@ -1111,7 +1153,7 @@ mutations: dict[str, tuple[str, str, str]] = {
         replace_once(
             WORKFLOW_TEXT,
             "name: GitHub repository posture "
-            "(admin/elevated-read controls unverified)\n",
+            "(public observations; admin contracts unverified)\n",
             "name: GitHub repository posture\n",
         ),
         SCRIPT_TEXT,

@@ -1,4 +1,4 @@
-name: GitHub repository posture (admin/elevated-read controls unverified)
+name: GitHub repository posture (public observations; admin contracts unverified)
 
 on:
   schedule:
@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   observe:
-    name: Secretless posture (admin/elevated-read controls unverified)
+    name: Secretless public posture (admin contracts unverified)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -48,7 +48,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Observe the secretless repository posture
+      - name: Observe only token-visible public repository posture
         env:
           GH_TOKEN: ${{ github.token }}
           OUTPUT_PATH: ${{ runner.temp }}/github-repository-posture/github-repository-posture.json
