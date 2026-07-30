@@ -79,6 +79,7 @@ jobs:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           EXPECTED_HEAD_SHA_INPUT: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
@@ -259,6 +260,7 @@ jobs:
         env:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ needs.prepare.outputs.control_plane_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
