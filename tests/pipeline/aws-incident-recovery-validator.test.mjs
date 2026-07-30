@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   rmSync,
@@ -8,14 +9,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  CLI_FAILURE_CODES,
   TARGET,
   buildRecoveryPlan,
   canonicalJson,
+  main,
+  sanitizedCliFailureCode,
   validateIncidentArtifact,
 } from "../../scripts/aws-incident-recovery.mjs";
 
+const validatorCli = fileURLToPath(new URL("../../scripts/aws-incident-recovery.mjs", import.meta.url));
 const accountId = "123456789012";
 const controlPlaneSha = "324073874b862e08bf8d80fa70709165cee86851";
 const expiresAt = "2026-07-30T14:20:00Z";
@@ -284,4 +290,90 @@ test("rejects invalid prepared resource digests during delete reconstruction", (
       })
     );
   }
+});
+test("CLI exposes only allowlisted failure codes and never raw values or paths", () => {
+  const privateMarker = "PRIVATE_RECOVERY_VALUE_7f6c2a";
+  const privatePath = `/tmp/${privateMarker}/sealed-input.json`;
+  const cases = [
+    {
+      args: ["unsupported-command", privateMarker],
+      expected: CLI_FAILURE_CODES.INVALID_INVOCATION,
+    },
+    {
+      args: ["validate-artifact", privatePath],
+      expected: CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED,
+    },
+    {
+      args: [
+        "build-plan",
+        privatePath,
+        privatePath,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privatePath,
+        privatePath,
+      ],
+      expected: CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED,
+    },
+    {
+      args: [
+        "rebuild-plan",
+        privatePath,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privatePath,
+        privatePath,
+      ],
+      expected: CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED,
+    },
+  ];
+
+  for (const { args, expected } of cases) {
+    const result = spawnSync(process.execPath, [validatorCli, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, `::error::${expected}\n`);
+    assert.doesNotMatch(result.stderr, /PRIVATE_RECOVERY_VALUE|ENOENT|sealed-input/u);
+    assert.equal(result.stderr.includes(privateMarker), false);
+    assert.equal(result.stderr.includes(privatePath), false);
+  }
+});
+
+test("CLI failure-code sanitizer rejects raw and spoofed error properties", () => {
+  assert.deepEqual(Object.values(CLI_FAILURE_CODES), [
+    "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+    "AWS_RECOVERY_INVALID_INVOCATION",
+    "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+    "AWS_RECOVERY_VALIDATOR_FAILED",
+  ]);
+  const privateMarker = "PRIVATE_SANITIZER_MARKER";
+  const spoofed = new Error(privateMarker);
+  spoofed.publicCode = CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED;
+  for (const error of [
+    new Error(privateMarker),
+    { code: CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED, path: privateMarker },
+    spoofed,
+  ]) {
+    assert.equal(
+      sanitizedCliFailureCode(error),
+      CLI_FAILURE_CODES.VALIDATOR_FAILED
+    );
+  }
+
+  let invocationFailure;
+  try {
+    main(["unsupported-command", privateMarker]);
+  } catch (error) {
+    invocationFailure = error;
+  }
+  assert.equal(
+    sanitizedCliFailureCode(invocationFailure),
+    CLI_FAILURE_CODES.INVALID_INVOCATION
+  );
 });

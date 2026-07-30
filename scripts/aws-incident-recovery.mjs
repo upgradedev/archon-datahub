@@ -69,6 +69,40 @@ const CONTROL_PLANE_PATTERN = /^[a-f0-9]{40}$/u;
 const ACCOUNT_PATTERN = /^[0-9]{12}$/u;
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 
+export const CLI_FAILURE_CODES = Object.freeze({
+  ARTIFACT_VALIDATION_FAILED: "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+  INVALID_INVOCATION: "AWS_RECOVERY_INVALID_INVOCATION",
+  PLAN_VALIDATION_FAILED: "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+  VALIDATOR_FAILED: "AWS_RECOVERY_VALIDATOR_FAILED",
+});
+const CLI_FAILURE_CODE_ALLOWLIST = new Set(Object.values(CLI_FAILURE_CODES));
+
+class CliFailure extends Error {
+  constructor(publicCode) {
+    super(publicCode);
+    this.name = "CliFailure";
+    this.publicCode = publicCode;
+  }
+}
+
+function withCliFailureCode(publicCode, action) {
+  try {
+    return action();
+  } catch {
+    throw new CliFailure(publicCode);
+  }
+}
+
+export function sanitizedCliFailureCode(error) {
+  if (
+    error instanceof CliFailure &&
+    CLI_FAILURE_CODE_ALLOWLIST.has(error.publicCode)
+  ) {
+    return error.publicCode;
+  }
+  return CLI_FAILURE_CODES.VALIDATOR_FAILED;
+}
+
 function invariant(value, message) {
   if (!value) {
     throw new Error(message);
@@ -376,7 +410,7 @@ function readJson(path, label) {
 }
 
 function usage() {
-  throw new Error("usage: validate-artifact <dir> | build-plan <stack.json> <resources.json> <template-sha> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out> | rebuild-plan <stack.json> <resource-state-sha256> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out>");
+  throw new CliFailure(CLI_FAILURE_CODES.INVALID_INVOCATION);
 }
 
 function emitSafePlan(result) {
@@ -395,41 +429,61 @@ function emitSafePlan(result) {
 export function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "validate-artifact") {
-    invariant(args.length === 1, "validate-artifact arguments are invalid");
-    process.stdout.write(`${canonicalJson(validateIncidentArtifact(args[0]))}\n`);
-    return;
+    if (args.length !== 1) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED, () => {
+      process.stdout.write(`${canonicalJson(validateIncidentArtifact(args[0]))}\n`);
+    });
   }
   if (command === "build-plan") {
-    invariant(args.length === 8, "build-plan arguments are invalid");
-    const [stackPath, resourcesPath, templateSha, accountId, expiresAt, controlPlaneSha, planPath, policyPath] = args;
-    const result = buildRecoveryPlan({
-      accountId,
-      controlPlaneSha,
-      expiresAt,
-      resourcesResponse: readJson(resourcesPath, "stack resources"),
-      sourceTemplateSemanticSha256: templateSha,
-      stackResponse: readJson(stackPath, "stack description"),
+    if (args.length !== 8) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED, () => {
+      const [
+        stackPath,
+        resourcesPath,
+        templateSha,
+        accountId,
+        expiresAt,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ] = args;
+      const result = buildRecoveryPlan({
+        accountId,
+        controlPlaneSha,
+        expiresAt,
+        resourcesResponse: readJson(resourcesPath, "stack resources"),
+        sourceTemplateSemanticSha256: templateSha,
+        stackResponse: readJson(stackPath, "stack description"),
+      });
+      writePrivate(planPath, result.plan);
+      writePrivate(policyPath, result.policyDocument);
+      emitSafePlan(result);
     });
-    writePrivate(planPath, result.plan);
-    writePrivate(policyPath, result.policyDocument);
-    emitSafePlan(result);
-    return;
   }
   if (command === "rebuild-plan") {
-    invariant(args.length === 7, "rebuild-plan arguments are invalid");
-    const [stackPath, resourceStateSha256, accountId, expiresAt, controlPlaneSha, planPath, policyPath] = args;
-    const result = buildRecoveryPlan({
-      accountId,
-      controlPlaneSha,
-      expiresAt,
-      preparedResourceStateSha256: resourceStateSha256,
-      sourceTemplateSemanticSha256: TARGET.sourceTemplateSemanticSha256,
-      stackResponse: readJson(stackPath, "stack description"),
+    if (args.length !== 7) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED, () => {
+      const [
+        stackPath,
+        resourceStateSha256,
+        accountId,
+        expiresAt,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ] = args;
+      const result = buildRecoveryPlan({
+        accountId,
+        controlPlaneSha,
+        expiresAt,
+        preparedResourceStateSha256: resourceStateSha256,
+        sourceTemplateSemanticSha256: TARGET.sourceTemplateSemanticSha256,
+        stackResponse: readJson(stackPath, "stack description"),
+      });
+      writePrivate(planPath, result.plan);
+      writePrivate(policyPath, result.policyDocument);
+      emitSafePlan(result);
     });
-    writePrivate(planPath, result.plan);
-    writePrivate(policyPath, result.policyDocument);
-    emitSafePlan(result);
-    return;
   }
   usage();
 }
@@ -437,8 +491,8 @@ const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).hr
 if (import.meta.url === invokedPath) {
   try {
     main();
-  } catch {
-    process.stderr.write("AWS incident recovery validation failed\n");
+  } catch (error) {
+    process.stderr.write(`::error::${sanitizedCliFailureCode(error)}\n`);
     process.exitCode = 1;
   }
 }
