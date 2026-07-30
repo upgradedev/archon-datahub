@@ -506,6 +506,10 @@ require_text "${foundation_workflow}" \
   '${{ runner.temp }}/aws-foundation-failure/SHA256SUMS' \
   '${{ runner.temp }}/aws-foundation-failure/cfn-failure.json'
 require_text "${foundation_workflow}" \
+  'explicitIncidentRecoveryContract:' \
+  '"contracts/aws-incident-recovery-v1.json"' \
+  'explicitIncidentRecoveryStatus:' \
+  '"recovered-delete-complete-cleanup-proven"' \
   '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
 require_text "${foundation_workflow}" \
   'test "${NODE_VERSION}" = "${contract_node_version}"' \
