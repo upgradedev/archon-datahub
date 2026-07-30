@@ -15,7 +15,7 @@ mkdir -p "${state}"
 increment() {
   local name="$1" path="${state}/${1}.count" count=0
   if [[ -f "${path}" ]]; then count="$(<"${path}")"; fi
-  count=$((count + 1)); printf '%s' "${count}" >"${path}"
+  count=$((count + 1)); printf '%s' "${count}" >"${path}"; printf '%s' "${count}"
 }
 temp_removed=false
 if [[ -f "${state}/temp-removed" ]]; then temp_removed=true; fi
@@ -24,7 +24,13 @@ case "${1:-}:${2:-}" in
     printf '{"Account":"%s","Arn":"arn:aws:sts::%s:assumed-role/archon-datahub-github-foundation/test-session","UserId":"fixture"}\n' "${FAKE_ACCOUNT_ID}" "${FAKE_ACCOUNT_ID}"
     ;;
   iam:list-role-policies)
-    increment list-role-policies
+    if [[ "$#" -ne 6 || "$3" != "--role-name" ||
+      "$4" != "archon-datahub-github-governed-canary-recovery" ||
+      "$5" != "--output" || "$6" != "json" ]]; then
+      echo "unexpected ListRolePolicies arguments" >&2
+      exit 96
+    fi
+    list_call="$(increment list-role-policies)"
     case "${FAKE_INITIAL_INVENTORY:-base}" in
       access-denied)
         echo "An error occurred (AccessDenied): ${FAKE_PRIVATE_MARKER}" >&2
@@ -38,6 +44,15 @@ case "${1:-}:${2:-}" in
           printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
         else
           printf '%s\n' '{"PolicyNames":["archon-incident-30546241677-delete","archon-staging-stack-read"]}'
+        fi
+        ;;
+      base-temp-reset)
+        if [[ "${temp_removed}" == false ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-incident-30546241677-delete","archon-staging-stack-read"]}'
+        elif [[ "${list_call}" == 3 ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","transient-policy"]}'
+        else
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
         fi
         ;;
       base-other)
@@ -54,7 +69,14 @@ case "${1:-}:${2:-}" in
     esac
     ;;
   iam:delete-role-policy)
-    increment delete-role-policy
+    if [[ "$#" -ne 6 || "$3" != "--role-name" ||
+      "$4" != "archon-datahub-github-governed-canary-recovery" ||
+      "$5" != "--policy-name" ||
+      "$6" != "archon-incident-30546241677-delete" ]]; then
+      echo "unexpected DeleteRolePolicy arguments" >&2
+      exit 95
+    fi
+    increment delete-role-policy >/dev/null
     case "${FAKE_DELETE_MODE:-success}" in
       success)
         : >"${state}/temp-removed"
@@ -72,7 +94,7 @@ case "${1:-}:${2:-}" in
     esac
     ;;
   cloudformation:list-stacks)
-    increment list-stacks
+    increment list-stacks >/dev/null
     echo "An error occurred (AccessDenied) when calling the ListStacks operation: ${FAKE_PRIVATE_MARKER}" >&2
     exit 254
     ;;
@@ -139,6 +161,12 @@ for accepted in success raced-no-such; do
   test -f "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'present cleanup evidence is missing'
   assert_no_raw_error "${case_root}"
 done
+
+run_driver cleanup-consecutive-reset cleanup success base-temp-reset || fail 'cleanup should recover after a transient non-absent read'
+case_root="${test_root}/cleanup-consecutive-reset"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 1 || fail 'reset sequence must delete exactly once'
+test "$(call_count "${case_root}/state/list-role-policies.count")" = 6 || fail 'non-absent read must reset three-new-read confirmation count'
+test -f "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'reset sequence cleanup evidence is missing'
 
 if run_driver cleanup-delete-access-denied cleanup access-denied base-temp; then
   fail 'persistent policy after opaque delete failure must fail closed'

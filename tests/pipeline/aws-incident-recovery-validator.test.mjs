@@ -391,7 +391,7 @@ test("CLI failure-code sanitizer rejects raw and spoofed error properties", () =
     CLI_FAILURE_CODES.INVALID_INVOCATION
   );
 });
-test("CLI exposes distinct sanitized codes for stack status and physical survivors", () => {
+test("CLI maps every plan invariant to an exact sanitized code", () => {
   const privateMarker = "PRIVATE_PLAN_INVARIANT_4b91";
   const root = mkdtempSync(join(tmpdir(), `archon-${privateMarker}-`));
   const stackPath = join(root, "stack.json");
@@ -401,55 +401,111 @@ test("CLI exposes distinct sanitized codes for stack status and physical survivo
   const liveExpiry = new Date(Date.now() + 5 * 60 * 1_000)
     .toISOString()
     .replace(/\.\d{3}Z$/u, "Z");
-  const invoke = () =>
-    spawnSync(
-      process.execPath,
-      [
-        validatorCli,
-        "build-plan",
-        stackPath,
-        resourcesPath,
-        TARGET.sourceTemplateSemanticSha256,
-        accountId,
-        liveExpiry,
-        controlPlaneSha,
-        planPath,
-        policyPath,
-      ],
-      {
-        encoding: "utf8",
-        env: { ...process.env, GITHUB_ACTIONS: "true", RUNNER_TEMP: root },
-      }
-    );
+  const cases = [
+    {
+      expected: CLI_FAILURE_CODES.STACK_ID_INVALID,
+      stackOverrides: { StackId: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_STATUS_INVALID,
+      stackOverrides: { StackStatus: `DELETE_FAILED_${privateMarker}` },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_AUTHORITY_INVALID,
+      stackOverrides: { RoleARN: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_NESTING_INVALID,
+      stackOverrides: { ParentId: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_TERMINATION_PROTECTION_INVALID,
+      stackOverrides: { EnableTerminationProtection: true },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_TAGS_INVALID,
+      stackOverrides: { Tags: [{ Key: "Application", Value: privateMarker }] },
+    },
+    {
+      expected: CLI_FAILURE_CODES.TEMPLATE_IDENTITY_INVALID,
+      templateSha: privateMarker,
+    },
+    {
+      expected: CLI_FAILURE_CODES.TTL_INVALID,
+      expiresAt: privateMarker,
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_STATE_UNAVAILABLE,
+      resources: {},
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_STATE_EMPTY,
+      resources: { StackResourceSummaries: [] },
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_UNSUPPORTED_STATUS,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[1].ResourceStatus =
+          `UPDATE_FAILED_${privateMarker}`;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_MISMATCH,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].ResourceType = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE,
+      mutateResources(resources) {
+        resources.StackResourceSummaries.push({
+          ...resources.StackResourceSummaries[0],
+        });
+      },
+    },
+  ];
 
   try {
-    writeFileSync(
-      stackPath,
-      JSON.stringify(stackResponse({ StackStatus: `DELETE_FAILED_${privateMarker}` })),
-      "utf8"
-    );
-    writeFileSync(resourcesPath, JSON.stringify(resourcesResponse()), "utf8");
-    let result = invoke();
-    assert.equal(result.status, 1);
-    assert.equal(
-      result.stderr,
-      `::error::${CLI_FAILURE_CODES.STACK_STATUS_INVALID}\n`
-    );
-    assert.equal(result.stderr.includes(privateMarker), false);
-    assert.equal(result.stderr.includes("DELETE_FAILED"), false);
-
-    writeFileSync(stackPath, JSON.stringify(stackResponse()), "utf8");
-    const physicalSurvivor = resourcesResponse();
-    physicalSurvivor.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
-    writeFileSync(resourcesPath, JSON.stringify(physicalSurvivor), "utf8");
-    result = invoke();
-    assert.equal(result.status, 1);
-    assert.equal(
-      result.stderr,
-      `::error::${CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID}\n`
-    );
-    assert.equal(result.stderr.includes(privateMarker), false);
-    assert.equal(result.stderr.includes("PhysicalResourceId"), false);
+    for (const testCase of cases) {
+      const stack = stackResponse(testCase.stackOverrides);
+      const resources = testCase.resources ?? resourcesResponse();
+      testCase.mutateResources?.(resources);
+      writeFileSync(stackPath, JSON.stringify(stack), "utf8");
+      writeFileSync(resourcesPath, JSON.stringify(resources), "utf8");
+      const result = spawnSync(
+        process.execPath,
+        [
+          validatorCli,
+          "build-plan",
+          stackPath,
+          resourcesPath,
+          testCase.templateSha ?? TARGET.sourceTemplateSemanticSha256,
+          accountId,
+          testCase.expiresAt ?? liveExpiry,
+          controlPlaneSha,
+          planPath,
+          policyPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, GITHUB_ACTIONS: "true", RUNNER_TEMP: root },
+        }
+      );
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, `::error::${testCase.expected}\n`);
+      assert.equal(result.stderr.includes(privateMarker), false);
+      assert.doesNotMatch(
+        result.stderr,
+        /DELETE_FAILED|PhysicalResourceId|UPDATE_FAILED|ENOENT/u
+      );
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
