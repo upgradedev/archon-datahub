@@ -246,13 +246,14 @@ export function buildRecoveryPlan({
   invariant(Array.isArray(stackResponse.Stacks) && stackResponse.Stacks.length === 1, "target stack is not unique");
   const stack = stackResponse.Stacks[0];
   invariant(stack.StackName === TARGET.stackName, "target stack name differs");
-  const exactStackIdPattern = new RegExp(
-    `^arn:aws:cloudformation:${TARGET.region}:${accountId}:stack/${TARGET.stackName}/` +
-      "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
-    "u"
-  );
+  const expectedStackIdPrefix =
+    `arn:aws:cloudformation:${TARGET.region}:${accountId}:stack/${TARGET.stackName}/`;
+  const stackIdSuffix =
+    typeof stack.StackId === "string" && stack.StackId.startsWith(expectedStackIdPrefix)
+      ? stack.StackId.slice(expectedStackIdPrefix.length)
+      : "";
   invariant(
-    typeof stack.StackId === "string" && exactStackIdPattern.test(stack.StackId),
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(stackIdSuffix),
     "target stack ID is invalid"
   );
   invariant(stack.StackStatus === "ROLLBACK_COMPLETE", "target stack status is not recoverable");
