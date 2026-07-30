@@ -1,0 +1,166 @@
+{
+  "schemaVersion": "archon.datahub-demo-state/v1",
+  "owner": "https://github.com/upgradedev/archon-datahub",
+  "officialBaseline": {
+    "name": "showcase-ecommerce",
+    "description": "Official DataHub showcase-ecommerce data pack, pinned to an immutable upstream commit.",
+    "repository": "https://github.com/datahub-project/static-assets",
+    "commit": "edbfb6dafd95fc401d90b104776eb790077c4478",
+    "tree": "4cb2a5bfee6caaf2c1996ccc7e6da37b14c9efe5",
+    "commitSignatureVerified": true,
+    "referenceTimestamp": 1769615173327,
+    "packFormatVersion": "1",
+    "indexVersion": "4",
+    "expectedMcpCount": 3873,
+    "expectedUniqueEntityUrnCount": 1088,
+    "files": [
+      {
+        "path": "index.json",
+        "size": 167,
+        "gitBlob": "758fc37055ab90354b55311b149b43c24e0c9f71",
+        "sha256": "014ba86260b27a74c31ff021ddfe3daec32e76a9dc1b3f0229570baf0600cdab"
+      },
+      {
+        "path": "01-definitions.json",
+        "size": 6001,
+        "gitBlob": "f3648fdc12722a887dbf8f410ff01856ada2c542",
+        "sha256": "3ecaf19324736331d6edb80c4fd7363d5b15fd41e2f9daf3ac68506aedf86608",
+        "waitForCompletion": true
+      },
+      {
+        "path": "02-data.json",
+        "size": 3183160,
+        "gitBlob": "71793d2da973f9c2ac773e375ed8b34b7ea8f059",
+        "sha256": "0b3aeaa8941acc79f7d08db370ec092912ca77c15c2c2cdba2bf243225630c90",
+        "waitForCompletion": false
+      },
+      {
+        "path": "03-context.json",
+        "size": 68944,
+        "gitBlob": "22b929ea3c3ce18b1d0eb95978f78241a9f9e87b",
+        "sha256": "58ce56e42288d085e5d1ce07e2b9e98ea732efa2c144941df9a8805ad50f3c71",
+        "waitForCompletion": false
+      }
+    ],
+    "anchors": [
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_history,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry.explore.order_details,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Geographic_Measures,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:tableau,b2fd91.f32082e5-06b8-f46e-9047-4611fffe66b0,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.order_entry_db.order_entry.order_items,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:postgres,b2fd91.order_entry_db.order_entry.regions,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "dataset",
+        "urn": "urn:li:dataset:(urn:li:dataPlatform:s3,b2fd91.demo-data-bucket/order_entry/products,PROD)",
+        "aspect": "datasetProperties"
+      },
+      {
+        "entityType": "domain",
+        "urn": "urn:li:domain:b2fd91.ce125416-344c-4db4-9f07-f7086a851606",
+        "aspect": "domainProperties"
+      },
+      {
+        "entityType": "dataProduct",
+        "urn": "urn:li:dataProduct:b2fd91.e0e95662-34bb-42fc-9dcc-29002bbbfeda",
+        "aspect": "dataProductProperties"
+      },
+      {
+        "entityType": "dashboard",
+        "urn": "urn:li:dashboard:(tableau,b2fd91.843bf583-900b-f1ba-0532-b5e67a0373dc)",
+        "aspect": "dashboardInfo"
+      },
+      {
+        "entityType": "glossaryTerm",
+        "urn": "urn:li:glossaryTerm:b2fd91.Email_Address",
+        "aspect": "glossaryTermInfo"
+      }
+    ]
+  },
+  "binding": {
+    "query": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.archon_demo.archon_orders_audit_target,PROD)",
+    "targetUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.archon_demo.archon_orders_audit_target,PROD)",
+    "domainUrn": "urn:li:domain:archonShowcaseEcommerce",
+    "danglingUpstreamUrn": "urn:li:dataset:(urn:li:dataPlatform:external,archon_demo.intentionally_missing_orders_feed,PROD)",
+    "sensitiveFieldPath": "email",
+    "ownedUrns": [
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.archon_demo.archon_orders_audit_target,PROD)",
+      "urn:li:domain:archonShowcaseEcommerce"
+    ]
+  },
+  "state": {
+    "domain": {
+      "name": "Archon Showcase E-commerce",
+      "description": "Archon-owned domain for the reproducible DataHub hackathon audit target."
+    },
+    "dataset": {
+      "name": "archon_orders_audit_target",
+      "description": "Reproducible Archon audit target: retained cross-source ownership contradiction, one intentionally unclassified email field, and one intentionally dangling upstream.",
+      "qualifiedName": "b2fd91.archon_demo.archon_orders_audit_target",
+      "schemaName": "archon_orders_audit_target",
+      "fields": [
+        {
+          "path": "order_id",
+          "nativeType": "VARCHAR",
+          "logicalType": "string",
+          "nullable": false,
+          "isPartOfKey": true
+        },
+        {
+          "path": "email",
+          "nativeType": "VARCHAR",
+          "logicalType": "string",
+          "nullable": false,
+          "isPartOfKey": false
+        },
+        {
+          "path": "amount",
+          "nativeType": "NUMBER",
+          "logicalType": "number",
+          "nullable": false,
+          "isPartOfKey": false
+        }
+      ]
+    },
+    "ownershipHistory": [
+      {
+        "owner": "urn:li:corpGroup:b2fd91.BusinessIntelligence",
+        "ownershipType": "DATAOWNER",
+        "pipelineName": "snowflake-prod",
+        "runId": "snowflake-connector-2026-06-01",
+        "lastObserved": 1780304400000
+      },
+      {
+        "owner": "urn:li:corpGroup:b2fd91.data-governance",
+        "ownershipType": "DATAOWNER",
+        "pipelineName": "dbt-prod",
+        "runId": "dbt-manifest-2026-07-01",
+        "lastObserved": 1782896400000
+      }
+    ]
+  },
+  "resetConfirmation": "RESET ARCHON DATAHUB DEMO"
+}

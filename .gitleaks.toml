@@ -1,0 +1,12 @@
+title = "Archon DataHub secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "AWS ACM EC P-256 certificate algorithm is a public enum, not a credential"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''(?i)(certificatekeyalgorithm|keyalgorithm)[^\r\n]{0,64}EC_prime256v1''',
+]
