@@ -161,6 +161,22 @@ jq --exit-status '
       version: "v4.47.2"
     }
   } and
+  .aws.sharedApiGatewayLogging == {
+    external: {
+      bindingSha256Variable: "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+      managedStackMustBeAbsent: true,
+      mutation: "none",
+      sameAccountRoleArnRequired: true,
+      takeover: "forbidden"
+    },
+    managed: {
+      inlinePolicyName: "archon-apigateway-cloudwatch-logs",
+      roleName: "archon-datahub-apigateway-cloudwatch-logs",
+      stackName: "Archon-Shared-ApiGateway-Logging"
+    },
+    ownershipModes: ["foundation-managed", "external-pinned"],
+    region: "eu-west-1"
+  } and
   .aws.governedCanaryRoles.stackName == "Archon-Governed-Canary-Roles" and
   .aws.governedCanaryRoles.region == "eu-west-1" and
   .aws.governedCanaryRoles.roles.prepare == {
@@ -374,6 +390,12 @@ require_text "${foundation_workflow}" \
   'test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"' \
   'test "${CONFIRMATION_INPUT}" = "BOOTSTRAP_CDK_FOUNDATION"' \
   '$rule.prevent_self_review == false' \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}' \
+  '[[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" =~ ^[0-9a-f]{64}$ ]]' \
+  'SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}' \
+  'DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}' \
+  'Shared API Gateway logging account: pinned external binding, unchanged, no takeover' \
+  'Managed stack inventory: \`9\` plus one external account binding' \
   'role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}' \
   'scripts/render-aws-foundation-policy.mjs' \
   'archon-aws-foundation-control' \
@@ -860,11 +882,27 @@ require_text "${reconciler}" \
   'PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE' \
   'readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"' \
   'Reconcile the three governed-canary read roles' \
-  'Require all ten foundation stacks to be IN_SYNC' \
-  "jq -e 'length == 10 and all(.[]; .stackDriftStatus == \"IN_SYNC\")'" \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256="${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256:-}"' \
+  'inspect_api_gateway_binding() {' \
+  'assert_stack_absent() {' \
+  '^arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/([A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]{1,64}$' \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256=${observed_sha}' \
+  'clear the stale external API Gateway binding pin before managed reconciliation' \
+  'test "${shared_api_gateway_mode}" = "${shared_api_gateway_preflight_mode}"' \
+  'bindingState: "UNCHANGED"' \
+  'managedStackAbsent: true' \
+  'mutation: "none"' \
+  'takeover: "forbidden"' \
+  'validation: "pinned-and-unchanged"' \
+  'validation: "managed-and-verified"' \
+  'Require every managed foundation stack to be IN_SYNC' \
+  'test "${drift_stack_count}" -eq 10' \
+  'test "${drift_stack_count}" -eq 9' \
+  'managedStackCount: $driftStackCount' \
+  'externalBindingCount:' \
   'test "${compact_policy_size}" -le 6144' \
   'test "${boundary_compact_size}" -le 6144' \
-  'stackCount: 10' \
+
   'sourceTemplateSha256: $sourceTemplateSha256' \
   'canary_role_binding_sha=${combined_canary_binding_sha}' \
   'operational_role_binding_sha=${combined_operational_binding_sha}' \
@@ -874,6 +912,32 @@ require_text "${reconciler}" \
   'deployRequirement: "explicit-role-migration"' \
   'applicationStackRoleTransition: $applicationStackRoleTransition' \
   'application_stack_role_transition=${application_stack_role_transition_state}'
+shared_api_gateway_block="$(
+  sed -n \
+    "/foundation_phase='shared-api-gateway'/,/foundation_phase='governed-canary-roles'/p" \
+    "${reconciler}"
+)"
+external_shared_branch="$(
+  sed -n \
+    '/if \[\[ "${shared_api_gateway_mode}" == "external-pinned" \]\]/,/^else$/p' \
+    <<<"${shared_api_gateway_block}" |
+    sed '$d'
+)"
+test -n "${external_shared_branch}" ||
+  fail "missing external-pinned reconciliation branch"
+for forbidden_external_action in \
+  'aws cloudformation deploy' \
+  'aws cloudformation update-termination-protection' \
+  'aws iam ' \
+  'aws apigateway update-account' \
+  'aws apigateway patch'; do
+  if grep -Fq "${forbidden_external_action}" <<<"${external_shared_branch}"; then
+    fail "external API Gateway mode must remain mutation- and IAM-inspection-free"
+  fi
+done
+forbid_text "${reconciler}" \
+  'Require all ten foundation stacks to be IN_SYNC' \
+  'stackCount: 10'
 test "$(
   grep -Fc 'infra/aws/foundation/cdk-execution-policy.yml' "${reconciler}"
 )" -eq 1 ||
@@ -989,7 +1053,15 @@ require_text "${runbook}" \
   'exact committed `infra/aws/package-lock.json` entry' \
   'installed CLI version must exactly match that decoded lock entry' \
   'version `32`' \
-  'ten CloudFormation stack instances' \
+  'Nine CloudFormation stack instances are always managed by Archon' \
+  'ten managed stacks' \
+  'nine managed stacks plus one pinned external account binding' \
+  '`AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`' \
+  '`foundation-managed`' \
+  '`external-pinned`' \
+  '`pinned-and-unchanged`' \
+  'no API Gateway account mutation' \
+  'managed stack must be absent' \
   '`Archon-Governed-Canary-Roles`' \
   '`archon-aws-foundation-control`' \
   '`archon-aws-foundation-assets`' \
@@ -1014,6 +1086,10 @@ require_text "${runbook}" \
   '`foundation-complete-deploy-migration-required`' \
   '`requires-explicit-deploy-migration`' \
   '`ready-for-deploy`'
+forbid_text "${runbook}" \
+  'ten CloudFormation stack instances' \
+  'reconciles all ten stacks' \
+  'ten-stack drift evidence'
 require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
