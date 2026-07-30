@@ -242,6 +242,8 @@ jobs:
               requiresZeroAttachedManagedPolicies: true,
               requiresZeroInlinePolicies: true
             } and
+            .aws.foundationPolicies.migrationContract ==
+              "contracts/aws-foundation-policy-migration-v1.json" and
             .aws.foundationPolicies.sourceBundleAttachable == false and
             .aws.foundationPolicies.roleInlinePolicyCount == 0 and
             .aws.foundationPolicies.roleAttachedPolicyCount == 4 and

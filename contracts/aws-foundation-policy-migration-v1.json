@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "archon.aws-foundation-policy-migration/v1",
+  "status": "ready-for-migration",
+  "sourceFailure": {
+    "runId": 30586169834,
+    "runAttempt": 1,
+    "headSha": "06680d074c4d2a4bc18a64b9c217c137c3bdcf5a",
+    "phase": "drift-verification",
+    "diagnostic": "missing-drift-dependency-permissions",
+    "awsMutationsBeforeFailure": "reconciliation-completed-postchecks-passed",
+    "failureArtifact": "not-authored-command-outside-sanitized-wrapper"
+  },
+  "workflow": {
+    "entry": ".github/workflows/aws-foundation-policy-migration.yml",
+    "cleanup": ".github/workflows/aws-foundation-policy-migration-cleanup.yml",
+    "branch": "master",
+    "concurrencyGroup": "archon-aws-control-plane",
+    "confirmation": "MIGRATE EXACT FOUNDATION CONTROL POLICY",
+    "cleanupConfirmation": "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION",
+    "ownerActorOnly": true,
+    "exactHeadRequired": true
+  },
+  "policy": {
+    "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+    "renderer": "scripts/render-aws-foundation-policy.mjs",
+    "group": "control",
+    "name": "archon-aws-foundation-control",
+    "initialVersionCount": 1,
+    "successfulVersionCount": 2,
+    "retainPreviousDefaultForRollback": true,
+    "exactDelta": {
+      "stackScopedStatement": "ReconcileExactFoundationStacks",
+      "stackScopedActions": [
+        "cloudformation:DetectStackResourceDrift"
+      ],
+      "wildcardStatement": "InspectFoundationTemplates",
+      "wildcardActions": [
+        "cloudformation:BatchDescribeTypeConfigurations"
+      ]
+    }
+  },
+  "authorization": {
+    "installerEnvironment": "aws-foundation",
+    "executorEnvironment": "governed-canary-recovery",
+    "executorRoleName": "archon-datahub-github-governed-canary-recovery",
+    "temporaryPolicyName": "archon-foundation-control-policy-migration",
+    "ttlSeconds": 1200,
+    "managedPolicyActions": [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "temporaryPolicyReadAction": "iam:GetRolePolicy",
+    "selfPersistenceActionsAllowed": false,
+    "canonicalReadbackRequired": true,
+    "mandatoryRevocation": true,
+    "absenceReadCount": 3
+  },
+  "phases": [
+    "prepare-and-authorize",
+    "create-and-verify-nondefault-version",
+    "single-default-switch",
+    "postverify-and-revoke"
+  ],
+  "recovery": {
+    "automaticFollowerOnNonSuccess": true,
+    "manualDispatch": true,
+    "rollbackToPreviousDefault": true,
+    "deleteOnlyNewNondefaultVersion": true,
+    "mandatoryAuthorizationRevocation": true
+  },
+  "evidence": {
+    "schemaVersion": "archon.aws-foundation-policy-migration-receipt/v1",
+    "artifactFiles": [
+      "SHA256SUMS",
+      "migration.json"
+    ],
+    "artifactRetentionDays": 90,
+    "canonicalJson": true,
+    "checksumSealed": true,
+    "attestationRequired": true,
+    "sensitiveIdentifiersAllowed": false
+  }
+}
