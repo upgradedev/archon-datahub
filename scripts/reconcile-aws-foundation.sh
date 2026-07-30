@@ -74,6 +74,7 @@ readonly SHARED_API_ROLE="archon-datahub-apigateway-cloudwatch-logs"
 readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"
 readonly LEGACY_DEPLOY_ROLE="archon-datahub-github-deploy"
 readonly EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-evidence"
+readonly FAILURE_EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-failure"
 shared_api_gateway_mode=""
 shared_api_gateway_observed_role_arn=""
 shared_api_gateway_observed_binding_sha=""
@@ -230,11 +231,283 @@ revalidate_master() {
   done
 }
 
+assert_diagnostic_stack_allowlisted() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  case "${stack_label}|${region}|${stack_name}" in
+    "staging-iam|${PRIMARY_REGION}|${IAM_STACK[staging]}" | \
+      "production-iam|${PRIMARY_REGION}|${IAM_STACK[production]}" | \
+      "staging-deploy|${PRIMARY_REGION}|${DEPLOY_STACK[staging]}" | \
+      "production-deploy|${PRIMARY_REGION}|${DEPLOY_STACK[production]}" | \
+      "staging-bootstrap-primary|${PRIMARY_REGION}|${BOOTSTRAP_STACK[staging]}" | \
+      "staging-bootstrap-edge|${EDGE_REGION}|${BOOTSTRAP_STACK[staging]}" | \
+      "production-bootstrap-primary|${PRIMARY_REGION}|${BOOTSTRAP_STACK[production]}" | \
+      "production-bootstrap-edge|${EDGE_REGION}|${BOOTSTRAP_STACK[production]}" | \
+      "shared-api-gateway|${PRIMARY_REGION}|${SHARED_API_STACK}" | \
+      "governed-canary-roles|${PRIMARY_REGION}|${CANARY_ROLE_STACK}")
+      return 0
+      ;;
+  esac
+  echo "::error::Refusing CloudFormation diagnostics for a non-allowlisted stack label" >&2
+  return 1
+}
+
+cleanup_failure_evidence_staging() {
+  local staging_dir="$1"
+  if [[ "${staging_dir}" != "${FAILURE_EVIDENCE_DIR}.staging" ]]; then
+    return 1
+  fi
+  if [[ ! -e "${staging_dir}" && ! -L "${staging_dir}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${staging_dir}" || -L "${staging_dir}" ]]; then
+    return 1
+  fi
+  rm -f -- \
+    "${staging_dir}/.cfn-failure.json.tmp" \
+    "${staging_dir}/.cfn-failure.canonical.tmp" \
+    "${staging_dir}/cfn-failure.json" \
+    "${staging_dir}/SHA256SUMS" 2>/dev/null || true
+  rmdir -- "${staging_dir}" 2>/dev/null
+}
+
+capture_managed_stack_failure() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  local stack_status="${4:-}"
+  local staging_dir="${FAILURE_EVIDENCE_DIR}.staging"
+  local diagnostic_tmp="${staging_dir}/.cfn-failure.json.tmp"
+  local canonical_tmp="${staging_dir}/.cfn-failure.canonical.tmp"
+  local canonical_safe_json
+  local computed_digest
+  local actual_inventory_sha
+  local expected_inventory_sha
+
+  if ! assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"; then
+    return 1
+  fi
+  if [[ -z "${stack_status}" ]]; then
+    if ! stack_status="$(
+      aws cloudformation describe-stacks \
+        --region "${region}" \
+        --stack-name "${stack_name}" \
+        --query 'Stacks[0].StackStatus' \
+        --output text 2>/dev/null
+    )"; then
+      stack_status="UNKNOWN"
+    fi
+  fi
+  case "${stack_status}" in
+    CREATE_COMPLETE | CREATE_FAILED | CREATE_IN_PROGRESS | \
+      DELETE_COMPLETE | DELETE_FAILED | DELETE_IN_PROGRESS | \
+      IMPORT_COMPLETE | IMPORT_IN_PROGRESS | IMPORT_ROLLBACK_COMPLETE | \
+      IMPORT_ROLLBACK_FAILED | IMPORT_ROLLBACK_IN_PROGRESS | \
+      REVIEW_IN_PROGRESS | ROLLBACK_COMPLETE | ROLLBACK_FAILED | \
+      ROLLBACK_IN_PROGRESS | UPDATE_COMPLETE | \
+      UPDATE_COMPLETE_CLEANUP_IN_PROGRESS | UPDATE_FAILED | \
+      UPDATE_IN_PROGRESS | UPDATE_ROLLBACK_COMPLETE | \
+      UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS | \
+      UPDATE_ROLLBACK_FAILED | UPDATE_ROLLBACK_IN_PROGRESS)
+      ;;
+    *)
+      stack_status="UNKNOWN"
+      ;;
+  esac
+
+  if [[ -e "${FAILURE_EVIDENCE_DIR}" || -L "${FAILURE_EVIDENCE_DIR}" || \
+    -e "${staging_dir}" || -L "${staging_dir}" ]]; then
+    echo "::error::Sanitized CloudFormation failure evidence already exists" >&2
+    return 1
+  fi
+  if ! install -d -m 0700 "${staging_dir}"; then
+    echo "::error::Unable to stage sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if [[ ! -d "${staging_dir}" || -L "${staging_dir}" ]]; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Invalid sanitized CloudFormation failure staging directory" >&2
+    return 1
+  fi
+  if ! aws cloudformation describe-stack-events \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --max-items 25 \
+    --output json 2>/dev/null |
+    node scripts/sanitize-cloudformation-failure.mjs \
+      --stack-label "${stack_label}" \
+      --stack-status "${stack_status}" >"${diagnostic_tmp}"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to author sanitized CloudFormation failure evidence for the allowlisted stack label" >&2
+    return 1
+  fi
+  if ! test "$(wc -c <"${diagnostic_tmp}")" -le 2048; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence exceeded its size limit" >&2
+    return 1
+  fi
+  if ! jq -cS . "${diagnostic_tmp}" >"${canonical_tmp}" 2>/dev/null; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence was not valid JSON" >&2
+    return 1
+  fi
+  if ! cmp -s "${diagnostic_tmp}" "${canonical_tmp}"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence was not canonical" >&2
+    return 1
+  fi
+  if ! rm -f -- "${canonical_tmp}"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to finalize sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if ! jq -e '
+    (keys | sort) == [
+      "diagnosticSha256",
+      "logicalResourceId",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ] and
+    .schemaVersion == "archon.aws-foundation-cfn-failure/v1" and
+    (.diagnosticSha256 | test("^[0-9a-f]{64}$"))
+  ' "${diagnostic_tmp}" >/dev/null 2>&1; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence failed schema validation" >&2
+    return 1
+  fi
+  if ! canonical_safe_json="$(
+    jq -cS '{
+      logicalResourceId,
+      reasonCategory,
+      resourceStatus,
+      resourceType,
+      schemaVersion,
+      stackLabel,
+      stackStatus
+    }' "${diagnostic_tmp}" 2>/dev/null
+  )"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to canonicalize sanitized diagnostic fields" >&2
+    return 1
+  fi
+  if ! computed_digest="$(
+    printf '%s' "${canonical_safe_json}" |
+      sha256sum |
+      awk '{print $1}'
+  )"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to recompute the sanitized diagnostic digest" >&2
+    return 1
+  fi
+  if [[ ! "${computed_digest}" =~ ^[0-9a-f]{64}$ ]] || \
+    ! jq -e --arg computedDigest "${computed_digest}" \
+      '.diagnosticSha256 == $computedDigest' \
+      "${diagnostic_tmp}" >/dev/null 2>&1; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation diagnostic digest mismatch" >&2
+    return 1
+  fi
+  if ! mv -T -- "${diagnostic_tmp}" "${staging_dir}/cfn-failure.json"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to finalize sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if ! (
+    cd "${staging_dir}" &&
+      sha256sum cfn-failure.json >SHA256SUMS &&
+      test "$(wc -l <SHA256SUMS)" -eq 1 &&
+      grep -Eq '^[0-9a-f]{64}  cfn-failure.json$' SHA256SUMS &&
+      sha256sum --check --strict SHA256SUMS >/dev/null 2>&1
+  ); then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to checksum-seal sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if ! actual_inventory_sha="$(
+    find -P "${staging_dir}" -mindepth 1 -printf '%P\t%y\0' |
+      LC_ALL=C sort -z |
+      sha256sum |
+      awk '{print $1}'
+  )"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to inventory sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if ! expected_inventory_sha="$(
+    printf 'SHA256SUMS\tf\0cfn-failure.json\tf\0' |
+      sha256sum |
+      awk '{print $1}'
+  )"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to derive the expected failure evidence inventory" >&2
+    return 1
+  fi
+  if [[ ! "${actual_inventory_sha}" =~ ^[0-9a-f]{64}$ || \
+    "${actual_inventory_sha}" != "${expected_inventory_sha}" ]]; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence inventory mismatch" >&2
+    return 1
+  fi
+  if [[ -e "${FAILURE_EVIDENCE_DIR}" || -L "${FAILURE_EVIDENCE_DIR}" ]]; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Sanitized CloudFormation failure evidence destination appeared during capture" >&2
+    return 1
+  fi
+  if ! mv -T -- "${staging_dir}" "${FAILURE_EVIDENCE_DIR}"; then
+    cleanup_failure_evidence_staging "${staging_dir}" >/dev/null 2>&1 || true
+    echo "::error::Unable to publish sanitized CloudFormation failure evidence" >&2
+    return 1
+  fi
+  if [[ ! -d "${FAILURE_EVIDENCE_DIR}" || -L "${FAILURE_EVIDENCE_DIR}" ]]; then
+    echo "::error::Published sanitized CloudFormation failure evidence is invalid" >&2
+    return 1
+  fi
+  printf '::notice::Sealed sanitized CloudFormation failure evidence for stack label %s\n' \
+    "${stack_label}"
+  return 0
+}
+
+run_managed_stack_command() {
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
+  local command_status
+  shift 3
+
+  if ! assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"; then
+    return 1
+  fi
+  if "$@" >/dev/null 2>&1; then
+    return 0
+  else
+    command_status="$?"
+  fi
+  if ! capture_managed_stack_failure \
+    "${stack_label}" "${region}" "${stack_name}"; then
+    echo "::error::Managed stack command failed and sanitized diagnostic capture was unavailable" >&2
+  fi
+  return "${command_status}"
+}
+
 assert_stack_role_is_null_if_present() {
-  local region="$1"
-  local stack_name="$2"
+  local stack_label="$1"
+  local region="$2"
+  local stack_name="$3"
   local output="${RUNNER_TEMP}/stack-role-${region}-${stack_name}.json"
   local error="${output}.error"
+  local stack_status
+
+  if ! assert_diagnostic_stack_allowlisted \
+    "${stack_label}" "${region}" "${stack_name}"; then
+    return 1
+  fi
   if aws cloudformation describe-stacks \
     --region "${region}" \
     --stack-name "${stack_name}" \
@@ -243,6 +516,28 @@ assert_stack_role_is_null_if_present() {
       (.Stacks | length) == 1 and
       ((.Stacks[0].RoleARN // "") == "")
     ' "${output}" >/dev/null
+    stack_status="$(jq -er '.Stacks[0].StackStatus' "${output}")"
+    case "${stack_status}" in
+      CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE | \
+        IMPORT_COMPLETE | IMPORT_ROLLBACK_COMPLETE)
+        ;;
+      ROLLBACK_COMPLETE | *_FAILED)
+        if ! capture_managed_stack_failure \
+          "${stack_label}" "${region}" "${stack_name}" "${stack_status}"; then
+          echo "::error::Blocked managed stack state could not be sanitized" >&2
+        fi
+        printf \
+          '::error title=Blocked managed foundation stack state::stackLabel=%s; stackStatus=%s\n' \
+          "${stack_label}" "${stack_status}" >&2
+        return 1
+        ;;
+      *)
+        printf \
+          '::error title=Managed foundation stack is not update-safe::stackLabel=%s; stackStatus=%s\n' \
+          "${stack_label}" "${stack_status}" >&2
+        return 1
+        ;;
+    esac
   else
     grep -Eq 'does not exist|ValidationError' "${error}"
   fi
@@ -535,25 +830,25 @@ jq -e '
 ' <<<"${legacy_stacks}" >/dev/null
 
 foundation_phase='preflight:foundation-stack-role-binding:staging:iam'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-iam" "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-bootstrap-primary" "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'
-assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
+assert_stack_role_is_null_if_present "staging-bootstrap-edge" "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:iam'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[production]}"
+assert_stack_role_is_null_if_present "production-iam" "${PRIMARY_REGION}" "${IAM_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:deploy'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
+assert_stack_role_is_null_if_present "production-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
+assert_stack_role_is_null_if_present "production-bootstrap-primary" "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'
-assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
+assert_stack_role_is_null_if_present "production-bootstrap-edge" "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
 foundation_phase='preflight:foundation-stack-role-binding:shared-api'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+assert_stack_role_is_null_if_present "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}"
 foundation_phase='preflight:foundation-stack-role-binding:governed-canary'
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+assert_stack_role_is_null_if_present "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
 foundation_phase='preflight:shared-api-gateway'
 inspect_api_gateway_binding
 shared_api_gateway_preflight_mode="${shared_api_gateway_mode}"
@@ -632,8 +927,10 @@ echo "::group::Reconcile stage IAM foundations"
 for stage in staging production; do
   revalidate_master
   assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
-  aws cloudformation deploy \
+    "${stage}-iam" "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
+  run_managed_stack_command \
+    "${stage}-iam" "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${IAM_STACK[${stage}]}" \
     --template-file "${IAM_FOUNDATION_TEMPLATE}" \
@@ -647,8 +944,10 @@ for stage in staging production; do
       Application=archon-datahub \
       Environment="${stage}" \
       ManagedBy=github-actions \
-      Purpose=stage-iam-foundation >/dev/null
-  aws cloudformation update-termination-protection \
+      Purpose=stage-iam-foundation
+  run_managed_stack_command \
+    "${stage}-iam" "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}" \
+    aws cloudformation update-termination-protection \
     --region "${PRIMARY_REGION}" \
     --stack-name "${IAM_STACK[${stage}]}" \
     --enable-termination-protection
@@ -841,8 +1140,10 @@ if [[ "${shared_api_gateway_mode}" == "external-pinned" ]]; then
       '
   )"
 else
-  assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
-  aws cloudformation deploy \
+  assert_stack_role_is_null_if_present "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+  run_managed_stack_command \
+    "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${SHARED_API_STACK}" \
     --template-file infra/aws/foundation/api-gateway-account.yml \
@@ -852,8 +1153,10 @@ else
       Application=archon-datahub \
       Environment=shared \
       ManagedBy=github-actions \
-      Purpose=shared-apigateway-logging >/dev/null
-  aws cloudformation update-termination-protection \
+      Purpose=shared-apigateway-logging
+  run_managed_stack_command \
+    "shared-api-gateway" "${PRIMARY_REGION}" "${SHARED_API_STACK}" \
+    aws cloudformation update-termination-protection \
     --region "${PRIMARY_REGION}" \
     --stack-name "${SHARED_API_STACK}" \
     --enable-termination-protection
@@ -946,8 +1249,10 @@ echo "::endgroup::"
 foundation_phase='governed-canary-roles'
 echo "::group::Reconcile the three governed-canary read roles"
 revalidate_master
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
-aws cloudformation deploy \
+assert_stack_role_is_null_if_present "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+run_managed_stack_command \
+  "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}" \
+  aws cloudformation deploy \
   --region "${PRIMARY_REGION}" \
   --stack-name "${CANARY_ROLE_STACK}" \
   --template-file infra/aws/foundation/governed-canary-roles.yml \
@@ -955,8 +1260,10 @@ aws cloudformation deploy \
   --no-fail-on-empty-changeset \
   --parameter-overrides \
     GitHubOrganization=upgradedev \
-    GitHubRepository=archon-datahub >/dev/null
-aws cloudformation update-termination-protection \
+    GitHubRepository=archon-datahub
+run_managed_stack_command \
+  "governed-canary-roles" "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}" \
+  aws cloudformation update-termination-protection \
   --region "${PRIMARY_REGION}" \
   --stack-name "${CANARY_ROLE_STACK}" \
   --enable-termination-protection
@@ -1156,10 +1463,16 @@ echo "::group::Bootstrap both isolated stages in both regions"
 for stage in staging production; do
   for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
     target="${stage}:${region}"
+    bootstrap_label="${stage}-bootstrap-primary"
+    if [[ "${region}" == "${EDGE_REGION}" ]]; then
+      bootstrap_label="${stage}-bootstrap-edge"
+    fi
     revalidate_master
     assert_stack_role_is_null_if_present \
-      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
-    infra/aws/node_modules/.bin/cdk bootstrap \
+      "${bootstrap_label}" "${region}" "${BOOTSTRAP_STACK[${stage}]}"
+    run_managed_stack_command \
+      "${bootstrap_label}" "${region}" "${BOOTSTRAP_STACK[${stage}]}" \
+      infra/aws/node_modules/.bin/cdk bootstrap \
       "aws://${EXPECTED_ACCOUNT_ID}/${region}" \
       --template "${BOOTSTRAP_TEMPLATE_BY_TARGET[${target}]}" \
       --toolkit-stack-name "${BOOTSTRAP_STACK[${stage}]}" \
@@ -1183,8 +1496,10 @@ echo "::group::Reconcile the two environment-bound deploy roles"
 for stage in staging production; do
   revalidate_master
   assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
-  aws cloudformation deploy \
+    "${stage}-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
+  run_managed_stack_command \
+    "${stage}-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}" \
+    aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${DEPLOY_STACK[${stage}]}" \
     --template-file infra/aws/foundation/github-actions-deploy-role.yml \
@@ -1202,8 +1517,10 @@ for stage in staging production; do
       Application=archon-datahub \
       Environment="${stage}" \
       ManagedBy=github-actions \
-      Purpose=github-deployment-role >/dev/null
-  aws cloudformation update-termination-protection \
+      Purpose=github-deployment-role
+  run_managed_stack_command \
+    "${stage}-deploy" "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}" \
+    aws cloudformation update-termination-protection \
     --region "${PRIMARY_REGION}" \
     --stack-name "${DEPLOY_STACK[${stage}]}" \
     --enable-termination-protection

@@ -407,6 +407,58 @@
     "artifactRetentionDays": 90,
     "containsRawAccountId": false,
     "containsRawRoleArn": false,
+    "failureDiagnostics": {
+      "schemaVersion": "archon.aws-foundation-cfn-failure/v1",
+      "artifactFiles": [
+        "SHA256SUMS",
+        "cfn-failure.json"
+      ],
+      "artifactRetentionDays": 90,
+      "artifactUpload": "explicit-files-only",
+      "autoRecovery": "forbidden",
+      "canonicalJson": true,
+      "credentialClearProofRequired": true,
+      "diagnosticCount": 1,
+      "digestFields": [
+        "logicalResourceId",
+        "reasonCategory",
+        "resourceStatus",
+        "resourceType",
+        "schemaVersion",
+        "stackLabel",
+        "stackStatus"
+      ],
+      "managedCommandOutput": "suppressed",
+      "maxRecentEvents": 25,
+      "postCredentialDigestRecomputed": true,
+      "rawReasonHashing": false,
+      "rawReasonRetention": false,
+      "recursiveInventory": "exact-two-root-regular-files",
+      "stackIdentity": "allowlisted-label-only",
+      "allowlistedStackLabels": [
+        "governed-canary-roles",
+        "production-bootstrap-edge",
+        "production-bootstrap-primary",
+        "production-deploy",
+        "production-iam",
+        "shared-api-gateway",
+        "staging-bootstrap-edge",
+        "staging-bootstrap-primary",
+        "staging-deploy",
+        "staging-iam"
+      ],
+      "fields": [
+
+        "diagnosticSha256",
+        "logicalResourceId",
+        "reasonCategory",
+        "resourceStatus",
+        "resourceType",
+        "schemaVersion",
+        "stackLabel",
+        "stackStatus"
+      ]
+    },
     "applicationStackRolePreflight": {
       "entryCount": 5,
       "allowedEntryValidations": [
