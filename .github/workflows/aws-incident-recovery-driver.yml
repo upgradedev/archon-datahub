@@ -232,7 +232,8 @@ jobs:
           CONTROL_PLANE_SHA: ${{ steps.source.outputs.control_plane_sha }}
         run: |
           set -euo pipefail
-          export EXPIRES_AT="$(date --utc --date='+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')"
+          EXPIRES_AT="$(date --utc --date='+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')"
+          export EXPIRES_AT
           bash scripts/run-aws-incident-recovery.sh prepare
 
   delete-once:
