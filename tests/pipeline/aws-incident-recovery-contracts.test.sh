@@ -222,7 +222,11 @@ require_text "${driver_workflow}" \
   'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' \
   'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
   'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
-  'aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c'
+  'aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c' \
+  'PREPARED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}' \
+  'PREPARED_POLICY_SHA256: ${{ needs.prepare.outputs.policy_sha256 }}' \
+  'PREPARED_STACK_ID_SHA256: ${{ needs.prepare.outputs.stack_id_sha256 }}' \
+  '[[ "${PREPARED_PLAN_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]'
 for workflow in "${entry}" "${driver_workflow}" "${cleanup_workflow}"; do
   forbid_text "${workflow}" \
     'contents: write' 'checks: write' 'deployments: write' 'issues: write' \

@@ -260,6 +260,9 @@ jobs:
         env:
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           CONTROL_PLANE_SHA: ${{ needs.prepare.outputs.control_plane_sha }}
+          PREPARED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          PREPARED_POLICY_SHA256: ${{ needs.prepare.outputs.policy_sha256 }}
+          PREPARED_STACK_ID_SHA256: ${{ needs.prepare.outputs.stack_id_sha256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -271,9 +274,9 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
             --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
-          [[ "${{ needs.prepare.outputs.plan_digest }}" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "${{ needs.prepare.outputs.policy_sha256 }}" =~ ^sha256:[a-f0-9]{64}$ ]]
-          [[ "${{ needs.prepare.outputs.stack_id_sha256 }}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${PREPARED_PLAN_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${PREPARED_POLICY_SHA256}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${PREPARED_STACK_ID_SHA256}" =~ ^sha256:[a-f0-9]{64}$ ]]
 
       - name: Assume separately approved recovery role
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
