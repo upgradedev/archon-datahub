@@ -16,6 +16,7 @@ permissions:
   actions: read
   attestations: write
   contents: read
+  deployments: read
   id-token: write
 
 concurrency:
@@ -98,6 +99,7 @@ jobs:
       actions: read
       attestations: write
       contents: read
+      deployments: read
       id-token: write
     uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml
     with:
