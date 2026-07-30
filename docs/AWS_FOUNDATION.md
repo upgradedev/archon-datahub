@@ -438,8 +438,8 @@ or API key and is attested before retention.
 
 A managed foundation stack rejected in a failed preflight state, or a managed
 stack command that fails, triggers a bounded diagnostic query for that exact
-allowlisted stack only. Original managed CloudFormation and CDK command stdout
-and stderr are suppressed before capture. The reconciler reads at most 25
+allowlisted stack only. Original managed CloudFormation and CDK command
+stdout and stderr are suppressed before capture. The reconciler reads at most 25
 recent CloudFormation events and writes exactly one canonical
 `cfn-failure.json` record containing only an allowlisted stack label, stack
 status, logical resource ID, resource type and status, a safe reason category,
@@ -452,8 +452,8 @@ requires the exact recursive inventory of two root regular non-symlink files,
 and only then atomically publishes the final directory.
 
 After AWS credentials are cleared, the workflow repeats the exact recursive
-inventory and checksum checks, requires canonical JSON bytes, and recomputes the
-diagnostic digest from the seven safe fields. Only `cfn-failure.json` and
+inventory and checksum checks and requires canonical JSON bytes. It
+recomputes the diagnostic digest from the seven safe fields. Only `cfn-failure.json` and
 `SHA256SUMS` are passed as explicit upload paths and retained for 90 days. A
 missing, malformed, oversized, non-canonical, non-allowlisted, or digest-mismatched
 diagnostic fails closed and is not uploaded.

@@ -145,7 +145,6 @@ export function sanitizeCloudFormationFailure(document, options) {
   const rawReason = event.ResourceStatusReason;
   const reasonCategory = classifyReason(rawReason);
   const canonicalSafeFields = Object.freeze({
-
     logicalResourceId,
     reasonCategory,
     resourceStatus,
@@ -155,7 +154,6 @@ export function sanitizeCloudFormationFailure(document, options) {
     stackStatus,
   });
   const diagnostic = Object.freeze({
-
     diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields)),
     logicalResourceId,
     reasonCategory,
