@@ -484,7 +484,7 @@ require_text "${runbook}" \
   'Cleanup-only; `3` files uploaded; no GitHub attestation created' \
   '## Canonical policy digest domain' \
   'validator hashes recursively sorted, compact UTF-8 JSON bytes without a' \
-  'Modified, malformed, non-object, and newline-domain'
+  'Modified, malformed, non-object, and newline-domain' \
   'ResourceStatus` as the resource' \
   '`ROLLBACK_COMPLETE`' \
   '`DELETE_SKIPPED`' \
