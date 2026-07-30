@@ -117,11 +117,15 @@ runtime-boundary removal, foundation mutation, and identity/account
 administration. The production guard also denies mutation of the staging-owned
 shared registry KMS key.
 
-The inline-template renderer rejects a wildcard in the ARN service segment for
-every direct or `Fn::Sub` resource ARN under an IAM policy document, following
+The inline-template renderer parses every direct or `Fn::Sub` resource ARN under
+an IAM policy document without splitting colons inside substitution tokens. It
+accepts only a literal AWS partition or an exact `AWS::Partition` reference and
+a literal lowercase service token; wildcard, substituted, malformed, or
+incomplete service ARNs fail closed under
 [AWS IAM Resource ARN rules](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_resource.html).
-Deterministic negative fixtures prove that both encodings fail before the
-foundation workflow requests AWS credentials.
+Deterministic negative fixtures cover direct and intrinsic substitutions,
+including variable-map evasions, before the foundation workflow requests AWS
+credentials.
 
 ## Runtime permissions boundary
 

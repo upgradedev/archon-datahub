@@ -64,6 +64,9 @@
       "iamPolicyResourceArnValidation": {
         "directStrings": true,
         "intrinsicSubStrings": true,
+        "malformedOrIncompleteArns": "forbidden",
+        "partitionResolution": "literal-aws-or-exact-AWS::Partition-ref",
+        "serviceSegment": "literal-lowercase-token",
         "verifier": "scripts/verify-iam-policy-resource-arns.mjs",
         "wildcardServiceSegments": "forbidden"
       },

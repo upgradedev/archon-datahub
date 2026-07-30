@@ -157,6 +157,9 @@ jq --exit-status '
     iamPolicyResourceArnValidation: {
       directStrings: true,
       intrinsicSubStrings: true,
+      malformedOrIncompleteArns: "forbidden",
+      partitionResolution: "literal-aws-or-exact-AWS::Partition-ref",
+      serviceSegment: "literal-lowercase-token",
       verifier: "scripts/verify-iam-policy-resource-arns.mjs",
       wildcardServiceSegments: "forbidden"
     },
@@ -919,12 +922,15 @@ if ! awk '
 fi
 require_text "${iam_resource_arn_verifier}" \
   'Object.hasOwn(value, "Fn::Sub")' \
+  'isExactAwsPartitionReference' \
   'serviceSegment.includes("*")' \
   'serviceSegment.includes("?")' \
+  'literalPartition' \
   'No IAM PolicyDocument Resource ARNs were available for validation'
 require_text "${iam_resource_arn_verifier_test}" \
-  'rejects a wildcard service segment in a direct Resource ARN' \
-  'rejects a wildcard service segment in an intrinsic-sub Resource ARN'
+  'accepts exact AWS partitions, exact services, and resource-name wildcards' \
+  'rejects wildcard and nonliteral service segments without substitution-map bypass' \
+  'fails closed for malformed, incomplete, empty, and unresolved ARN shapes'
 
 if awk '
   /^[[:space:]]*-[[:space:]]+Sid:/ {

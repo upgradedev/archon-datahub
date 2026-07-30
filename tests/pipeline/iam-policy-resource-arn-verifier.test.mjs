@@ -22,32 +22,71 @@ function templateWithResource(resource) {
   };
 }
 
-test("accepts exact service segments and resource-name wildcards", () => {
+test("accepts exact AWS partitions, exact services, and resource-name wildcards", () => {
   const result = assertNoWildcardIamResourceArnServices(
     templateWithResource([
-      "*",
       "arn:aws:s3:::archon-production-*",
+      "arn:aws-us-gov:iam::123456789012:role/Archon-*",
       { "Fn::Sub": "arn:${AWS::Partition}:s3:::archon-production-*/*" },
-      { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-*" }
+      {
+        "Fn::Sub": [
+          "arn:${Partition}:iam::${AWS::AccountId}:role/Archon-*",
+          { Partition: { Ref: "AWS::Partition" } }
+        ]
+      }
     ])
   );
   assert.equal(result.policyDocumentCount, 1);
-  assert.equal(result.resourceArnCount, 3);
+  assert.equal(result.resourceArnCount, 4);
   assert.deepEqual(result.violations, []);
 });
 
-test("rejects a wildcard service segment in a direct Resource ARN", () => {
-  assert.throws(
-    () => assertNoWildcardIamResourceArnServices(templateWithResource("arn:aws:*:*:123456789012:*Archon-production*")),
-    /ArchonCdkGuardPolicy\/Fixture:direct:service=\*/
+test("rejects wildcard and nonliteral service segments without substitution-map bypass", () => {
+  const fixtures = [
+    "arn:aws:*:*:123456789012:*Archon-production*",
+    "arn:aws:s?:*:123456789012:*Archon-production*",
+    { "Fn::Sub": "arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-staging*" },
+    {
+      "Fn::Sub": [
+        "arn:${AWS::Partition}:${Service}:eu-west-1:${AWS::AccountId}:resource/*",
+        { Service: "*" }
+      ]
+    }
+  ];
+  for (const fixture of fixtures) {
+    const result = inspectIamPolicyResourceArns(templateWithResource(fixture));
+    assert.equal(result.violations.length, 1);
+    assert.throws(() => assertNoWildcardIamResourceArnServices(templateWithResource(fixture)));
+  }
+  assert.equal(
+    inspectIamPolicyResourceArns(templateWithResource(fixtures[3])).violations[0].reason,
+    "nonliteral-service"
   );
 });
 
-test("rejects a wildcard service segment in an intrinsic-sub Resource ARN", () => {
-  assert.throws(
-    () => assertNoWildcardIamResourceArnServices(templateWithResource({ "Fn::Sub": "arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-staging*" })),
-    /ArchonCdkGuardPolicy\/Fixture:intrinsic-sub:service=\*/
-  );
+test("fails closed for malformed, incomplete, empty, and unresolved ARN shapes", () => {
+  const fixtures = [
+    ["arn:${AWS::Partition:s3:::archon-*", "unclosed-placeholder"],
+    ["arn:aws:s3", "incomplete-arn"],
+    ["arn:aws:s3:::", "missing-resource"],
+    ["arn:${AWS::Partition}:s3:::archon-*", "invalid-partition"],
+    [
+      { "Fn::Sub": "arn:${Partition}:s3:::archon-*" },
+      "invalid-partition"
+    ],
+    [
+      {
+        "Fn::Sub": ["arn:${Partition}:s3:::archon-*", { Partition: "aws" }]
+      },
+      "invalid-partition"
+    ]
+  ];
+  for (const [fixture, reason] of fixtures) {
+    const result = inspectIamPolicyResourceArns(templateWithResource(fixture));
+    assert.equal(result.violations.length, 1);
+    assert.equal(result.violations[0].reason, reason);
+    assert.throws(() => assertNoWildcardIamResourceArnServices(templateWithResource(fixture)));
+  }
 });
 
 test("walks conditional policy statements in IAM resources only", () => {
