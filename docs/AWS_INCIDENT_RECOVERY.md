@@ -4,9 +4,12 @@ Status: **attempted; `DeleteStack` not executed; cleanup proof successful**.
 Cleanup-only run `30571619440` proved canonical temporary-policy absence. The
 first recovery run `30571830902` stopped on the historical generic incident
 mismatch. Classified recovery run `30576390064` then proved the exact live class
-`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`. Both runs stopped before
-`PutRolePolicy`, skipped `DeleteStack`, and completed mandatory revocation plus
-the final canonical absence proof. The machine-readable status remains
+`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`. Authorization-readback
+run `30579644527` passed the validator and reached `PutRolePolicy`, but its
+legacy shell verifier compared newline-terminated jq output with the validator's
+no-newline canonical JSON digest, so canonical equality was not proven. It
+failed closed before `DeleteStack`; mandatory revocation and the final canonical
+absence proof succeeded. The machine-readable status remains
 `attempted-delete-not-executed-cleanup-proven`; no stack-deletion claim is made.
 
 This runbook covers one historical CloudFormation incident only. It is not a
@@ -52,6 +55,12 @@ cross-job value. It remains runner-private; only its SHA-256 crosses jobs.
 | Classified diagnostic | `AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`; `PutRolePolicy` not reached; `DeleteStack` skipped |
 | Classified recovery artifact | `8773039467`, `aws-incident-recovery-30576390064-1` |
 | Classified artifact ZIP SHA-256 | `sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e` |
+| Authorization-readback run | `30579644527`, attempt `1`, commit `bce219b0a03a5d3a7e162edf81866d00848aaac9`, prepare failed closed |
+| Authorization result | Validator success; `PutRolePolicy` request succeeded; canonical readback not proven; `DeleteStack` skipped |
+| Authorization artifact | `8774187155`, `aws-incident-recovery-30579644527-1`, `930` bytes, expires `2026-10-28T20:32:58Z` |
+| Authorization artifact ZIP SHA-256 | `sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8` |
+| Authorization evidence scope | Cleanup-only; `3` files uploaded; no GitHub attestation created |
+| Authorization finalization | Mandatory revocation succeeded; canonical absence proved |
 | Recovery finalization | Mandatory revocation succeeded; canonical absence proved |
 
 ## Operator interface
@@ -149,6 +158,22 @@ or separate `governed-canary-recovery` approval.
    `DELETE_COMPLETE` and a successful `ListStacks` result to show no active
    stack with the sealed name. Failed AWS reads never prove absence.
 9. A final `if: always()` cleanup runs even after earlier failure.
+
+## Canonical policy digest domain
+
+The validator hashes recursively sorted, compact UTF-8 JSON bytes without a
+trailing newline. Run `30579644527` exposed that the shell readback previously
+piped jq's newline-terminated output directly to `sha256sum`, placing expected
+and observed values in different byte domains even when their JSON could be
+equivalent. The driver now captures object-only `jq -ceS` output and hashes it
+with `printf '%s'`, so both sides use the exact no-newline domain.
+
+CI compares bytes produced by the validator's exported `canonicalJson` function
+with a deliberately key-reordered AWS-shaped readback. Exact equivalence must
+pass on the first read. Modified, malformed, non-object, and newline-domain
+values exhaust the bounded retries and fail closed without exposing raw AWS
+values. This correction changes no workflow permission, IAM grant, delete
+shape, approval gate, or cleanup requirement.
 
 ## Authority, IAM limitations, and consistency
 
