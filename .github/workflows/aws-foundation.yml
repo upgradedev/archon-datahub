@@ -445,10 +445,21 @@ jobs:
               ],
               artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
               artifactRetentionDays: 90,
+              artifactUpload: "explicit-files-only",
               autoRecovery: "forbidden",
+              canonicalJson: true,
               diagnosticCount: 1,
+              digestFields: [
+                "logicalResourceId",
+                "reasonCategory",
+                "resourceStatus",
+                "resourceType",
+                "schemaVersion",
+                "stackLabel",
+                "stackStatus"
+              ],
               fields: [
-                "deniedAwsAction",
+
                 "diagnosticSha256",
                 "logicalResourceId",
                 "reasonCategory",
@@ -458,9 +469,12 @@ jobs:
                 "stackLabel",
                 "stackStatus"
               ],
+              managedCommandOutput: "suppressed",
               maxRecentEvents: 25,
+              postCredentialDigestRecomputed: true,
               rawReasonHashing: false,
               rawReasonRetention: false,
+              recursiveInventory: "exact-two-root-regular-files",
               schemaVersion: "archon.aws-foundation-cfn-failure/v1",
               stackIdentity: "allowlisted-label-only"
             }
@@ -882,30 +896,73 @@ jobs:
           FAILURE_EVIDENCE_DIR: ${{ runner.temp }}/aws-foundation-failure
         run: |
           set -euo pipefail
-          if [[ ! -e "${FAILURE_EVIDENCE_DIR}" ]]; then
+          if [[ ! -e "${FAILURE_EVIDENCE_DIR}" && ! -L "${FAILURE_EVIDENCE_DIR}" ]]; then
             echo "available=false" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
           test -d "${FAILURE_EVIDENCE_DIR}"
           test ! -L "${FAILURE_EVIDENCE_DIR}"
-          for path in cfn-failure.json SHA256SUMS; do
-            test -f "${FAILURE_EVIDENCE_DIR}/${path}"
-            test ! -L "${FAILURE_EVIDENCE_DIR}/${path}"
+          if ! actual_inventory_sha="$(
+            find -P "${FAILURE_EVIDENCE_DIR}" \
+              -mindepth 1 -printf '%P\t%y\0' |
+              LC_ALL=C sort -z |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to inventory sanitized failure evidence" >&2
+            exit 1
+          fi
+          if ! expected_inventory_sha="$(
+            printf 'SHA256SUMS\tf\0cfn-failure.json\tf\0' |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to derive the expected failure evidence inventory" >&2
+            exit 1
+          fi
+          if [[ ! "${actual_inventory_sha}" =~ ^[0-9a-f]{64}$ || \
+            "${actual_inventory_sha}" != "${expected_inventory_sha}" ]]; then
+            echo "::error::Sanitized failure evidence inventory mismatch" >&2
+            exit 1
+          fi
+          for evidence_path in cfn-failure.json SHA256SUMS; do
+            test -f "${FAILURE_EVIDENCE_DIR}/${evidence_path}"
+            test ! -L "${FAILURE_EVIDENCE_DIR}/${evidence_path}"
           done
-          test "$(
-            find "${FAILURE_EVIDENCE_DIR}" \
-              -mindepth 1 -maxdepth 1 -type f | wc -l
-          )" -eq 2
-          (
-            cd "${FAILURE_EVIDENCE_DIR}"
-            test "$(wc -l <SHA256SUMS)" -eq 1
-            grep -Eq '^[0-9a-f]{64}  cfn-failure.json$' SHA256SUMS
-            sha256sum --check --strict SHA256SUMS
-          )
-          test "$(wc -c <"${FAILURE_EVIDENCE_DIR}/cfn-failure.json")" -le 2048
-          jq -e '
+          if ! (
+            cd "${FAILURE_EVIDENCE_DIR}" &&
+              test "$(wc -l <SHA256SUMS)" -eq 1 &&
+              grep -Eq '^[0-9a-f]{64}  cfn-failure.json$' SHA256SUMS &&
+              sha256sum --check --strict SHA256SUMS >/dev/null 2>&1
+          ); then
+            echo "::error::Sanitized failure evidence checksum mismatch" >&2
+            exit 1
+          fi
+          if ! test "$(wc -c <"${FAILURE_EVIDENCE_DIR}/cfn-failure.json")" -le 2048; then
+            echo "::error::Sanitized failure evidence exceeded its size limit" >&2
+            exit 1
+          fi
+          if ! canonical_diagnostic="$(
+            mktemp "${RUNNER_TEMP}/aws-foundation-failure-canonical.XXXXXX"
+          )"; then
+            echo "::error::Unable to stage canonical failure evidence validation" >&2
+            exit 1
+          fi
+          trap 'rm -f -- "${canonical_diagnostic}"' EXIT
+          if ! jq -cS . \
+            "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+            >"${canonical_diagnostic}" 2>/dev/null; then
+            echo "::error::Sanitized failure evidence was not valid JSON" >&2
+            exit 1
+          fi
+          if ! cmp -s \
+            "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+            "${canonical_diagnostic}"; then
+            echo "::error::Sanitized failure evidence was not canonical JSON" >&2
+            exit 1
+          fi
+          if ! jq -e '
             (keys | sort) == [
-              "deniedAwsAction",
               "diagnosticSha256",
               "logicalResourceId",
               "reasonCategory",
@@ -952,20 +1009,55 @@ jobs:
               "invalid-request", "quota-exceeded", "resource-conflict",
               "service-failure", "timeout", "unknown"
             )) and
-            (.diagnosticSha256 | test("^[0-9a-f]{64}$")) and
-            (
-              .deniedAwsAction == null or
-              (.deniedAwsAction | test("^[a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127}$"))
-            )
-          ' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" >/dev/null
+            (.diagnosticSha256 | test("^[0-9a-f]{64}$"))
+          ' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" >/dev/null 2>&1; then
+            echo "::error::Sanitized failure evidence failed schema validation" >&2
+            exit 1
+          fi
+          if ! canonical_safe_json="$(
+            jq -cS '{
+              logicalResourceId,
+              reasonCategory,
+              resourceStatus,
+              resourceType,
+              schemaVersion,
+              stackLabel,
+              stackStatus
+            }' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" 2>/dev/null
+          )"; then
+            echo "::error::Unable to canonicalize sanitized diagnostic fields" >&2
+            exit 1
+          fi
+          if ! computed_digest="$(
+            printf '%s' "${canonical_safe_json}" |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to recompute sanitized diagnostic digest" >&2
+            exit 1
+          fi
+          if [[ ! "${computed_digest}" =~ ^[0-9a-f]{64}$ ]] || \
+            ! jq -e --arg computedDigest "${computed_digest}" \
+              '.diagnosticSha256 == $computedDigest' \
+              "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+              >/dev/null 2>&1; then
+            echo "::error::Sanitized diagnostic digest mismatch" >&2
+            exit 1
+          fi
+          if ! rm -f -- "${canonical_diagnostic}"; then
+            echo "::error::Unable to remove canonical validation staging" >&2
+            exit 1
+          fi
+          trap - EXIT
           echo "available=true" >>"${GITHUB_OUTPUT}"
-
       - name: Retain checksum-sealed sanitized foundation failure evidence
         if: ${{ failure() && steps.failure_evidence.outputs.available == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: aws-foundation-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aws-foundation-failure/
+          path: |
+            ${{ runner.temp }}/aws-foundation-failure/SHA256SUMS
+            ${{ runner.temp }}/aws-foundation-failure/cfn-failure.json
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
