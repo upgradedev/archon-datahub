@@ -450,7 +450,7 @@ jobs:
               fields: [
                 "deniedAwsAction",
                 "logicalResourceId",
-                "rawReasonSha256",
+                "diagnosticSha256",
                 "reasonCategory",
                 "resourceStatus",
                 "resourceType",
@@ -459,6 +459,7 @@ jobs:
                 "stackStatus"
               ],
               maxRecentEvents: 25,
+              rawReasonHashing: false,
               rawReasonRetention: false,
               schemaVersion: "archon.aws-foundation-cfn-failure/v1",
               stackIdentity: "allowlisted-label-only"
@@ -906,7 +907,7 @@ jobs:
             (keys | sort) == [
               "deniedAwsAction",
               "logicalResourceId",
-              "rawReasonSha256",
+              "diagnosticSha256",
               "reasonCategory",
               "resourceStatus",
               "resourceType",
@@ -951,7 +952,7 @@ jobs:
               "invalid-request", "quota-exceeded", "resource-conflict",
               "service-failure", "timeout", "unknown"
             )) and
-            (.rawReasonSha256 | test("^[0-9a-f]{64}$")) and
+            (.diagnosticSha256 | test("^[0-9a-f]{64}$")) and
             (
               .deniedAwsAction == null or
               (.deniedAwsAction | test("^[a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127}$"))

@@ -370,7 +370,7 @@ jq --exit-status '
     fields: [
       "deniedAwsAction",
       "logicalResourceId",
-      "rawReasonSha256",
+      "diagnosticSha256",
       "reasonCategory",
       "resourceStatus",
       "resourceType",
@@ -379,6 +379,7 @@ jq --exit-status '
       "stackStatus"
     ],
     maxRecentEvents: 25,
+    rawReasonHashing: false,
     rawReasonRetention: false,
     schemaVersion: "archon.aws-foundation-cfn-failure/v1",
     stackIdentity: "allowlisted-label-only"
@@ -1021,7 +1022,7 @@ require_text "${failure_sanitizer}" \
   'const MAX_EVENTS = 25;' \
   'const MAX_OUTPUT_BYTES = 2_048;' \
   'ALLOWLISTED_STACK_LABELS' \
-  'rawReasonSha256: sha256(rawReason)' \
+  'diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields))' \
   'deniedAwsAction: extractDeniedAction(rawReason, reasonCategory)' \
   'schemaVersion: "archon.aws-foundation-cfn-failure/v1"' \
   'process.stderr.write("CloudFormation failure sanitization failed\n")'
@@ -1176,7 +1177,7 @@ require_text "${runbook}" \
   '`requires-explicit-deploy-migration`' \
   '`ready-for-deploy`' \
   'Sanitized managed-stack failure evidence' \
-  'never stores or prints the raw CloudFormation reason' \
+  'never stores, prints, or hashes the raw CloudFormation reason' \
   'does not delete, recreate, or' \
   '`cfn-failure.json`' \
   'retained for 90 days'

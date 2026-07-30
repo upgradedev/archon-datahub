@@ -314,7 +314,7 @@ capture_managed_stack_failure() {
     (keys | sort) == [
       "deniedAwsAction",
       "logicalResourceId",
-      "rawReasonSha256",
+      "diagnosticSha256",
       "reasonCategory",
       "resourceStatus",
       "resourceType",
@@ -323,7 +323,7 @@ capture_managed_stack_failure() {
       "stackStatus"
     ] and
     .schemaVersion == "archon.aws-foundation-cfn-failure/v1" and
-    (.rawReasonSha256 | test("^[0-9a-f]{64}$"))
+    (.diagnosticSha256 | test("^[0-9a-f]{64}$"))
   ' "${diagnostic_tmp}" >/dev/null
   mv "${diagnostic_tmp}" "${FAILURE_EVIDENCE_DIR}/cfn-failure.json"
   (

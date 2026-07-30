@@ -417,6 +417,7 @@
       "autoRecovery": "forbidden",
       "diagnosticCount": 1,
       "maxRecentEvents": 25,
+      "rawReasonHashing": false,
       "rawReasonRetention": false,
       "stackIdentity": "allowlisted-label-only",
       "allowlistedStackLabels": [
@@ -434,7 +435,7 @@
       "fields": [
         "deniedAwsAction",
         "logicalResourceId",
-        "rawReasonSha256",
+        "diagnosticSha256",
         "reasonCategory",
         "resourceStatus",
         "resourceType",

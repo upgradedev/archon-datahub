@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const MAX_INPUT_BYTES = 262_144;
@@ -21,6 +20,22 @@ export const ALLOWLISTED_STACK_LABELS = Object.freeze([
   "staging-iam",
 ]);
 
+const allowedActionServices = new Set([
+  "acm",
+  "apigateway",
+  "cloudformation",
+  "cloudfront",
+  "ecr",
+  "iam",
+  "kms",
+  "lambda",
+  "logs",
+  "route53",
+  "s3",
+  "sqs",
+  "ssm",
+  "sts",
+]);
 const stackLabels = new Set(ALLOWLISTED_STACK_LABELS);
 const stackStatuses = new Set([
   "CREATE_COMPLETE",
@@ -58,7 +73,8 @@ const resourceFailureStatuses = new Set([
 ]);
 const logicalIdPattern = /^[A-Za-z][A-Za-z0-9]{0,254}$/;
 const resourceTypePattern = /^(?:AWS::[A-Za-z0-9]+::[A-Za-z0-9]+|Custom::[A-Za-z0-9._-]+)$/;
-const deniedActionPattern = /\b([a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127})\b/;
+const deniedActionGrammar = /\b(?:is\s+)?not authorized to perform\s*:\s*([a-z0-9][a-z0-9-]{1,62}:[A-Z][A-Za-z0-9]{1,127})(?=$|[\s,.;)])/gi;
+const deniedActionPattern = /^([a-z0-9][a-z0-9-]{1,62}):([A-Z][A-Za-z0-9]{1,127})$/;
 
 function classifyReason(reason) {
   if (/access\s*denied|accessdenied|not authorized|unauthori[sz]ed|explicit deny/i.test(reason)) {
@@ -92,12 +108,39 @@ function extractDeniedAction(reason, category) {
   if (category !== "access-denied") {
     return null;
   }
-  const match = deniedActionPattern.exec(reason);
-  return match ? match[1] : null;
+  for (const match of reason.matchAll(deniedActionGrammar)) {
+    const action = deniedActionPattern.exec(match[1]);
+    if (action && allowedActionServices.has(action[1])) {
+      return match[1];
+    }
+  }
+  return null;
 }
 
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+export async function readBoundedInput(stream) {
+  const chunks = [];
+  let retainedBytes = 0;
+  for await (const value of stream) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    const remaining = MAX_INPUT_BYTES + 1 - retainedBytes;
+    if (remaining > 0) {
+      const retained = chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.length;
+    }
+    if (retainedBytes > MAX_INPUT_BYTES) {
+      stream.destroy();
+      throw new Error("sanitizer input exceeds hard limit");
+    }
+  }
+  if (retainedBytes === 0) {
+    throw new Error("sanitizer input is empty");
+  }
+  return Buffer.concat(chunks, retainedBytes);
 }
 
 export function sanitizeCloudFormationFailure(document, options) {
@@ -125,17 +168,30 @@ export function sanitizeCloudFormationFailure(document, options) {
   if (!logicalIdPattern.test(logicalResourceId ?? "") || !resourceTypePattern.test(resourceType ?? "")) {
     throw new Error("unsafe CloudFormation event identity");
   }
+  if (typeof event.ResourceStatusReason !== "string" || event.ResourceStatusReason.length === 0) {
+    throw new Error("missing CloudFormation failure reason");
+  }
 
-  const rawReason = typeof event.ResourceStatusReason === "string" ? event.ResourceStatusReason : "";
+  const rawReason = event.ResourceStatusReason;
   const reasonCategory = classifyReason(rawReason);
-  const diagnostic = Object.freeze({
+  const canonicalSafeFields = Object.freeze({
     deniedAwsAction: extractDeniedAction(rawReason, reasonCategory),
     logicalResourceId,
-    rawReasonSha256: sha256(rawReason),
     reasonCategory,
     resourceStatus,
     resourceType,
     schemaVersion: "archon.aws-foundation-cfn-failure/v1",
+    stackLabel,
+    stackStatus,
+  });
+  const diagnostic = Object.freeze({
+    deniedAwsAction: canonicalSafeFields.deniedAwsAction,
+    diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields)),
+    logicalResourceId,
+    reasonCategory,
+    resourceStatus,
+    resourceType,
+    schemaVersion: canonicalSafeFields.schemaVersion,
     stackLabel,
     stackStatus,
   });
@@ -167,10 +223,7 @@ function parseOptions(argv) {
 
 async function main() {
   try {
-    const input = readFileSync(0);
-    if (input.length === 0 || input.length > MAX_INPUT_BYTES) {
-      throw new Error("invalid sanitizer input size");
-    }
+    const input = await readBoundedInput(process.stdin);
     const document = JSON.parse(input.toString("utf8"));
     const diagnostic = sanitizeCloudFormationFailure(document, parseOptions(process.argv.slice(2)));
     process.stdout.write(serializeCloudFormationFailure(diagnostic));

@@ -442,9 +442,9 @@ allowlisted stack only. The reconciler reads at most 25 recent CloudFormation
 events and writes exactly one canonical `cfn-failure.json` record containing
 only an allowlisted stack label, stack status, logical resource ID, resource
 type and status, a safe reason category, an optional regex-safe denied AWS
-action, and the SHA-256 of the raw reason.
+action, and a SHA-256 over only those canonical allowlisted diagnostic fields.
 
-The diagnostic path never stores or prints the raw CloudFormation reason, stack
+The diagnostic path never stores, prints, or hashes the raw CloudFormation reason, stack
 name or ARN, account identifier, URL, request token, or physical resource ID.
 The two-file artifact (`cfn-failure.json` and `SHA256SUMS`) is revalidated after
 AWS credentials are cleared, checksum-sealed, and retained for 90 days. A
