@@ -346,6 +346,16 @@ for group in assets identity attachments; do
   ' <<<"${rendered}" >/dev/null
 done
 
+require_text "${repository_root}/docs/AWS_FOUNDATION.md" \
+  'Existing foundation-policy version migration' \
+  '`cloudformation:DetectStackResourceDrift`' \
+  '`cloudformation:BatchDescribeTypeConfigurations`' \
+  '`MIGRATE EXACT FOUNDATION CONTROL POLICY`' \
+  'fresh rollback-only grant' \
+  '`queue: max`' \
+  'excludes account' \
+  'raw IAM documents'
+
 require_text "${ci_workflow}" \
   'tests/pipeline/aws-foundation-policy-migration-contracts.test.sh' \
   'scripts/run-aws-foundation-policy-migration.sh' \

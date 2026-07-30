@@ -284,6 +284,34 @@ OIDC provider, then renders and verifies all four managed policies in memory
 before it inspects or creates the role. A missing policy is created; a
 mismatched existing policy is never overwritten.
 
+### Existing foundation-policy version migration
+
+Foundation run `30586169834` proved that CloudFormation stack drift also needs
+`cloudformation:DetectStackResourceDrift` and
+`cloudformation:BatchDescribeTypeConfigurations`. The reviewed source adds only those two
+dependencies in their correct stack-scoped and read-only wildcard statements. Because the
+bootstrap intentionally refuses to overwrite a mismatched managed policy, the change uses
+the dedicated CI-only
+[`aws-foundation-policy-migration.yml`](../.github/workflows/aws-foundation-policy-migration.yml)
+transaction rather than a workstation or direct AWS mutation.
+
+The workflow requires the signed, exact current `master`, green CI, CodeQL, and workflow
+security gates, the literal `MIGRATE EXACT FOUNDATION CONTROL POLICY` confirmation, and
+separate `aws-foundation` and `governed-canary-recovery` approvals. It creates a new
+non-default `archon-aws-foundation-control` version, canonically reads it back, changes the
+default exactly once, and retains the previous version as the rollback point. A temporary
+20-minute inline grant targets only that managed-policy ARN and is removed after three
+consecutive exact-baseline reads.
+
+[`aws-foundation-policy-migration-cleanup.yml`](../.github/workflows/aws-foundation-policy-migration-cleanup.yml)
+follows any non-successful transaction and can also be dispatched manually. It first
+replaces any stale grant with a fresh rollback-only grant that cannot create policy
+versions, then restores the previous default and deletes only the reviewed new non-default
+version. Both the AWS control-plane and governed-canary locks use `queue: max`, so a newer
+privileged run cannot evict a waiting cleanup follower. Retained evidence contains only
+canonical document digests, version IDs, state, and revocation proof; it excludes account
+IDs, ARNs, and raw IAM documents.
+
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
 On an existing account, a canonical role may already have any subset of the
