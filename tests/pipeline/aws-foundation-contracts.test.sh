@@ -29,6 +29,8 @@ dependency_override_verifier="${repository_root}/scripts/verify-exact-npm-overri
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
 failure_sanitizer="${repository_root}/scripts/sanitize-cloudformation-failure.mjs"
 failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure-sanitizer.test.mjs"
+iam_resource_arn_verifier="${repository_root}/scripts/verify-iam-policy-resource-arns.mjs"
+iam_resource_arn_verifier_test="${repository_root}/tests/pipeline/iam-policy-resource-arn-verifier.test.mjs"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
@@ -82,13 +84,17 @@ for path in \
   "${reconciler}" \
   "${failure_sanitizer}" \
   "${failure_sanitizer_test}" \
+  "${iam_resource_arn_verifier}" \
+  "${iam_resource_arn_verifier_test}" \
   "${runtime_verifier}" \
   "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
 
-node --test "${failure_sanitizer_test}"
+node --test \
+  "${failure_sanitizer_test}" \
+  "${iam_resource_arn_verifier_test}"
 
 jq --exit-status '
   .schemaVersion == "archon.aws-foundation/v1" and
@@ -148,6 +154,15 @@ jq --exit-status '
       scalarPolicy: "strict-ascii-plain-or-json-quoted"
     },
     format: "canonical-flow-yaml",
+    iamPolicyResourceArnValidation: {
+      directStrings: true,
+      intrinsicSubStrings: true,
+      malformedOrIncompleteArns: "forbidden",
+      partitionResolution: "literal-aws-or-exact-AWS::Partition-ref",
+      serviceSegment: "literal-lowercase-token",
+      verifier: "scripts/verify-iam-policy-resource-arns.mjs",
+      wildcardServiceSegments: "forbidden"
+    },
     maximumTemplateBodyBytes: 51200,
     outputRoot: "RUNNER_TEMP",
     renderer: "scripts/render-inline-cloudformation-template.sh",
@@ -771,6 +786,12 @@ require_text "${execution_policy}" \
   'DenySharedApiGatewayAccountMutation' \
   'DenyRuntimeBoundaryRemoval' \
   'DenyFoundationControlPlaneMutation' \
+  'DenyProductionNamedBuckets' \
+  'DenyStagingNamedBuckets' \
+  'arn:${AWS::Partition}:s3:::archon-production-*' \
+  'arn:${AWS::Partition}:s3:::archon-production-*/*' \
+  'arn:${AWS::Partition}:s3:::archon-staging-*' \
+  'arn:${AWS::Partition}:s3:::archon-staging-*/*' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
@@ -797,7 +818,10 @@ forbid_text "${execution_policy}" \
   'route53:DisassociateVPCFromHostedZone' \
   'route53:VPCs: arn:' \
   'route53:*' \
-  'acm:*'
+  'acm:*' \
+  'DenyProductionNamedResources' \
+  'DenyStagingNamedResources' \
+  'arn:${AWS::Partition}:*:*:${AWS::AccountId}:'
 actual_route53_actions="$(
   grep -E \
     '^[[:space:]]*(Action:[[:space:]]+|-[[:space:]]+)route53:[A-Za-z0-9]+' \
@@ -896,6 +920,18 @@ if ! awk '
 ' "${execution_policy}"; then
   fail "viewer certificate create-time tagging policy is not exact"
 fi
+require_text "${iam_resource_arn_verifier}" \
+  'Object.hasOwn(value, "Fn::Sub")' \
+  'isExactAwsPartitionReference' \
+  'serviceSegment.includes("*")' \
+  'serviceSegment.includes("?")' \
+  'literalPartition' \
+  'No IAM PolicyDocument Resource ARNs were available for validation'
+require_text "${iam_resource_arn_verifier_test}" \
+  'accepts exact AWS partitions, exact services, and resource-name wildcards' \
+  'rejects wildcard and nonliteral service segments without substitution-map bypass' \
+  'fails closed for malformed, incomplete, empty, and unresolved ARN shapes'
+
 if awk '
   /^[[:space:]]*-[[:space:]]+Sid:/ {
     effect = ""
@@ -935,6 +971,7 @@ require_text "${inline_template_renderer}" \
   '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
   'node "${workspace_root}/scripts/render-canonical-flow-yaml.mjs"' \
   'jq -cS' \
+  'scripts/verify-iam-policy-resource-arns.mjs' \
   'cmp -s "${canonical_json}" "${round_trip}"' \
   '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
 require_text "${canonical_flow_renderer}" \
