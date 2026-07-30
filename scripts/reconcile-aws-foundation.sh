@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'
+foundation_phase='startup'
+
+report_foundation_error() {
+  local exit_code="$1"
+  local source_line="$2"
+  trap - ERR
+  set +e
+  printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\n' \
+    "${FOUNDATION_DIAGNOSTIC_SOURCE}" "${source_line}" \
+    "${foundation_phase}" "${exit_code}" >&2
+  exit "${exit_code}"
+}
+
+trap 'report_foundation_error "$?" "$LINENO"' ERR
+shopt -s inherit_errexit
 
 : "${EXPECTED_ACCOUNT_ID:?EXPECTED_ACCOUNT_ID is required}"
 : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
@@ -382,23 +399,47 @@ deployed_template_sha() {
     awk '{print $1}'
 }
 
+foundation_phase='preflight:revalidate-master'
 echo "::group::Fail-closed AWS foundation preflight"
 revalidate_master
-for template in \
-  infra/aws/foundation/api-gateway-account.yml \
-  "${IAM_FOUNDATION_TEMPLATE}" \
-  infra/aws/foundation/github-actions-deploy-role.yml \
-  infra/aws/foundation/github-actions-foundation-role.yml \
-  infra/aws/foundation/governed-canary-roles.yml \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:eu-west-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:us-east-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:eu-west-1]}" \
-  "${BOOTSTRAP_TEMPLATE_BY_TARGET[production:us-east-1]}"; do
-  aws cloudformation validate-template \
-    --region "${PRIMARY_REGION}" \
-    --template-body "file://${template}" >/dev/null
-done
+foundation_phase='preflight:validate-template:api-gateway-account'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/api-gateway-account.yml' >/dev/null
+foundation_phase='preflight:validate-template:iam-foundation'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${IAM_FOUNDATION_TEMPLATE}" >/dev/null
+foundation_phase='preflight:validate-template:github-actions-deploy-role'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/github-actions-deploy-role.yml' >/dev/null
+foundation_phase='preflight:validate-template:github-actions-foundation-role'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/github-actions-foundation-role.yml' >/dev/null
+foundation_phase='preflight:validate-template:governed-canary-roles'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body 'file://infra/aws/foundation/governed-canary-roles.yml' >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:staging:eu-west-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:eu-west-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:staging:us-east-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[staging:us-east-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:production:eu-west-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[production:eu-west-1]}" >/dev/null
+foundation_phase='preflight:validate-template:bootstrap:production:us-east-1'
+aws cloudformation validate-template \
+  --region "${PRIMARY_REGION}" \
+  --template-body "file://${BOOTSTRAP_TEMPLATE_BY_TARGET[production:us-east-1]}" >/dev/null
 
+foundation_phase='preflight:legacy-role'
 legacy_error="${RUNNER_TEMP}/legacy-deploy-role.error"
 if aws iam get-role \
   --role-name "${LEGACY_DEPLOY_ROLE}" \
@@ -408,6 +449,7 @@ if aws iam get-role \
 fi
 grep -q 'NoSuchEntity' "${legacy_error}"
 
+foundation_phase='preflight:legacy-stacks'
 legacy_stacks="$(
   aws cloudformation list-stacks \
     --region "${PRIMARY_REGION}" \
@@ -430,33 +472,48 @@ jq -e '
   length == 0
 ' <<<"${legacy_stacks}" >/dev/null
 
-for stage in staging production; do
-  assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
-  assert_stack_role_is_null_if_present \
-    "${PRIMARY_REGION}" "${DEPLOY_STACK[${stage}]}"
-  for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
-    assert_stack_role_is_null_if_present \
-      "${region}" "${BOOTSTRAP_STACK[${stage}]}"
-  done
-done
+foundation_phase='preflight:foundation-stack-role-binding:staging:iam'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'
+assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[staging]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:iam'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${IAM_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:deploy'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${DEPLOY_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'
+assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${BOOTSTRAP_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'
+assert_stack_role_is_null_if_present "${EDGE_REGION}" "${BOOTSTRAP_STACK[production]}"
+foundation_phase='preflight:foundation-stack-role-binding:shared-api'
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+foundation_phase='preflight:foundation-stack-role-binding:governed-canary'
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
+foundation_phase='preflight:shared-api-gateway'
 assert_api_gateway_no_clobber
 staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 production_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
+foundation_phase='preflight:application-stack-role-binding:staging:registry'
 assert_application_stack_role_exact_if_present \
   staging "${PRIMARY_REGION}" Archon-Registry "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:primary'
 assert_application_stack_role_exact_if_present \
   staging "${PRIMARY_REGION}" Archon-staging "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:edge'
 assert_application_stack_role_exact_if_present \
   staging "${EDGE_REGION}" Archon-staging-Edge "${staging_cfn_us}"
+foundation_phase='preflight:application-stack-role-binding:production:primary'
 assert_application_stack_role_exact_if_present \
   production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:production:edge'
 assert_application_stack_role_exact_if_present \
   production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
+foundation_phase='preflight:application-stack-role-transition'
 application_stack_role_transition_json="$(
   jq -cnS \
     --argjson entries "${application_stack_roles_json}" '
@@ -506,6 +563,7 @@ if [[ "${application_stack_role_transition_state}" == \
 fi
 echo "::endgroup::"
 
+foundation_phase='stage-iam'
 echo "::group::Reconcile stage IAM foundations"
 for stage in staging production; do
   revalidate_master
@@ -686,6 +744,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='shared-api-gateway'
 echo "::group::Reconcile the shared API Gateway logging account"
 revalidate_master
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
@@ -786,6 +845,7 @@ shared_role_binding_sha="$(
 )"
 echo "::endgroup::"
 
+foundation_phase='governed-canary-roles'
 echo "::group::Reconcile the three governed-canary read roles"
 revalidate_master
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
@@ -993,6 +1053,7 @@ canary_template_sha="$(
 )"
 echo "::endgroup::"
 
+foundation_phase='bootstrap'
 echo "::group::Bootstrap both isolated stages in both regions"
 for stage in staging production; do
   for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
@@ -1019,6 +1080,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='deploy-roles'
 echo "::group::Reconcile the two environment-bound deploy roles"
 for stage in staging production; do
   revalidate_master
@@ -1050,6 +1112,7 @@ for stage in staging production; do
 done
 echo "::endgroup::"
 
+foundation_phase='drift-verification'
 echo "::group::Require all ten foundation stacks to be IN_SYNC"
 revalidate_master
 drift_file="${RUNNER_TEMP}/aws-foundation-drift.json"
@@ -1128,6 +1191,7 @@ jq -e 'length == 10 and all(.[]; .stackDriftStatus == "IN_SYNC")' \
 drift_sha="$(sha256sum "${drift_file}" | awk '{print $1}')"
 echo "::endgroup::"
 
+foundation_phase='evidence'
 echo "::group::Verify live stage bindings and author sanitized evidence"
 rm -rf -- "${EVIDENCE_DIR}"
 mkdir -p "${EVIDENCE_DIR}"
