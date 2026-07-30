@@ -84,7 +84,7 @@ test -s "${canonical_json}"
 "${yq_bin}" \
   --output-format=yaml \
   --no-colors \
-  '... style="flow"' \
+  '... style="" | .. style="flow"' \
   "${canonical_json}" >"${flow_yaml}"
 test -s "${flow_yaml}"
 

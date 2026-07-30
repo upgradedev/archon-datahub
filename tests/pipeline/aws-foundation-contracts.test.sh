@@ -769,7 +769,7 @@ require_text "${inline_template_renderer}" \
   '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
   '--output-format=yaml' \
   'jq -cS' \
-  "'... style=\"flow\"'" \
+  "'... style=\"\" | .. style=\"flow\"'" \
   'cmp -s "${canonical_json}" "${round_trip}"' \
   '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
 test "$(
