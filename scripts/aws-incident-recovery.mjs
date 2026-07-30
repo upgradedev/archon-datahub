@@ -231,6 +231,7 @@ export function buildRecoveryPlan({
   controlPlaneSha,
   expiresAt,
   now = new Date(),
+  preparedResourceStateSha256,
   resourcesResponse,
   sourceTemplateSemanticSha256,
   stackResponse,
@@ -257,7 +258,20 @@ export function buildRecoveryPlan({
   invariant(stack.ParentId == null && stack.RootId == null, "target stack is not a root stack");
   invariant(stack.EnableTerminationProtection === false, "target stack termination protection is enabled");
   exactTags(stack.Tags);
-  const resources = validateResourceSummaries(resourcesResponse);
+
+  let resourceStateSha256;
+  if (resourcesResponse !== undefined) {
+    const resources = validateResourceSummaries(resourcesResponse);
+    resourceStateSha256 = `sha256:${sha256(canonicalJson(resources))}`;
+  } else {
+    invariant(
+      typeof preparedResourceStateSha256 === "string" &&
+        preparedResourceStateSha256.startsWith("sha256:") &&
+        SHA256_PATTERN.test(preparedResourceStateSha256.slice(7)),
+      "prepared resource-state digest is invalid"
+    );
+    resourceStateSha256 = preparedResourceStateSha256;
+  }
 
   const policyDocument = {
     Version: "2012-10-17",
@@ -305,7 +319,7 @@ export function buildRecoveryPlan({
     target: {
       label: TARGET.label,
       region: TARGET.region,
-      resourceStateSha256: `sha256:${sha256(canonicalJson(resources))}`,
+      resourceStateSha256,
       sourceTemplateSemanticSha256,
       stackId: stack.StackId,
       stackIdSha256: `sha256:${stackIdSha256}`,
@@ -319,10 +333,10 @@ export function buildRecoveryPlan({
     planDigest: `sha256:${sha256(canonicalJson(plan))}`,
     policyDocument,
     policyDocumentSha256: `sha256:${policyDocumentSha256}`,
+    resourceStateSha256,
     stackIdSha256: `sha256:${stackIdSha256}`,
   });
 }
-
 function requireRunnerTemp(path) {
   const runnerTemp = process.env.RUNNER_TEMP;
   invariant(process.env.GITHUB_ACTIONS === "true", "CLI writes are CI-only");
@@ -349,7 +363,20 @@ function readJson(path, label) {
 }
 
 function usage() {
-  throw new Error("usage: validate-artifact <dir> | build-plan <stack.json> <resources.json> <template-sha> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out>");
+  throw new Error("usage: validate-artifact <dir> | build-plan <stack.json> <resources.json> <template-sha> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out> | rebuild-plan <stack.json> <resource-state-sha256> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out>");
+}
+
+function emitSafePlan(result) {
+  process.stdout.write(
+    `${canonicalJson({
+      clientRequestToken: result.clientRequestToken,
+      expiresAt: result.expiresAt,
+      planDigest: result.planDigest,
+      policyDocumentSha256: result.policyDocumentSha256,
+      resourceStateSha256: result.resourceStateSha256,
+      stackIdSha256: result.stackIdSha256,
+    })}\n`
+  );
 }
 
 export function main(argv = process.argv.slice(2)) {
@@ -372,20 +399,27 @@ export function main(argv = process.argv.slice(2)) {
     });
     writePrivate(planPath, result.plan);
     writePrivate(policyPath, result.policyDocument);
-    process.stdout.write(
-      `${canonicalJson({
-        clientRequestToken: result.clientRequestToken,
-        expiresAt: result.expiresAt,
-        planDigest: result.planDigest,
-        policyDocumentSha256: result.policyDocumentSha256,
-        stackIdSha256: result.stackIdSha256,
-      })}\n`
-    );
+    emitSafePlan(result);
+    return;
+  }
+  if (command === "rebuild-plan") {
+    invariant(args.length === 7, "rebuild-plan arguments are invalid");
+    const [stackPath, resourceStateSha256, accountId, expiresAt, controlPlaneSha, planPath, policyPath] = args;
+    const result = buildRecoveryPlan({
+      accountId,
+      controlPlaneSha,
+      expiresAt,
+      preparedResourceStateSha256: resourceStateSha256,
+      sourceTemplateSemanticSha256: TARGET.sourceTemplateSemanticSha256,
+      stackResponse: readJson(stackPath, "stack description"),
+    });
+    writePrivate(planPath, result.plan);
+    writePrivate(policyPath, result.policyDocument);
+    emitSafePlan(result);
     return;
   }
   usage();
 }
-
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
 if (import.meta.url === invokedPath) {
   try {
