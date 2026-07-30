@@ -12,13 +12,24 @@
   },
   "workflow": {
     "entry": ".github/workflows/aws-foundation-policy-migration.yml",
+    "driver": ".github/workflows/aws-foundation-policy-migration-driver.yml",
     "cleanup": ".github/workflows/aws-foundation-policy-migration-cleanup.yml",
     "branch": "master",
-    "concurrencyGroup": "archon-aws-control-plane",
+    "outerConcurrencyGroup": "archon-aws-control-plane",
+    "innerConcurrencyGroup": "archon-governed-canary-mutation-recovery",
+    "queue": "max",
     "confirmation": "MIGRATE EXACT FOUNDATION CONTROL POLICY",
     "cleanupConfirmation": "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION",
     "ownerActorOnly": true,
     "exactHeadRequired": true
+  },
+  "implementation": {
+    "driver": "scripts/run-aws-foundation-policy-migration.sh",
+    "libraries": [
+      "scripts/aws-foundation-policy-migration-authorization.sh",
+      "scripts/aws-foundation-policy-migration-common.sh",
+      "scripts/aws-foundation-policy-migration-state.sh"
+    ]
   },
   "policy": {
     "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
@@ -53,6 +64,13 @@
       "iam:ListPolicyVersions",
       "iam:SetDefaultPolicyVersion"
     ],
+    "rollbackManagedPolicyActions": [
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
     "temporaryPolicyReadAction": "iam:GetRolePolicy",
     "selfPersistenceActionsAllowed": false,
     "canonicalReadbackRequired": true,
@@ -68,6 +86,7 @@
   "recovery": {
     "automaticFollowerOnNonSuccess": true,
     "manualDispatch": true,
+    "freshRollbackOnlyAuthorization": true,
     "rollbackToPreviousDefault": true,
     "deleteOnlyNewNondefaultVersion": true,
     "mandatoryAuthorizationRevocation": true
