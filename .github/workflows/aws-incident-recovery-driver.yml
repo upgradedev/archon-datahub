@@ -1,0 +1,472 @@
+name: Sealed AWS staging IAM incident recovery driver
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        description: Exact internal operation: recover or cleanup
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact fixed lowercase 40-character current master SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type DELETE SEALED STAGING IAM INCIDENT
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-governed-canary-mutation-recovery
+  cancel-in-progress: false
+
+env:
+  AWS_PAGER: ""
+  INCIDENT_ARTIFACT_DIGEST: sha256:7aa20586b970ac938fba9299e0c3c2538482b92086db811ea583f84bd3b02e24
+  INCIDENT_ARTIFACT_ID: "8760846578"
+  INCIDENT_ARTIFACT_NAME: aws-foundation-failure-aea65845e3a9456403a7fb6e9f338e4c14c0b781-30546241677-1
+  INCIDENT_HEAD_SHA: aea65845e3a9456403a7fb6e9f338e4c14c0b781
+  INCIDENT_RUN_ATTEMPT: "1"
+  INCIDENT_RUN_ID: "30546241677"
+  RECOVERY_CONFIRMATION: DELETE SEALED STAGING IAM INCIDENT
+  TARGET_REGION: eu-west-1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Validate incident and seal temporary authorization
+    if: >-
+      inputs.operation == 'recover' &&
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      client_token: ${{ steps.prepare.outputs.client_token }}
+      control_plane_sha: ${{ steps.source.outputs.control_plane_sha }}
+      expires_at: ${{ steps.prepare.outputs.expires_at }}
+      plan_digest: ${{ steps.prepare.outputs.plan_digest }}
+      policy_sha256: ${{ steps.prepare.outputs.policy_sha256 }}
+      resource_state_sha256: ${{ steps.prepare.outputs.resource_state_sha256 }}
+      stack_id_sha256: ${{ steps.prepare.outputs.stack_id_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+      - name: Bind fixed master and exact historical incident
+        id: source
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_HEAD_SHA_INPUT: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCOUNT_ID:?aws-foundation AWS_ACCOUNT_ID is required}"
+          : "${AWS_FOUNDATION_ROLE_ARN:?aws-foundation AWS_FOUNDATION_ROLE_ARN is required}"
+          echo "::add-mask::${AWS_ACCOUNT_ID}"
+          echo "::add-mask::${AWS_FOUNDATION_ROLE_ARN}"
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${WORKFLOW_REF}" = \
+            "upgradedev/archon-datahub/.github/workflows/aws-incident-recovery.yml@refs/heads/master"
+          test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
+          [[ "${EXPECTED_HEAD_SHA_INPUT}" =~ ^[0-9a-f]{40}$ ]]
+          test "${EXPECTED_HEAD_SHA_INPUT}" = "${CONTROL_PLANE_SHA}"
+          test "${WORKFLOW_SHA}" = "${CONTROL_PLANE_SHA}"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          master_sha="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          test "${master_sha}" = "${CONTROL_PLANE_SHA}"
+
+          parent="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${INCIDENT_RUN_ID}/attempts/${INCIDENT_RUN_ATTEMPT}")"
+          jq -e \
+            --arg head "${INCIDENT_HEAD_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == 30546241677 and
+              .run_attempt == 1 and
+              .workflow_id == 323358060 and
+              .name ==
+                "Bootstrap AWS foundation at aea65845e3a9456403a7fb6e9f338e4c14c0b781" and
+              .path == ".github/workflows/aws-foundation.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .head_sha == $head and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "failure"
+            ' <<<"${parent}" >/dev/null || {
+            echo "::error::The exact historical incident run binding differs"
+            exit 1
+          }
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${INCIDENT_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${INCIDENT_ARTIFACT_DIGEST}" \
+            --arg head "${INCIDENT_HEAD_SHA}" \
+            --arg name "${INCIDENT_ARTIFACT_NAME}" '
+              .id == 8760846578 and
+              .name == $name and
+              .size_in_bytes == 697 and
+              .expired == false and
+              .digest == $digest and
+              .workflow_run.id == 30546241677 and
+              .workflow_run.head_branch == "master" and
+              .workflow_run.head_sha == $head
+            ' <<<"${artifact}" >/dev/null || {
+            echo "::error::The exact historical incident artifact binding differs"
+            exit 1
+          }
+          artifacts="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${INCIDENT_RUN_ID}/artifacts?per_page=100")"
+          jq -e \
+            --arg digest "${INCIDENT_ARTIFACT_DIGEST}" \
+            --arg name "${INCIDENT_ARTIFACT_NAME}" '
+              ([.artifacts[] |
+                select(
+                  .id == 8760846578 and
+                  .name == $name and
+                  .expired == false and
+                  .digest == $digest
+                )] | length) == 1
+            ' <<<"${artifacts}" >/dev/null
+          echo "control_plane_sha=${CONTROL_PLANE_SHA}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download only the exact incident artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: "8760846578"
+          path: ${{ runner.temp }}/sealed-incident
+          repository: ${{ github.repository }}
+          run-id: "30546241677"
+          github-token: ${{ github.token }}
+
+      - name: Validate exact inventory, checksums, and canonical payload
+        run: |
+          set -euo pipefail
+          safe="$(node scripts/aws-incident-recovery.mjs \
+            validate-artifact "${RUNNER_TEMP}/sealed-incident")"
+          jq -e '
+            .failurePayloadSha256 ==
+              "sha256:187d4cf683a61a778feec2051f1ef5c99b60cc58344edbf1a7d0189f28c67442" and
+            (.inventorySha256 | test("^sha256:[a-f0-9]{64}$"))
+          ' <<<"${safe}" >/dev/null
+
+      - name: Render exact current canary-role template before AWS trust
+        id: role_template
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/governed-canary-roles.yaml"
+          canonical="${RUNNER_TEMP}/governed-canary-roles.canonical.json"
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/governed-canary-roles.yml \
+            "${output}" "${canonical}"
+          {
+            echo "source=${GITHUB_WORKSPACE}/infra/aws/foundation/governed-canary-roles.yml"
+            echo "source_sha=$(sha256sum infra/aws/foundation/governed-canary-roles.yml | awk '{print $1}')"
+            echo "path=${output}"
+            echo "sha=$(sha256sum "${output}" | awk '{print $1}')"
+            echo "semantic_sha=$(sha256sum "${canonical}" | awk '{print $1}')"
+            echo "yq=${RUNNER_TEMP}/archon-inline-cfn-yq"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Assume protected foundation role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-incident-prepare-${{ github.run_id }}
+
+      - name: Seal plan and install exact expiring authorization
+        id: prepare
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CANARY_ROLE_SOURCE: ${{ steps.role_template.outputs.source }}
+          CANARY_ROLE_SOURCE_SHA: ${{ steps.role_template.outputs.source_sha }}
+          CANARY_ROLE_TEMPLATE: ${{ steps.role_template.outputs.path }}
+          CANARY_ROLE_TEMPLATE_SHA: ${{ steps.role_template.outputs.sha }}
+          CANARY_ROLE_TEMPLATE_SEMANTIC_SHA: ${{ steps.role_template.outputs.semantic_sha }}
+          CANARY_ROLE_YQ_BIN: ${{ steps.role_template.outputs.yq }}
+          CONTROL_PLANE_SHA: ${{ steps.source.outputs.control_plane_sha }}
+        run: |
+          set -euo pipefail
+          export EXPIRES_AT="$(date --utc --date='+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')"
+          bash scripts/run-aws-incident-recovery.sh prepare
+
+  delete-once:
+    name: One-shot STANDARD delete of sealed stack ID
+    needs: prepare
+    if: inputs.operation == 'recover' && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: governed-canary-recovery
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+      - name: Revalidate fixed master immediately before recovery trust
+        env:
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CONTROL_PLANE_SHA: ${{ needs.prepare.outputs.control_plane_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
+          test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test "$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+          [[ "${{ needs.prepare.outputs.plan_digest }}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${{ needs.prepare.outputs.policy_sha256 }}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${{ needs.prepare.outputs.stack_id_sha256 }}" =~ ^sha256:[a-f0-9]{64}$ ]]
+
+      - name: Assume separately approved recovery role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-incident-delete-${{ github.run_id }}
+
+      - name: Rederive sealed plan and issue exactly one delete
+        id: delete
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_CANARY_RECOVERY_ROLE_ARN: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ needs.prepare.outputs.control_plane_sha }}
+          EXPIRES_AT: ${{ needs.prepare.outputs.expires_at }}
+          EXPECTED_CLIENT_TOKEN: ${{ needs.prepare.outputs.client_token }}
+          EXPECTED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          EXPECTED_POLICY_SHA256: ${{ needs.prepare.outputs.policy_sha256 }}
+          EXPECTED_RESOURCE_STATE_SHA256: ${{ needs.prepare.outputs.resource_state_sha256 }}
+          EXPECTED_STACK_ID_SHA256: ${{ needs.prepare.outputs.stack_id_sha256 }}
+        run: bash scripts/run-aws-incident-recovery.sh delete-once
+
+  revoke-and-postverify:
+    name: Always revoke authorization and prove exact deletion
+    needs:
+      - prepare
+      - delete-once
+    if: >-
+      always() &&
+      inputs.operation == 'recover' &&
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate fixed master before mandatory revocation
+        env:
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION_INPUT}" = "${RECOVERY_CONFIRMATION}"
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+
+
+      - name: Assume protected foundation role for revocation
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-incident-revoke-${{ github.run_id }}
+
+      - name: Revoke and verify completed exact deletion
+        if: needs.prepare.result == 'success'
+        id: recovery
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          EXPIRES_AT: ${{ needs.prepare.outputs.expires_at }}
+          EXPECTED_STACK_ID_SHA256: ${{ needs.prepare.outputs.stack_id_sha256 }}
+          PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          POLICY_SHA256: ${{ needs.prepare.outputs.policy_sha256 }}
+        run: bash scripts/run-aws-incident-recovery.sh postverify
+
+      - name: Revoke safely after incomplete preparation
+        if: needs.prepare.result != 'success'
+        id: cleanup
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+        run: bash scripts/run-aws-incident-recovery.sh cleanup
+
+      - name: Mandatory final fail-closed policy absence proof
+        if: always()
+        id: final_cleanup
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+        run: bash scripts/run-aws-incident-recovery.sh cleanup
+      - name: Attest sanitized exact recovery evidence
+        if: steps.recovery.outcome == 'success'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.recovery.outputs.checksums }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-incident-recovery/v1
+          predicate-path: ${{ steps.recovery.outputs.predicate }}
+
+      - name: Retain only sanitized canonical recovery evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-incident-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/archon-aws-incident-recovery/evidence/recovery.json
+            ${{ runner.temp }}/archon-aws-incident-recovery/evidence/SHA256SUMS
+            ${{ runner.temp }}/archon-aws-incident-recovery/evidence/attestation-predicate.json
+            ${{ runner.temp }}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json
+            ${{ runner.temp }}/archon-aws-incident-recovery/cleanup-evidence/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+  cleanup:
+    name: Independent idempotent temporary-policy cleanup
+    if: >-
+      inputs.operation == 'cleanup' &&
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      inputs.confirmation == 'REVOKE SEALED INCIDENT POLICY'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind exact current cleanup driver without target inputs
+        env:
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test "$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+
+      - name: Assume protected foundation role for cleanup only
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-incident-cleanup-${{ github.run_id }}
+
+      - name: Revoke exact temporary policy and prove absence
+        id: cleanup_evidence
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+        run: bash scripts/run-aws-incident-recovery.sh cleanup
+
+      - name: Attest sanitized cleanup evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.cleanup_evidence.outputs.checksums }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-incident-recovery-cleanup/v1
+          predicate-path: ${{ steps.cleanup_evidence.outputs.predicate }}
+
+      - name: Retain only sanitized canonical cleanup evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-incident-recovery-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.cleanup_evidence.outputs.evidence_dir }}/cleanup.json
+            ${{ steps.cleanup_evidence.outputs.evidence_dir }}/SHA256SUMS
+            ${{ steps.cleanup_evidence.outputs.evidence_dir }}/attestation-predicate.json
+          if-no-files-found: error
+          retention-days: 90
