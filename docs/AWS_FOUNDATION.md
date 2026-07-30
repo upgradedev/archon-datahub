@@ -3,8 +3,8 @@
 Archon's AWS foundation is a manual, idempotent GitHub Actions control plane.
 It creates the stage-isolated CDK bootstrap, least-privilege CloudFormation
 execution policies, runtime permissions boundaries, environment-bound GitHub
-OIDC roles, governed-canary read roles, and the single regional API Gateway
-logging account.
+OIDC roles, governed-canary read roles, and either manages or explicitly pins
+the single regional API Gateway logging account without taking it over.
 
 All executable verification, synthesis, deployment, drift detection, and
 evidence generation runs in GitHub Actions. A workstation build or temporary
@@ -12,7 +12,8 @@ artifact is neither required nor accepted as release evidence.
 
 ## Final topology
 
-The account contains these ten CloudFormation stack instances:
+Nine CloudFormation stack instances are always managed by Archon. A tenth
+stack exists only in `foundation-managed` API Gateway mode:
 
 | Purpose | Region | Stack |
 | --- | --- | --- |
@@ -21,11 +22,17 @@ The account contains these ten CloudFormation stack instances:
 | Staging GitHub deploy role | `eu-west-1` | `Archon-GitHub-Staging-Deploy-Role` |
 | Production GitHub deploy role | `eu-west-1` | `Archon-GitHub-Production-Deploy-Role` |
 | Governed-canary GitHub roles | `eu-west-1` | `Archon-Governed-Canary-Roles` |
-| Shared API Gateway logging | `eu-west-1` | `Archon-Shared-ApiGateway-Logging` |
+| Shared API Gateway logging (`foundation-managed` only) | `eu-west-1` | `Archon-Shared-ApiGateway-Logging` |
 | Staging CDK bootstrap | `eu-west-1` | `CDKToolkit-archonstg` |
 | Staging CDK bootstrap | `us-east-1` | `CDKToolkit-archonstg` |
 | Production CDK bootstrap | `eu-west-1` | `CDKToolkit-archonprd` |
 | Production CDK bootstrap | `us-east-1` | `CDKToolkit-archonprd` |
+
+`foundation-managed` therefore produces ten managed stacks. `external-pinned`
+produces nine managed stacks plus one pinned external account binding; the
+`Archon-Shared-ApiGateway-Logging` managed stack must be absent in that mode.
+The evidence and workflow summary report the exact managed-stack count instead
+of describing the external binding as a CloudFormation stack.
 
 The stage mapping is fixed:
 
@@ -181,10 +188,28 @@ CIDR prefix lists.
 ## Shared regional resources
 
 API Gateway has one CloudWatch logging role setting per AWS account and
-region. The `Archon-Shared-ApiGateway-Logging` stack therefore owns the only
-`AWS::ApiGateway::Account` binding in `eu-west-1`, the role
-`archon-datahub-apigateway-cloudwatch-logs`, and its exact inline log policy.
-Both stage execution policies explicitly deny `/account` mutation.
+region. The foundation resolves that singleton in exactly one of two modes:
+
+- In `foundation-managed`, the protected digest pin is empty and the account
+  binding is either empty or already names
+  `archon-datahub-apigateway-cloudwatch-logs`. The
+  `Archon-Shared-ApiGateway-Logging` stack creates or reconciles the
+  `AWS::ApiGateway::Account` resource, role, and exact inline log policy.
+- In `external-pinned`, an existing non-Archon binding must be a strict
+  same-account IAM role ARN and its exact SHA-256 must match the protected
+  `aws-foundation` variable `AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`. The
+  managed stack must be absent. This path performs no API Gateway account mutation,
+  no IAM role inspection, and no takeover.
+
+A foreign binding without an exact pin fails before mutation and exposes only
+its SHA-256 for deliberate operator pinning. A malformed or cross-account ARN,
+a stale or mismatched pin, a changed binding during the run, or coexistence
+with the managed stack also fails closed. The raw external ARN is masked,
+revalidated unchanged at the shared and drift gates, and never enters retained
+evidence; the receipt records only `pinned-and-unchanged` plus its binding
+hash. Archon does not claim that the external role's trust or permissions were
+verified, so the shared-account owner remains responsible for CloudWatch log
+delivery. Both stage execution policies explicitly deny `/account` mutation.
 
 Staging owns creation and reconciliation of the shared immutable
 `archon-datahub` ECR repository and `alias/archon/ecr` key. Production may
@@ -379,8 +404,10 @@ to the regional platform stack.
 4. The workflow verifies the protected GitHub control plane, synthesizes and
    proves both runtime boundaries, assumes the foundation role through OIDC,
    validates the four attached foundation policies by exact canonical
-   equality, reconciles all ten stacks, and requires every stack to be
-   `IN_SYNC`.
+   equality, then resolves the API Gateway ownership mode. It either
+   reconciles ten managed stacks or verifies nine managed stacks plus one
+   pinned external account binding, and requires every managed stack to be
+   `IN_SYNC` and the external binding, when selected, to remain unchanged.
 5. Configure the deploy-role and governed-canary role variables from the
    resulting exact role names.
 6. Dispatch the immutable deployment workflow. It shares concurrency group
@@ -401,6 +428,8 @@ binding, the receipt instead surfaces `ready-for-deploy`.
 
 The final foundation artifact contains sanitized digests, four bootstrap
 variant hashes, execution-policy bundle hashes, role-binding hashes, the
-application-stack role preflight and explicit transition state, and ten-stack
-drift evidence. It contains no raw account ID, role ARN, secret, token,
-password, credential, or API key and is attested before retention.
+application-stack role preflight and explicit transition state, and drift
+evidence for the exact nine or ten managed stacks. External mode additionally
+records one takeover-forbidden, no-mutation binding as pinned and unchanged.
+It contains no raw account ID, role ARN, secret, token, password, credential,
+or API key and is attested before retention.

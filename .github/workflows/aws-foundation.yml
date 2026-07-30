@@ -61,6 +61,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}
           STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}
           STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}
           PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}
@@ -92,6 +93,9 @@ jobs:
           test "${AWS_REGION}" = "eu-west-1"
           test "${AWS_FOUNDATION_ROLE_ARN}" = \
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${FOUNDATION_ROLE_NAME}"
+          if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+            [[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          fi
           dns_name_pattern='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
           hosted_zone_id_pattern='^Z[A-Z0-9]{1,31}$'
           [[ "${STAGING_CLOUDFRONT_DOMAIN_NAME}" =~ ${dns_name_pattern} ]]
@@ -274,10 +278,21 @@ jobs:
               }
             } and
             .aws.sharedApiGatewayLogging == {
-              inlinePolicyName: "archon-apigateway-cloudwatch-logs",
-              region: "eu-west-1",
-              roleName: "archon-datahub-apigateway-cloudwatch-logs",
-              stackName: "Archon-Shared-ApiGateway-Logging"
+              external: {
+                bindingSha256Variable:
+                  "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+                managedStackMustBeAbsent: true,
+                mutation: "none",
+                sameAccountRoleArnRequired: true,
+                takeover: "forbidden"
+              },
+              managed: {
+                inlinePolicyName: "archon-apigateway-cloudwatch-logs",
+                roleName: "archon-datahub-apigateway-cloudwatch-logs",
+                stackName: "Archon-Shared-ApiGateway-Logging"
+              },
+              ownershipModes: ["foundation-managed", "external-pinned"],
+              region: "eu-west-1"
             } and
             .aws.deployRoles.staging.roleName ==
               "archon-datahub-github-staging-deploy" and
@@ -770,6 +785,7 @@ jobs:
         id: reconcile
         env:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
@@ -881,6 +897,8 @@ jobs:
           CANARY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.canary_role_binding_sha }}
           OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
+          SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}
+          DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}
         run: |
           set -euo pipefail
           {
@@ -892,9 +910,24 @@ jobs:
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
             echo "- Operational roles: stage judge access plus production posture, runtime, and paging"
-            echo "- Shared API Gateway logging account: exact foundation-owned role"
+            case "${SHARED_API_GATEWAY_MODE}" in
+              foundation-managed)
+                test "${DRIFT_STACK_COUNT}" = "10"
+                echo "- Shared API Gateway logging account: exact foundation-managed role"
+                echo "- Managed stack inventory: \`10\`"
+                ;;
+              external-pinned)
+                test "${DRIFT_STACK_COUNT}" = "9"
+                echo "- Shared API Gateway logging account: pinned external binding, unchanged, no takeover"
+                echo "- Managed stack inventory: \`9\` plus one external account binding"
+                ;;
+              *)
+                echo "::error::invalid shared API Gateway evidence mode"
+                exit 1
+                ;;
+            esac
             echo "- Application stack RoleARN transition: \`${APPLICATION_STACK_ROLE_TRANSITION}\`"
-            echo "- Ten-stack drift digest: \`${DRIFT_SHA}\`"
+            echo "- Managed-stack drift digest: \`${DRIFT_SHA}\`"
             echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
             echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"

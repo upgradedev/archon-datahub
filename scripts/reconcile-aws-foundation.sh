@@ -45,6 +45,7 @@ shopt -s inherit_errexit
 : "${PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID:?PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
+AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256="${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256:-}"
 
 [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
 [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
@@ -53,6 +54,9 @@ shopt -s inherit_errexit
 [[ "${IAM_FOUNDATION_SEMANTIC_SHA}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${IAM_FOUNDATION_YQ_SHA}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${FOUNDATION_POLICY_ACTUAL_SHA}" =~ ^[0-9a-f]{64}$ ]]
+if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+  [[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+fi
 test "${PINNED_BOOTSTRAP_VERSION}" = "32"
 readonly DNS_NAME_PATTERN='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 readonly HOSTED_ZONE_ID_PATTERN='^Z[A-Z0-9]{1,31}$'
@@ -70,6 +74,16 @@ readonly SHARED_API_ROLE="archon-datahub-apigateway-cloudwatch-logs"
 readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"
 readonly LEGACY_DEPLOY_ROLE="archon-datahub-github-deploy"
 readonly EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-evidence"
+shared_api_gateway_mode=""
+shared_api_gateway_observed_role_arn=""
+shared_api_gateway_observed_binding_sha=""
+shared_api_gateway_preflight_mode=""
+shared_api_gateway_preflight_binding_sha=""
+shared_role_binding_sha=""
+shared_policy_sha=""
+shared_template_sha=""
+shared_api_gateway_json=""
+drift_stack_count=0
 
 declare -A BOOTSTRAP_STACK=(
   [staging]="CDKToolkit-archonstg"
@@ -313,16 +327,64 @@ assert_application_stack_role_exact_if_present() {
   )"
 }
 
-assert_api_gateway_no_clobber() {
-  local account_json="${RUNNER_TEMP}/api-gateway-account-preflight.json"
+assert_stack_absent() {
+  local region="$1"
+  local stack_name="$2"
+  local output="${RUNNER_TEMP}/absent-stack-${region}-${stack_name}.json"
+  local error="${output}.error"
+  if aws cloudformation describe-stacks \
+    --region "${region}" \
+    --stack-name "${stack_name}" \
+    --output json >"${output}" 2>"${error}"; then
+    echo "::error::external API Gateway binding cannot coexist with the Archon managed stack"
+    return 1
+  fi
+  grep -Eq 'does not exist|ValidationError' "${error}"
+}
+
+inspect_api_gateway_binding() {
+  local account_json="${RUNNER_TEMP}/api-gateway-account-binding.json"
   local expected_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${SHARED_API_ROLE}"
+  local observed
+  local observed_sha
   aws apigateway get-account \
     --region "${PRIMARY_REGION}" \
     --output json >"${account_json}"
-  jq -e --arg expected "${expected_arn}" '
-    ((.cloudwatchRoleArn // "") == "") or
-    .cloudwatchRoleArn == $expected
-  ' "${account_json}" >/dev/null
+  observed="$(jq -er '(.cloudwatchRoleArn // "") | select(type == "string")' "${account_json}")"
+  if [[ -n "${observed}" ]]; then
+    echo "::add-mask::${observed}"
+  fi
+  observed_sha="$(printf '%s' "${observed}" | sha256sum | awk '{print $1}')"
+  if [[ -z "${observed}" ]]; then
+    if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+      echo "::error::clear the stale external API Gateway binding pin before managed reconciliation"
+      return 1
+    fi
+    shared_api_gateway_mode="foundation-managed"
+  elif [[ "${observed}" == "${expected_arn}" ]]; then
+    if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+      echo "::error::clear the stale external API Gateway binding pin before managed reconciliation"
+      return 1
+    fi
+    assert_stack_complete_without_service_role \
+      "${PRIMARY_REGION}" \
+      "${SHARED_API_STACK}" \
+      "${RUNNER_TEMP}/managed-shared-api-stack-preflight.json"
+    shared_api_gateway_mode="foundation-managed"
+  else
+    if [[ ! "${observed}" =~ ^arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/([A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]{1,64}$ ]]; then
+      echo "::error::the existing API Gateway CloudWatch role is not one same-account role ARN"
+      return 1
+    fi
+    if [[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" != "${observed_sha}" ]]; then
+      echo "::error title=Pin existing API Gateway logging role::AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256=${observed_sha}"
+      return 1
+    fi
+    assert_stack_absent "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+    shared_api_gateway_mode="external-pinned"
+  fi
+  shared_api_gateway_observed_role_arn="${observed}"
+  shared_api_gateway_observed_binding_sha="${observed_sha}"
 }
 
 get_managed_policy_document() {
@@ -493,7 +555,9 @@ assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
 foundation_phase='preflight:foundation-stack-role-binding:governed-canary'
 assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
 foundation_phase='preflight:shared-api-gateway'
-assert_api_gateway_no_clobber
+inspect_api_gateway_binding
+shared_api_gateway_preflight_mode="${shared_api_gateway_mode}"
+shared_api_gateway_preflight_binding_sha="${shared_api_gateway_observed_binding_sha}"
 staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
@@ -745,104 +809,138 @@ done
 echo "::endgroup::"
 
 foundation_phase='shared-api-gateway'
-echo "::group::Reconcile the shared API Gateway logging account"
+echo "::group::Reconcile or pin the shared API Gateway logging account"
 revalidate_master
-assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
-assert_api_gateway_no_clobber
-aws cloudformation deploy \
-  --region "${PRIMARY_REGION}" \
-  --stack-name "${SHARED_API_STACK}" \
-  --template-file infra/aws/foundation/api-gateway-account.yml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --no-fail-on-empty-changeset \
-  --tags \
-    Application=archon-datahub \
-    Environment=shared \
-    ManagedBy=github-actions \
-    Purpose=shared-apigateway-logging >/dev/null
-aws cloudformation update-termination-protection \
-  --region "${PRIMARY_REGION}" \
-  --stack-name "${SHARED_API_STACK}" \
-  --enable-termination-protection
-shared_stack_json="${RUNNER_TEMP}/shared-api-gateway-stack.json"
-assert_stack_complete_without_service_role \
-  "${PRIMARY_REGION}" "${SHARED_API_STACK}" "${shared_stack_json}"
-shared_role_arn="$(
-  jq -er '
-    .Stacks[0].Outputs[] |
-    select(.OutputKey == "ApiGatewayCloudWatchLogsRoleArn") |
-    .OutputValue
-  ' "${shared_stack_json}"
-)"
-test "${shared_role_arn}" = \
-  "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${SHARED_API_ROLE}"
-echo "::add-mask::${shared_role_arn}"
-api_account_json="${RUNNER_TEMP}/api-gateway-account-final.json"
-aws apigateway get-account \
-  --region "${PRIMARY_REGION}" \
-  --output json >"${api_account_json}"
-jq -e --arg expected "${shared_role_arn}" '
-  .cloudwatchRoleArn == $expected
-' "${api_account_json}" >/dev/null
-shared_role_json="${RUNNER_TEMP}/shared-api-gateway-role.json"
-aws iam get-role \
-  --role-name "${SHARED_API_ROLE}" \
-  --output json >"${shared_role_json}"
-jq -e '
-  .Role.RoleName == "archon-datahub-apigateway-cloudwatch-logs" and
-  (.Role.PermissionsBoundary == null) and
-  (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
-  .Role.AssumeRolePolicyDocument.Statement[0] == {
-    Action: "sts:AssumeRole",
-    Effect: "Allow",
-    Principal: {Service: "apigateway.amazonaws.com"},
-    Sid: "ApiGatewayServiceOnly"
-  }
-' "${shared_role_json}" >/dev/null
-aws iam list-attached-role-policies \
-  --role-name "${SHARED_API_ROLE}" \
-  --output json |
-  jq -e '.AttachedPolicies == []' >/dev/null
-aws iam list-role-policies \
-  --role-name "${SHARED_API_ROLE}" \
-  --output json |
-  jq -e '.PolicyNames == ["archon-apigateway-cloudwatch-logs"]' >/dev/null
-shared_inline_json="${RUNNER_TEMP}/shared-api-gateway-inline-policy.json"
-aws iam get-role-policy \
-  --role-name "${SHARED_API_ROLE}" \
-  --policy-name archon-apigateway-cloudwatch-logs \
-  --output json >"${shared_inline_json}"
-jq -e '
-  ([.PolicyDocument.Statement[].Action] | flatten | index("*") | not) and
-  (
-    .PolicyDocument |
-    tostring |
-    contains("AdministratorAccess") |
-    not
-  ) and
-  (
-    .PolicyDocument |
-    tostring |
-    contains("API-Gateway-Execution-Logs_")
-  ) and
-  (
-    .PolicyDocument |
-    tostring |
-    contains("/archon/staging/api-gateway")
-  ) and
-  (
-    .PolicyDocument |
-    tostring |
-    contains("/archon/production/api-gateway")
-  )
-' "${shared_inline_json}" >/dev/null
-shared_policy_sha="$(canonical_policy_sha "${shared_inline_json}")"
-shared_template_sha="$(
-  deployed_template_sha "${PRIMARY_REGION}" "${SHARED_API_STACK}"
-)"
-shared_role_binding_sha="$(
-  printf '%s' "${shared_role_arn}" | sha256sum | awk '{print $1}'
-)"
+inspect_api_gateway_binding
+test "${shared_api_gateway_mode}" = "${shared_api_gateway_preflight_mode}"
+test "${shared_api_gateway_observed_binding_sha}" = \
+  "${shared_api_gateway_preflight_binding_sha}"
+if [[ "${shared_api_gateway_mode}" == "external-pinned" ]]; then
+  shared_role_binding_sha="${shared_api_gateway_observed_binding_sha}"
+  shared_api_gateway_json="$(
+    jq -cnS \
+      --arg bindingSha256 "${shared_role_binding_sha}" '
+        {
+          external: {
+            bindingSha256: $bindingSha256,
+            bindingSha256Variable:
+              "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+            bindingState: "UNCHANGED",
+            managedStackAbsent: true,
+            mutation: "none",
+            roleArnTemplate:
+              "arn:aws:iam::<AWS_ACCOUNT_ID>:role/<PINNED_EXTERNAL_ROLE_PATH_AND_NAME>",
+            sameAccountRoleArn: true
+          },
+          managed: null,
+          mode: "external-pinned",
+          roleBindingSha256: $bindingSha256,
+          takeover: "forbidden",
+          validation: "pinned-and-unchanged"
+        }
+      '
+  )"
+else
+  assert_stack_role_is_null_if_present "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+  aws cloudformation deploy \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${SHARED_API_STACK}" \
+    --template-file infra/aws/foundation/api-gateway-account.yml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --no-fail-on-empty-changeset \
+    --tags \
+      Application=archon-datahub \
+      Environment=shared \
+      ManagedBy=github-actions \
+      Purpose=shared-apigateway-logging >/dev/null
+  aws cloudformation update-termination-protection \
+    --region "${PRIMARY_REGION}" \
+    --stack-name "${SHARED_API_STACK}" \
+    --enable-termination-protection
+  shared_stack_json="${RUNNER_TEMP}/shared-api-gateway-stack.json"
+  assert_stack_complete_without_service_role \
+    "${PRIMARY_REGION}" "${SHARED_API_STACK}" "${shared_stack_json}"
+  shared_role_arn="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "ApiGatewayCloudWatchLogsRoleArn") |
+      .OutputValue
+    ' "${shared_stack_json}"
+  )"
+  test "${shared_role_arn}" = \
+    "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${SHARED_API_ROLE}"
+  echo "::add-mask::${shared_role_arn}"
+  api_account_json="${RUNNER_TEMP}/api-gateway-account-final.json"
+  aws apigateway get-account \
+    --region "${PRIMARY_REGION}" \
+    --output json >"${api_account_json}"
+  jq -e --arg expected "${shared_role_arn}" '
+    .cloudwatchRoleArn == $expected
+  ' "${api_account_json}" >/dev/null
+  shared_role_json="${RUNNER_TEMP}/shared-api-gateway-role.json"
+  aws iam get-role \
+    --role-name "${SHARED_API_ROLE}" \
+    --output json >"${shared_role_json}"
+  jq -e '
+    .Role.RoleName == "archon-datahub-apigateway-cloudwatch-logs" and
+    (.Role.PermissionsBoundary == null) and
+    (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+    .Role.AssumeRolePolicyDocument.Statement[0] == {
+      Action: "sts:AssumeRole",
+      Effect: "Allow",
+      Principal: {Service: "apigateway.amazonaws.com"},
+      Sid: "ApiGatewayServiceOnly"
+    }
+  ' "${shared_role_json}" >/dev/null
+  aws iam list-attached-role-policies \
+    --role-name "${SHARED_API_ROLE}" \
+    --output json |
+    jq -e '.AttachedPolicies == []' >/dev/null
+  aws iam list-role-policies \
+    --role-name "${SHARED_API_ROLE}" \
+    --output json |
+    jq -e '.PolicyNames == ["archon-apigateway-cloudwatch-logs"]' >/dev/null
+  shared_inline_json="${RUNNER_TEMP}/shared-api-gateway-inline-policy.json"
+  aws iam get-role-policy \
+    --role-name "${SHARED_API_ROLE}" \
+    --policy-name archon-apigateway-cloudwatch-logs \
+    --output json >"${shared_inline_json}"
+  jq -e '
+    ([.PolicyDocument.Statement[].Action] | flatten | index("*") | not) and
+    (.PolicyDocument | tostring | contains("AdministratorAccess") | not) and
+    (.PolicyDocument | tostring | contains("API-Gateway-Execution-Logs_")) and
+    (.PolicyDocument | tostring | contains("/archon/staging/api-gateway")) and
+    (.PolicyDocument | tostring | contains("/archon/production/api-gateway"))
+  ' "${shared_inline_json}" >/dev/null
+  shared_policy_sha="$(canonical_policy_sha "${shared_inline_json}")"
+  shared_template_sha="$(
+    deployed_template_sha "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+  )"
+  shared_role_binding_sha="$(
+    printf '%s' "${shared_role_arn}" | sha256sum | awk '{print $1}'
+  )"
+  shared_api_gateway_json="$(
+    jq -cnS \
+      --arg bindingSha256 "${shared_role_binding_sha}" \
+      --arg inlinePolicySha256 "${shared_policy_sha}" \
+      --arg templateSha256 "${shared_template_sha}" '
+        {
+          external: null,
+          managed: {
+            deployedTemplateSha256: $templateSha256,
+            inlinePolicySha256: $inlinePolicySha256,
+            roleArnTemplate:
+              "arn:aws:iam::<AWS_ACCOUNT_ID>:role/archon-datahub-apigateway-cloudwatch-logs",
+            stackName: "Archon-Shared-ApiGateway-Logging"
+          },
+          mode: "foundation-managed",
+          roleBindingSha256: $bindingSha256,
+          takeover: "forbidden",
+          validation: "managed-and-verified"
+        }
+      '
+  )"
+fi
 echo "::endgroup::"
 
 foundation_phase='governed-canary-roles'
@@ -1113,7 +1211,7 @@ done
 echo "::endgroup::"
 
 foundation_phase='drift-verification'
-echo "::group::Require all ten foundation stacks to be IN_SYNC"
+echo "::group::Require every managed foundation stack to be IN_SYNC"
 revalidate_master
 drift_file="${RUNNER_TEMP}/aws-foundation-drift.json"
 printf '[]' >"${drift_file}"
@@ -1183,11 +1281,21 @@ for stage in staging production; do
       "${stage}" bootstrap "${region}" "${BOOTSTRAP_STACK[${stage}]}"
   done
 done
-check_drift shared api-gateway "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+inspect_api_gateway_binding
+test "${shared_api_gateway_mode}" = "${shared_api_gateway_preflight_mode}"
+test "${shared_api_gateway_observed_binding_sha}" = "${shared_role_binding_sha}"
+if [[ "${shared_api_gateway_mode}" == "foundation-managed" ]]; then
+  check_drift shared api-gateway "${PRIMARY_REGION}" "${SHARED_API_STACK}"
+fi
 check_drift shared governed-canary-roles \
   "${PRIMARY_REGION}" "${CANARY_ROLE_STACK}"
-jq -e 'length == 10 and all(.[]; .stackDriftStatus == "IN_SYNC")' \
-  "${drift_file}" >/dev/null
+drift_stack_count="$(jq -er 'length' "${drift_file}")"
+if [[ "${shared_api_gateway_mode}" == "foundation-managed" ]]; then
+  test "${drift_stack_count}" -eq 10
+else
+  test "${drift_stack_count}" -eq 9
+fi
+jq -e 'all(.[]; .stackDriftStatus == "IN_SYNC")' "${drift_file}" >/dev/null
 drift_sha="$(sha256sum "${drift_file}" | awk '{print $1}')"
 echo "::endgroup::"
 
@@ -1981,10 +2089,9 @@ jq -cnS \
   --arg bootstrapTemplateSha256 "${BOOTSTRAP_TEMPLATE_SHA}" \
   --argjson pinnedBootstrapVersion "${PINNED_BOOTSTRAP_VERSION}" \
   --arg driftSha256 "${drift_sha}" \
+  --argjson driftStackCount "${drift_stack_count}" \
   --arg runtimeInventorySha256 "${runtime_inventory_sha}" \
-  --arg sharedPolicySha256 "${shared_policy_sha}" \
-  --arg sharedRoleBindingSha256 "${shared_role_binding_sha}" \
-  --arg sharedDeployedTemplateSha256 "${shared_template_sha}" \
+  --argjson sharedApiGateway "${shared_api_gateway_json}" \
   --arg governedCanaryDeployedTemplateSha256 "${canary_template_sha}" \
   --argjson governedCanaryRoles "${canary_roles_json}" \
   --argjson operationalRoles "${operational_roles_json}" \
@@ -2010,14 +2117,7 @@ jq -cnS \
         operationalRoles: $operationalRoles,
         partition: "aws",
         runtimeInventorySha256: $runtimeInventorySha256,
-        sharedApiGateway: {
-          deployedTemplateSha256: $sharedDeployedTemplateSha256,
-          inlinePolicySha256: $sharedPolicySha256,
-          roleArnTemplate:
-            "arn:aws:iam::<AWS_ACCOUNT_ID>:role/archon-datahub-apigateway-cloudwatch-logs",
-          roleBindingSha256: $sharedRoleBindingSha256,
-          validation: "passed"
-        },
+        sharedApiGateway: $sharedApiGateway,
         stages: $stages
       },
       bootstrapTemplate: {
@@ -2027,8 +2127,10 @@ jq -cnS \
       },
       completedAt: $completedAt,
       drift: {
+        externalBindingCount:
+          (if $sharedApiGateway.mode == "external-pinned" then 1 else 0 end),
+        managedStackCount: $driftStackCount,
         sha256: $driftSha256,
-        stackCount: 10,
         status: "IN_SYNC"
       },
       schemaVersion: "archon.aws-foundation-evidence/v1",
@@ -2096,11 +2198,17 @@ jq -e '
       end
     )
   ) and
-  .drift == {
-    sha256: .drift.sha256,
-    stackCount: 10,
-    status: "IN_SYNC"
-  } and
+  (.drift.sha256 | test("^[0-9a-f]{64}$")) and
+  .drift.status == "IN_SYNC" and
+  (
+    if .aws.sharedApiGateway.mode == "foundation-managed" then
+      .drift.managedStackCount == 10 and
+      .drift.externalBindingCount == 0
+    else
+      .drift.managedStackCount == 9 and
+      .drift.externalBindingCount == 1
+    end
+  ) and
   (.aws.stages | map(.stage)) == ["staging", "production"] and
   (
     [.aws.stages[].publicViewerDns.domainName] |
@@ -2133,7 +2241,35 @@ jq -e '
     "paging-test"
   ] and
   all(.aws.operationalRoles[]; .validation == "passed") and
-  .aws.sharedApiGateway.validation == "passed"
+  .aws.sharedApiGateway.takeover == "forbidden" and
+  (.aws.sharedApiGateway.roleBindingSha256 | test("^[0-9a-f]{64}$")) and
+  (
+    if .aws.sharedApiGateway.mode == "foundation-managed" then
+      .aws.sharedApiGateway.validation == "managed-and-verified" and
+      .aws.sharedApiGateway.external == null and
+      .aws.sharedApiGateway.managed.stackName ==
+        "Archon-Shared-ApiGateway-Logging" and
+      (.aws.sharedApiGateway.managed.deployedTemplateSha256 |
+        test("^[0-9a-f]{64}$")) and
+      (.aws.sharedApiGateway.managed.inlinePolicySha256 |
+        test("^[0-9a-f]{64}$"))
+    else
+      .aws.sharedApiGateway.mode == "external-pinned" and
+      .aws.sharedApiGateway.validation == "pinned-and-unchanged" and
+      .aws.sharedApiGateway.managed == null and
+      .aws.sharedApiGateway.external == {
+        bindingSha256: .aws.sharedApiGateway.roleBindingSha256,
+        bindingSha256Variable:
+          "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+        bindingState: "UNCHANGED",
+        managedStackAbsent: true,
+        mutation: "none",
+        roleArnTemplate:
+          "arn:aws:iam::<AWS_ACCOUNT_ID>:role/<PINNED_EXTERNAL_ROLE_PATH_AND_NAME>",
+        sameAccountRoleArn: true
+      }
+    end
+  )
 ' "${foundation_json}" >/dev/null
 
 foundation_sha="$(sha256sum "${foundation_json}" | awk '{print $1}')"
@@ -2263,5 +2399,7 @@ combined_operational_binding_sha="$(
   echo "canary_role_binding_sha=${combined_canary_binding_sha}"
   echo "operational_role_binding_sha=${combined_operational_binding_sha}"
   echo "application_stack_role_transition=${application_stack_role_transition_state}"
+  echo "shared_api_gateway_mode=${shared_api_gateway_mode}"
+  echo "drift_stack_count=${drift_stack_count}"
 } >>"${GITHUB_OUTPUT}"
 echo "::endgroup::"
