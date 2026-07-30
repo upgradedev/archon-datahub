@@ -41,6 +41,10 @@ on:
         description: Exact inner receipt.json SHA-256 from the sealed artifact
         required: true
         type: string
+      fixture_coordinates:
+        description: Promote-only canonical JSON with exact fixture run, artifact, and receipt coordinates
+        required: false
+        type: string
       migrate_legacy_cloudformation_roles:
         description: One-time opt-in to replace legacy persisted stack execution roles; final verification remains exact
         required: true
@@ -145,6 +149,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
+          CANARY_FIXTURE_COORDINATES: ${{ inputs.fixture_coordinates }}
         run: |
           set -euo pipefail
           case "${DEPLOYMENT_MODE}" in
@@ -162,6 +167,37 @@ jobs:
             echo "::error::release_sha must be a full lowercase commit SHA"
             exit 1
           }
+          if test "${DEPLOYMENT_MODE}" = "promote"; then
+            test "${#CANARY_FIXTURE_COORDINATES}" -le 1024
+            canonical_fixture_coordinates="$(jq -ceS '
+              select(
+                (keys | sort) == [
+                  "fixture_artifact_digest",
+                  "fixture_artifact_id",
+                  "fixture_receipt_sha256",
+                  "fixture_run_attempt",
+                  "fixture_run_id"
+                ] and
+                (.fixture_run_id |
+                  test("^[1-9][0-9]{0,19}$")) and
+                (.fixture_run_attempt |
+                  test("^[1-9][0-9]{0,9}$")) and
+                (.fixture_artifact_id |
+                  test("^[1-9][0-9]{0,19}$")) and
+                (.fixture_artifact_digest |
+                  test("^sha256:[0-9a-f]{64}$")) and
+                (.fixture_receipt_sha256 |
+                  test("^[0-9a-f]{64}$"))
+              )
+            ' <<<"${CANARY_FIXTURE_COORDINATES}")"
+            test "${CANARY_FIXTURE_COORDINATES}" = \
+              "${canonical_fixture_coordinates}" || {
+              echo "::error::fixture_coordinates must be exact canonical JSON"
+              exit 1
+            }
+          else
+            test -z "${CANARY_FIXTURE_COORDINATES}"
+          fi
 
           repository_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -4106,6 +4142,7 @@ jobs:
       rollback_evidence_digest: ${{ steps.gate.outputs.rollback_evidence_digest }}
       predicate_sha256: ${{ steps.gate.outputs.predicate_sha256 }}
       attestation_verification_sha256: ${{ steps.gate.outputs.attestation_verification_sha256 }}
+      fixture_binding_digest: ${{ steps.gate.outputs.fixture_binding_digest }}
     steps:
       - name: Dispatch and verify exact governed canary
         id: gate
@@ -4116,6 +4153,7 @@ jobs:
           DEPLOYMENT_RUN_ATTEMPT: ${{ github.run_attempt }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
+          CANARY_FIXTURE_COORDINATES: ${{ inputs.fixture_coordinates }}
         run: |
           set -euo pipefail
           umask 077
@@ -4124,6 +4162,52 @@ jobs:
           [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${DEPLOYMENT_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          test "${#CANARY_FIXTURE_COORDINATES}" -le 1024
+          canonical_fixture_coordinates="$(jq -ceS '
+            select(
+              (keys | sort) == [
+                "fixture_artifact_digest",
+                "fixture_artifact_id",
+                "fixture_receipt_sha256",
+                "fixture_run_attempt",
+                "fixture_run_id"
+              ] and
+              (.fixture_run_id |
+                test("^[1-9][0-9]{0,19}$")) and
+              (.fixture_run_attempt |
+                test("^[1-9][0-9]{0,9}$")) and
+              (.fixture_artifact_id |
+                test("^[1-9][0-9]{0,19}$")) and
+              (.fixture_artifact_digest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              (.fixture_receipt_sha256 |
+                test("^[0-9a-f]{64}$"))
+            )
+          ' <<<"${CANARY_FIXTURE_COORDINATES}")"
+          test "${CANARY_FIXTURE_COORDINATES}" = \
+            "${canonical_fixture_coordinates}"
+          IFS=$'\t' read -r \
+            CANARY_FIXTURE_RUN_ID \
+            CANARY_FIXTURE_RUN_ATTEMPT \
+            CANARY_FIXTURE_ARTIFACT_ID \
+            CANARY_FIXTURE_ARTIFACT_DIGEST \
+            CANARY_FIXTURE_RECEIPT_SHA256 < <(
+              jq -r '
+                [
+                  .fixture_run_id,
+                  .fixture_run_attempt,
+                  .fixture_artifact_id,
+                  .fixture_artifact_digest,
+                  .fixture_receipt_sha256
+                ] |
+                @tsv
+              ' <<<"${canonical_fixture_coordinates}"
+            )
+          [[ "${CANARY_FIXTURE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_FIXTURE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${CANARY_FIXTURE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_FIXTURE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANARY_FIXTURE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
 
           repository_json="$(gh api \
             -H "Accept: application/vnd.github+json" \
@@ -4161,12 +4245,22 @@ jobs:
             --arg ref "${default_branch}" \
             --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
             --arg releaseSha "${RELEASE_SHA}" \
+            --arg fixtureRunId "${CANARY_FIXTURE_RUN_ID}" \
+            --arg fixtureRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --arg fixtureArtifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
+            --arg fixtureArtifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
+            --arg fixtureReceiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
             '{
               ref: $ref,
               return_run_details: true,
               inputs: {
                 deployment_run_id: $deploymentRunId,
                 release_sha: $releaseSha,
+                fixture_run_id: $fixtureRunId,
+                fixture_run_attempt: $fixtureRunAttempt,
+                fixture_artifact_id: $fixtureArtifactId,
+                fixture_artifact_digest: $fixtureArtifactDigest,
+                fixture_receipt_sha256: $fixtureReceiptSha256,
                 confirmation: "RUN ISOLATED GOVERNED CANARY"
               }
             }')"
@@ -4366,6 +4460,11 @@ jobs:
             --arg releaseSha "${RELEASE_SHA}" \
             --arg controlPlaneSha "${CONTROL_PLANE_SHA}" \
             --arg rollbackEvidenceDigest "${rollback_evidence_digest}" \
+            --arg fixtureRunId "${CANARY_FIXTURE_RUN_ID}" \
+            --arg fixtureRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --arg fixtureArtifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
+            --arg fixtureArtifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
+            --arg fixtureReceiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
             --slurpfile evidence "${evidence_dir}/rollback-evidence.json" '
               .schemaVersion ==
                 "archon.governed-canary-attestation/v1" and
@@ -4378,9 +4477,61 @@ jobs:
               .rollbackProposalDigest ==
                 $evidence[0].rollbackProposalDigest and
               .rollbackEvidenceDigest == $rollbackEvidenceDigest and
+              (.fixtureBindingDigest |
+                test("^sha256:[0-9a-f]{64}$")) and
+              .fixtureBinding == {
+                schemaVersion:
+                  "archon.governed-canary-fixture-binding/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflowRunId: $fixtureRunId,
+                workflowRunAttempt: $fixtureRunAttempt,
+                artifactId: $fixtureArtifactId,
+                artifactName:
+                  ("datahub-canary-fixture-receipt-" +
+                    $fixtureRunId + "-" + $fixtureRunAttempt),
+                artifactDigest: $fixtureArtifactDigest,
+                receiptSha256: $fixtureReceiptSha256,
+                stateContractSha256:
+                  .fixtureBinding.stateContractSha256,
+                postStateSha256: .fixtureBinding.postStateSha256,
+                gmsEndpointFingerprint:
+                  .fixtureBinding.gmsEndpointFingerprint,
+                isolationMarkerSha256:
+                  .fixtureBinding.isolationMarkerSha256,
+                attestationPredicateSha256:
+                  .fixtureBinding.attestationPredicateSha256,
+                target: {
+                  query: "archon_governed_canary_fixture",
+                  targetUrn:
+                    "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)"
+                }
+              } and
+              (
+                [
+                  .fixtureBinding.stateContractSha256,
+                  .fixtureBinding.postStateSha256,
+                  .fixtureBinding.gmsEndpointFingerprint,
+                  .fixtureBinding.isolationMarkerSha256,
+                  .fixtureBinding.attestationPredicateSha256
+                ] |
+                all(.[]; test("^[0-9a-f]{64}$"))
+              ) and
               .result == "write-verified-and-rollback-proven"
             ' "${evidence_dir}/attestation-predicate.json" >/dev/null || {
             echo "::error::The canary attestation predicate has incomplete or mismatched bindings"
+            exit 1
+          }
+          fixture_binding="$(jq -cS \
+            '.fixtureBinding' \
+            "${evidence_dir}/attestation-predicate.json")"
+          fixture_binding_digest="$(jq -er \
+            '.fixtureBindingDigest' \
+            "${evidence_dir}/attestation-predicate.json")"
+          test "sha256:$(printf '%s' "${fixture_binding}" |
+            sha256sum | awk '{print $1}')" = \
+            "${fixture_binding_digest}" || {
+            echo "::error::The canary fixture binding digest is invalid"
             exit 1
           }
 
@@ -4438,6 +4589,7 @@ jobs:
             echo "rollback_evidence_digest=${rollback_evidence_digest}"
             echo "predicate_sha256=${predicate_sha256}"
             echo "attestation_verification_sha256=${attestation_verification_sha256}"
+            echo "fixture_binding_digest=${fixture_binding_digest}"
           } >>"${GITHUB_OUTPUT}"
           {
             echo "### Pre-production governed canary passed"
@@ -4445,6 +4597,7 @@ jobs:
             echo "- Run: ${expected_html_url}"
             echo "- Release: \`${RELEASE_SHA}\`"
             echo "- Control plane: \`${CONTROL_PLANE_SHA}\`"
+            echo "- Attested fixture binding: \`${fixture_binding_digest}\`"
             echo "- Rollback subject: \`${rollback_subject_sha256}\`"
             echo "- Required solo-owner approval comment: \`${approval_comment}\`"
             echo "- Result: \`write-verified-and-rollback-proven\`"
@@ -7430,6 +7583,7 @@ jobs:
           CANARY_ROLLBACK_EVIDENCE_DIGEST: ${{ needs.preproduction_canary.outputs.rollback_evidence_digest }}
           CANARY_PREDICATE_SHA: ${{ needs.preproduction_canary.outputs.predicate_sha256 }}
           CANARY_ATTESTATION_VERIFICATION_SHA: ${{ needs.preproduction_canary.outputs.attestation_verification_sha256 }}
+          CANARY_FIXTURE_BINDING_DIGEST: ${{ needs.preproduction_canary.outputs.fixture_binding_digest }}
           STACK_OUTPUTS: ${{ steps.deploy.outputs.stack_outputs }}
           PRODUCTION_EDGE_OUTPUTS: ${{ steps.deploy.outputs.edge_outputs }}
           STAGING_IAC_ASSEMBLY_MANIFEST_SHA: ${{ needs.staging.outputs.iac_assembly_manifest_sha }}
@@ -7483,6 +7637,7 @@ jobs:
           test "${CANARY_RUN_URL}" = \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANARY_RUN_ID}"
           [[ "${CANARY_ROLLBACK_EVIDENCE_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${CANARY_FIXTURE_BINDING_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]
           for digest in \
             "${CANARY_ARTIFACT_SHA}" \
             "${CANARY_ROLLBACK_SUBJECT_SHA}" \
@@ -7575,6 +7730,8 @@ jobs:
             --arg governedCanaryPredicateSha256 "${CANARY_PREDICATE_SHA}" \
             --arg governedCanaryAttestationVerificationSha256 \
               "${CANARY_ATTESTATION_VERIFICATION_SHA}" \
+            --arg governedCanaryFixtureBindingDigest \
+              "${CANARY_FIXTURE_BINDING_DIGEST}" \
             --arg deploymentRunId "${GITHUB_RUN_ID}" \
             --arg stagingIacAssemblyManifestSha256 \
               "${STAGING_IAC_ASSEMBLY_MANIFEST_SHA}" \
@@ -7659,6 +7816,8 @@ jobs:
                     $governedCanaryPredicateSha256,
                   attestationVerificationSha256:
                     $governedCanaryAttestationVerificationSha256,
+                  fixtureBindingDigest:
+                    $governedCanaryFixtureBindingDigest,
                   result: "write-verified-and-rollback-proven"
                 }
               },
