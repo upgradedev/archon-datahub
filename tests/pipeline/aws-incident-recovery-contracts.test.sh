@@ -57,7 +57,22 @@ jq --exit-status '
   .schemaVersion == "archon.aws-incident-recovery/v1" and
   .repository == "upgradedev/archon-datahub" and
   .defaultBranch == "master" and
-  .status == "implemented-not-executed" and
+    .status == "attempted-delete-not-executed-cleanup-proof-pending" and
+  .execution == {
+    cleanupRun: {
+      canonicalAbsenceProof: "pending",
+      result: "failure",
+      runId: "30567949203"
+    },
+    deleteStackExecuted: false,
+    recoveryRun: {
+      deleteStack: "skipped",
+      result: "prepare-build-plan-failed",
+      runId: "30567769601"
+    },
+    temporaryPolicyAbsent: "not-proven",
+    temporaryPolicyInstalled: "not-proven"
+  } and
   .controlPlane.inputs == ["expected_head_sha", "confirmation"] and
   .controlPlane.secretForwarding == "none" and
   .controlPlane.runbook == "docs/AWS_INCIDENT_RECOVERY.md" and
@@ -105,7 +120,15 @@ jq --exit-status '
     stackArgument: "sealed-full-stack-id",
     targetInput: false
   } and
-  .revocation.deleteFailureHandling == "success-or-exact-NoSuchEntity-only" and
+    .revocation.preDeleteInventoryRequired == true and
+  .revocation.deleteOnlyWhenTemporaryPolicyPresent == true and
+  .revocation.baseOnlyDeleteCallCount == 0 and
+  .revocation.temporaryPolicyPresentDeleteCallCount == 1 and
+  .revocation.deleteResponseAuthoritative == false and
+  .revocation.canonicalPostcondition ==
+    "three-consecutive-exact-baseline-only-inventories" and
+  .revocation.unexpectedInventoryWithoutTemporaryPolicy ==
+    "fail-without-delete" and
   .revocation.absenceConfirmations == 3 and
   .revocation.independentRetryTriggers == {
     schedule: "forbidden",
@@ -119,6 +142,32 @@ jq --exit-status '
       "timed_out"
     ]
   } and
+  .validator.cliFailureCodes == [
+    "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+    "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+    "AWS_RECOVERY_INVALID_INVOCATION",
+    "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+    "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+    "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+    "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+    "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+    "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+    "AWS_RECOVERY_STACK_ID_INVALID",
+    "AWS_RECOVERY_STACK_NESTING_INVALID",
+    "AWS_RECOVERY_STACK_STATUS_INVALID",
+    "AWS_RECOVERY_STACK_TAGS_INVALID",
+    "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+    "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+    "AWS_RECOVERY_TTL_INVALID",
+    "AWS_RECOVERY_VALIDATOR_FAILED"
+  ] and
+  .validator.fallbackCliFailureCode == "AWS_RECOVERY_VALIDATOR_FAILED" and
+  .validator.rawErrorMessages == false and
+  .validator.rawPaths == false and
+  .validator.rawValues == false and
+  .evidence.uploadRequiresEvidenceProducerSuccess == true and
+  .evidence.failedCleanupWithoutEvidenceUpload == true and
   .postverification.stackNameHasNoActiveStack == true and
   .normalFoundation.autoRecovery == "forbidden" and
   .normalFoundation.reconcilerDeleteStack == "forbidden" and
@@ -157,7 +206,10 @@ require_text "${driver_workflow}" \
   'run-id: "30546241677"' \
   'if: always()' \
   'run: bash scripts/run-aws-incident-recovery.sh delete-once' \
-  'run: bash scripts/run-aws-incident-recovery.sh cleanup'
+  'run: bash scripts/run-aws-incident-recovery.sh cleanup' \
+  "(steps.recovery.outcome == 'success' ||" \
+  "steps.cleanup.outcome == 'success' ||" \
+  "steps.final_cleanup.outcome == 'success')"
 forbid_text "${driver_workflow}" 'secrets: inherit'
 
 require_text "${cleanup_workflow}" \
@@ -264,13 +316,31 @@ require_text "${driver}" \
   '.AttachedPolicies == []' \
   'iam put-role-policy' \
   'iam delete-role-policy' \
-  'NoSuchEntity' \
+  'Unable to inspect recovery-role inline policies before revocation' \
+  'local delete_required=false' \
+  'any(.PolicyNames[]; . == $temp)' \
   'consecutive_absent' \
   'original-id-delete-complete-and-no-active-name' \
   '--deletion-mode STANDARD'
 require_text "${validator}" \
   'cloudformation:RoleArn' \
-  'Null: { "cloudformation:RoleArn": "true" }'
+  'Null: { "cloudformation:RoleArn": "true" }' \
+  'CLI_FAILURE_CODE_ALLOWLIST' \
+  'error instanceof PlanInvariantError' \
+  'error instanceof CliFailure' \
+  'AWS_RECOVERY_STACK_STATUS_INVALID' \
+  'AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID' \
+  'sanitizedCliFailureCode(error)'
+forbid_text "${validator}" \
+  'error.message' 'error.stack' 'error.path' 'JSON.stringify(error' \
+  'process.stderr.write(error' 'console.error('
+require_text "${validator_test}" \
+  'spawnSync' \
+  'PRIVATE_RECOVERY_VALUE' \
+  'PRIVATE_PLAN_INVARIANT' \
+  'CLI_FAILURE_CODES.STACK_STATUS_INVALID' \
+  'CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID' \
+  'assert.equal(result.stderr'
 require_count 3 "${driver}" 'mask_value "${stack_id}"'
 require_count 1 "${driver}" 'aws cloudformation delete-stack'
 require_count 1 "${driver}" 'aws iam put-role-policy'
@@ -282,7 +352,9 @@ forbid_text "${driver}" \
   'FORCE_DELETE_STACK' \
   '--retain-resources' \
   '--role-arn' \
-  '--deployment-config'
+  '--deployment-config' \
+  'NoSuchEntity' \
+  'delete-role-policy.error'
 cleanup_function="$(sed -n '/^cleanup()/,/^}/p' "${driver}")"
 if grep -Fq 'delete-stack' <<<"${cleanup_function}"; then fail 'cleanup mode can call DeleteStack'; fi
 forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
@@ -301,7 +373,11 @@ require_text "${ci}" \
   'bash tests/pipeline/aws-incident-recovery-contracts.test.sh' \
   'bash tests/pipeline/aws-incident-recovery-driver.test.sh'
 require_text "${runbook}" \
-  'Status: **implemented, not executed**' \
+  'Status: **attempted; `DeleteStack` not executed; cleanup proof pending**' \
+  'Recovery run `30567769601` failed during prepare/build-plan' \
+  'Cleanup run `30567949203` also failed' \
   'PutRolePolicy' \
   'eventually consistent' \
-  'exact AWS `NoSuchEntity` code for `DeleteRolePolicy`'
+  'lists inline policies before mutation' \
+  'The opaque request response is never treated as proof' \
+  'Upload runs only when at least'

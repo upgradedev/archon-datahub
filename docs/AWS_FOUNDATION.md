@@ -485,7 +485,7 @@ automatically deletes, recreates, or continues rollback. The one reviewed
 historical `staging-iam` exception is a separate CI-only, two-environment
 control plane with immutable incident coordinates, short-lived exact-stack
 authorization, mandatory revocation, and sanitized attested evidence. Its
-status is `implemented-not-executed`; see
+status is `attempted-delete-not-executed-cleanup-proof-pending`; see
 [`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
 `contracts/aws-incident-recovery-v1.json`.
 
