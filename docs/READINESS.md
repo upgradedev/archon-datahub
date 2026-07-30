@@ -409,17 +409,21 @@ UI layout.
 - Treat every security result as a pipeline result. Security verification and release
   evidence are produced exclusively by CI/CD; workstation builds, local synths, manual
   scanners, and copied reports must not substitute for or supplement a CI/CD gate.
-- The GitHub-posture workflow and source contracts are CI-validated; run
-  `.github/workflows/github-repository-posture.yml` on `master` and retain its first live
-  normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks only the
-  repository/merge lifecycle values, public `master` protection signal, Apache-2.0
-  detection, private vulnerability reporting, exact 17-environment inventory,
-  `can_admins_bypass=false`, and each environment's exact `master`-only deployment policy.
-  It must report detailed branch-protection rules, the Actions allowlist/SHA-pinning
-  controls, and all environment secret-name inventories as unverified. No elevated
-  credential is currently configured; a future tier would require the reviewed
-  least-privilege set `Actions:read`, `Administration:read`, `Environments:read`, and
-  `Metadata:read`. Never export or copy a workstation `gh` token into GitHub Actions.
+- The GitHub-posture workflow and source contracts require a fresh remote CI review; after
+  merge, run `.github/workflows/github-repository-posture.yml` on `master` and retain its
+  first successful normalized secretless receipt. The automatic `GITHUB_TOKEN` tier checks
+  only token-visible repository identity/public-state fields, the public `master`
+  protection signal, Apache-2.0 detection, private vulnerability reporting, the exact
+  17-environment inventory, `can_admins_bypass=false`, reviewer posture, and each
+  environment's exact `master`-only deployment policy. Repository merge/lifecycle
+  expectations, detailed branch-protection rules, the Actions allowlist/SHA-pinning
+  controls, and all environment secret-name inventories remain unverified. The receipt
+  binds lifecycle expectations only by SHA-256 digest with `verification: not-performed`,
+  emits no lifecycle values, and makes no secret-emptiness assertion because protected
+  runtime environments intentionally require live secrets. No elevated credential is
+  configured; a future tier would require `Actions:read`, `Administration:read`,
+  `Environments:read`, and `Metadata:read`. Never export or copy a workstation `gh` token
+  into GitHub Actions.
 
 ### 2. Real DataHub evidence
 
@@ -586,11 +590,13 @@ preflight and live endpoint evidence, staging deployment, versioned secret refre
 runtime-config publication, control-Lambda dependency/SCA gates, fail-closed hosted
 start/status smoke contracts, protected OWASP
 ZAP DAST, production approval, same-digest promotion, rollback selection, and
-retained deployment evidence plus a scheduled public availability proof. The repository
-control plane now has all 17 exact `master`-only environments, administrator bypass
-disabled, strict app-bound `master` protection, a SHA-pinned explicit Actions allowlist,
-private vulnerability reporting, and exact sole-owner approval on all 12 protected
-mutation/approval environments. It is **not operationally proven yet** because the
+retained deployment evidence plus a scheduled public availability proof. The secretless tier can observe all 17 exact `master`-only environments, administrator
+bypass disabled, the public `master` protection signal, private vulnerability reporting,
+and exact sole-owner approval on all 12 protected mutation/approval environments. The
+SHA-pinned Actions allowlist and repository merge/lifecycle settings remain expected only
+inside the administration contract with `verification: not-performed`; this receipt does
+not prove them or inspect environment secret names. It is **not operationally proven yet**
+because the
 protected AWS foundation/bootstrap pipeline, DataHub credential/endpoint configuration,
 hosted URL, and production promotion receipt are still pending. Therefore Archon has a comparable CD design,
 but not yet the same proven end-to-end posture as the referenced Nebius, Qwen, or OpenAI
