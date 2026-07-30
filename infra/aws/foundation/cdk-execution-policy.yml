@@ -302,7 +302,6 @@ Resources:
               ArnEquals:
                 iam:PolicyARN:
                   - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-                  - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
           - Sid: PassOnlyStageRolesToRequiredServices
             Effect: Allow
             Action: iam:PassRole
