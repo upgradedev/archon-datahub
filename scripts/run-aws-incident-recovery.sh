@@ -13,7 +13,7 @@ readonly INCIDENT_RUN_ID="30546241677"
 readonly INCIDENT_RUN_ATTEMPT="1"
 readonly TARGET_REGION="eu-west-1"
 readonly TARGET_STACK_NAME="Archon-Staging-IAM-Foundation"
-readonly TARGET_TEMPLATE_SHA="80a2b02326bbaa3ae145d0fff52cc1c20f3a330d4ef5c7fa2d816182f7c2b825"
+readonly TARGET_TEMPLATE_SHA="80a2b02326bbaa3ae145d0fff52cc1c20f3a330d4ef5c7fa2d816182f7c2b825"`nreadonly ROLE_SOURCE_SHA="0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4"
 readonly ROLE_STACK_NAME="Archon-Governed-Canary-Roles"
 readonly RECOVERY_ROLE_NAME="archon-datahub-github-governed-canary-recovery"
 readonly BASE_POLICY_NAME="archon-staging-stack-read"
@@ -113,6 +113,19 @@ snapshot_target() {
   printf '%s\n%s\n%s\n' "${stack}" "${resources}" "${template_sha}"
 }
 
+snapshot_stack_only() {
+  local prefix="$1"
+  local stack="${WORK_ROOT}/${prefix}-stack.json"
+  safe_aws "Unable to inspect the sealed incident stack" "${stack}" \
+    cloudformation describe-stacks \
+    --region "${TARGET_REGION}" \
+    --stack-name "${TARGET_STACK_NAME}" \
+    --output json
+  local stack_id
+  stack_id="$(jq -er '.Stacks[0].StackId' "${stack}")"
+  echo "::add-mask::${stack_id}"
+  printf '%s\n' "${stack}"
+}
 validate_recovery_role() {
   local yq_bin="$1"
   local expected_template_sha="$2"
@@ -199,11 +212,7 @@ validate_recovery_role() {
       (.PolicyDocument.Statement | length) == 1 and
       .PolicyDocument.Statement[0].Sid == "ReadExactStagingStack" and
       .PolicyDocument.Statement[0].Effect == "Allow" and
-      (.PolicyDocument.Statement[0].Action | sort) == [
-        "cloudformation:DescribeStacks",
-        "cloudformation:GetTemplate",
-        "cloudformation:ListStackResources"
-      ] and
+      .PolicyDocument.Statement[0].Action == "cloudformation:DescribeStacks" and
       .PolicyDocument.Statement[0].Resource ==
         ("arn:aws:cloudformation:eu-west-1:" + $account + ":stack/Archon-staging/*")
     ' "${base_policy}" >/dev/null || fail "The recovery-role base policy differs"
@@ -211,11 +220,21 @@ validate_recovery_role() {
 
 prepare() {
   validate_common
+  : "${CANARY_ROLE_SOURCE:?CANARY_ROLE_SOURCE is required}"
+  : "${CANARY_ROLE_SOURCE_SHA:?CANARY_ROLE_SOURCE_SHA is required}"
   : "${CANARY_ROLE_TEMPLATE:?CANARY_ROLE_TEMPLATE is required}"
   : "${CANARY_ROLE_TEMPLATE_SHA:?CANARY_ROLE_TEMPLATE_SHA is required}"
   : "${CANARY_ROLE_TEMPLATE_SEMANTIC_SHA:?CANARY_ROLE_TEMPLATE_SEMANTIC_SHA is required}"
   : "${CANARY_ROLE_YQ_BIN:?CANARY_ROLE_YQ_BIN is required}"
   : "${EXPIRES_AT:?EXPIRES_AT is required}"
+  test -f "${CANARY_ROLE_SOURCE}"
+  test ! -L "${CANARY_ROLE_SOURCE}"
+  test "${CANARY_ROLE_SOURCE_SHA}" = "${ROLE_SOURCE_SHA}"
+  test "$(sha256sum "${CANARY_ROLE_SOURCE}" | awk '{print $1}')" = "${ROLE_SOURCE_SHA}"
+  [[ "${CANARY_ROLE_TEMPLATE_SHA}" =~ ^[a-f0-9]{64}$ ]]
+  [[ "${CANARY_ROLE_TEMPLATE_SEMANTIC_SHA}" =~ ^[a-f0-9]{64}$ ]]
+  test "$(sha256sum "${CANARY_ROLE_TEMPLATE}" | awk '{print $1}')" = \
+    "${CANARY_ROLE_TEMPLATE_SHA}" || fail "The rendered role template changed before mutation"
   verify_caller "archon-datahub-github-foundation"
 
   if ! aws cloudformation deploy \
@@ -285,40 +304,33 @@ prepare() {
 
 delete_once() {
   validate_common
-  : "${CANARY_ROLE_YQ_BIN:?CANARY_ROLE_YQ_BIN is required}"
   : "${EXPIRES_AT:?EXPIRES_AT is required}"
   : "${EXPECTED_PLAN_DIGEST:?EXPECTED_PLAN_DIGEST is required}"
   : "${EXPECTED_POLICY_SHA256:?EXPECTED_POLICY_SHA256 is required}"
+  : "${EXPECTED_RESOURCE_STATE_SHA256:?EXPECTED_RESOURCE_STATE_SHA256 is required}"
   : "${EXPECTED_STACK_ID_SHA256:?EXPECTED_STACK_ID_SHA256 is required}"
   : "${EXPECTED_CLIENT_TOKEN:?EXPECTED_CLIENT_TOKEN is required}"
   verify_caller "${RECOVERY_ROLE_NAME}"
 
-  mapfile -t target < <(snapshot_target "delete" "${CANARY_ROLE_YQ_BIN}")
-  test "${#target[@]}" -eq 3
+  local stack
+  stack="$(snapshot_stack_only "delete")"
   local plan="${WORK_ROOT}/delete-plan.json"
   local policy="${WORK_ROOT}/delete-policy.json"
   local safe
-  safe="$(node "${VALIDATOR}" build-plan \
-    "${target[0]}" "${target[1]}" "${target[2]}" \
+  safe="$(node "${VALIDATOR}" rebuild-plan \
+    "${stack}" "${EXPECTED_RESOURCE_STATE_SHA256}" \
     "${AWS_ACCOUNT_ID}" "${EXPIRES_AT}" "${CONTROL_PLANE_SHA}" \
     "${plan}" "${policy}")" || fail "Unable to rederive the immutable recovery plan"
   test "$(jq -er '.planDigest' <<<"${safe}")" = "${EXPECTED_PLAN_DIGEST}" || \
     fail "The immutable recovery plan digest differs"
   test "$(jq -er '.policyDocumentSha256' <<<"${safe}")" = \
     "${EXPECTED_POLICY_SHA256}" || fail "The temporary policy digest differs"
+  test "$(jq -er '.resourceStateSha256' <<<"${safe}")" = \
+    "${EXPECTED_RESOURCE_STATE_SHA256}" || fail "The sealed resource-state digest differs"
   test "$(jq -er '.stackIdSha256' <<<"${safe}")" = \
     "${EXPECTED_STACK_ID_SHA256}" || fail "The sealed stack identity differs"
   test "$(jq -er '.clientRequestToken' <<<"${safe}")" = \
     "${EXPECTED_CLIENT_TOKEN}" || fail "The deterministic delete token differs"
-
-  local observed="${WORK_ROOT}/delete-observed-policy.json"
-  safe_aws "Unable to read the temporary recovery authorization" "${observed}" \
-    iam get-role-policy \
-    --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    --output json
-  test "$(jq -cS '.PolicyDocument' "${observed}" | sha256sum | awk '{print $1}')" = \
-    "${EXPECTED_POLICY_SHA256#sha256:}" || fail "The active recovery policy differs"
 
   local stack_id
   stack_id="$(jq -er '.target.stackId' "${plan}")"
@@ -334,14 +346,21 @@ delete_once() {
   fi
   echo "delete_called=true" >>"${GITHUB_OUTPUT}"
 }
-
 revoke_policy() {
-  local existing="${WORK_ROOT}/revoke-existing-policy.json"
-  if aws iam get-role-policy \
-    --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    --output json >"${existing}" 2>/dev/null; then
-    chmod 0600 "${existing}"
+  local before="${WORK_ROOT}/revoke-policies-before.json"
+  local after="${WORK_ROOT}/revoke-policies-after.json"
+  safe_aws "Unable to enumerate recovery-role policies before revocation" "${before}" \
+    iam list-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
+  jq -e '
+    (.PolicyNames | sort) == ["archon-staging-stack-read"] or
+    (.PolicyNames | sort) == [
+      "archon-incident-30546241677-delete",
+      "archon-staging-stack-read"
+    ]
+  ' "${before}" >/dev/null || fail "Recovery-role policy inventory differs before revocation"
+  if jq -e --arg policy "${TEMP_POLICY_NAME}" '
+    .PolicyNames | index($policy) != null
+  ' "${before}" >/dev/null; then
     if ! aws iam delete-role-policy \
       --role-name "${RECOVERY_ROLE_NAME}" \
       --policy-name "${TEMP_POLICY_NAME}" \
@@ -349,14 +368,12 @@ revoke_policy() {
       fail "Unable to revoke the temporary recovery authorization"
     fi
   fi
-  if aws iam get-role-policy \
-    --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    --output json >/dev/null 2>&1; then
-    fail "The temporary recovery authorization remains attached"
-  fi
+  safe_aws "Unable to enumerate recovery-role policies after revocation" "${after}" \
+    iam list-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
+  jq -e '
+    (.PolicyNames | sort) == ["archon-staging-stack-read"]
+  ' "${after}" >/dev/null || fail "The temporary recovery authorization remains attached"
 }
-
 postverify() {
   validate_common
   : "${EXPECTED_STACK_ID_SHA256:?EXPECTED_STACK_ID_SHA256 is required}"
