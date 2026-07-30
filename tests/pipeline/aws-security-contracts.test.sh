@@ -2090,6 +2090,54 @@ EOF
 test "${deployment_mode_contract}" = \
   "${expected_deployment_mode_contract}"
 
+fixture_coordinate_contract="$(
+  sed -n '/^      fixture_coordinates:/,/^      migrate_legacy_cloudformation_roles:/p' \
+    "${deploy_workflow}" |
+    sed '$d'
+)"
+expected_fixture_coordinate_contract="$(
+  cat <<'EOF'
+      fixture_coordinates:
+        description: Promote-only canonical JSON with exact fixture run, artifact, and receipt coordinates
+        required: false
+        type: string
+EOF
+)"
+test "${fixture_coordinate_contract}" = \
+  "${expected_fixture_coordinate_contract}"
+test "$(
+  sed -n '/^    inputs:/,/^# Selecting an older successful/p' \
+    "${deploy_workflow}" |
+    grep -Ec '^      [a-z][a-z0-9_]+:$'
+)" -eq 10
+for fixture_coordinate_contract_fragment in \
+  'if test "${DEPLOYMENT_MODE}" = "promote"; then' \
+  'test "${#CANARY_FIXTURE_COORDINATES}" -le 1024' \
+  'canonical_fixture_coordinates="$(jq -ceS' \
+  '(keys | sort) == [' \
+  '"fixture_artifact_digest"' \
+  '"fixture_artifact_id"' \
+  '"fixture_receipt_sha256"' \
+  '"fixture_run_attempt"' \
+  '"fixture_run_id"' \
+  'test "${CANARY_FIXTURE_COORDINATES}" = \' \
+  '"${canonical_fixture_coordinates}"' \
+  'test -z "${CANARY_FIXTURE_COORDINATES}"' \
+  '[[ "${CANARY_FIXTURE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]' \
+  '[[ "${CANARY_FIXTURE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]' \
+  '[[ "${CANARY_FIXTURE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]' \
+  '[[ "${CANARY_FIXTURE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]' \
+  '[[ "${CANARY_FIXTURE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]' \
+  'fixture_run_id: $fixtureRunId' \
+  'fixture_run_attempt: $fixtureRunAttempt' \
+  'fixture_artifact_id: $fixtureArtifactId' \
+  'fixture_artifact_digest: $fixtureArtifactDigest' \
+  'fixture_receipt_sha256: $fixtureReceiptSha256' \
+  'fixtureBindingDigest:' \
+  '$governedCanaryFixtureBindingDigest'; do
+  grep -Fq "${fixture_coordinate_contract_fragment}" "${deploy_workflow}"
+done
+
 bootstrap_output_contract="$(
   sed -n '/^      bootstrap_artifact_id:/,/^    steps:/p' \
     "${deploy_workflow}" |

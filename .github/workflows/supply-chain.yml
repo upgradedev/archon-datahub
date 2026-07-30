@@ -638,6 +638,10 @@ jobs:
                 $release and
               .pipelineSecurity.preProductionGovernedCanary.controlPlaneSha ==
                 $controlPlaneSha and
+              (
+                .pipelineSecurity.preProductionGovernedCanary.fixtureBindingDigest |
+                test("^sha256:[a-f0-9]{64}$")
+              ) and
               .pipelineSecurity.preProductionGovernedCanary.result ==
                 "write-verified-and-rollback-proven" and
               .production.stackName == "Archon-production" and

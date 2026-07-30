@@ -448,8 +448,12 @@ UI layout.
   canary environments in
   [`docs/GOVERNED_CANARY.md`](GOVERNED_CANARY.md). The immutable deployment pipeline
   dispatches `.github/workflows/governed-canary.yml` after staging and blocks production
-  until its exact signed rollback proof is verified. It fails closed unless the exact
-  staging release, disposable TEST/DEV fixture, dedicated tenant endpoints,
+  until its exact signed rollback proof is verified. First run the protected
+  `.github/workflows/datahub-canary-fixture.yml` `seed` (or deliberately confirmed `reset`)
+  action for the same release and retain its run ID, run attempt, receipt artifact ID,
+  GitHub artifact digest, and inner `receipt.json` SHA-256. The canary fails closed unless
+  those coordinates resolve to the exact attested Snowflake `TEST` fixture, the exact
+  staging release, dedicated tenant endpoints,
   pre-approval sealed plan/recovery digests, Cognito PKCE approval, terminal receipt,
   separately approved inverse, and read-after-rollback are all bound.
   Never expose write tools on the public Archon MCP/API surface.
@@ -462,7 +466,8 @@ UI layout.
   and foundation role already exist; no local bootstrap is accepted as evidence.
 - Deploy the application in two pipeline phases. First dispatch
   `.github/workflows/deploy.yml` with `deployment_mode=staging-bootstrap`, an exact
-  successful default-branch CI run/SHA, and the protected demo-state receipt. This runs the
+  successful default-branch CI run/SHA, the protected demo-state receipt, and the optional
+  `fixture_coordinates` input left exactly empty. This runs the
   immutable source and control-plane gates, deploys and verifies staging, stops before the
   governed canary/production, and emits only
   `staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`.
@@ -471,8 +476,11 @@ UI layout.
   `CANARY_COGNITO_CLIENT_ID`, `CANARY_COGNITO_HOSTED_UI_ORIGIN`,
   `CANARY_CHROME_VERSION`, and `CANARY_CHROME_BINARY_SHA256`, together with the
   separately protected canary credentials and explicit solo-owner reviewer rules. Finally dispatch
-  `deployment_mode=promote` for the selected immutable release; it repeats staging
-  verification, requires the signed governed write/rollback canary, and only then permits
+  `deployment_mode=promote` for the selected immutable release with the exact bounded
+  canonical `fixture_coordinates` JSON emitted by the fixture attestation summary. Its
+  only five keys are `fixture_run_id`, `fixture_run_attempt`, `fixture_artifact_id`,
+  `fixture_artifact_digest`, and `fixture_receipt_sha256`; it repeats staging verification,
+  requires the signed fixture-bound governed write/rollback canary, and only then permits
   protected production promotion. The bootstrap artifact is a bound configuration handoff,
   never a credential carrier. Its static/source contract is CI-validated; the actual
   `staging-bootstrap` and `promote` dispatches remain externally blocked and unexecuted.
