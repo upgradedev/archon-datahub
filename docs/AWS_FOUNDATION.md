@@ -34,12 +34,13 @@ The stage mapping is fixed:
 | Staging | `archonstg` | `archon-datahub-runtime-boundary-staging` | `archon-datahub-github-staging-deploy` |
 | Production | `archonprd` | `archon-datahub-runtime-boundary-production` | `archon-datahub-github-production-deploy` |
 
-The foundation resolves the AWS CDK CLI version from the exact committed
-`infra/aws/package-lock.json` entry for `node_modules/aws-cdk`; the installed
-CLI version must exactly match that decoded lock entry. The bootstrap template is
-pinned to version `32`. Each qualifier owns an independent toolkit stack, asset
-bucket, container-assets repository, SSM version parameter, and bootstrap role
-family in both regions. Every toolkit stack is termination protected.
+The foundation resolves the AWS CDK CLI version from the
+exact committed `infra/aws/package-lock.json` entry for `node_modules/aws-cdk`;
+the installed CLI version must exactly match that decoded lock entry. The
+bootstrap template is pinned to version `32`. Each qualifier owns an independent
+toolkit stack, asset bucket, container-assets repository, SSM version parameter,
+and bootstrap role family in both regions. Every toolkit stack is termination
+protected.
 
 The canonical bootstrap template is patched four times. Each stage-and-region
 variant permits its deploy role to create or update only the exact application
