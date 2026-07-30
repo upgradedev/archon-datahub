@@ -391,13 +391,18 @@ jq --exit-status '
       "stackStatus"
     ],
     managedCommandOutput: "suppressed",
-    maxRecentEvents: 25,
+    maxInputBytes: 1048576,
+    maxRecentEvents: 100,
+    deprioritizedReasonCategories: ["dependency-failure"],
+    eventOrder: "cloudformation-newest-first",
+    eventSelection: "newest-non-dependency-failed-else-newest-failed",
     postCredentialDigestRecomputed: true,
     rawReasonHashing: false,
     rawReasonRetention: false,
     recursiveInventory: "exact-two-root-regular-files",
     schemaVersion: "archon.aws-foundation-cfn-failure/v1",
-    stackIdentity: "allowlisted-label-only"
+    stackIdentity: "allowlisted-label-only",
+    unknownReasonCategoryEligible: true
   }
 ' "${contract}" >/dev/null
 
@@ -1016,7 +1021,7 @@ require_text "${reconciler}" \
   'run_managed_stack_command() {' \
   'if "$@" >/dev/null 2>&1; then' \
   'aws cloudformation describe-stack-events' \
-  '--max-items 25' \
+  '--max-items 100' \
   '--output json 2>/dev/null |' \
   'node scripts/sanitize-cloudformation-failure.mjs' \
   'find -P "${staging_dir}" -mindepth 1 -printf' \
@@ -1081,9 +1086,13 @@ test "$(
   fail "reconciler may reference the oversized source template only as evidence"
 
 require_text "${failure_sanitizer}" \
-  'const MAX_EVENTS = 25;' \
+  'const MAX_INPUT_BYTES = 1_048_576;' \
+  'const MAX_EVENTS = 100;' \
   'const MAX_OUTPUT_BYTES = 2_048;' \
   'ALLOWLISTED_STACK_LABELS' \
+  'const failedEvents = document.StackEvents.filter(' \
+  'classifyReason(reason) !== "dependency-failure"' \
+  '?? failedEvents[0]' \
   'const canonicalSafeFields = Object.freeze({' \
   'diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields))' \
   'schemaVersion: "archon.aws-foundation-cfn-failure/v1"' \
@@ -1240,6 +1249,9 @@ require_text "${runbook}" \
   '`ready-for-deploy`' \
   'Sanitized managed-stack failure evidence' \
   'stdout and stderr are suppressed before capture' \
+  'selects the newest failed event whose safe reason category is not' \
+  '`unknown` remains eligible' \
+  'fall back to the newest failed event' \
   'exact recursive inventory of two root regular non-symlink files' \
   'recomputes the diagnostic digest from the seven safe fields' \
   'never stores, prints, or hashes the raw CloudFormation' \

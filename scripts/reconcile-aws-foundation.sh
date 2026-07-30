@@ -334,7 +334,7 @@ capture_managed_stack_failure() {
   if ! aws cloudformation describe-stack-events \
     --region "${region}" \
     --stack-name "${stack_name}" \
-    --max-items 25 \
+    --max-items 100 \
     --output json 2>/dev/null |
     node scripts/sanitize-cloudformation-failure.mjs \
       --stack-label "${stack_label}" \

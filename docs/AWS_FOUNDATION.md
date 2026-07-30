@@ -439,9 +439,15 @@ or API key and is attested before retention.
 A managed foundation stack rejected in a failed preflight state, or a managed
 stack command that fails, triggers a bounded diagnostic query for that exact
 allowlisted stack only. Original managed CloudFormation and CDK command
-stdout and stderr are suppressed before capture. The reconciler reads at most 25
-recent CloudFormation events and writes exactly one canonical
-`cfn-failure.json` record containing only an allowlisted stack label, stack
+stdout and stderr are suppressed before capture. The reconciler reads at most 100
+recent CloudFormation events in their API-provided newest-first order, while
+sanitizer input remains hard-capped at 1,048,576 bytes. It
+selects the newest failed event whose safe reason category is not
+`dependency-failure`; `unknown` remains eligible because it may be the true
+root cause. Only when every failed event is `dependency-failure` does it
+fall back to the newest failed event. The chosen event then passes the existing
+fail-closed identity and reason validation before one canonical
+`cfn-failure.json` record is written containing only an allowlisted stack label, stack
 status, logical resource ID, resource type and status, a safe reason category,
 and a SHA-256 over exactly those canonical allowlisted diagnostic fields.
 

@@ -3,8 +3,8 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-const MAX_INPUT_BYTES = 262_144;
-const MAX_EVENTS = 25;
+const MAX_INPUT_BYTES = 1_048_576;
+const MAX_EVENTS = 100;
 const MAX_OUTPUT_BYTES = 2_048;
 
 export const ALLOWLISTED_STACK_LABELS = Object.freeze([
@@ -125,12 +125,21 @@ export function sanitizeCloudFormationFailure(document, options) {
     throw new Error("invalid bounded CloudFormation event set");
   }
 
-  const event = document.StackEvents.find(
+  const failedEvents = document.StackEvents.filter(
     (candidate) => candidate && resourceFailureStatuses.has(candidate.ResourceStatus),
   );
-  if (!event) {
+  if (failedEvents.length === 0) {
     throw new Error("no failed CloudFormation resource event");
   }
+  const event =
+    failedEvents.find((candidate) => {
+      const reason = candidate.ResourceStatusReason;
+      return (
+        typeof reason !== "string" ||
+        reason.length === 0 ||
+        classifyReason(reason) !== "dependency-failure"
+      );
+    }) ?? failedEvents[0];
 
   const logicalResourceId = event.LogicalResourceId;
   const resourceType = event.ResourceType;

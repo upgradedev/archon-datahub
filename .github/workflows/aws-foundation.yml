@@ -471,13 +471,18 @@ jobs:
                 "stackStatus"
               ],
               managedCommandOutput: "suppressed",
-              maxRecentEvents: 25,
+              maxInputBytes: 1048576,
+              maxRecentEvents: 100,
+              deprioritizedReasonCategories: ["dependency-failure"],
+              eventOrder: "cloudformation-newest-first",
+              eventSelection: "newest-non-dependency-failed-else-newest-failed",
               postCredentialDigestRecomputed: true,
               rawReasonHashing: false,
               rawReasonRetention: false,
               recursiveInventory: "exact-two-root-regular-files",
               schemaVersion: "archon.aws-foundation-cfn-failure/v1",
-              stackIdentity: "allowlisted-label-only"
+              stackIdentity: "allowlisted-label-only",
+              unknownReasonCategoryEligible: true
             }
           ' contracts/aws-foundation-v1.json >/dev/null
           jq -e '
