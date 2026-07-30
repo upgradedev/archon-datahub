@@ -446,19 +446,21 @@ jobs:
             infra/aws/foundation/cdk-execution-policy.yml \
             "${output}" \
             "${canonical}"
-          echo "path=${output}" >>"${GITHUB_OUTPUT}"
-          echo "sha=$(sha256sum "${output}" | awk '{print $1}')" \
-            >>"${GITHUB_OUTPUT}"
-          echo "canonical_path=${canonical}" >>"${GITHUB_OUTPUT}"
-          echo "canonical_sha=$(sha256sum "${canonical}" | awk '{print $1}')" \
-            >>"${GITHUB_OUTPUT}"
           yq_bin="${RUNNER_TEMP}/archon-inline-cfn-yq"
           test -f "${yq_bin}"
           test ! -L "${yq_bin}"
           test -x "${yq_bin}"
-          echo "yq_path=${yq_bin}" >>"${GITHUB_OUTPUT}"
-          echo "yq_sha=$(sha256sum "${yq_bin}" | awk '{print $1}')" \
-            >>"${GITHUB_OUTPUT}"
+          output_sha="$(sha256sum "${output}" | awk '{print $1}')"
+          canonical_sha="$(sha256sum "${canonical}" | awk '{print $1}')"
+          yq_sha="$(sha256sum "${yq_bin}" | awk '{print $1}')"
+          {
+            echo "path=${output}"
+            echo "sha=${output_sha}"
+            echo "canonical_path=${canonical}"
+            echo "canonical_sha=${canonical_sha}"
+            echo "yq_path=${yq_bin}"
+            echo "yq_sha=${yq_sha}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Prove exact synthesized runtime action equality for both stages
         run: |

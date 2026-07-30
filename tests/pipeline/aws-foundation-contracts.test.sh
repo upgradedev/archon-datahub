@@ -768,7 +768,6 @@ require_text "${inline_template_renderer}" \
   '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
   '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
   '--output-format=yaml' \
-  '--width 0' \
   'jq -cS' \
   "'... style=\"flow\"'" \
   'cmp -s "${canonical_json}" "${round_trip}"' \
