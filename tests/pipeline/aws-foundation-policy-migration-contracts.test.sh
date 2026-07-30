@@ -285,16 +285,16 @@ for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
     'declare -p' \
     'BASH_COMMAND' \
     'AdministratorAccess' \
-    'iam:PassRole' \
-    'iam:AttachRolePolicy' \
-    'iam:CreateRole' \
-    'iam:DeleteRole'
+    'aws iam pass-role' \
+    'aws iam attach-role-policy' \
+    'aws iam create-role' \
+    'aws iam delete-role'
 done
 forbid_text "${main_driver}" '--set-as-default'
 forbid_text "${authorization}" \
   '"Resource": "*"' \
-  'iam:PutRolePolicy"' \
-  'iam:DeleteRolePolicy"'
+  'aws iam put-role-policy' \
+  'aws iam delete-role-policy'
 forbid_text "${canary_roles}" \
   'archon-foundation-control-policy-migration' \
   'iam:CreatePolicyVersion' \
