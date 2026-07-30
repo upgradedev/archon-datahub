@@ -58,7 +58,7 @@ jq --exit-status '
   .schemaVersion == "archon.aws-incident-recovery/v1" and
   .repository == "upgradedev/archon-datahub" and
   .defaultBranch == "master" and
-  .status == "attempted-delete-not-executed-cleanup-proven" and
+  .status == "recovered-delete-complete-cleanup-proven" and
   .execution.recoveryRun == {
     artifact: {
       id: "8771158101",
@@ -113,6 +113,47 @@ jq --exit-status '
     runId: "30579644527",
     validator: "success"
   } and
+  .execution.successfulRecoveryRun == {
+    artifact: {
+      createdAt: "2026-07-30T21:19:37Z",
+      evidenceScope: "recovery-and-cleanup",
+      expiresAt: "2026-10-28T21:15:52Z",
+      id: "8775321544",
+      name: "aws-incident-recovery-30582684638-1",
+      sizeBytes: 2085,
+      uploadedFileCount: 6,
+      zipDigest: "sha256:dddf3d887781c18d2b1578c8083e450c41ba120753206b5f2f80b50031eee155"
+    },
+    canonicalAbsenceProof: "proven",
+    canonicalPolicyReadback: "proven",
+    cleanupFollower: {
+      result: "skipped-on-success",
+      runId: "30582939537"
+    },
+    completedAt: "2026-07-30T21:19:41Z",
+    deleteStack: "executed-once",
+    deletionMode: "STANDARD",
+    githubAttestation: {
+      id: "38051531",
+      subject: "recovery.json",
+      subjectDigest: "sha256:44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef",
+      url: "https://github.com/upgradedev/archon-datahub/attestations/38051531"
+    },
+    headSha: "8b7451da65d1bf1ed14b17e0c1f0cc5d43d6cf40",
+    mandatoryRevocation: "success",
+    preflightGates: {
+      ci: { result: "success", runId: "30582157198" },
+      codeql: { result: "success", runId: "30582157151" },
+      productionSupplyChain: { result: "success", runId: "30582494521" },
+      workflowSecurity: { result: "success", runId: "30582157207" }
+    },
+    putRolePolicy: "request-succeeded",
+    result: "success",
+    runAttempt: "1",
+    runId: "30582684638",
+    stackDeletionProof: "original-id-delete-complete-and-no-active-name",
+    validator: "success"
+  } and
   .execution.cleanupRun == {
     artifact: {
       attestationUrl: "https://github.com/upgradedev/archon-datahub/attestations/38026442",
@@ -127,9 +168,10 @@ jq --exit-status '
     runAttempt: "1",
     runId: "30571619440"
   } and
-  .execution.temporaryPolicyInstalled == false and
+  .execution.temporaryPolicyInstalledDuringSuccessfulRun == true and
+  .execution.temporaryPolicyPresentAfterRun == false and
   .execution.temporaryPolicyAbsent == "proven" and
-  .execution.deleteStackExecuted == false and
+  .execution.deleteStackExecuted == true and
   .controlPlane.inputs == ["expected_head_sha", "confirmation"] and
   .controlPlane.secretForwarding == "none" and
   .controlPlane.runbook == "docs/AWS_INCIDENT_RECOVERY.md" and
@@ -265,7 +307,7 @@ jq --exit-status '
   .evidence.failureDiagnostics.explicitIncidentRecoveryContract ==
     "contracts/aws-incident-recovery-v1.json" and
   .evidence.failureDiagnostics.explicitIncidentRecoveryStatus ==
-    "attempted-delete-not-executed-cleanup-proven"
+    "recovered-delete-complete-cleanup-proven"
 ' "${foundation_contract}" >/dev/null
 
 require_count 2 "${entry}" '        type: string'
@@ -467,34 +509,25 @@ require_text "${ci}" \
   'bash tests/pipeline/aws-incident-recovery-contracts.test.sh' \
   'bash tests/pipeline/aws-incident-recovery-driver.test.sh'
 require_text "${runbook}" \
-  'Status: **attempted; `DeleteStack` not executed; cleanup proof successful**' \
-  'Cleanup-only run `30571619440` proved canonical temporary-policy absence' \
-  'first recovery run `30571830902` stopped on the historical generic' \
-  'Classified recovery run | `30576390064`' \
-  '`AWS_RECOVERY_INCIDENT_RECORD_MISMATCH`' \
-  '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`' \
-  '`sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0`' \
-  '`8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2`' \
-  'https://github.com/upgradedev/archon-datahub/attestations/38026442' \
-  '`sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878`' \
-  '`sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e`' \
-  'Authorization-readback run | `30579644527`' \
-  '`PutRolePolicy` request succeeded; canonical readback not proven' \
-  '`sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8`' \
-  'Cleanup-only; `3` files uploaded; no GitHub attestation created' \
-  '## Canonical policy digest domain' \
-  'validator hashes recursively sorted, compact UTF-8 JSON bytes without a' \
-  'Modified, malformed, non-object, and newline-domain' \
+  'Status: **recovered; `DeleteStack` executed once; deletion and cleanup proofs successful**' \
+  '`recovered-delete-complete-cleanup-proven`' \
+  'Successful recovery run | `30582684638`' \
+  'CI `30582157198`; CodeQL `30582157151`' \
+  'Workflow Security `30582157207`; Production Supply Chain `30582494521`' \
+  'Exactly one `STANDARD` `DeleteStack`' \
+  '`sha256:dddf3d887781c18d2b1578c8083e450c41ba120753206b5f2f80b50031eee155`' \
+  '`44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef`' \
+  'https://github.com/upgradedev/archon-datahub/attestations/38051531' \
+  'Run `30582939537` skipped on successful source recovery' \
+  'do not dispatch' \
+  'now-absent target must make any accidental rerun fail before authorization' \
+  'GitHub attestation `38051531` binds only canonical `recovery.json`' \
+  'cleanup files are retained evidence, not separately attested' \
   'ResourceStatus` as the resource' \
   '`ROLLBACK_COMPLETE`' \
   '`DELETE_SKIPPED`' \
   '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID`' \
   '`AWS_RECOVERY_RESOURCE_STATE_PAGINATED`' \
-  'Any remaining `NextToken` fails before private outputs or' \
-  'authorization. The incident record must occur once' \
-  'Missing `PhysicalResourceId` alone is never treated as proof' \
-  'retired from the current failure-code allowlist' \
-  'does not alter the workflow, IAM policy' \
   'eventually consistent' \
   'lists inline policies before mutation' \
   'The opaque request response is never treated as proof' \
@@ -509,9 +542,11 @@ forbid_text "${driver}" \
   '--starting-token'
 
 require_text "${foundation_runbook}" \
-  'Authorization-readback run `30579644527` passed' \
-  'legacy' \
-  'canonical JSON' \
-  '`DeleteStack` was skipped' \
-  'no stack' \
-  'deletion or GitHub-attestation claim is made'
+  '`recovered-delete-complete-cleanup-proven`' \
+  'Exact-master run `30582684638`' \
+  'exactly one `STANDARD` `DeleteStack`' \
+  'Artifact `8775321544` and GitHub' \
+  'attestation `38051531`' \
+  'cleanup follower' \
+  '`30582939537` skipped on success' \
+  'ordinary idempotent foundation workflow'

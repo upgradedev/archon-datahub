@@ -485,16 +485,15 @@ automatically deletes, recreates, or continues rollback. The one reviewed
 historical `staging-iam` exception is a separate CI-only, two-environment
 control plane with immutable incident coordinates, short-lived exact-stack
 authorization, mandatory revocation, and sanitized attested evidence. Its
-status is `attempted-delete-not-executed-cleanup-proven`. Cleanup run
-`30571619440` proved canonical temporary-policy absence. Recovery run
-`30571830902` stopped on the historical generic mismatch; classified run
-`30576390064` then proved exact `DELETE_COMPLETE` without a physical ID. Both
-stopped before `PutRolePolicy`. Authorization-readback run `30579644527` passed
-the validator and reached `PutRolePolicy`, then failed closed because the legacy
-shell verifier hashed jq's trailing LF while the validator hashed no-LF
-canonical JSON. `DeleteStack` was skipped; mandatory revocation and the final
-canonical absence proof succeeded. The status is unchanged and no stack
-deletion or GitHub-attestation claim is made. See
+status is `recovered-delete-complete-cleanup-proven`. Cleanup run `30571619440`
+and three fail-closed recovery attempts established the historical evidence and
+revocation controls. Exact-master run `30582684638` then passed canonical policy
+readback, issued exactly one `STANDARD` `DeleteStack`, proved the original stack
+ID reached `DELETE_COMPLETE` with no active sealed stack name, revoked the
+temporary policy, and proved canonical absence. Artifact `8775321544` and GitHub
+attestation `38051531` retain the sanitized receipt; cleanup follower
+`30582939537` skipped on success. The deleted staging IAM foundation can now be
+recreated only through the ordinary idempotent foundation workflow. See
 [`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
 `contracts/aws-incident-recovery-v1.json`.
 

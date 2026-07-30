@@ -1,16 +1,16 @@
 # Sealed AWS staging IAM incident recovery
 
-Status: **attempted; `DeleteStack` not executed; cleanup proof successful**.
-Cleanup-only run `30571619440` proved canonical temporary-policy absence. The
-first recovery run `30571830902` stopped on the historical generic incident
-mismatch. Classified recovery run `30576390064` then proved the exact live class
-`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`. Authorization-readback
-run `30579644527` passed the validator and reached `PutRolePolicy`, but its
-legacy shell verifier compared newline-terminated jq output with the validator's
-no-newline canonical JSON digest, so canonical equality was not proven. It
-failed closed before `DeleteStack`; mandatory revocation and the final canonical
-absence proof succeeded. The machine-readable status remains
-`attempted-delete-not-executed-cleanup-proven`; no stack-deletion claim is made.
+Status: **recovered; `DeleteStack` executed once; deletion and cleanup proofs successful**.
+Cleanup-only run `30571619440` first proved canonical temporary-policy absence.
+Recovery runs `30571830902` and `30576390064` then failed closed before
+`PutRolePolicy`; authorization-readback run `30579644527` reached the temporary
+policy but stopped before deletion and completed mandatory revocation. After the
+canonical byte-domain fix passed exact-master gates, recovery run `30582684638`
+validated the sealed incident, proved the installed policy by canonical readback,
+issued exactly one `STANDARD` `DeleteStack`, proved the original stack ID reached
+`DELETE_COMPLETE` with no active stack of the sealed name, revoked the temporary
+policy, and proved canonical absence. Its GitHub attestation is `38051531`.
+The machine-readable status is `recovered-delete-complete-cleanup-proven`.
 
 This runbook covers one historical CloudFormation incident only. It is not a
 general rollback or stack-deletion facility, and it does not change the normal
@@ -61,7 +61,16 @@ cross-job value. It remains runner-private; only its SHA-256 crosses jobs.
 | Authorization artifact ZIP SHA-256 | `sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8` |
 | Authorization evidence scope | Cleanup-only; `3` files uploaded; no GitHub attestation created |
 | Authorization finalization | Mandatory revocation succeeded; canonical absence proved |
-| Recovery finalization | Mandatory revocation succeeded; canonical absence proved |
+| Successful recovery run | `30582684638`, attempt `1`, commit `8b7451da65d1bf1ed14b17e0c1f0cc5d43d6cf40`, success |
+| Exact-master preflight gates | CI `30582157198`; CodeQL `30582157151`; Workflow Security `30582157207`; Production Supply Chain `30582494521`; all success |
+| Successful authorization | Validator, `PutRolePolicy`, and canonical policy readback succeeded |
+| Successful delete | Exactly one `STANDARD` `DeleteStack`; original stack ID `DELETE_COMPLETE`; no active sealed stack name |
+| Successful recovery artifact | `8775321544`, `aws-incident-recovery-30582684638-1`, `2085` bytes, `6` files, expires `2026-10-28T21:15:52Z` |
+| Successful artifact ZIP SHA-256 | `sha256:dddf3d887781c18d2b1578c8083e450c41ba120753206b5f2f80b50031eee155` |
+| Canonical `recovery.json` SHA-256 | `44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef` |
+| Successful recovery attestation | [GitHub attestation `38051531`](https://github.com/upgradedev/archon-datahub/attestations/38051531) |
+| Successful finalization | Mandatory revocation succeeded; canonical policy absence proved |
+| Automatic cleanup follower | Run `30582939537` skipped on successful source recovery; no extra approval or mutation |
 
 ## Operator interface
 
@@ -74,9 +83,9 @@ confirmation=DELETE SEALED STAGING IAM INCIDENT
 ```
 
 There are no account, artifact, region, role, stack-name, stack-ID, or target
-inputs. Run only the version merged to current `master`, after its CI,
-workflow-security, and CodeQL receipts are successful. The present branch is
-implementation evidence only; this document does not authorize dispatch.
+inputs. The one sealed operation completed in run `30582684638`; do not dispatch
+it again. The workflow remains immutable audit evidence for this incident, and
+the now-absent target must make any accidental rerun fail before authorization.
 
 Cleanup-only retry uses `.github/workflows/aws-incident-recovery-cleanup.yml`:
 
@@ -87,8 +96,8 @@ confirmation=REVOKE SEALED INCIDENT POLICY
 
 It also follows an incomplete recovery only for exact `action_required`,
 `cancelled`, `failure`, `stale`, or `timed_out` conclusions. It excludes
-`success`, `neutral`, and `skipped`, and has no recurring schedule. Success
-already includes mandatory final cleanup and does not enqueue another approval.
+`success`, `neutral`, and `skipped`, and has no recurring schedule. Success already includes mandatory final cleanup. Follower run `30582939537`
+therefore completed as `skipped` and did not enqueue another approval.
 
 
 ## Current-state classification and narrow terminal acceptance
@@ -230,6 +239,11 @@ trigger a misleading missing-artifact failure. Evidence may contain safe
 coordinates and digests, but never raw account IDs, role ARNs, stack IDs/ARNs,
 plans, AWS errors, credentials, tokens, paths, or secrets. Validator failures
 expose only the explicit allowlisted machine code for the failed invariant.
+
+Successful run `30582684638` uploaded six explicit recovery-and-cleanup files.
+GitHub attestation `38051531` binds only canonical `recovery.json` at SHA-256
+`44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef`;
+the artifact's cleanup files are retained evidence, not separately attested.
 
 `contracts/aws-incident-recovery-v1.json` is machine-readable authority. CI
 syntax-checks both scripts, checks the validator, runs validator unit tests,
