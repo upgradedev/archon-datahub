@@ -388,7 +388,13 @@ require_text "${foundation_renderer}" \
   'if (Buffer.byteLength(compact, "utf8") > 6144)' \
   'source statement Sids must be unique, non-empty strings'
 
-renderer_runtime_dir="$(mktemp -d)"
+renderer_runtime_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+test -d "${renderer_runtime_root}"
+test ! -L "${renderer_runtime_root}"
+renderer_runtime_dir="$(
+  mktemp -d \
+    "${renderer_runtime_root%/}/archon-foundation-renderer.XXXXXX"
+)"
 cleanup_renderer_runtime() {
   rm -rf -- "${renderer_runtime_dir}"
 }
