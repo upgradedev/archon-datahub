@@ -623,20 +623,22 @@ cleanup() {
     printf 'predicate=%s\n' "${evidence_dir}/attestation-predicate.json"
   } >>"${GITHUB_OUTPUT}"
 }
-case "${1:-}" in
-  prepare)
-    prepare
-    ;;
-  delete-once)
-    delete_once
-    ;;
-  postverify)
-    postverify
-    ;;
-  cleanup)
-    cleanup
-    ;;
-  *)
-    fail "Unsupported AWS incident recovery mode"
-    ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    prepare)
+      prepare
+      ;;
+    delete-once)
+      delete_once
+      ;;
+    postverify)
+      postverify
+      ;;
+    cleanup)
+      cleanup
+      ;;
+    *)
+      fail "Unsupported AWS incident recovery mode"
+      ;;
+  esac
+fi

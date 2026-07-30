@@ -9,6 +9,7 @@
     "cleanupWorkflow": ".github/workflows/aws-incident-recovery-cleanup.yml",
     "driver": "scripts/run-aws-incident-recovery.sh",
     "validator": "scripts/aws-incident-recovery.mjs",
+    "secretForwarding": "none",
     "inputs": [
       "expected_head_sha",
       "confirmation"
@@ -31,8 +32,15 @@
     "concurrency": {
       "entryAndCleanup": "archon-aws-control-plane",
       "reusableDriver": "archon-governed-canary-mutation-recovery",
+      "foundationJob": "archon-governed-canary-mutation-recovery",
+      "lockOrder": [
+        "archon-aws-control-plane",
+        "archon-governed-canary-mutation-recovery"
+      ],
       "cancelInProgress": false,
-      "holdsBothLocksDuringTemporaryGrant": true
+      "holdsBothLocksDuringTemporaryGrant": true,
+      "foundationAcquiresBothLocks": true,
+      "deployDispatchesInnerCanaryWhileHoldingOuter": true
     }
   },
   "incident": {
@@ -99,6 +107,7 @@
     "baselinePolicyName": "archon-staging-stack-read",
     "baselinePolicyUnchanged": true,
     "foundationRolePolicyBroadening": "forbidden",
+    "attachedManagedPolicies": "forbidden",
     "temporaryPolicy": {
       "name": "archon-incident-30546241677-delete",
       "maximumTtlSeconds": 1800,
@@ -139,8 +148,11 @@
           "protected-environment",
           "exact-role-resource",
           "canonical-policy-equality",
+          "zero-attached-managed-policies",
+          "bounded-eventual-consistency-readback",
+          "repeated-canonical-absence",
           "short-DateLessThan-TTL",
-          "unconditional-revocation",
+          "unconditional-exact-policy-revocation",
           "trusted-exact-CLI"
         ]
       }
@@ -171,11 +183,20 @@
     "decisionSource": "fail-closed-ListRolePolicies",
     "exactPolicyDeletion": true,
     "postDeleteRelistRequired": true,
-    "independentRetryTriggers": [
-      "workflow_run",
-      "workflow_dispatch",
-      "schedule"
-    ],
+    "deleteFailureHandling": "success-or-exact-NoSuchEntity-only",
+    "absenceConfirmations": 3,
+    "independentRetryTriggers": {
+      "workflowRunConclusions": [
+        "action_required",
+        "cancelled",
+        "failure",
+        "stale",
+        "timed_out"
+      ],
+      "workflowDispatch": true,
+      "schedule": "forbidden",
+      "successfulRun": "forbidden"
+    },
     "cleanupNeverCallsDeleteStack": true,
     "cleanupIndependentOfLaterMasterAdvance": true,
     "ttlMakesDelayedCleanupEffectivelyNonprivileged": true
@@ -183,7 +204,7 @@
   "postverification": {
     "originalStackIdDigestMatches": true,
     "originalStackStatus": "DELETE_COMPLETE",
-    "stackNameAbsent": true,
+    "stackNameHasNoActiveStack": true,
     "temporaryPolicyAbsent": true
   },
   "evidence": {
@@ -206,6 +227,7 @@
   },
   "tests": {
     "contract": "tests/pipeline/aws-incident-recovery-contracts.test.sh",
+    "driver": "tests/pipeline/aws-incident-recovery-driver.test.sh",
     "validator": "tests/pipeline/aws-incident-recovery-validator.test.mjs"
   }
 }
