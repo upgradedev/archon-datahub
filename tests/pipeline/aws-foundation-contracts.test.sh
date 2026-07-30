@@ -117,10 +117,19 @@ jq --exit-status '
     sourceBundleAttachable: false
   } and
   .aws.inlineTemplateRendering == {
+    deployedOriginalMatchesSemanticSha256: true,
+    flowEmitter: {
+      linuxAmd64Sha256:
+        "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+      name: "mikefarah/yq",
+      version: "v4.47.2"
+    },
+    format: "canonical-flow-yaml",
     maximumTemplateBodyBytes: 51200,
     outputRoot: "RUNNER_TEMP",
     renderer: "scripts/render-inline-cloudformation-template.sh",
     sameBytesForValidationAndDeploy: true,
+    semanticRoundTrip: "rain-json-canonical-equality",
     source: "infra/aws/foundation/cdk-execution-policy.yml",
     tool: {
       linuxAmd64ArchiveSha256:
@@ -751,12 +760,18 @@ require_text "${inline_template_renderer}" \
   'if [[ "${GITHUB_ACTIONS:-}" != "true" ]]' \
   'RAIN_VERSION="v1.24.4"' \
   'RAIN_LINUX_AMD64_ARCHIVE_SHA256="5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"' \
+  'YQ_VERSION="v4.47.2"' \
+  'YQ_LINUX_AMD64_SHA256="1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0"' \
   'CLOUDFORMATION_TEMPLATE_BODY_MAX_BYTES=51200' \
   'test ! -L "$1"' \
   'sha256sum --check --strict' \
   '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
+  '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
+  '--output-format=yaml' \
+  '--width 0' \
   'jq -cS' \
-  'cmp -s "${compact_json}" "${round_trip}"' \
+  "'... style=\"flow\"'" \
+  'cmp -s "${canonical_json}" "${round_trip}"' \
   '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
 test "$(
   grep -nF 'test ! -L "$1"' "${inline_template_renderer}" |
@@ -769,8 +784,23 @@ test "$(
 require_text "${reconciler}" \
   'IAM_FOUNDATION_TEMPLATE' \
   'IAM_FOUNDATION_TEMPLATE_SHA' \
+  'IAM_FOUNDATION_CANONICAL_JSON' \
+  'IAM_FOUNDATION_SEMANTIC_SHA' \
+  'IAM_FOUNDATION_YQ_BIN' \
+  'IAM_FOUNDATION_YQ_SHA' \
+  '.aws.inlineTemplateRendering.flowEmitter.linuxAmd64Sha256' \
   '--template-file "${IAM_FOUNDATION_TEMPLATE}"' \
+  '--template-stage Original' \
+  '.TemplateBody |' \
+  'if type == "string" then . else tojson end' \
+  '--output-format=json' \
+  'mktemp "${RUNNER_TEMP}/archon-deployed-template.XXXXXX' \
   'iamFoundationTemplateSha256: $iamFoundationTemplateSha256' \
+  'iamFoundationSemanticSha256: $iamFoundationSemanticSha256' \
+  'IAM_TEMPLATE_SHA["${stage}"]' \
+  '"${IAM_FOUNDATION_SEMANTIC_SHA}"' \
+  'deployed Original template does not match the pre-OIDC canonical template' \
+  '.iamDeployedTemplateSha256 == $expected' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME' \
@@ -817,7 +847,8 @@ require_text "${ci_workflow}" \
   'EXPECTED_BOOTSTRAP_VERSION: "32"' \
   'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
   'Render the exact inline-safe IAM foundation template' \
-  '"${RUNNER_TEMP}/archon-cdk-execution-policy.json"' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
   'node scripts/verify-aws-runtime-boundary.mjs'
 require_text "${deploy_workflow}" \
@@ -831,6 +862,10 @@ require_text "${foundation_workflow}" \
   'Render the inline-safe IAM foundation template' \
   'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
   'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
+  'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \
+  'IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}' \
+  'IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}' \
+  'IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \

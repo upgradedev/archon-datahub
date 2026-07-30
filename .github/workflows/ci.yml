@@ -689,7 +689,8 @@ jobs:
         run: |
           bash scripts/render-inline-cloudformation-template.sh \
             infra/aws/foundation/cdk-execution-policy.yml \
-            "${RUNNER_TEMP}/archon-cdk-execution-policy.json"
+            "${RUNNER_TEMP}/archon-cdk-execution-policy.yaml" \
+            "${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"
       - name: Package locked approval Lambda dependencies
         working-directory: infra/aws/lambda/approval
         run: npm ci --omit=dev --ignore-scripts

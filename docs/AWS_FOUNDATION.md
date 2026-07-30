@@ -54,13 +54,22 @@ and once for production.
 
 The readable source is larger than CloudFormation's 51,200-byte inline
 `TemplateBody` limit. Both ordinary CI and the protected foundation workflow
-therefore use checksum-pinned AWS CloudFormation Rain `v1.24.4` to render the
-same template as canonical compact JSON below `RUNNER_TEMP`. The renderer
-rejects non-runner use, symlinks, output outside `RUNNER_TEMP`, malformed or
-empty templates, round-trip drift, and output above 51,200 bytes. The protected
-workflow hashes the rendered bytes before OIDC and uses those exact bytes for
-both `ValidateTemplate` and deployment; the hash is retained in the attested
-foundation evidence.
+therefore use checksum-pinned AWS CloudFormation Rain `v1.24.4` and
+`mikefarah/yq` `v4.47.2` to render the unchanged template as canonical
+flow-style YAML below `RUNNER_TEMP`. Flow-style YAML removes JSON quoting
+overhead without removing resources, policy statements, descriptions, outputs,
+or other template semantics. The renderer rejects non-runner use, symlinks,
+output outside `RUNNER_TEMP`, malformed or empty templates, Rain JSON semantic
+round-trip drift, and output above 51,200 bytes.
+
+The protected workflow hashes the rendered bytes before OIDC and uses those
+exact bytes for both `ValidateTemplate` and deployment. After each stage
+deploys, CloudFormation's `GetTemplate --template-stage Original` body is
+canonicalized to JSON with the same checksum-pinned `yq` binary and its
+semantic SHA-256 must equal the pre-OIDC canonical JSON SHA-256 before the
+attested foundation evidence can be sealed.
+The evidence records both the exact flow-YAML transport hash and the canonical
+semantic hash.
 
 Each stage receives ten customer-managed execution policies:
 

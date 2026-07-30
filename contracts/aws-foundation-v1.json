@@ -53,6 +53,14 @@
       "outputRoot": "RUNNER_TEMP",
       "maximumTemplateBodyBytes": 51200,
       "sameBytesForValidationAndDeploy": true,
+      "deployedOriginalMatchesSemanticSha256": true,
+      "format": "canonical-flow-yaml",
+      "semanticRoundTrip": "rain-json-canonical-equality",
+      "flowEmitter": {
+        "name": "mikefarah/yq",
+        "version": "v4.47.2",
+        "linuxAmd64Sha256": "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0"
+      },
       "tool": {
         "name": "aws-cloudformation/rain",
         "version": "v1.24.4",

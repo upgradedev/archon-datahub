@@ -234,10 +234,19 @@ jobs:
               "archon-aws-foundation-attachments"
             ] and
             .aws.inlineTemplateRendering == {
+              deployedOriginalMatchesSemanticSha256: true,
+              flowEmitter: {
+                linuxAmd64Sha256:
+                  "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+                name: "mikefarah/yq",
+                version: "v4.47.2"
+              },
+              format: "canonical-flow-yaml",
               maximumTemplateBodyBytes: 51200,
               outputRoot: "RUNNER_TEMP",
               renderer: "scripts/render-inline-cloudformation-template.sh",
               sameBytesForValidationAndDeploy: true,
+              semanticRoundTrip: "rain-json-canonical-equality",
               source: "infra/aws/foundation/cdk-execution-policy.yml",
               tool: {
                 linuxAmd64ArchiveSha256:
@@ -431,12 +440,24 @@ jobs:
         id: iam_foundation_template
         run: |
           set -euo pipefail
-          output="${RUNNER_TEMP}/archon-cdk-execution-policy.json"
+          output="${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"
+          canonical="${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"
           bash scripts/render-inline-cloudformation-template.sh \
             infra/aws/foundation/cdk-execution-policy.yml \
-            "${output}"
+            "${output}" \
+            "${canonical}"
           echo "path=${output}" >>"${GITHUB_OUTPUT}"
           echo "sha=$(sha256sum "${output}" | awk '{print $1}')" \
+            >>"${GITHUB_OUTPUT}"
+          echo "canonical_path=${canonical}" >>"${GITHUB_OUTPUT}"
+          echo "canonical_sha=$(sha256sum "${canonical}" | awk '{print $1}')" \
+            >>"${GITHUB_OUTPUT}"
+          yq_bin="${RUNNER_TEMP}/archon-inline-cfn-yq"
+          test -f "${yq_bin}"
+          test ! -L "${yq_bin}"
+          test -x "${yq_bin}"
+          echo "yq_path=${yq_bin}" >>"${GITHUB_OUTPUT}"
+          echo "yq_sha=$(sha256sum "${yq_bin}" | awk '{print $1}')" \
             >>"${GITHUB_OUTPUT}"
 
       - name: Prove exact synthesized runtime action equality for both stages
@@ -466,6 +487,10 @@ jobs:
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
           IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
           IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
@@ -490,6 +515,22 @@ jobs:
             "${IAM_FOUNDATION_TEMPLATE_SHA}"
           test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
             -le 51200
+          test "$(sha256sum "${IAM_FOUNDATION_CANONICAL_JSON}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_SEMANTIC_SHA}"
+          jq -e '
+            type == "object" and
+            (.Resources | type == "object" and length > 0)
+          ' "${IAM_FOUNDATION_CANONICAL_JSON}" >/dev/null
+          test -f "${IAM_FOUNDATION_YQ_BIN}"
+          test ! -L "${IAM_FOUNDATION_YQ_BIN}"
+          test -x "${IAM_FOUNDATION_YQ_BIN}"
+          test "${IAM_FOUNDATION_YQ_SHA}" = "$(
+            jq -er \
+              '.aws.inlineTemplateRendering.flowEmitter.linuxAmd64Sha256' \
+              contracts/aws-foundation-v1.json
+          )"
+          test "$(sha256sum "${IAM_FOUNDATION_YQ_BIN}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_YQ_SHA}"
           for tuple in \
             "STAGING_PRIMARY_BOOTSTRAP_TEMPLATE STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
             "STAGING_EDGE_BOOTSTRAP_TEMPLATE STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA" \
@@ -694,6 +735,10 @@ jobs:
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
           IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
           IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}

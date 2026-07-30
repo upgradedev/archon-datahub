@@ -16,6 +16,10 @@ set -euo pipefail
 : "${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA:?PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA is required}"
 : "${IAM_FOUNDATION_TEMPLATE:?IAM_FOUNDATION_TEMPLATE is required}"
 : "${IAM_FOUNDATION_TEMPLATE_SHA:?IAM_FOUNDATION_TEMPLATE_SHA is required}"
+: "${IAM_FOUNDATION_CANONICAL_JSON:?IAM_FOUNDATION_CANONICAL_JSON is required}"
+: "${IAM_FOUNDATION_SEMANTIC_SHA:?IAM_FOUNDATION_SEMANTIC_SHA is required}"
+: "${IAM_FOUNDATION_YQ_BIN:?IAM_FOUNDATION_YQ_BIN is required}"
+: "${IAM_FOUNDATION_YQ_SHA:?IAM_FOUNDATION_YQ_SHA is required}"
 : "${PINNED_BOOTSTRAP_VERSION:?PINNED_BOOTSTRAP_VERSION is required}"
 : "${FOUNDATION_POLICY_ACTUAL_SHA:?FOUNDATION_POLICY_ACTUAL_SHA is required}"
 : "${STAGING_CLOUDFRONT_DOMAIN_NAME:?STAGING_CLOUDFRONT_DOMAIN_NAME is required}"
@@ -29,6 +33,8 @@ set -euo pipefail
 [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${BOOTSTRAP_TEMPLATE_SHA}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${IAM_FOUNDATION_TEMPLATE_SHA}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${IAM_FOUNDATION_SEMANTIC_SHA}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${IAM_FOUNDATION_YQ_SHA}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${FOUNDATION_POLICY_ACTUAL_SHA}" =~ ^[0-9a-f]{64}$ ]]
 test "${PINNED_BOOTSTRAP_VERSION}" = "32"
 readonly DNS_NAME_PATTERN='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
@@ -162,10 +168,26 @@ revalidate_master() {
     "${IAM_FOUNDATION_TEMPLATE_SHA}"
   test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
     -le 51200
+  test -f "${IAM_FOUNDATION_CANONICAL_JSON}"
+  test ! -L "${IAM_FOUNDATION_CANONICAL_JSON}"
+  test "$(
+    sha256sum "${IAM_FOUNDATION_CANONICAL_JSON}" |
+      awk '{print $1}'
+  )" = "${IAM_FOUNDATION_SEMANTIC_SHA}"
   jq -e '
     type == "object" and
     (.Resources | type == "object" and length > 0)
-  ' "${IAM_FOUNDATION_TEMPLATE}" >/dev/null
+  ' "${IAM_FOUNDATION_CANONICAL_JSON}" >/dev/null
+  test -f "${IAM_FOUNDATION_YQ_BIN}"
+  test ! -L "${IAM_FOUNDATION_YQ_BIN}"
+  test -x "${IAM_FOUNDATION_YQ_BIN}"
+  test "${IAM_FOUNDATION_YQ_SHA}" = "$(
+    jq -er \
+      '.aws.inlineTemplateRendering.flowEmitter.linuxAmd64Sha256' \
+      contracts/aws-foundation-v1.json
+  )"
+  test "$(sha256sum "${IAM_FOUNDATION_YQ_BIN}" | awk '{print $1}')" = \
+    "${IAM_FOUNDATION_YQ_SHA}"
   for stage in staging production; do
     for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
       target="${stage}:${region}"
@@ -337,12 +359,25 @@ expected_execution_policy_arns() {
 deployed_template_sha() {
   local region="$1"
   local stack_name="$2"
+  local response
+  local body
+  response="$(mktemp "${RUNNER_TEMP}/archon-deployed-template.XXXXXX.json")"
+  body="$(mktemp "${RUNNER_TEMP}/archon-deployed-template.XXXXXX.body")"
   aws cloudformation get-template \
     --region "${region}" \
     --stack-name "${stack_name}" \
     --template-stage Original \
-    --output json |
-    jq -cS '.TemplateBody' |
+    --output json >"${response}"
+  jq -er '
+    .TemplateBody |
+    if type == "string" then . else tojson end
+  ' "${response}" >"${body}"
+  "${IAM_FOUNDATION_YQ_BIN}" \
+    --output-format=json \
+    --indent 0 \
+    '.' \
+    "${body}" |
+    jq -cS . |
     sha256sum |
     awk '{print $1}'
 }
@@ -641,6 +676,13 @@ for stage in staging production; do
   IAM_TEMPLATE_SHA["${stage}"]="$(
     deployed_template_sha "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
   )"
+  if [[ "${IAM_TEMPLATE_SHA[${stage}]}" != \
+    "${IAM_FOUNDATION_SEMANTIC_SHA}" ]]; then
+    echo \
+      "::error::${stage} deployed Original template does not match the pre-OIDC canonical template" \
+      >&2
+    exit 1
+  fi
 done
 echo "::endgroup::"
 
@@ -1864,6 +1906,7 @@ jq -cnS \
   --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
   --arg foundationPolicyActualSha256 "${FOUNDATION_POLICY_ACTUAL_SHA}" \
   --arg iamFoundationTemplateSha256 "${IAM_FOUNDATION_TEMPLATE_SHA}" \
+  --arg iamFoundationSemanticSha256 "${IAM_FOUNDATION_SEMANTIC_SHA}" \
   --arg bootstrapTemplateSha256 "${BOOTSTRAP_TEMPLATE_SHA}" \
   --argjson pinnedBootstrapVersion "${PINNED_BOOTSTRAP_VERSION}" \
   --arg driftSha256 "${drift_sha}" \
@@ -1883,6 +1926,7 @@ jq -cnS \
     {
       aws: {
         foundationPolicyActualSha256: $foundationPolicyActualSha256,
+        iamFoundationSemanticSha256: $iamFoundationSemanticSha256,
         iamFoundationTemplateSha256: $iamFoundationTemplateSha256,
         applicationStackRolePreflight: $applicationStackRoles,
         applicationStackRoleTransition: $applicationStackRoleTransition,
@@ -1936,6 +1980,16 @@ jq -e '
   (
     .aws.iamFoundationTemplateSha256 |
     test("^[0-9a-f]{64}$")
+  ) and
+  (
+    .aws.iamFoundationSemanticSha256 |
+    test("^[0-9a-f]{64}$")
+  ) and
+  (
+    .aws.iamFoundationSemanticSha256 as $expected |
+    all(.aws.stages[];
+      .iamDeployedTemplateSha256 == $expected
+    )
   ) and
   (.aws.applicationStackRolePreflight | length) == 5 and
   all(.aws.applicationStackRolePreflight[];
