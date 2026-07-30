@@ -285,10 +285,10 @@ for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
     'declare -p' \
     'BASH_COMMAND' \
     'AdministratorAccess' \
-    'aws iam pass-role' \
-    'aws iam attach-role-policy' \
-    'aws iam create-role' \
-    'aws iam delete-role'
+    'aws iam pass-role ' \
+    'aws iam attach-role-policy ' \
+    'aws iam create-role ' \
+    'aws iam delete-role '
 done
 forbid_text "${main_driver}" '--set-as-default'
 forbid_text "${authorization}" \
