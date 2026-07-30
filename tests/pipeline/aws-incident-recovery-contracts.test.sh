@@ -446,7 +446,8 @@ require_text "${runbook}" \
   '`DELETE_SKIPPED`' \
   '`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID`' \
   '`AWS_RECOVERY_RESOURCE_STATE_PAGINATED`' \
-  'remaining `NextToken` fails before private outputs or authorization' \
+  'Any remaining `NextToken` fails before private outputs or' \
+  'authorization. The incident record must occur once' \
   'Missing `PhysicalResourceId` alone is never treated as proof' \
   'retired from the current failure-code allowlist' \
   'does not alter the workflow, IAM policy' \
