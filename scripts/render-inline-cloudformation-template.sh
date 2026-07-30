@@ -81,12 +81,22 @@ jq -cS \
   "${pretty_json}" >"${canonical_json}"
 test -s "${canonical_json}"
 
+idiomatic_yaml="$(
+  mktemp "${RUNNER_TEMP}/archon-inline-cfn.idiomatic.XXXXXX.yaml"
+)"
 "${yq_bin}" \
   --output-format=yaml \
   --no-colors \
-  '... style="" |
-    (.. | select(kind == "map" or kind == "seq")) style="flow"' \
-  "${canonical_json}" >"${flow_yaml}"
+  --prettyPrint \
+  '.' \
+  "${canonical_json}" >"${idiomatic_yaml}"
+test -s "${idiomatic_yaml}"
+
+"${yq_bin}" \
+  --output-format=yaml \
+  --no-colors \
+  '(.. | select(kind == "map" or kind == "seq")) style="flow"' \
+  "${idiomatic_yaml}" >"${flow_yaml}"
 test -s "${flow_yaml}"
 
 template_bytes="$(wc -c <"${flow_yaml}" | tr -d '[:space:]')"

@@ -768,6 +768,8 @@ require_text "${inline_template_renderer}" \
   '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
   '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
   '--output-format=yaml' \
+  '--prettyPrint' \
+  'archon-inline-cfn.idiomatic.XXXXXX.yaml' \
   'jq -cS' \
   'select(kind == "map" or kind == "seq")) style="flow"' \
   'cmp -s "${canonical_json}" "${round_trip}"' \
