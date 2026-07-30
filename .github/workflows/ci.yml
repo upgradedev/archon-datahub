@@ -63,6 +63,7 @@ jobs:
             scripts/materialize-datahub-mcp-lock.sh \
             scripts/npm-audit-retry.sh \
             scripts/patch-cdk-brace-expansion.sh \
+            scripts/seal-cdk-bootstrap-templates.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/reconcile-aws-foundation.sh \
@@ -679,6 +680,10 @@ jobs:
         run: node scripts/verify-exact-npm-overrides.mjs infra/aws
       - name: Repair the exact vulnerable CDK bundled dependency
         run: bash scripts/patch-cdk-brace-expansion.sh infra/aws
+      - name: Seal the exact CDK bootstrap templates without AWS access
+        env:
+          EXPECTED_BOOTSTRAP_VERSION: "32"
+        run: bash scripts/seal-cdk-bootstrap-templates.sh
       - name: Package locked approval Lambda dependencies
         working-directory: infra/aws/lambda/approval
         run: npm ci --omit=dev --ignore-scripts

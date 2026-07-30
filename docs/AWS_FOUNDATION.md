@@ -73,6 +73,12 @@ Every policy is independently checked against IAM's 6,144-byte managed-policy
 quota. No policy permits `Action: "*"`, a service-wide `service:*` allow, or
 `AdministratorAccess`.
 
+The ordinary pull-request CI also generates and seals the exact locked CDK
+bootstrap template for both stages and both regions, without AWS credentials.
+This rejects template drift before merge and dispatch. After the manual
+environment gate, the protected foundation workflow reuses that same verifier
+before requesting OIDC credentials or making any AWS call.
+
 The guard policy denies cross-stage resource names and ownership tags, shared
 API Gateway account mutation, runtime-boundary removal, foundation mutation,
 and identity/account administration. The production guard also denies mutation

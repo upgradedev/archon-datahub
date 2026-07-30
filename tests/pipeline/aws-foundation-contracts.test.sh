@@ -16,6 +16,7 @@ canary_roles="${repository_root}/infra/aws/foundation/governed-canary-roles.yml"
 execution_policy="${repository_root}/infra/aws/foundation/cdk-execution-policy.yml"
 api_gateway_account="${repository_root}/infra/aws/foundation/api-gateway-account.yml"
 bootstrap_patcher="${repository_root}/scripts/patch-cdk-bootstrap-template.mjs"
+bootstrap_sealer="${repository_root}/scripts/seal-cdk-bootstrap-templates.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
@@ -60,6 +61,7 @@ for path in \
   "${execution_policy}" \
   "${api_gateway_account}" \
   "${bootstrap_patcher}" \
+  "${bootstrap_sealer}" \
   "${foundation_renderer}" \
   "${foundation_bootstrap}" \
   "${reconciler}" \
@@ -333,8 +335,7 @@ require_text "${foundation_workflow}" \
   'archon-aws-foundation-attachments' \
   "jq -e '.PolicyNames == []'" \
   'infra/aws/foundation/governed-canary-roles.yml' \
-  'node scripts/patch-cdk-bootstrap-template.mjs' \
-  '--region "${region}"' \
+  'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
   'run: bash scripts/reconcile-aws-foundation.sh' \
   'Clear AWS credentials before artifact handling' \
   'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
@@ -347,6 +348,19 @@ require_text "${execution_policy}" \
   'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
 forbid_text "${execution_policy}" \
   'AmazonECSTaskExecutionRolePolicy'
+require_text "${bootstrap_sealer}" \
+  'CDK bootstrap seal failed:' \
+  'EXPECTED_BOOTSTRAP_VERSION is required' \
+  'expected one CdkBootstrapVersion resource' \
+  'required logical ID is missing:' \
+  'node "${patcher}"' \
+  'template is missing its isolation marker' \
+  'echo "${stage}_${region_slot}_path=${stage_template}"' \
+  'echo "${stage}_${region_slot}_sha=${stage_sha}"' \
+  'echo "path=${template}"' \
+  'echo "sha=${template_sha}"' \
+  'echo "version=${template_version}"' \
+  'Sealed CDK bootstrap v${template_version}'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi
@@ -750,6 +764,10 @@ require_text "${ci_workflow}" \
   'scripts/bootstrap-aws-foundation-role.sh' \
   'scripts/reconcile-aws-foundation.sh' \
   'scripts/patch-cdk-bootstrap-template.mjs' \
+  'scripts/seal-cdk-bootstrap-templates.sh' \
+  'Seal the exact CDK bootstrap templates without AWS access' \
+  'EXPECTED_BOOTSTRAP_VERSION: "32"' \
+  'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
   'scripts/render-aws-foundation-policy.mjs' \
   'node scripts/verify-aws-runtime-boundary.mjs'
 require_text "${deploy_workflow}" \
