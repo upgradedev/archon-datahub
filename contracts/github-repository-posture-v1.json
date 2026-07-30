@@ -52,7 +52,7 @@
       "verification": "not-performed"
     },
     "status": {
-      "reason": "The automatic GitHub Actions token cannot request repository Administration:read or Environments:read; detailed branch protection, Actions policy, and environment secret-name inventories remain unverified.",
+      "reason": "The automatic GitHub Actions token cannot request repository Administration:read or Environments:read; repository merge/lifecycle settings, detailed branch protection, Actions policy, and environment secret-name inventories remain unverified.",
       "value": "unverified-requires-administration-and-environments-read"
     }
   },
@@ -121,7 +121,6 @@
     }
   },
   "repository": {
-
     "archived": false,
     "branch": {
       "name": "master",

@@ -225,7 +225,6 @@ jq -e '
     (.environments.reviewerlessByDesign.exactNames | sort | unique) and
   .environments.soloOwnerApproval.exactNames ==
     (.environments.soloOwnerApproval.exactNames | sort | unique) and
-
   (
     (
       .environments.soloOwnerApproval.exactNames +
