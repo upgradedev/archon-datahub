@@ -1,7 +1,10 @@
 # Sealed AWS staging IAM incident recovery
 
-Status: **implemented, not executed**. This path is CI-only. It has not called
-AWS, dispatched recovery, or deleted a stack.
+Status: **attempted; `DeleteStack` not executed; cleanup proof pending**. Recovery
+run `30567769601` failed during prepare/build-plan, so its delete job was skipped.
+Cleanup run `30567949203` also failed. These receipts prove neither installation
+nor canonical absence of the temporary policy; they make no stack-deletion claim.
+The path remains CI-only and requires a successful cleanup proof before closure.
 
 This runbook covers one historical CloudFormation incident only. It is not a
 general rollback or stack-deletion facility, and it does not change the normal
@@ -74,13 +77,14 @@ already includes mandatory final cleanup and does not enqueue another approval.
    full stack ARN, rederives the same plan, and issues the repository's one
    `DeleteStack` request: full stack ID, deterministic token, `STANDARD` mode,
    no retain list, role override, deployment override, or force mode.
-6. `aws-foundation` unconditionally attempts deletion of the exact temporary
-   policy before evaluating unrelated role drift. It accepts success or the
-   exact AWS `NoSuchEntity` code for `DeleteRolePolicy`; every other error fails
-   closed. Raw errors remain private runner-temporary files and are removed.
-7. Three consecutive canonical baseline-only policy inventories prove
-   revocation. Unexpected policies fail the receipt after the known temporary
-   privilege has been removed.
+6. `aws-foundation` lists inline policies before mutation. Exact baseline-only
+   inventory causes zero delete calls. If the exact temporary policy is present,
+   it issues one delete request for that name; unexpected inventory without it
+   fails without mutation. The opaque request response is never treated as proof.
+7. Three new consecutive canonical baseline-only inventories are the sole
+   revocation proof. Persistent temporary or unrelated policy drift and failed
+   reads fail closed; temporary-plus-unrelated inventory is privilege-reduced
+   before its canonical proof can fail.
 8. Postverification requires the original stack-ID digest to reach
    `DELETE_COMPLETE` and a successful `ListStacks` result to show no active
    stack with the sealed name. Failed AWS reads never prove absence.
@@ -134,10 +138,13 @@ children the outer lock would deadlock their parent.
 
 ## Sanitized evidence and CI proof
 
-Recovery and cleanup produce canonical JSON, SHA-256 manifests, and attestation
-predicates retained for 90 days. They may contain safe coordinates and digests,
-but never raw account IDs, role ARNs, stack IDs/ARNs, plans, AWS errors,
-credentials, tokens, or secrets.
+Successful recovery or cleanup steps produce canonical JSON, SHA-256 manifests,
+and attestation predicates retained for 90 days. Upload runs only when at least
+one evidence-producing step succeeds; a failed cleanup with no receipt does not
+trigger a misleading missing-artifact failure. Evidence may contain safe
+coordinates and digests, but never raw account IDs, role ARNs, stack IDs/ARNs,
+plans, AWS errors, credentials, tokens, paths, or secrets. Validator failures
+expose only the explicit allowlisted machine code for the failed invariant.
 
 `contracts/aws-incident-recovery-v1.json` is machine-readable authority. CI
 syntax-checks both scripts, checks the validator, runs validator unit tests,

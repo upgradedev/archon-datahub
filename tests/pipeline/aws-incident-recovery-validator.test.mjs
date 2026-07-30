@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   rmSync,
@@ -8,14 +9,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  CLI_FAILURE_CODES,
   TARGET,
   buildRecoveryPlan,
   canonicalJson,
+  main,
+  sanitizedCliFailureCode,
   validateIncidentArtifact,
 } from "../../scripts/aws-incident-recovery.mjs";
 
+const validatorCli = fileURLToPath(new URL("../../scripts/aws-incident-recovery.mjs", import.meta.url));
 const accountId = "123456789012";
 const controlPlaneSha = "324073874b862e08bf8d80fa70709165cee86851";
 const expiresAt = "2026-07-30T14:20:00Z";
@@ -283,5 +289,224 @@ test("rejects invalid prepared resource digests during delete reconstruction", (
         stackResponse: stackResponse(),
       })
     );
+  }
+});
+test("CLI exposes only allowlisted failure codes and never raw values or paths", () => {
+  const privateMarker = "PRIVATE_RECOVERY_VALUE_7f6c2a";
+  const privatePath = `/tmp/${privateMarker}/sealed-input.json`;
+  const cases = [
+    {
+      args: ["unsupported-command", privateMarker],
+      expected: CLI_FAILURE_CODES.INVALID_INVOCATION,
+    },
+    {
+      args: ["validate-artifact", privatePath],
+      expected: CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED,
+    },
+    {
+      args: [
+        "build-plan",
+        privatePath,
+        privatePath,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privatePath,
+        privatePath,
+      ],
+      expected: CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED,
+    },
+    {
+      args: [
+        "rebuild-plan",
+        privatePath,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privateMarker,
+        privatePath,
+        privatePath,
+      ],
+      expected: CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED,
+    },
+  ];
+
+  for (const { args, expected } of cases) {
+    const result = spawnSync(process.execPath, [validatorCli, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, `::error::${expected}\n`);
+    assert.doesNotMatch(result.stderr, /PRIVATE_RECOVERY_VALUE|ENOENT|sealed-input/u);
+    assert.equal(result.stderr.includes(privateMarker), false);
+    assert.equal(result.stderr.includes(privatePath), false);
+  }
+});
+
+test("CLI failure-code sanitizer rejects raw and spoofed error properties", () => {
+  assert.deepEqual(Object.values(CLI_FAILURE_CODES), [
+    "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+    "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+    "AWS_RECOVERY_INVALID_INVOCATION",
+    "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+    "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+    "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+    "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+    "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+    "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+    "AWS_RECOVERY_STACK_ID_INVALID",
+    "AWS_RECOVERY_STACK_NESTING_INVALID",
+    "AWS_RECOVERY_STACK_STATUS_INVALID",
+    "AWS_RECOVERY_STACK_TAGS_INVALID",
+    "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+    "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+    "AWS_RECOVERY_TTL_INVALID",
+    "AWS_RECOVERY_VALIDATOR_FAILED",
+  ]);
+  const privateMarker = "PRIVATE_SANITIZER_MARKER";
+  const spoofed = new Error(privateMarker);
+  spoofed.publicCode = CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED;
+  for (const error of [
+    new Error(privateMarker),
+    { code: CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED, path: privateMarker },
+    spoofed,
+  ]) {
+    assert.equal(
+      sanitizedCliFailureCode(error),
+      CLI_FAILURE_CODES.VALIDATOR_FAILED
+    );
+  }
+
+  let invocationFailure;
+  try {
+    main(["unsupported-command", privateMarker]);
+  } catch (error) {
+    invocationFailure = error;
+  }
+  assert.equal(
+    sanitizedCliFailureCode(invocationFailure),
+    CLI_FAILURE_CODES.INVALID_INVOCATION
+  );
+});
+test("CLI maps every plan invariant to an exact sanitized code", () => {
+  const privateMarker = "PRIVATE_PLAN_INVARIANT_4b91";
+  const root = mkdtempSync(join(tmpdir(), `archon-${privateMarker}-`));
+  const stackPath = join(root, "stack.json");
+  const resourcesPath = join(root, "resources.json");
+  const planPath = join(root, "plan.json");
+  const policyPath = join(root, "policy.json");
+  const liveExpiry = new Date(Date.now() + 5 * 60 * 1_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/u, "Z");
+  const cases = [
+    {
+      expected: CLI_FAILURE_CODES.STACK_ID_INVALID,
+      stackOverrides: { StackId: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_STATUS_INVALID,
+      stackOverrides: { StackStatus: `DELETE_FAILED_${privateMarker}` },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_AUTHORITY_INVALID,
+      stackOverrides: { RoleARN: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_NESTING_INVALID,
+      stackOverrides: { ParentId: privateMarker },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_TERMINATION_PROTECTION_INVALID,
+      stackOverrides: { EnableTerminationProtection: true },
+    },
+    {
+      expected: CLI_FAILURE_CODES.STACK_TAGS_INVALID,
+      stackOverrides: { Tags: [{ Key: "Application", Value: privateMarker }] },
+    },
+    {
+      expected: CLI_FAILURE_CODES.TEMPLATE_IDENTITY_INVALID,
+      templateSha: privateMarker,
+    },
+    {
+      expected: CLI_FAILURE_CODES.TTL_INVALID,
+      expiresAt: privateMarker,
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_STATE_UNAVAILABLE,
+      resources: {},
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_STATE_EMPTY,
+      resources: { StackResourceSummaries: [] },
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_UNSUPPORTED_STATUS,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[1].ResourceStatus =
+          `UPDATE_FAILED_${privateMarker}`;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_MISMATCH,
+      mutateResources(resources) {
+        resources.StackResourceSummaries[0].ResourceType = privateMarker;
+      },
+    },
+    {
+      expected: CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE,
+      mutateResources(resources) {
+        resources.StackResourceSummaries.push({
+          ...resources.StackResourceSummaries[0],
+        });
+      },
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+      const stack = stackResponse(testCase.stackOverrides);
+      const resources = testCase.resources ?? resourcesResponse();
+      testCase.mutateResources?.(resources);
+      writeFileSync(stackPath, JSON.stringify(stack), "utf8");
+      writeFileSync(resourcesPath, JSON.stringify(resources), "utf8");
+      const result = spawnSync(
+        process.execPath,
+        [
+          validatorCli,
+          "build-plan",
+          stackPath,
+          resourcesPath,
+          testCase.templateSha ?? TARGET.sourceTemplateSemanticSha256,
+          accountId,
+          testCase.expiresAt ?? liveExpiry,
+          controlPlaneSha,
+          planPath,
+          policyPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, GITHUB_ACTIONS: "true", RUNNER_TEMP: root },
+        }
+      );
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, "");
+      assert.equal(result.stderr, `::error::${testCase.expected}\n`);
+      assert.equal(result.stderr.includes(privateMarker), false);
+      assert.doesNotMatch(
+        result.stderr,
+        /DELETE_FAILED|PhysicalResourceId|UPDATE_FAILED|ENOENT/u
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

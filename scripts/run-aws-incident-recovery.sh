@@ -438,25 +438,45 @@ delete_once() {
   echo "delete_called=true" >>"${GITHUB_OUTPUT}"
 }
 revoke_policy() {
+  local before="${WORK_ROOT}/revoke-policies-before.json"
   local after="${WORK_ROOT}/revoke-policies-after.json"
-  # Exact incident-policy deletion is privilege-reducing even when unrelated
-  # role drift exists. Delete first; then fail closed on the full inventory.
-  local delete_error="${WORK_ROOT}/delete-role-policy.error"
-  if ! aws iam delete-role-policy \
+  local delete_required=false
+
+  safe_aws "Unable to inspect recovery-role inline policies before revocation" \
+    "${before}" \
+    iam list-role-policies \
     --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    >/dev/null 2>"${delete_error}"; then
-    test -f "${delete_error}"
-    test ! -L "${delete_error}"
-    chmod 0600 "${delete_error}"
-    if ! LC_ALL=C grep -Eq \
-      '^An error occurred \(NoSuchEntity\) when calling the DeleteRolePolicy operation: .+$' \
-      "${delete_error}"; then
-      rm -f -- "${delete_error}"
-      fail "Unable to revoke the exact temporary recovery authorization"
+    --output json
+
+  if jq -e --arg base "${BASE_POLICY_NAME}" '
+    (type == "object") and
+    (.PolicyNames | type == "array") and
+    (all(.PolicyNames[]; type == "string")) and
+    ((.PolicyNames | sort) == [$base])
+  ' "${before}" >/dev/null; then
+    :
+  elif jq -e --arg temp "${TEMP_POLICY_NAME}" '
+    (type == "object") and
+    (.PolicyNames | type == "array") and
+    (all(.PolicyNames[]; type == "string")) and
+    any(.PolicyNames[]; . == $temp)
+  ' "${before}" >/dev/null; then
+    delete_required=true
+  else
+    fail "The recovery role contains unexpected inline-policy drift before revocation"
+  fi
+
+  if [[ "${delete_required}" == true ]]; then
+    # The request outcome is deliberately non-authoritative: a race or opaque
+    # response cannot prove revocation. Only repeated canonical inventory can.
+    if ! aws iam delete-role-policy \
+      --role-name "${RECOVERY_ROLE_NAME}" \
+      --policy-name "${TEMP_POLICY_NAME}" \
+      >/dev/null 2>/dev/null; then
+      :
     fi
   fi
-  rm -f -- "${delete_error}"
+
   wait_for_policy_absence "${after}"
 }
 postverify() {

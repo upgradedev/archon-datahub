@@ -2,7 +2,22 @@
   "schemaVersion": "archon.aws-incident-recovery/v1",
   "repository": "upgradedev/archon-datahub",
   "defaultBranch": "master",
-  "status": "implemented-not-executed",
+  "status": "attempted-delete-not-executed-cleanup-proof-pending",
+  "execution": {
+    "recoveryRun": {
+      "runId": "30567769601",
+      "result": "prepare-build-plan-failed",
+      "deleteStack": "skipped"
+    },
+    "cleanupRun": {
+      "runId": "30567949203",
+      "result": "failure",
+      "canonicalAbsenceProof": "pending"
+    },
+    "temporaryPolicyInstalled": "not-proven",
+    "temporaryPolicyAbsent": "not-proven",
+    "deleteStackExecuted": false
+  },
   "controlPlane": {
     "entryWorkflow": ".github/workflows/aws-incident-recovery.yml",
     "driverWorkflow": ".github/workflows/aws-incident-recovery-driver.yml",
@@ -153,7 +168,7 @@
           "bounded-eventual-consistency-readback",
           "repeated-canonical-absence",
           "short-DateLessThan-TTL",
-          "unconditional-exact-policy-revocation",
+          "list-first-conditional-exact-policy-revocation",
           "trusted-exact-CLI"
         ]
       }
@@ -168,6 +183,32 @@
     "resourceStateSealedBeforeAuthorization": true,
     "sourceTemplateIdentitySealedBeforeAuthorization": true
   },
+  "validator": {
+    "cliFailureCodes": [
+      "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+      "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+      "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+      "AWS_RECOVERY_INVALID_INVOCATION",
+      "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+      "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+      "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+      "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+      "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+      "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+      "AWS_RECOVERY_STACK_ID_INVALID",
+      "AWS_RECOVERY_STACK_NESTING_INVALID",
+      "AWS_RECOVERY_STACK_STATUS_INVALID",
+      "AWS_RECOVERY_STACK_TAGS_INVALID",
+      "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+      "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+      "AWS_RECOVERY_TTL_INVALID",
+      "AWS_RECOVERY_VALIDATOR_FAILED"
+    ],
+    "fallbackCliFailureCode": "AWS_RECOVERY_VALIDATOR_FAILED",
+    "rawErrorMessages": false,
+    "rawPaths": false,
+    "rawValues": false
+  },
   "delete": {
     "callCount": 1,
     "stackArgument": "sealed-full-stack-id",
@@ -181,10 +222,16 @@
   },
   "revocation": {
     "jobCondition": "always",
-    "decisionSource": "exact-delete-then-repeated-fail-closed-ListRolePolicies",
-    "exactPolicyDeletion": true,
+    "decisionSource": "pre-delete-inventory-and-canonical-postcondition-proof",
+    "preDeleteInventoryRequired": true,
+    "deleteOnlyWhenTemporaryPolicyPresent": true,
+    "baseOnlyDeleteCallCount": 0,
+    "temporaryPolicyPresentDeleteCallCount": 1,
+    "deleteResponseAuthoritative": false,
+    "canonicalPostcondition": "three-consecutive-exact-baseline-only-inventories",
     "postDeleteRelistRequired": true,
-    "deleteFailureHandling": "success-or-exact-NoSuchEntity-only",
+    "unexpectedInventoryWithoutTemporaryPolicy": "fail-without-delete",
+    "temporaryPolicyWithUnexpectedInventory": "delete-temporary-then-fail-if-drift-persists",
     "absenceConfirmations": 3,
     "independentRetryTriggers": {
       "workflowRunConclusions": [
@@ -214,6 +261,8 @@
     "checksumManifest": true,
     "attested": true,
     "retentionDays": 90,
+    "uploadRequiresEvidenceProducerSuccess": true,
+    "failedCleanupWithoutEvidenceUpload": true,
     "rawAwsErrors": false,
     "rawAccountId": false,
     "rawRoleArn": false,

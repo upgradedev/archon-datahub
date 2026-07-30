@@ -17,36 +17,77 @@ increment() {
   if [[ -f "${path}" ]]; then count="$(<"${path}")"; fi
   count=$((count + 1)); printf '%s' "${count}" >"${path}"; printf '%s' "${count}"
 }
+temp_removed=false
+if [[ -f "${state}/temp-removed" ]]; then temp_removed=true; fi
 case "${1:-}:${2:-}" in
   sts:get-caller-identity)
     printf '{"Account":"%s","Arn":"arn:aws:sts::%s:assumed-role/archon-datahub-github-foundation/test-session","UserId":"fixture"}\n' "${FAKE_ACCOUNT_ID}" "${FAKE_ACCOUNT_ID}"
     ;;
   iam:list-role-policies)
-    increment list-role-policies >/dev/null
-    if [[ "${FAKE_LIST_MODE:-base}" == "unexpected" ]]; then
-      printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","unreviewed-policy"]}'
-    else
-      printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+    if [[ "$#" -ne 6 || "$3" != "--role-name" ||
+      "$4" != "archon-datahub-github-governed-canary-recovery" ||
+      "$5" != "--output" || "$6" != "json" ]]; then
+      echo "unexpected ListRolePolicies arguments" >&2
+      exit 96
     fi
+    list_call="$(increment list-role-policies)"
+    case "${FAKE_INITIAL_INVENTORY:-base}" in
+      access-denied)
+        echo "An error occurred (AccessDenied): ${FAKE_PRIVATE_MARKER}" >&2
+        exit 254
+        ;;
+      base)
+        printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+        ;;
+      base-temp)
+        if [[ "${temp_removed}" == true ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+        else
+          printf '%s\n' '{"PolicyNames":["archon-incident-30546241677-delete","archon-staging-stack-read"]}'
+        fi
+        ;;
+      base-temp-reset)
+        if [[ "${temp_removed}" == false ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-incident-30546241677-delete","archon-staging-stack-read"]}'
+        elif [[ "${list_call}" == 3 ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","transient-policy"]}'
+        else
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+        fi
+        ;;
+      base-other)
+        printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","unreviewed-policy"]}'
+        ;;
+      base-temp-other)
+        if [[ "${temp_removed}" == true ]]; then
+          printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","unreviewed-policy"]}'
+        else
+          printf '%s\n' '{"PolicyNames":["archon-incident-30546241677-delete","archon-staging-stack-read","unreviewed-policy"]}'
+        fi
+        ;;
+      *) exit 98 ;;
+    esac
     ;;
   iam:delete-role-policy)
+    if [[ "$#" -ne 6 || "$3" != "--role-name" ||
+      "$4" != "archon-datahub-github-governed-canary-recovery" ||
+      "$5" != "--policy-name" ||
+      "$6" != "archon-incident-30546241677-delete" ]]; then
+      echo "unexpected DeleteRolePolicy arguments" >&2
+      exit 95
+    fi
     increment delete-role-policy >/dev/null
     case "${FAKE_DELETE_MODE:-success}" in
-      success) exit 0 ;;
-      no-such)
-        echo 'An error occurred (NoSuchEntity) when calling the DeleteRolePolicy operation: The role policy cannot be found.' >&2
+      success)
+        : >"${state}/temp-removed"
+        ;;
+      raced-no-such)
+        : >"${state}/temp-removed"
+        echo "An error occurred (NoSuchEntity) when calling the DeleteRolePolicy operation: ${FAKE_PRIVATE_MARKER}" >&2
         exit 254
         ;;
       access-denied)
-        echo 'An error occurred (AccessDenied) when calling the DeleteRolePolicy operation: denied' >&2
-        exit 254
-        ;;
-      throttled)
-        echo 'An error occurred (Throttling) when calling the DeleteRolePolicy operation: retry' >&2
-        exit 254
-        ;;
-      wrong-operation)
-        echo 'An error occurred (NoSuchEntity) when calling the PutRolePolicy operation: missing' >&2
+        echo "An error occurred (AccessDenied) when calling the DeleteRolePolicy operation: ${FAKE_PRIVATE_MARKER}" >&2
         exit 254
         ;;
       *) exit 99 ;;
@@ -54,7 +95,7 @@ case "${1:-}:${2:-}" in
     ;;
   cloudformation:list-stacks)
     increment list-stacks >/dev/null
-    echo 'An error occurred (AccessDenied) when calling the ListStacks operation: denied' >&2
+    echo "An error occurred (AccessDenied) when calling the ListStacks operation: ${FAKE_PRIVATE_MARKER}" >&2
     exit 254
     ;;
   *)
@@ -71,8 +112,22 @@ FAKE_SLEEP
 chmod 0700 "${test_root}/bin/sleep"
 
 fail() { echo "::error::$*" >&2; exit 1; }
+call_count() {
+  local path="$1"
+  if [[ -f "${path}" ]]; then
+    printf '%s' "$(<"${path}")"
+  else
+    printf '0'
+  fi
+}
+assert_no_raw_error() {
+  local case_root="$1"
+  if grep -Fq 'PRIVATE_AWS_ERROR_MARKER' "${case_root}/stdout" "${case_root}/stderr"; then
+    fail "raw AWS error leaked for ${case_root}"
+  fi
+}
 run_driver() {
-  local case_name="$1" mode="$2" delete_mode="$3" list_mode="${4:-base}"
+  local case_name="$1" mode="$2" delete_mode="$3" inventory="${4:-base}"
   local case_root="${test_root}/${case_name}"
   mkdir -p "${case_root}/state"
   : >"${case_root}/output"
@@ -80,7 +135,8 @@ run_driver() {
   FAKE_AWS_STATE="${case_root}/state" \
   FAKE_ACCOUNT_ID="123456789012" \
   FAKE_DELETE_MODE="${delete_mode}" \
-  FAKE_LIST_MODE="${list_mode}" \
+  FAKE_INITIAL_INVENTORY="${inventory}" \
+  FAKE_PRIVATE_MARKER="PRIVATE_AWS_ERROR_MARKER" \
   GITHUB_ACTIONS=true \
   RUNNER_TEMP="${case_root}" \
   GITHUB_OUTPUT="${case_root}/output" \
@@ -92,36 +148,64 @@ run_driver() {
   bash "${driver}" "${mode}" >"${case_root}/stdout" 2>"${case_root}/stderr"
 }
 
-for accepted in success no-such; do
-  run_driver "cleanup-${accepted}" cleanup "${accepted}" || fail "cleanup ${accepted} should succeed"
-  test "$(<"${test_root}/cleanup-${accepted}/state/delete-role-policy.count")" = 1 || fail "cleanup must issue one exact delete"
-  test ! -e "${test_root}/cleanup-${accepted}/archon-aws-incident-recovery/delete-role-policy.error" || fail "private delete error was retained"
-  test -f "${test_root}/cleanup-${accepted}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail "cleanup evidence is missing"
+run_driver cleanup-absent cleanup ignored base || fail 'already-absent cleanup should succeed'
+test "$(call_count "${test_root}/cleanup-absent/state/delete-role-policy.count")" = 0 || fail 'already-absent cleanup must not delete'
+test "$(call_count "${test_root}/cleanup-absent/state/list-role-policies.count")" = 4 || fail 'already-absent cleanup must classify then prove absence three times'
+test -f "${test_root}/cleanup-absent/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'already-absent cleanup evidence is missing'
+
+for accepted in success raced-no-such; do
+  run_driver "cleanup-present-${accepted}" cleanup "${accepted}" base-temp || fail "present cleanup ${accepted} should succeed"
+  case_root="${test_root}/cleanup-present-${accepted}"
+  test "$(call_count "${case_root}/state/delete-role-policy.count")" = 1 || fail 'present cleanup must issue exactly one delete'
+  test "$(call_count "${case_root}/state/list-role-policies.count")" = 4 || fail 'present cleanup must classify then prove absence three times'
+  test -f "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'present cleanup evidence is missing'
+  assert_no_raw_error "${case_root}"
 done
 
-for rejected in access-denied throttled wrong-operation; do
-  if run_driver "cleanup-${rejected}" cleanup "${rejected}"; then
-    fail "cleanup ${rejected} must fail closed"
-  fi
-  test "$(<"${test_root}/cleanup-${rejected}/state/delete-role-policy.count")" = 1 || fail "failed cleanup must still target delete once"
-  test ! -e "${test_root}/cleanup-${rejected}/archon-aws-incident-recovery/delete-role-policy.error" || fail "private raw error was retained"
-  grep -Fq 'Unable to revoke the exact temporary recovery authorization' "${test_root}/cleanup-${rejected}/stderr" || fail "generic failure was not emitted"
-  if grep -Eq 'AccessDenied|Throttling|NoSuchEntity' "${test_root}/cleanup-${rejected}/stderr"; then
-    fail "raw AWS error leaked to stderr"
-  fi
-done
+run_driver cleanup-consecutive-reset cleanup success base-temp-reset || fail 'cleanup should recover after a transient non-absent read'
+case_root="${test_root}/cleanup-consecutive-reset"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 1 || fail 'reset sequence must delete exactly once'
+test "$(call_count "${case_root}/state/list-role-policies.count")" = 6 || fail 'non-absent read must reset three-new-read confirmation count'
+test -f "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'reset sequence cleanup evidence is missing'
 
-if run_driver cleanup-unexpected-policy cleanup success unexpected; then
-  fail 'unexpected inline policy inventory must fail evidence'
+if run_driver cleanup-delete-access-denied cleanup access-denied base-temp; then
+  fail 'persistent policy after opaque delete failure must fail closed'
 fi
-test "$(<"${test_root}/cleanup-unexpected-policy/state/delete-role-policy.count")" = 1 || fail 'exact temporary policy was not deleted before drift failure'
-grep -Fq 'lacks repeated canonical absence' "${test_root}/cleanup-unexpected-policy/stderr" || fail 'unexpected inventory did not fail closed'
+case_root="${test_root}/cleanup-delete-access-denied"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 1 || fail 'failed delete path must issue exactly one delete'
+test ! -e "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'failed cleanup created false evidence'
+grep -Fq 'lacks repeated canonical absence' "${case_root}/stderr" || fail 'failed delete path did not fail canonical proof'
+assert_no_raw_error "${case_root}"
 
-if run_driver postverify-generic-failure postverify no-such; then
+if run_driver cleanup-list-access-denied cleanup ignored access-denied; then
+  fail 'unreadable initial inventory must fail closed'
+fi
+case_root="${test_root}/cleanup-list-access-denied"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 0 || fail 'unreadable inventory must not delete'
+grep -Fq 'Unable to inspect recovery-role inline policies before revocation' "${case_root}/stderr" || fail 'initial inventory failure was not generic'
+assert_no_raw_error "${case_root}"
+
+if run_driver cleanup-unexpected-only cleanup ignored base-other; then
+  fail 'unexpected inventory without temporary policy must fail closed'
+fi
+case_root="${test_root}/cleanup-unexpected-only"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 0 || fail 'unexpected inventory without temporary policy must not delete'
+grep -Fq 'unexpected inline-policy drift before revocation' "${case_root}/stderr" || fail 'unexpected inventory failure differs'
+
+if run_driver cleanup-temp-unexpected cleanup success base-temp-other; then
+  fail 'persistent unrelated inventory must fail after temporary-policy deletion'
+fi
+case_root="${test_root}/cleanup-temp-unexpected"
+test "$(call_count "${case_root}/state/delete-role-policy.count")" = 1 || fail 'temporary policy was not deleted before drift failure'
+test ! -e "${case_root}/archon-aws-incident-recovery/cleanup-evidence/cleanup.json" || fail 'unexpected inventory created false evidence'
+grep -Fq 'lacks repeated canonical absence' "${case_root}/stderr" || fail 'persistent unrelated inventory did not fail canonical proof'
+
+if run_driver postverify-generic-failure postverify ignored base; then
   fail 'generic ListStacks failure must not prove target-name absence'
 fi
 test ! -e "${test_root}/postverify-generic-failure/archon-aws-incident-recovery/evidence/recovery.json" || fail 'false recovery evidence was created'
 grep -Fq 'Unable to inspect sanitized deletion progress' "${test_root}/postverify-generic-failure/stderr" || fail 'generic ListStacks failure did not fail closed'
+assert_no_raw_error "${test_root}/postverify-generic-failure"
 
 # Source the real driver without executing a mode, override only AWS readers, and
 # prove workflow-command masking does not contaminate captured snapshot stdout.

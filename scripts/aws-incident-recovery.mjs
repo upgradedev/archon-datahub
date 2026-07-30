@@ -69,8 +69,73 @@ const CONTROL_PLANE_PATTERN = /^[a-f0-9]{40}$/u;
 const ACCOUNT_PATTERN = /^[0-9]{12}$/u;
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 
-function invariant(value, message) {
+export const CLI_FAILURE_CODES = Object.freeze({
+  ARTIFACT_VALIDATION_FAILED: "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+  INCIDENT_RECORD_MISMATCH: "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+  INCIDENT_RECORD_NOT_UNIQUE: "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+  INVALID_INVOCATION: "AWS_RECOVERY_INVALID_INVOCATION",
+  PLAN_VALIDATION_FAILED: "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+  RESOURCE_CREATE_FAILED_PHYSICAL_ID:
+    "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+  RESOURCE_STATE_EMPTY: "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+  RESOURCE_STATE_UNAVAILABLE: "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+  RESOURCE_UNSUPPORTED_STATUS: "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+  STACK_AUTHORITY_INVALID: "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+  STACK_ID_INVALID: "AWS_RECOVERY_STACK_ID_INVALID",
+  STACK_NESTING_INVALID: "AWS_RECOVERY_STACK_NESTING_INVALID",
+  STACK_STATUS_INVALID: "AWS_RECOVERY_STACK_STATUS_INVALID",
+  STACK_TAGS_INVALID: "AWS_RECOVERY_STACK_TAGS_INVALID",
+  STACK_TERMINATION_PROTECTION_INVALID:
+    "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+  TEMPLATE_IDENTITY_INVALID: "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+  TTL_INVALID: "AWS_RECOVERY_TTL_INVALID",
+  VALIDATOR_FAILED: "AWS_RECOVERY_VALIDATOR_FAILED",
+});
+const CLI_FAILURE_CODE_ALLOWLIST = new Set(Object.values(CLI_FAILURE_CODES));
+
+class CliFailure extends Error {
+  constructor(publicCode) {
+    super(publicCode);
+    this.name = "CliFailure";
+    this.publicCode = publicCode;
+  }
+}
+
+class PlanInvariantError extends Error {
+  constructor(message, publicCode) {
+    super(message);
+    this.name = "PlanInvariantError";
+    this.publicCode = publicCode;
+  }
+}
+
+function withCliFailureCode(publicCode, action) {
+  try {
+    return action();
+  } catch (error) {
+    const resolvedCode =
+      error instanceof PlanInvariantError &&
+      CLI_FAILURE_CODE_ALLOWLIST.has(error.publicCode)
+        ? error.publicCode
+        : publicCode;
+    throw new CliFailure(resolvedCode);
+  }
+}
+export function sanitizedCliFailureCode(error) {
+  if (
+    error instanceof CliFailure &&
+    CLI_FAILURE_CODE_ALLOWLIST.has(error.publicCode)
+  ) {
+    return error.publicCode;
+  }
+  return CLI_FAILURE_CODES.VALIDATOR_FAILED;
+}
+
+function invariant(value, message, publicCode) {
   if (!value) {
+    if (publicCode !== undefined) {
+      throw new PlanInvariantError(message, publicCode);
+    }
     throw new Error(message);
   }
 }
@@ -97,11 +162,16 @@ export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function exactKeys(value, expected, label) {
-  invariant(value !== null && typeof value === "object", `${label} is not an object`);
+function exactKeys(value, expected, label, publicCode) {
+  invariant(
+    value !== null && typeof value === "object",
+    `${label} is not an object`,
+    publicCode
+  );
   invariant(
     canonicalJson(Object.keys(value).sort()) === canonicalJson([...expected].sort()),
-    `${label} has an unexpected shape`
+    `${label} has an unexpected shape`,
+    publicCode
   );
 }
 
@@ -164,37 +234,60 @@ export function validateIncidentArtifact(directory) {
 }
 
 function exactTags(tags) {
-  invariant(Array.isArray(tags), "stack tags are unavailable");
+  const code = CLI_FAILURE_CODES.STACK_TAGS_INVALID;
+  invariant(Array.isArray(tags), "stack tags are unavailable", code);
   const observed = {};
   for (const tag of tags) {
-    exactKeys(tag, ["Key", "Value"], "stack tag");
-    invariant(typeof tag.Key === "string" && typeof tag.Value === "string", "stack tag is invalid");
-    invariant(!Object.hasOwn(observed, tag.Key), "stack tag key is duplicated");
+    exactKeys(tag, ["Key", "Value"], "stack tag", code);
+    invariant(
+      typeof tag.Key === "string" && typeof tag.Value === "string",
+      "stack tag is invalid",
+      code
+    );
+    invariant(!Object.hasOwn(observed, tag.Key), "stack tag key is duplicated", code);
     observed[tag.Key] = tag.Value;
   }
-  invariant(canonicalJson(observed) === canonicalJson(TARGET.tags), "stack tags differ");
+  invariant(
+    canonicalJson(observed) === canonicalJson(TARGET.tags),
+    "stack tags differ",
+    code
+  );
 }
-
 function validateResourceSummaries(resources) {
-  invariant(Array.isArray(resources.StackResourceSummaries), "stack resources are unavailable");
-  invariant(resources.StackResourceSummaries.length > 0, "stack resource inventory is empty");
+  invariant(
+    Array.isArray(resources.StackResourceSummaries),
+    "stack resources are unavailable",
+    CLI_FAILURE_CODES.RESOURCE_STATE_UNAVAILABLE
+  );
+  invariant(
+    resources.StackResourceSummaries.length > 0,
+    "stack resource inventory is empty",
+    CLI_FAILURE_CODES.RESOURCE_STATE_EMPTY
+  );
   let incidentRecordCount = 0;
   const sanitized = resources.StackResourceSummaries.map((resource) => {
     const hasPhysicalResourceId =
       typeof resource.PhysicalResourceId === "string" &&
       resource.PhysicalResourceId.length > 0;
     const isDeleted = resource.ResourceStatus === "DELETE_COMPLETE";
-    const isNonCreatedFailure =
-      typeof resource.ResourceStatus === "string" &&
-      resource.ResourceStatus === "CREATE_FAILED" &&
-      !hasPhysicalResourceId;
-    invariant(isDeleted || isNonCreatedFailure, "a surviving stack resource was observed");
+    const isCreateFailed = resource.ResourceStatus === "CREATE_FAILED";
+    invariant(
+      !(isCreateFailed && hasPhysicalResourceId),
+      "a CREATE_FAILED resource has a physical ID",
+      CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID
+    );
+    invariant(
+      isDeleted || isCreateFailed,
+      "an unsupported stack resource status was observed",
+      CLI_FAILURE_CODES.RESOURCE_UNSUPPORTED_STATUS
+    );
     if (resource.LogicalResourceId === EXPECTED_FAILURE.logicalResourceId) {
       invariant(
         resource.ResourceType === EXPECTED_FAILURE.resourceType &&
           resource.ResourceStatus === EXPECTED_FAILURE.resourceStatus &&
           !hasPhysicalResourceId,
-        "the incident resource record differs"
+        "the incident resource record differs",
+        CLI_FAILURE_CODES.INCIDENT_RECORD_MISMATCH
       );
       incidentRecordCount += 1;
     }
@@ -205,27 +298,32 @@ function validateResourceSummaries(resources) {
       resourceType: resource.ResourceType,
     };
   });
-  invariant(incidentRecordCount === 1, "the exact incident resource record is not unique");
+  invariant(
+    incidentRecordCount === 1,
+    "the exact incident resource record is not unique",
+    CLI_FAILURE_CODES.INCIDENT_RECORD_NOT_UNIQUE
+  );
   return sanitized.sort((left, right) =>
     canonicalJson(left).localeCompare(canonicalJson(right), "en")
   );
 }
-
 function parseExpiry(expiresAt, now) {
-  invariant(ISO_UTC_PATTERN.test(expiresAt), "policy expiry is not canonical UTC");
+  const code = CLI_FAILURE_CODES.TTL_INVALID;
+  invariant(ISO_UTC_PATTERN.test(expiresAt), "policy expiry is not canonical UTC", code);
   const expiryMs = Date.parse(expiresAt);
-  invariant(Number.isFinite(expiryMs), "policy expiry is invalid");
+  invariant(Number.isFinite(expiryMs), "policy expiry is invalid", code);
   const remainingSeconds = Math.floor((expiryMs - now.getTime()) / 1_000);
   invariant(
     remainingSeconds >= RECOVERY.minimumRemainingTtlSeconds,
-    "temporary authorization is expired or too close to expiry"
+    "temporary authorization is expired or too close to expiry",
+    code
   );
   invariant(
     remainingSeconds <= RECOVERY.maximumTtlSeconds,
-    "temporary authorization exceeds the reviewed TTL"
+    "temporary authorization exceeds the reviewed TTL",
+    code
   );
 }
-
 export function buildRecoveryPlan({
   accountId,
   controlPlaneSha,
@@ -240,12 +338,21 @@ export function buildRecoveryPlan({
   invariant(CONTROL_PLANE_PATTERN.test(controlPlaneSha), "control-plane SHA is invalid");
   invariant(
     sourceTemplateSemanticSha256 === TARGET.sourceTemplateSemanticSha256,
-    "deployed source template identity differs"
+    "deployed source template identity differs",
+    CLI_FAILURE_CODES.TEMPLATE_IDENTITY_INVALID
   );
   parseExpiry(expiresAt, now);
-  invariant(Array.isArray(stackResponse.Stacks) && stackResponse.Stacks.length === 1, "target stack is not unique");
+  invariant(
+    Array.isArray(stackResponse.Stacks) && stackResponse.Stacks.length === 1,
+    "target stack is not unique",
+    CLI_FAILURE_CODES.STACK_ID_INVALID
+  );
   const stack = stackResponse.Stacks[0];
-  invariant(stack.StackName === TARGET.stackName, "target stack name differs");
+  invariant(
+    stack.StackName === TARGET.stackName,
+    "target stack name differs",
+    CLI_FAILURE_CODES.STACK_ID_INVALID
+  );
   const expectedStackIdPrefix =
     `arn:aws:cloudformation:${TARGET.region}:${accountId}:stack/${TARGET.stackName}/`;
   const stackIdSuffix =
@@ -254,12 +361,29 @@ export function buildRecoveryPlan({
       : "";
   invariant(
     /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(stackIdSuffix),
-    "target stack ID is invalid"
+    "target stack ID is invalid",
+    CLI_FAILURE_CODES.STACK_ID_INVALID
   );
-  invariant(stack.StackStatus === "ROLLBACK_COMPLETE", "target stack status is not recoverable");
-  invariant(stack.RoleARN == null, "target stack has a service role");
-  invariant(stack.ParentId == null && stack.RootId == null, "target stack is not a root stack");
-  invariant(stack.EnableTerminationProtection === false, "target stack termination protection is enabled");
+  invariant(
+    stack.StackStatus === "ROLLBACK_COMPLETE",
+    "target stack status is not recoverable",
+    CLI_FAILURE_CODES.STACK_STATUS_INVALID
+  );
+  invariant(
+    stack.RoleARN == null,
+    "target stack has a service role",
+    CLI_FAILURE_CODES.STACK_AUTHORITY_INVALID
+  );
+  invariant(
+    stack.ParentId == null && stack.RootId == null,
+    "target stack is not a root stack",
+    CLI_FAILURE_CODES.STACK_NESTING_INVALID
+  );
+  invariant(
+    stack.EnableTerminationProtection === false,
+    "target stack termination protection is enabled",
+    CLI_FAILURE_CODES.STACK_TERMINATION_PROTECTION_INVALID
+  );
   exactTags(stack.Tags);
 
   let resourceStateSha256;
@@ -271,7 +395,8 @@ export function buildRecoveryPlan({
       typeof preparedResourceStateSha256 === "string" &&
         preparedResourceStateSha256.startsWith("sha256:") &&
         SHA256_PATTERN.test(preparedResourceStateSha256.slice(7)),
-      "prepared resource-state digest is invalid"
+      "prepared resource-state digest is invalid",
+      CLI_FAILURE_CODES.RESOURCE_STATE_UNAVAILABLE
     );
     resourceStateSha256 = preparedResourceStateSha256;
   }
@@ -376,7 +501,7 @@ function readJson(path, label) {
 }
 
 function usage() {
-  throw new Error("usage: validate-artifact <dir> | build-plan <stack.json> <resources.json> <template-sha> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out> | rebuild-plan <stack.json> <resource-state-sha256> <account-id> <expires-at> <control-plane-sha> <plan-out> <policy-out>");
+  throw new CliFailure(CLI_FAILURE_CODES.INVALID_INVOCATION);
 }
 
 function emitSafePlan(result) {
@@ -395,41 +520,61 @@ function emitSafePlan(result) {
 export function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
   if (command === "validate-artifact") {
-    invariant(args.length === 1, "validate-artifact arguments are invalid");
-    process.stdout.write(`${canonicalJson(validateIncidentArtifact(args[0]))}\n`);
-    return;
+    if (args.length !== 1) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.ARTIFACT_VALIDATION_FAILED, () => {
+      process.stdout.write(`${canonicalJson(validateIncidentArtifact(args[0]))}\n`);
+    });
   }
   if (command === "build-plan") {
-    invariant(args.length === 8, "build-plan arguments are invalid");
-    const [stackPath, resourcesPath, templateSha, accountId, expiresAt, controlPlaneSha, planPath, policyPath] = args;
-    const result = buildRecoveryPlan({
-      accountId,
-      controlPlaneSha,
-      expiresAt,
-      resourcesResponse: readJson(resourcesPath, "stack resources"),
-      sourceTemplateSemanticSha256: templateSha,
-      stackResponse: readJson(stackPath, "stack description"),
+    if (args.length !== 8) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED, () => {
+      const [
+        stackPath,
+        resourcesPath,
+        templateSha,
+        accountId,
+        expiresAt,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ] = args;
+      const result = buildRecoveryPlan({
+        accountId,
+        controlPlaneSha,
+        expiresAt,
+        resourcesResponse: readJson(resourcesPath, "stack resources"),
+        sourceTemplateSemanticSha256: templateSha,
+        stackResponse: readJson(stackPath, "stack description"),
+      });
+      writePrivate(planPath, result.plan);
+      writePrivate(policyPath, result.policyDocument);
+      emitSafePlan(result);
     });
-    writePrivate(planPath, result.plan);
-    writePrivate(policyPath, result.policyDocument);
-    emitSafePlan(result);
-    return;
   }
   if (command === "rebuild-plan") {
-    invariant(args.length === 7, "rebuild-plan arguments are invalid");
-    const [stackPath, resourceStateSha256, accountId, expiresAt, controlPlaneSha, planPath, policyPath] = args;
-    const result = buildRecoveryPlan({
-      accountId,
-      controlPlaneSha,
-      expiresAt,
-      preparedResourceStateSha256: resourceStateSha256,
-      sourceTemplateSemanticSha256: TARGET.sourceTemplateSemanticSha256,
-      stackResponse: readJson(stackPath, "stack description"),
+    if (args.length !== 7) usage();
+    return withCliFailureCode(CLI_FAILURE_CODES.PLAN_VALIDATION_FAILED, () => {
+      const [
+        stackPath,
+        resourceStateSha256,
+        accountId,
+        expiresAt,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ] = args;
+      const result = buildRecoveryPlan({
+        accountId,
+        controlPlaneSha,
+        expiresAt,
+        preparedResourceStateSha256: resourceStateSha256,
+        sourceTemplateSemanticSha256: TARGET.sourceTemplateSemanticSha256,
+        stackResponse: readJson(stackPath, "stack description"),
+      });
+      writePrivate(planPath, result.plan);
+      writePrivate(policyPath, result.policyDocument);
+      emitSafePlan(result);
     });
-    writePrivate(planPath, result.plan);
-    writePrivate(policyPath, result.policyDocument);
-    emitSafePlan(result);
-    return;
   }
   usage();
 }
@@ -437,8 +582,8 @@ const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).hr
 if (import.meta.url === invokedPath) {
   try {
     main();
-  } catch {
-    process.stderr.write("AWS incident recovery validation failed\n");
+  } catch (error) {
+    process.stderr.write(`::error::${sanitizedCliFailureCode(error)}\n`);
     process.exitCode = 1;
   }
 }
