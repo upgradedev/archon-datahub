@@ -47,6 +47,18 @@
         "archon-aws-foundation-attachments"
       ]
     },
+    "inlineTemplateRendering": {
+      "source": "infra/aws/foundation/cdk-execution-policy.yml",
+      "renderer": "scripts/render-inline-cloudformation-template.sh",
+      "outputRoot": "RUNNER_TEMP",
+      "maximumTemplateBodyBytes": 51200,
+      "sameBytesForValidationAndDeploy": true,
+      "tool": {
+        "name": "aws-cloudformation/rain",
+        "version": "v1.24.4",
+        "linuxAmd64ArchiveSha256": "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"
+      }
+    },
     "sharedApiGatewayLogging": {
       "stackName": "Archon-Shared-ApiGateway-Logging",
       "region": "eu-west-1",

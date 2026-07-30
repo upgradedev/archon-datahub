@@ -189,6 +189,7 @@ jobs:
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/render-aws-foundation-policy.mjs \
@@ -232,6 +233,19 @@ jobs:
               "archon-aws-foundation-identity",
               "archon-aws-foundation-attachments"
             ] and
+            .aws.inlineTemplateRendering == {
+              maximumTemplateBodyBytes: 51200,
+              outputRoot: "RUNNER_TEMP",
+              renderer: "scripts/render-inline-cloudformation-template.sh",
+              sameBytesForValidationAndDeploy: true,
+              source: "infra/aws/foundation/cdk-execution-policy.yml",
+              tool: {
+                linuxAmd64ArchiveSha256:
+                  "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
+                name: "aws-cloudformation/rain",
+                version: "v1.24.4"
+              }
+            } and
             .aws.sharedApiGatewayLogging == {
               inlinePolicyName: "archon-apigateway-cloudwatch-logs",
               region: "eu-west-1",
@@ -413,6 +427,18 @@ jobs:
         id: bootstrap_template
         run: bash scripts/seal-cdk-bootstrap-templates.sh
 
+      - name: Render the inline-safe IAM foundation template
+        id: iam_foundation_template
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/archon-cdk-execution-policy.json"
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            "${output}"
+          echo "path=${output}" >>"${GITHUB_OUTPUT}"
+          echo "sha=$(sha256sum "${output}" | awk '{print $1}')" \
+            >>"${GITHUB_OUTPUT}"
+
       - name: Prove exact synthesized runtime action equality for both stages
         run: |
           set -euo pipefail
@@ -438,6 +464,8 @@ jobs:
           CONTROL_PLANE_SHA: ${{ github.sha }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
@@ -458,6 +486,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
           test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
             "${BOOTSTRAP_TEMPLATE_SHA}"
+          test "$(sha256sum "${IAM_FOUNDATION_TEMPLATE}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_TEMPLATE_SHA}"
+          test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
+            -le 51200
           for tuple in \
             "STAGING_PRIMARY_BOOTSTRAP_TEMPLATE STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
             "STAGING_EDGE_BOOTSTRAP_TEMPLATE STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA" \
@@ -660,6 +692,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}

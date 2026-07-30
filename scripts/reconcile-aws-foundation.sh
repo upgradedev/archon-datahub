@@ -14,6 +14,8 @@ set -euo pipefail
 : "${PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA:?PRODUCTION_PRIMARY_BOOTSTRAP_TEMPLATE_SHA is required}"
 : "${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE:?PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE is required}"
 : "${PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA:?PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE_SHA is required}"
+: "${IAM_FOUNDATION_TEMPLATE:?IAM_FOUNDATION_TEMPLATE is required}"
+: "${IAM_FOUNDATION_TEMPLATE_SHA:?IAM_FOUNDATION_TEMPLATE_SHA is required}"
 : "${PINNED_BOOTSTRAP_VERSION:?PINNED_BOOTSTRAP_VERSION is required}"
 : "${FOUNDATION_POLICY_ACTUAL_SHA:?FOUNDATION_POLICY_ACTUAL_SHA is required}"
 : "${STAGING_CLOUDFRONT_DOMAIN_NAME:?STAGING_CLOUDFRONT_DOMAIN_NAME is required}"
@@ -26,6 +28,7 @@ set -euo pipefail
 [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
 [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
 [[ "${BOOTSTRAP_TEMPLATE_SHA}" =~ ^[0-9a-f]{64}$ ]]
+[[ "${IAM_FOUNDATION_TEMPLATE_SHA}" =~ ^[0-9a-f]{64}$ ]]
 [[ "${FOUNDATION_POLICY_ACTUAL_SHA}" =~ ^[0-9a-f]{64}$ ]]
 test "${PINNED_BOOTSTRAP_VERSION}" = "32"
 readonly DNS_NAME_PATTERN='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
@@ -153,6 +156,16 @@ revalidate_master() {
   test -z "$(git status --porcelain --untracked-files=all)"
   test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
     "${BOOTSTRAP_TEMPLATE_SHA}"
+  test -f "${IAM_FOUNDATION_TEMPLATE}"
+  test ! -L "${IAM_FOUNDATION_TEMPLATE}"
+  test "$(sha256sum "${IAM_FOUNDATION_TEMPLATE}" | awk '{print $1}')" = \
+    "${IAM_FOUNDATION_TEMPLATE_SHA}"
+  test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
+    -le 51200
+  jq -e '
+    type == "object" and
+    (.Resources | type == "object" and length > 0)
+  ' "${IAM_FOUNDATION_TEMPLATE}" >/dev/null
   for stage in staging production; do
     for region in "${PRIMARY_REGION}" "${EDGE_REGION}"; do
       target="${stage}:${region}"
@@ -338,7 +351,7 @@ echo "::group::Fail-closed AWS foundation preflight"
 revalidate_master
 for template in \
   infra/aws/foundation/api-gateway-account.yml \
-  infra/aws/foundation/cdk-execution-policy.yml \
+  "${IAM_FOUNDATION_TEMPLATE}" \
   infra/aws/foundation/github-actions-deploy-role.yml \
   infra/aws/foundation/github-actions-foundation-role.yml \
   infra/aws/foundation/governed-canary-roles.yml \
@@ -466,7 +479,7 @@ for stage in staging production; do
   aws cloudformation deploy \
     --region "${PRIMARY_REGION}" \
     --stack-name "${IAM_STACK[${stage}]}" \
-    --template-file infra/aws/foundation/cdk-execution-policy.yml \
+    --template-file "${IAM_FOUNDATION_TEMPLATE}" \
     --capabilities CAPABILITY_NAMED_IAM \
     --no-fail-on-empty-changeset \
     --parameter-overrides \
@@ -1826,6 +1839,7 @@ source_hashes="$(
     scripts/bootstrap-aws-foundation-role.sh \
     scripts/patch-cdk-bootstrap-template.mjs \
     scripts/reconcile-aws-foundation.sh \
+    scripts/render-inline-cloudformation-template.sh \
     scripts/render-aws-foundation-policy.mjs \
     scripts/verify-aws-runtime-boundary.mjs; do
     jq -cn \
@@ -1849,6 +1863,7 @@ jq -cnS \
   --argjson runId "${GITHUB_RUN_ID}" \
   --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
   --arg foundationPolicyActualSha256 "${FOUNDATION_POLICY_ACTUAL_SHA}" \
+  --arg iamFoundationTemplateSha256 "${IAM_FOUNDATION_TEMPLATE_SHA}" \
   --arg bootstrapTemplateSha256 "${BOOTSTRAP_TEMPLATE_SHA}" \
   --argjson pinnedBootstrapVersion "${PINNED_BOOTSTRAP_VERSION}" \
   --arg driftSha256 "${drift_sha}" \
@@ -1868,6 +1883,7 @@ jq -cnS \
     {
       aws: {
         foundationPolicyActualSha256: $foundationPolicyActualSha256,
+        iamFoundationTemplateSha256: $iamFoundationTemplateSha256,
         applicationStackRolePreflight: $applicationStackRoles,
         applicationStackRoleTransition: $applicationStackRoleTransition,
         governedCanary: {
@@ -1917,6 +1933,10 @@ jq -cnS \
 jq -e '
   .schemaVersion == "archon.aws-foundation-evidence/v1" and
   .validation == "passed" and
+  (
+    .aws.iamFoundationTemplateSha256 |
+    test("^[0-9a-f]{64}$")
+  ) and
   (.aws.applicationStackRolePreflight | length) == 5 and
   all(.aws.applicationStackRolePreflight[];
     .validation == "passed" or

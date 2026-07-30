@@ -63,6 +63,7 @@ jobs:
             scripts/materialize-datahub-mcp-lock.sh \
             scripts/npm-audit-retry.sh \
             scripts/patch-cdk-brace-expansion.sh \
+            scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/bootstrap-aws-foundation-role.sh \
@@ -684,6 +685,11 @@ jobs:
         env:
           EXPECTED_BOOTSTRAP_VERSION: "32"
         run: bash scripts/seal-cdk-bootstrap-templates.sh
+      - name: Render the exact inline-safe IAM foundation template
+        run: |
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            "${RUNNER_TEMP}/archon-cdk-execution-policy.json"
       - name: Package locked approval Lambda dependencies
         working-directory: infra/aws/lambda/approval
         run: npm ci --omit=dev --ignore-scripts
