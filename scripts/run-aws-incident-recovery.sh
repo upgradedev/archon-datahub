@@ -13,7 +13,8 @@ readonly INCIDENT_RUN_ID="30546241677"
 readonly INCIDENT_RUN_ATTEMPT="1"
 readonly TARGET_REGION="eu-west-1"
 readonly TARGET_STACK_NAME="Archon-Staging-IAM-Foundation"
-readonly TARGET_TEMPLATE_SHA="80a2b02326bbaa3ae145d0fff52cc1c20f3a330d4ef5c7fa2d816182f7c2b825"`nreadonly ROLE_SOURCE_SHA="0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4"
+readonly TARGET_TEMPLATE_SHA="80a2b02326bbaa3ae145d0fff52cc1c20f3a330d4ef5c7fa2d816182f7c2b825"
+readonly ROLE_SOURCE_SHA="0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4"
 readonly ROLE_STACK_NAME="Archon-Governed-Canary-Roles"
 readonly RECOVERY_ROLE_NAME="archon-datahub-github-governed-canary-recovery"
 readonly BASE_POLICY_NAME="archon-staging-stack-read"
@@ -273,6 +274,7 @@ prepare() {
   jq -e '
     (.planDigest | test("^sha256:[a-f0-9]{64}$")) and
     (.policyDocumentSha256 | test("^sha256:[a-f0-9]{64}$")) and
+    (.resourceStateSha256 | test("^sha256:[a-f0-9]{64}$")) and
     (.stackIdSha256 | test("^sha256:[a-f0-9]{64}$")) and
     (.clientRequestToken | test("^[A-Za-z0-9][-A-Za-z0-9]{0,127}$"))
   ' <<<"${safe}" >/dev/null || fail "The sealed recovery outputs are invalid"
@@ -298,6 +300,7 @@ prepare() {
     printf 'expires_at=%s\n' "$(jq -er '.expiresAt' <<<"${safe}")"
     printf 'plan_digest=%s\n' "$(jq -er '.planDigest' <<<"${safe}")"
     printf 'policy_sha256=%s\n' "$(jq -er '.policyDocumentSha256' <<<"${safe}")"
+    printf 'resource_state_sha256=%s\n' "$(jq -er '.resourceStateSha256' <<<"${safe}")"
     printf 'stack_id_sha256=%s\n' "$(jq -er '.stackIdSha256' <<<"${safe}")"
   } >>"${GITHUB_OUTPUT}"
 }
