@@ -21,7 +21,9 @@
     "confirmation": "MIGRATE EXACT FOUNDATION CONTROL POLICY",
     "cleanupConfirmation": "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION",
     "ownerActorOnly": true,
-    "exactHeadRequired": true
+    "exactHeadRequired": true,
+    "exactParentAttemptJobsRequired": true,
+    "automaticCleanupCurrentHeadIndependent": true
   },
   "implementation": {
     "driver": "scripts/run-aws-foundation-policy-migration.sh",
@@ -86,10 +88,18 @@
   "recovery": {
     "automaticFollowerOnNonSuccess": true,
     "manualDispatch": true,
+    "manualDispatchMode": "cleanup-rollback",
     "freshRollbackOnlyAuthorization": true,
     "rollbackToPreviousDefault": true,
     "deleteOnlyNewNondefaultVersion": true,
-    "mandatoryAuthorizationRevocation": true
+    "mandatoryAuthorizationRevocation": true,
+    "revokeOnlyPreservesExactTerminalState": true,
+    "parentOutcomeClassification": {
+      "migrateSucceeded": "cleanup-migrated",
+      "rollbackSucceeded": "cleanup-revoke",
+      "prepareSucceededWithoutSuccessfulMigrationOrRollback": "cleanup-rollback",
+      "prepareNotSucceeded": "cleanup-revoke"
+    }
   },
   "evidence": {
     "schemaVersion": "archon.aws-foundation-policy-migration-receipt/v1",

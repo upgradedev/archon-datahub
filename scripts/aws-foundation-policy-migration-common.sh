@@ -116,6 +116,8 @@ validate_common() {
       "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION" and
     .workflow.ownerActorOnly == true and
     .workflow.exactHeadRequired == true and
+    .workflow.exactParentAttemptJobsRequired == true and
+    .workflow.automaticCleanupCurrentHeadIndependent == true and
     .policy.sourceBundle ==
       "infra/aws/foundation/github-actions-foundation-policy.json" and
     .policy.renderer == "scripts/render-aws-foundation-policy.mjs" and
@@ -159,10 +161,19 @@ validate_common() {
     .authorization.absenceReadCount == 3 and
     .recovery.automaticFollowerOnNonSuccess == true and
     .recovery.manualDispatch == true and
+    .recovery.manualDispatchMode == "cleanup-rollback" and
     .recovery.freshRollbackOnlyAuthorization == true and
     .recovery.rollbackToPreviousDefault == true and
     .recovery.deleteOnlyNewNondefaultVersion == true and
     .recovery.mandatoryAuthorizationRevocation == true and
+    .recovery.revokeOnlyPreservesExactTerminalState == true and
+    .recovery.parentOutcomeClassification == {
+      migrateSucceeded: "cleanup-migrated",
+      rollbackSucceeded: "cleanup-revoke",
+      prepareSucceededWithoutSuccessfulMigrationOrRollback:
+        "cleanup-rollback",
+      prepareNotSucceeded: "cleanup-revoke"
+    } and
     .evidence.schemaVersion ==
       "archon.aws-foundation-policy-migration-receipt/v1" and
     .evidence.artifactFiles == ["SHA256SUMS", "migration.json"] and

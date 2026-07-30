@@ -304,13 +304,18 @@ default exactly once, and retains the previous version as the rollback point. A 
 consecutive exact-baseline reads.
 
 [`aws-foundation-policy-migration-cleanup.yml`](../.github/workflows/aws-foundation-policy-migration-cleanup.yml)
-follows any non-successful transaction and can also be dispatched manually. It first
-replaces any stale grant with a fresh rollback-only grant that cannot create policy
-versions, then restores the previous default and deletes only the reviewed new non-default
-version. Both the AWS control-plane and governed-canary locks use `queue: max`, so a newer
-privileged run cannot evict a waiting cleanup follower. Retained evidence contains only
-canonical document digests, version IDs, state, and revocation proof; it excludes account
-IDs, ARNs, and raw IAM documents.
+follows any non-successful transaction and can also be dispatched manually. The automatic
+follower binds itself to the exact parent attempt and classifies its exact prepare, migrate,
+rollback, and revoke jobs. A failure before prepare or after a completed rollback gets
+revoke-only cleanup; an incomplete mutation gets a fresh rollback-only grant; and a completed
+migration whose evidence step failed remains migrated while authorization is revoked. Only
+the rollback path can restore the previous default and delete the reviewed new version. It
+does not depend on a later `master` head, and both privileged locks use `queue: max`, so a
+newer run cannot evict a waiting cleanup follower. Immediately before temporary privilege is
+installed, the workflow also proves the exact reviewer, no-admin-bypass, and master-only
+branch policy of both GitHub environments. Retained evidence contains only canonical document
+digests, version IDs, state, and revocation proof; it excludes account IDs, ARNs, and raw IAM
+documents.
 
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
