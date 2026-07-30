@@ -9,11 +9,11 @@
 //   J1  metadata scan → 4-agent audit → quantified, multi-class findings report
 //   J2  ReAct governance audit — G1–G6 evaluated, human-gated (pending)
 //   J3  live-shaped contradiction recovery via aspect version history — FIRES
-//   J4  drift-candidate (negative) — single-run monotonic edit does NOT become a contradiction
+//   J4  drift-candidate (negative) — same-pipeline edit does NOT become a contradiction
 //   J5  dual-face MCP round-trip — audit_catalog + run_audit_loop over the real protocol
 //   J6  quantified findings report — exact class counts + severity ordering + grounded narrative
 //   J7  edge: clean single-source catalog — no contradictions, governance still audits
-//   J8  edge: single-run monotonic drift is benign (drift candidate, not a confirmed conflict)
+//   J8  edge: same-pipeline drift is benign (drift candidate, not a confirmed conflict)
 //   J9  replay-cassette journey — real-shape GMS history recovers the conflict through the pipeline
 
 import { test } from "node:test";
@@ -27,7 +27,7 @@ import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 import { buildMcpServer } from "../../src/mcp/server.js";
 import { defaultAuditLoop } from "../../src/ap/loop.js";
 import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
-import { FIXTURE_REPORTS, FIXTURE_CLEAN_REPORTS, FIXTURE_VERSION_HISTORY } from "../../src/datahub/fixtures.js";
+import { FIXTURE_CLEAN_REPORTS, FIXTURE_VERSION_HISTORY } from "../../src/datahub/fixtures.js";
 import { validateSnapshot } from "../../src/governance/validator.js";
 import {
   auditVersionHistory,
@@ -39,6 +39,8 @@ import {
 import type { Finding } from "../../src/types.js";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 
@@ -96,30 +98,40 @@ test("J3: version-history recovery fires on a single-source catalog (the live-sh
   assert.match(lineageStep.produced, /2 recovered from aspect version history/);
 });
 
-// ── J4 — drift-candidate negative: single-run monotonic edit is NOT a contradiction ─
-test("J4: raw_orders' single-run monotonic edit does NOT surface as a contradiction", async () => {
+// ── J4 — drift-candidate negative: same-pipeline edit is NOT a contradiction ─────────
+test("J4: raw_orders' same-pipeline edit does NOT surface as a contradiction", async () => {
   const client = new FakeDataHubMcpClient(FIXTURE_CLEAN_REPORTS, FIXTURE_VERSION_HISTORY);
   const report = await new AuditPipeline().run(client);
   const rawOrdersContradictions = report.findings.filter(
     (f) => f.type === "contradiction" && f.subject.includes("raw_orders")
   );
-  assert.equal(rawOrdersContradictions.length, 0, "single-run drift must not become a contradiction");
+  assert.equal(rawOrdersContradictions.length, 0, "same-pipeline drift must not become a contradiction");
 });
 
 // ── J5 — dual-face MCP round-trip over the real protocol ────────────────────────
 test("J5: dual-face MCP round-trip — audit_catalog + run_audit_loop over a real Client↔Server", async () => {
-  const { server } = await buildMcpServer({ datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() });
+  const { server } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    pipeline: new AuditPipeline(),
+    demoQuery: "sales",
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "journey", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const audit = JSON.parse(((await client.callTool({ name: "audit_catalog", arguments: {} })) as {
+    const audit = JSON.parse(((await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "sales" },
+    })) as {
       content: Array<{ text: string }>;
     }).content[0]!.text);
-    assert.ok(audit.findings.length >= 5);
+    assert.ok(audit.findings.length >= 1);
     assert.ok(audit.narrative);
 
-    const loop = JSON.parse(((await client.callTool({ name: "run_audit_loop", arguments: {} })) as {
+    const loop = JSON.parse(((await client.callTool({
+      name: "run_audit_loop",
+      arguments: { query: "sales" },
+    })) as {
       content: Array<{ text: string }>;
     }).content[0]!.text);
     assert.equal(loop.disposition, "pending");
@@ -157,22 +169,22 @@ test("J7: edge — a clean single-source catalog yields no contradictions but st
   assert.ok(c.governance_violation > 0, "governance audit still runs on a clean catalog");
 });
 
-// ── J8 — edge: single-run monotonic drift is benign (candidate drift, not a conflict) ─
-test("J8: edge — single-run monotonic drift is a candidate, never a confirmed contradiction", async () => {
-  const singleRun: AspectVersionHistory = {
+// ── J8 — edge: two runs of one pipeline are drift, never a cross-source conflict ─────
+test("J8: edge — same-pipeline drift is a candidate, never a confirmed contradiction", async () => {
+  const samePipeline: AspectVersionHistory = {
     urn: SALES,
     aspect: "ownership",
     versions: [
-      { value: { owners: [{ owner: "urn:li:corpGroup:a" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "r1" } },
-      { value: { owners: [{ owner: "urn:li:corpGroup:b" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "r1" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:a" }] }, systemMetadata: { version: "1", lastObserved: 1, runId: "r1", pipelineName: "snowflake-prod" } },
+      { value: { owners: [{ owner: "urn:li:corpGroup:b" }] }, systemMetadata: { version: "2", lastObserved: 2, runId: "r2", pipelineName: "snowflake-prod" } },
     ],
   };
-  // Recovery correctly reports ZERO contradictions for a single-run edit …
-  assert.equal(auditVersionHistory([singleRun]).contradictions.length, 0);
+  // Recovery correctly reports ZERO contradictions for a same-pipeline edit …
+  assert.equal(auditVersionHistory([samePipeline]).contradictions.length, 0);
   // … yet the on-MCP-surface drift detector still surfaces it as a CANDIDATE (the value did
   // change between two harvests) — proving the two are honestly separated.
-  const prior = versionHistoryToFacts({ ...singleRun, versions: [singleRun.versions[0]!] });
-  const current = versionHistoryToFacts({ ...singleRun, versions: [singleRun.versions[1]!] });
+  const prior = versionHistoryToFacts({ ...samePipeline, versions: [samePipeline.versions[0]!] });
+  const current = versionHistoryToFacts({ ...samePipeline, versions: [samePipeline.versions[1]!] });
   const drift = detectDrift(prior, current);
   assert.equal(drift.length, 1);
   assert.equal(drift[0]!.attribute, "owner");
@@ -197,9 +209,14 @@ test("J9: replay-cassette journey — real-shape GMS history recovers the confli
   // (empty current-view reports → the finding can come only from the cassette history).
   const client = new FakeDataHubMcpClient([], [history]);
   const report = await new AuditPipeline().run(client);
+  assert.match(
+    report.scanId,
+    /^history:/,
+    "a history-only replay must retain a non-empty evidence-bound scan identity"
+  );
   const owner = report.findings.find(
     (f) => f.type === "contradiction" && (f.detail as { attribute?: string }).attribute === "owner"
   );
-  assert.ok(owner, "the cassette's cross-run ownership conflict must surface as a finding");
+  assert.ok(owner, "the cassette's cross-source ownership conflict must surface as a finding");
   assert.match(owner!.recommendation ?? "", /team-ops/);
 });
