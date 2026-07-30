@@ -383,7 +383,7 @@ jq --exit-status '
     artifactUpload: "explicit-files-only",
     autoRecovery: "forbidden",
     explicitIncidentRecoveryContract: "contracts/aws-incident-recovery-v1.json",
-    explicitIncidentRecoveryStatus: "attempted-delete-not-executed-cleanup-proof-pending",
+    explicitIncidentRecoveryStatus: "attempted-delete-not-executed-cleanup-proven",
     canonicalJson: true,
     credentialClearProofRequired: true,
     diagnosticCount: 1,
