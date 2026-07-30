@@ -1,0 +1,643 @@
+name: Submission BONUS OSS
+
+run-name: Seal merged upstream contribution for ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      ci_run_id:
+        description: Exact successful current-release CI push run ID
+        required: true
+        type: string
+      upstream_pull_request_number:
+        description: Exact merged acryldata/mcp-server-datahub pull request number
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-bonus-oss-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-bonus-oss/v1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  produce:
+    name: Produce exact merged upstream contribution evidence
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - name: Bind dispatch to the exact current release and scalar inputs
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-oss.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CI_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${UPSTREAM_PULL_REQUEST_NUMBER}" =~ ^[1-9][0-9]*$ ]]
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}" || {
+            echo "::error::BONUS-OSS evidence requires the exact current master release"
+            exit 1
+          }
+
+      - name: Check out the exact unprivileged producer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the merged-status and repository control-plane contracts
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          node scripts/verify-contrib.mjs
+          gate="${RUNNER_TEMP}/submission-bonus-oss-producer-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
+      - name: Collect the exact CI receipt to merged upstream byte binding
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/submission-bonus-oss-source"
+          test ! -e "${output}"
+          python3 scripts/collect-submission-bonus-oss.py collect \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --ci-run-id "${CI_RUN_ID}" \
+            --upstream-pull-request-number \
+              "${UPSTREAM_PULL_REQUEST_NUMBER}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --output "${output}"
+          test -f "${output}/facts/BONUS-OSS.json"
+          test ! -L "${output}/facts/BONUS-OSS.json"
+          jq -e '
+            .state == "merged" and
+            .publiclyAccessible == true and
+            .acceptedByMaintainer == true and
+            .candidateBinding.exactHeadTreeMatch == true and
+            .candidateBinding.exactMergedPathBytesMatch == true and
+            .validatedCandidateDigest ==
+              .candidateBinding.canonicalFileManifestDigest and
+            .upstreamPullRequest.headTreeSha ==
+              .candidateBinding.reconstructedTreeSha and
+            .ciValidation.artifactProducerAttempt <=
+              .ciValidation.runAttempt
+          ' "${output}/facts/BONUS-OSS.json" >/dev/null
+
+      - name: Assemble the exact registered BONUS OSS subjects
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          source="${RUNNER_TEMP}/submission-bonus-oss-source"
+          output="${RUNNER_TEMP}/submission-bonus-oss"
+          test ! -e "${output}"
+          python3 scripts/validate-submission-proof-receipts.py \
+            assemble-standard \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-oss \
+            --facts-dir "${source}/facts" \
+            --output-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${source}/assembled-validation.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-oss \
+            --source-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${source}/retained-validation.json"
+          cmp --silent \
+            "${source}/assembled-validation.json" \
+            "${source}/retained-validation.json"
+          jq -e '
+            .sourceKey == "bonus-oss" and
+            .workflowPath ==
+              ".github/workflows/submission-bonus-oss.yml" and
+            .subjectCount == 4 and
+            .proofIds == ["BONUS-OSS"] and
+            .result == "verified"
+          ' "${source}/retained-validation.json" >/dev/null
+          test "$(
+            find "${output}" -type f -printf '%P\n' |
+              LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/BONUS-OSS.json \
+              support/BONUS-OSS/ci-validation.json \
+              support/BONUS-OSS/upstream-pr.json |
+              LC_ALL=C sort
+          )"
+          (
+            cd "${output}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            awk '{print $2}' "${output}/SHA256SUMS"
+          )" = "$(
+            printf '%s\n' \
+              attestation-predicate.json \
+              proofs/BONUS-OSS.json \
+              support/BONUS-OSS/ci-validation.json \
+              support/BONUS-OSS/upstream-pr.json |
+              LC_ALL=C sort
+          )"
+
+      - name: Recollect every external identity before retention
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          first="${RUNNER_TEMP}/submission-bonus-oss-source"
+          final="${RUNNER_TEMP}/submission-bonus-oss-final-source"
+          test ! -e "${final}"
+          python3 scripts/collect-submission-bonus-oss.py collect \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --ci-run-id "${CI_RUN_ID}" \
+            --upstream-pull-request-number \
+              "${UPSTREAM_PULL_REQUEST_NUMBER}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --output "${final}"
+          cmp --silent \
+            "${first}/facts/BONUS-OSS.json" \
+            "${final}/facts/BONUS-OSS.json"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Retain the exact BONUS OSS standard subjects
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: submission-bonus-oss-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/submission-bonus-oss
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+
+  attest:
+    name: Independently revalidate and attest merged upstream evidence
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind attester to the exact current release and workflow run
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-oss.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CI_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${UPSTREAM_PULL_REQUEST_NUMBER}" =~ ^[1-9][0-9]*$ ]]
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+
+      - name: Check out the exact unprivileged attester
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Independently resolve the latest retained producer artifact
+        id: producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          node scripts/verify-contrib.mjs
+          gate="${RUNNER_TEMP}/submission-bonus-oss-attester-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+          pages="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix \
+                "submission-bonus-oss-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${pages}"
+          )"
+          producer_attempt="$(jq -er '.producerAttempt' <<<"${selected}")"
+          artifact_id="$(jq -er '.metadata.id' <<<"${selected}")"
+          artifact_name="$(jq -er '.metadata.name' <<<"${selected}")"
+          artifact_digest="$(jq -er '.metadata.digest' <<<"${selected}")"
+          jobs="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${producer_attempt}/jobs?per_page=100"
+          )"
+          producer_job="$(
+            jq -cer '
+              [
+                .[] |
+                .jobs[] |
+                select(
+                  .name ==
+                    "Produce exact merged upstream contribution evidence" and
+                  .status == "completed" and
+                  .conclusion == "success" and
+                  (.started_at | type) == "string" and
+                  (.completed_at | type) == "string"
+                )
+              ] |
+              if length == 1 then .[0]
+              else error("producer artifact has no exact successful owner job")
+              end
+            ' <<<"${jobs}"
+          )"
+          jq -e \
+            --arg startedAt "$(jq -er '.started_at' <<<"${producer_job}")" \
+            --arg completedAt "$(jq -er '.completed_at' <<<"${producer_job}")" '
+              .metadata.created_at >= $startedAt and
+              .metadata.created_at <= $completedAt
+            ' <<<"${selected}" >/dev/null
+          {
+            echo "artifact_id=${artifact_id}"
+            echo "artifact_name=${artifact_name}"
+            echo "artifact_digest=${artifact_digest}"
+            echo "producer_attempt=${producer_attempt}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download the exact immutable producer artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.producer.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-bonus-oss-attestation
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Independently reconstruct all CI and upstream facts
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ steps.producer.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          retained="${RUNNER_TEMP}/submission-bonus-oss-attestation"
+          fresh="${RUNNER_TEMP}/submission-bonus-oss-attester-source"
+          test ! -e "${fresh}"
+          python3 scripts/collect-submission-bonus-oss.py collect \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --ci-run-id "${CI_RUN_ID}" \
+            --upstream-pull-request-number \
+              "${UPSTREAM_PULL_REQUEST_NUMBER}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --output "${fresh}"
+          test -d "${retained}"
+          test ! -L "${retained}"
+          test -z "$(find "${retained}" -type l -print -quit)"
+          test "$(
+            find "${retained}" -type f -printf '%P\n' |
+              LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/BONUS-OSS.json \
+              support/BONUS-OSS/ci-validation.json \
+              support/BONUS-OSS/upstream-pr.json |
+              LC_ALL=C sort
+          )"
+          (
+            cd "${retained}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key bonus-oss \
+            --source-dir "${retained}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${PRODUCER_ATTEMPT}" \
+            --notice NOTICE.md \
+            >"${fresh}/retained-validation.json"
+          jq -e '
+            .sourceKey == "bonus-oss" and
+            .subjectCount == 4 and
+            .proofIds == ["BONUS-OSS"] and
+            .result == "verified"
+          ' "${fresh}/retained-validation.json" >/dev/null
+          jq -cS '.facts' "${retained}/proofs/BONUS-OSS.json" \
+            >"${fresh}/retained-facts.json"
+          cmp --silent \
+            "${fresh}/facts/BONUS-OSS.json" \
+            "${fresh}/retained-facts.json"
+
+      - name: Recollect and recheck every immutable identity before attestation
+        env:
+          ARTIFACT_DIGEST: ${{ steps.producer.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ steps.producer.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.producer.outputs.artifact_name }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          UPSTREAM_PULL_REQUEST_NUMBER: ${{ inputs.upstream_pull_request_number }}
+        run: |
+          set -euo pipefail
+          first="${RUNNER_TEMP}/submission-bonus-oss-attester-source"
+          final="${RUNNER_TEMP}/submission-bonus-oss-attester-final-source"
+          test ! -e "${final}"
+          python3 scripts/collect-submission-bonus-oss.py collect \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --ci-run-id "${CI_RUN_ID}" \
+            --upstream-pull-request-number \
+              "${UPSTREAM_PULL_REQUEST_NUMBER}" \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --output "${final}"
+          cmp --silent \
+            "${first}/facts/BONUS-OSS.json" \
+            "${final}/facts/BONUS-OSS.json"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson artifactId "${ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${artifact}" >/dev/null
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Attest all four exact BONUS OSS subjects
+        id: attest
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-bonus-oss-attestation/SHA256SUMS
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-bonus-oss-attestation/attestation-predicate.json
+
+      - name: Verify persisted signed full-subject attestation
+        env:
+          ATTESTATION_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${ATTESTATION_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${ATTESTATION_URL}" = \
+            "https://github.com/${GITHUB_REPOSITORY}/attestations/${ATTESTATION_ID}"
+          test -f "${ATTESTATION_BUNDLE_PATH}"
+          test ! -L "${ATTESTATION_BUNDLE_PATH}"
+          bundle_size="$(stat --format='%s' "${ATTESTATION_BUNDLE_PATH}")"
+          (( bundle_size >= 1 && bundle_size <= 16777216 ))
+          jq -e -s '
+            length == 1 and
+            (.[0] | type == "object")
+          ' "${ATTESTATION_BUNDLE_PATH}" >/dev/null
+
+          root="${RUNNER_TEMP}/submission-bonus-oss-attestation"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          expected_names=(
+            attestation-predicate.json
+            proofs/BONUS-OSS.json
+            support/BONUS-OSS/ci-validation.json
+            support/BONUS-OSS/upstream-pr.json
+          )
+          mapfile -t observed_names < <(
+            awk '{print $2}' "${root}/SHA256SUMS"
+          )
+          test "${observed_names[*]}" = "${expected_names[*]}"
+          expected_subjects="$(
+            jq -Rn '
+              [
+                inputs |
+                capture(
+                  "^(?<sha>[0-9a-f]{64})  " +
+                  "(?<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+                ) |
+                {
+                  name: .name,
+                  digest: {sha256: .sha}
+                }
+              ] |
+              sort_by(.name)
+            ' <"${root}/SHA256SUMS"
+          )"
+          test "$(jq 'length' <<<"${expected_subjects}")" = "4"
+
+          verification_dir="$(
+            mktemp -d "${RUNNER_TEMP}/submission-bonus-oss-verification.XXXXXX"
+          )"
+          cleanup() {
+            rm -rf -- "${verification_dir}"
+          }
+          trap cleanup EXIT
+          validate_verification_result() {
+            local output_path="$1"
+            jq -e \
+              --slurpfile bundle "${ATTESTATION_BUNDLE_PATH}" \
+              --slurpfile predicate "${root}/attestation-predicate.json" \
+              --arg predicateType "${PREDICATE_TYPE}" \
+              --argjson expectedSubjects "${expected_subjects}" '
+                type == "array" and
+                (
+                  [
+                    .[] |
+                    select(
+                      .attestation == $bundle[0] and
+                      .verificationResult.statement.predicateType ==
+                        $predicateType and
+                      .verificationResult.statement.predicate ==
+                        $predicate[0] and
+                      (
+                        .verificationResult.statement.subject |
+                        sort_by(.name)
+                      ) == $expectedSubjects
+                    )
+                  ] |
+                  length == 1
+                )
+              ' "${output_path}" >/dev/null
+          }
+          verify_subject() {
+            local subject_path="$1"
+            local bundle_output="$2"
+            local persisted_output="$3"
+            gh attestation verify \
+              "${subject_path}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --bundle "${ATTESTATION_BUNDLE_PATH}" \
+              --predicate-type "${PREDICATE_TYPE}" \
+              --signer-workflow \
+                "github.com/${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-oss.yml" \
+              --signer-digest "${RELEASE_SHA}" \
+              --source-digest "${RELEASE_SHA}" \
+              --source-ref refs/heads/master \
+              --deny-self-hosted-runners \
+              --format json >"${bundle_output}"
+            validate_verification_result "${bundle_output}"
+
+            local attempt
+            for attempt in {1..12}; do
+              if gh attestation verify \
+                "${subject_path}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --predicate-type "${PREDICATE_TYPE}" \
+                --signer-workflow \
+                  "github.com/${GITHUB_REPOSITORY}/.github/workflows/submission-bonus-oss.yml" \
+                --signer-digest "${RELEASE_SHA}" \
+                --source-digest "${RELEASE_SHA}" \
+                --source-ref refs/heads/master \
+                --deny-self-hosted-runners \
+                --format json >"${persisted_output}" &&
+                validate_verification_result "${persisted_output}"; then
+                return 0
+              fi
+              if (( attempt < 12 )); then
+                sleep 5
+              fi
+            done
+            echo "::error::Persisted full-subject BONUS-OSS attestation could not be verified"
+            return 1
+          }
+          for index in "${!expected_names[@]}"; do
+            verify_subject \
+              "${root}/${expected_names[$index]}" \
+              "${verification_dir}/bundle-${index}.json" \
+              "${verification_dir}/persisted-${index}.json"
+          done
+          {
+            echo "### BONUS-OSS evidence sealed"
+            echo
+            echo "- Subjects: 4 plus \`SHA256SUMS\`"
+            echo "- Attestation: ${ATTESTATION_URL}"
+          } >>"${GITHUB_STEP_SUMMARY}"

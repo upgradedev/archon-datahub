@@ -1,0 +1,1693 @@
+name: Manage Cognito judge user
+
+run-name: ${{ inputs.operation }} judge access in ${{ inputs.stage }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Exact protected Archon environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      operation:
+        description: Explicit judge-user lifecycle operation
+        required: true
+        type: choice
+        options:
+          - provision
+          - rotate
+          - reactivate
+          - deactivate
+
+# Dedicated judge-access environments isolate this workflow from deployment roles
+# and secrets. JUDGE_USERNAME/JUDGE_PASSWORD are protected secrets, never inputs.
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: archon-judge-user-${{ inputs.stage }}
+  cancel-in-progress: false
+
+env:
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_PAGER: ""
+  BASH_ENV: /dev/null
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  control-plane:
+    name: Validate request and exact operation control plane
+    if: github.repository == 'upgradedev/archon-datahub'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      gate_sha256: ${{ steps.gate.outputs.gate_sha256 }}
+      gate_mode: ${{ steps.gate.outputs.gate_mode }}
+      emergency_workflow_file_sha256: ${{ steps.gate.outputs.emergency_workflow_file_sha256 }}
+      judge_account_id: ${{ steps.request.outputs.judge_account_id }}
+      target_account_id: ${{ steps.request.outputs.target_account_id }}
+      target_region: ${{ steps.request.outputs.target_region }}
+      target_role_arn: ${{ steps.request.outputs.target_role_arn }}
+      target_application_url: ${{ steps.request.outputs.target_application_url }}
+      target_sha256: ${{ steps.request.outputs.target_sha256 }}
+      request_sha256: ${{ steps.approval_receipt.outputs.request_sha256 }}
+    steps:
+      - name: Check out the exact unprivileged control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the explicit request without protected values
+        id: request
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_PRODUCTION_ACCOUNT_ID: ${{ vars.JUDGE_PRODUCTION_ACCOUNT_ID }}
+          JUDGE_STAGING_ACCOUNT_ID: ${{ vars.JUDGE_STAGING_ACCOUNT_ID }}
+          JUDGE_PRODUCTION_AWS_ACCOUNT_ID: ${{ vars.JUDGE_PRODUCTION_AWS_ACCOUNT_ID }}
+          JUDGE_STAGING_AWS_ACCOUNT_ID: ${{ vars.JUDGE_STAGING_AWS_ACCOUNT_ID }}
+          JUDGE_PRODUCTION_AWS_REGION: ${{ vars.JUDGE_PRODUCTION_AWS_REGION }}
+          JUDGE_STAGING_AWS_REGION: ${{ vars.JUDGE_STAGING_AWS_REGION }}
+          JUDGE_PRODUCTION_APPLICATION_URL: ${{ vars.JUDGE_PRODUCTION_APPLICATION_URL }}
+          JUDGE_STAGING_APPLICATION_URL: ${{ vars.JUDGE_STAGING_APPLICATION_URL }}
+        run: |
+          set -euo pipefail
+          case "${ARCHON_STAGE}" in
+            staging)
+              judge_account_id="${JUDGE_STAGING_ACCOUNT_ID}"
+              target_account_id="${JUDGE_STAGING_AWS_ACCOUNT_ID}"
+              target_region="${JUDGE_STAGING_AWS_REGION}"
+              target_application_url="${JUDGE_STAGING_APPLICATION_URL}"
+              ;;
+            production)
+              judge_account_id="${JUDGE_PRODUCTION_ACCOUNT_ID}"
+              target_account_id="${JUDGE_PRODUCTION_AWS_ACCOUNT_ID}"
+              target_region="${JUDGE_PRODUCTION_AWS_REGION}"
+              target_application_url="${JUDGE_PRODUCTION_APPLICATION_URL}"
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "${judge_account_id}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${target_account_id}" =~ ^[0-9]{12}$ ]]
+          [[ "${target_region}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]]
+          case "${target_region}" in
+            cn-*) aws_partition="aws-cn" ;;
+            us-gov-*) aws_partition="aws-us-gov" ;;
+            *) aws_partition="aws" ;;
+          esac
+          target_role_arn="arn:${aws_partition}:iam::${target_account_id}:role/archon-${ARCHON_STAGE}-judge-user"
+          JUDGE_ACCOUNT_ID="${judge_account_id}" \
+            bash scripts/manage-cognito-judge-user.sh request
+          target_sha256="$(
+            JUDGE_TARGET_ACCOUNT_ID="${target_account_id}" \
+            JUDGE_TARGET_REGION="${target_region}" \
+            JUDGE_TARGET_ROLE_ARN="${target_role_arn}" \
+            JUDGE_TARGET_APPLICATION_URL="${target_application_url}" \
+              bash scripts/verify-judge-environment-approval.sh target-digest
+          )"
+          [[ "${target_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "judge_account_id=${judge_account_id}"
+            echo "target_account_id=${target_account_id}"
+            echo "target_region=${target_region}"
+            echo "target_role_arn=${target_role_arn}"
+            echo "target_application_url=${target_application_url}"
+            echo "target_sha256=${target_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Seal the exact operation-specific default-branch control plane
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+            gate_mode="emergency-deactivate-current-master"
+            emergency_workflow_file_sha256="$(
+              jq -er '
+                select(
+                  .schemaVersion == "archon.judge-emergency-control-plane/v1" and
+                  .mode == "emergency-deactivate-current-master" and
+                  .operation == "deactivate" and
+                  .ciStatus == "not-asserted"
+                ) |
+                .workflow.fileSha256 |
+                select(type == "string" and test("^[0-9a-f]{64}$"))
+              ' "${OUTPUT_PATH}"
+            )"
+            [[ "${emergency_workflow_file_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+            gate_mode="full-green"
+          fi
+          gate_sha256="$(
+            sha256sum "${OUTPUT_PATH}" |
+              awk '{print $1}'
+          )"
+          [[ "${gate_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo "gate_sha256=${gate_sha256}"
+            echo "gate_mode=${gate_mode}"
+            if [[ "${gate_mode}" == "emergency-deactivate-current-master" ]]; then
+              echo "emergency_workflow_file_sha256=${emergency_workflow_file_sha256}"
+            fi
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Publish the opaque-identity approval receipt phrase
+        id: approval_receipt
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ steps.request.outputs.judge_account_id }}
+          JUDGE_TARGET_ACCOUNT_ID: ${{ steps.request.outputs.target_account_id }}
+          JUDGE_TARGET_REGION: ${{ steps.request.outputs.target_region }}
+          JUDGE_TARGET_ROLE_ARN: ${{ steps.request.outputs.target_role_arn }}
+          JUDGE_TARGET_APPLICATION_URL: ${{ steps.request.outputs.target_application_url }}
+          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.gate_sha256 }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          CONTROL_PLANE_MODE: ${{ steps.gate.outputs.gate_mode }}
+          EMERGENCY_WORKFLOW_FILE_SHA256: ${{ steps.gate.outputs.emergency_workflow_file_sha256 }}
+        run: |
+          set -euo pipefail
+          request_sha256="$(
+            bash scripts/verify-judge-environment-approval.sh request-digest
+          )"
+          approval_comment="$(
+            JUDGE_REQUEST_SHA256="${request_sha256}" \
+              bash scripts/verify-judge-environment-approval.sh approval-comment
+          )"
+          echo "request_sha256=${request_sha256}" >>"${GITHUB_OUTPUT}"
+          echo "::notice title=Required solo-owner judge approval comment::${approval_comment}"
+          {
+            echo "### Required solo-owner judge approval comment"
+            echo
+            if [[ "${CONTROL_PLANE_MODE}" == "emergency-deactivate-current-master" ]]; then
+              [[ "${EMERGENCY_WORKFLOW_FILE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+              echo "> [!WARNING]"
+              echo "> Emergency deactivation binds the exact current master workflow and run, but deliberately does not assert green CI status."
+              echo
+              echo "Workflow SHA: \`${CONTROL_PLANE_SHA}\`"
+              echo
+              echo "Workflow file SHA-256: \`${EMERGENCY_WORKFLOW_FILE_SHA256}\`"
+              echo
+            fi
+            echo "Target fingerprint: \`${{ steps.request.outputs.target_sha256 }}\`"
+            echo
+            echo '```text'
+            printf '%s\n' "${approval_comment}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  manage:
+    name: Apply exact protected Cognito operation
+    needs: control-plane
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: judge-access-${{ inputs.stage }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      artifact_digest: ${{ steps.resolve_artifact.outputs.artifact_digest }}
+      artifact_id: ${{ steps.resolve_artifact.outputs.artifact_id }}
+      artifact_name: ${{ steps.resolve_artifact.outputs.artifact_name }}
+      predicate_digest: sha256:${{ steps.operation_receipt.outputs.predicate_sha256 }}
+      producer_run_attempt: ${{ steps.operation_receipt.outputs.producer_run_attempt }}
+      producer_run_id: ${{ steps.operation_receipt.outputs.producer_run_id }}
+      release_sha: ${{ github.sha }}
+    steps:
+      - name: Require exact solo-owner approval receipt before any privileged setup
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          JUDGE_REVIEWER_USER_ID: ${{ vars.JUDGE_REVIEWER_USER_ID }}
+          REVIEW_ACTOR: ${{ github.actor }}
+          REVIEW_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${ARCHON_STAGE}" in
+            staging|production) ;;
+            *) exit 1 ;;
+          esac
+          [[ "${EXPECTED_REQUEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${JUDGE_REVIEWER_USER_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${REVIEW_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          [[ "${REVIEW_TRIGGERING_ACTOR}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${REVIEW_ACTOR,,}" = "upgradedev"
+          test "${REVIEW_TRIGGERING_ACTOR,,}" = "upgradedev"
+
+          environment_name="judge-access-${ARCHON_STAGE}"
+          expected_comment="ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${GITHUB_RUN_ID}|run_attempt=${GITHUB_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}"
+          repository_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          default_branch="$(
+            jq -er '.default_branch | select(type == "string")' \
+              <<<"${repository_json}"
+          )"
+          test "${default_branch}" = "master"
+
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}"
+          )"
+          jq -e \
+            --arg name "${environment_name}" \
+            --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+              (.protection_rules // []) as $rules |
+              (
+                [$rules[] | select(.type == "required_reviewers")]
+              ) as $review_rules |
+              .name == $name and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true and
+              ($review_rules | length) == 1 and
+              $review_rules[0].prevent_self_review == false and
+              (($review_rules[0].reviewers // []) | length) == 1 and
+              all(
+                ($review_rules[0].reviewers // [])[];
+                .type == "User" and
+                (.reviewer.id | type == "number") and
+                (.reviewer.login | type == "string") and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
+              ) and
+              (
+                [
+                  ($review_rules[0].reviewers // [])[] |
+                  select(.reviewer.id == $reviewer_id)
+                ] |
+                length
+              ) == 1
+            ' <<<"${environment_json}" >/dev/null
+          configured_reviewer_login="$(
+            jq -er \
+              --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+                [
+                  (.protection_rules // [])[] |
+                  select(.type == "required_reviewers") |
+                  (.reviewers // [])[] |
+                  select(
+                    .type == "User" and
+                    .reviewer.id == $reviewer_id
+                  ) |
+                  .reviewer.login
+                ] |
+                select(length == 1) |
+                .[0]
+              ' <<<"${environment_json}"
+          )"
+
+          branch_policies="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}/deployment-branch-policies?per_page=100"
+          )"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and
+            (.branch_policies | length) == 1 and
+            .branch_policies[0].name == $branch and
+            (
+              (.branch_policies[0] | has("type") | not) or
+              .branch_policies[0].type == "branch"
+            )
+          ' <<<"${branch_policies}" >/dev/null
+
+          approvals_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          jq -e \
+            --arg environment "${environment_name}" \
+            --arg comment "${expected_comment}" \
+            --arg reviewer_login "${configured_reviewer_login}" \
+            --arg actor "${REVIEW_ACTOR}" \
+            --arg triggering_actor "${REVIEW_TRIGGERING_ACTOR}" \
+            --argjson reviewer_id "${JUDGE_REVIEWER_USER_ID}" '
+              type == "array" and
+              (
+                [
+                  .[] |
+                  select(
+                    .state == "approved" and
+                    .comment == $comment and
+                    .user.type == "User" and
+                    .user.id == $reviewer_id and
+                    (.user.login | ascii_downcase) ==
+                      ($reviewer_login | ascii_downcase) and
+                    (.user.login | ascii_downcase) ==
+                      ($actor | ascii_downcase) and
+                    (.user.login | ascii_downcase) ==
+                      ($triggering_actor | ascii_downcase) and
+                    ((.environments // []) | length) == 1 and
+                    .environments[0].name == $environment
+                  )
+                ] |
+                length
+              ) == 1
+            ' <<<"${approvals_json}" >/dev/null
+
+      - name: Validate protected role configuration
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          AWS_JUDGE_USER_ROLE_ARN: ${{ vars.AWS_JUDGE_USER_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          SEALED_TARGET_ACCOUNT_ID: ${{ needs.control-plane.outputs.target_account_id }}
+          SEALED_TARGET_REGION: ${{ needs.control-plane.outputs.target_region }}
+          SEALED_TARGET_ROLE_ARN: ${{ needs.control-plane.outputs.target_role_arn }}
+          SEALED_TARGET_SHA256: ${{ needs.control-plane.outputs.target_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${AWS_REGION}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*$ ]]
+          [[ "${EXPECTED_GATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${SEALED_TARGET_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test "${EXPECTED_ACCOUNT_ID}" = "${SEALED_TARGET_ACCOUNT_ID}"
+          test "${AWS_REGION}" = "${SEALED_TARGET_REGION}"
+          case "${AWS_REGION}" in
+            cn-*) aws_partition="aws-cn" ;;
+            us-gov-*) aws_partition="aws-us-gov" ;;
+            *) aws_partition="aws" ;;
+          esac
+          expected_role_arn="arn:${aws_partition}:iam::${EXPECTED_ACCOUNT_ID}:role/archon-${ARCHON_STAGE}-judge-user"
+          test "${AWS_JUDGE_USER_ROLE_ARN}" = "${expected_role_arn}" || {
+            echo "::error::AWS_JUDGE_USER_ROLE_ARN is not the exact stage-specific judge role"
+            exit 1
+          }
+          test "${AWS_JUDGE_USER_ROLE_ARN}" = "${SEALED_TARGET_ROLE_ARN}"
+
+      - name: Check out the exact protected control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Revalidate request and unchanged operation control plane before AWS trust
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_TARGET_ACCOUNT_ID: ${{ needs.control-plane.outputs.target_account_id }}
+          JUDGE_TARGET_REGION: ${{ needs.control-plane.outputs.target_region }}
+          JUDGE_TARGET_ROLE_ARN: ${{ needs.control-plane.outputs.target_role_arn }}
+          JUDGE_TARGET_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh request
+          test "$(
+            bash scripts/verify-judge-environment-approval.sh request-digest
+          )" = "${EXPECTED_REQUEST_SHA256}"
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+          fi
+
+      - name: Configure dedicated judge-user AWS credentials through OIDC
+        id: oidc
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_JUDGE_USER_ROLE_ARN }}
+          role-session-name: archon-judge-${{ github.run_id }}-${{ inputs.stage }}
+          role-duration-seconds: 900
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Revalidate unchanged control plane after AWS trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          EXECUTING_WORKFLOW_FILE_PATH: .github/workflows/judge-user.yml
+          EXECUTING_WORKFLOW_REF: ${{ github.workflow_ref }}
+          EXECUTING_WORKFLOW_REPOSITORY: ${{ github.repository }}
+          EXECUTING_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${JUDGE_USER_OPERATION}" == "deactivate" ]]; then
+            OUTPUT_PATH="${RUNNER_TEMP}/judge-emergency-control-plane.json"
+            export OUTPUT_PATH
+            bash scripts/verify-judge-emergency-control-plane.sh
+          else
+            OUTPUT_PATH="${RUNNER_TEMP}/control-plane-security-gates.json"
+            export OUTPUT_PATH
+            bash scripts/verify-github-control-plane.sh
+          fi
+
+      - name: Start the sanitized lifecycle observation
+        id: lifecycle_start
+        run: |
+          set -euo pipefail
+          started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          [[ "${started_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+          echo "started_at=${started_at}" >>"${GITHUB_OUTPUT}"
+
+      - name: Provision, rotate, or reactivate and read back the exact Cognito state
+        if: inputs.operation == 'provision' || inputs.operation == 'rotate' || inputs.operation == 'reactivate'
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+          JUDGE_PASSWORD: ${{ secrets.JUDGE_PASSWORD }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+          LIFECYCLE_STARTED_AT: ${{ steps.lifecycle_start.outputs.started_at }}
+          OUTPUT_PATH: ${{ runner.temp }}/judge-user-operation-evidence/judge-operation-state.json
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh apply
+
+      - name: Deactivate and read back the exact Cognito state
+        if: inputs.operation == 'deactivate'
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          JUDGE_USER_OPERATION: deactivate
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+          LIFECYCLE_STARTED_AT: ${{ steps.lifecycle_start.outputs.started_at }}
+          OUTPUT_PATH: ${{ runner.temp }}/judge-user-operation-evidence/judge-operation-state.json
+        run: |
+          set -euo pipefail
+          bash scripts/manage-cognito-judge-user.sh apply
+
+      - name: Seal the sanitized lifecycle operation receipt
+        id: operation_receipt
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          CONTROL_PLANE_MODE: ${{ needs.control-plane.outputs.gate_mode }}
+          EMERGENCY_WORKFLOW_FILE_SHA256: ${{ needs.control-plane.outputs.emergency_workflow_file_sha256 }}
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          EXPECTED_TARGET_SHA256: ${{ needs.control-plane.outputs.target_sha256 }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          TARGET_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence_dir="${RUNNER_TEMP}/judge-user-operation-evidence"
+          state_receipt="${evidence_dir}/judge-operation-state.json"
+          operation_receipt="${evidence_dir}/operation-receipt.json"
+          manifest="${evidence_dir}/manifest.json"
+          predicate="${evidence_dir}/attestation-predicate.json"
+
+          test -f "${state_receipt}"
+          test ! -L "${state_receipt}"
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${EXPECTED_GATE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_REQUEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${EXPECTED_TARGET_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${TARGET_APPLICATION_URL}" == https://* ]]
+          application_origin_sha256="$(
+            printf '%s' "${TARGET_APPLICATION_URL}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          state_receipt_sha256="$(
+            sha256sum "${state_receipt}" |
+              awk '{print $1}'
+          )"
+          approval_receipt_sha256="$(
+            printf '%s' \
+              "ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${GITHUB_RUN_ID}|run_attempt=${GITHUB_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          [[ "${application_origin_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${state_receipt_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${approval_receipt_sha256}" =~ ^[0-9a-f]{64}$ ]]
+
+          jq -e \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg applicationOriginSha256 "${application_origin_sha256}" '
+              def exact_keys($value; $keys):
+                ($value | type) == "object" and
+                (($value | keys | sort) == ($keys | sort));
+              exact_keys(.; [
+                "schemaVersion",
+                "stage",
+                "operation",
+                "identityDigest",
+                "cognitoSubjectDigest",
+                "applicationOriginSha256",
+                "priorState",
+                "finalState",
+                "startedAt",
+                "completedAt",
+                "observation",
+                "result",
+                "sanitized",
+                "secretMaterialRetained",
+                "sessionRevocation"
+              ]) and
+              .schemaVersion == "archon.judge-user-state-transition/v1" and
+              .stage == $stage and
+              .operation == $operation and
+              (.identityDigest | test("^[0-9a-f]{64}$")) and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
+              .applicationOriginSha256 == $applicationOriginSha256 and
+              exact_keys(.priorState; [
+                "identity",
+                "access",
+                "authentication",
+                "authorization"
+              ]) and
+              exact_keys(.finalState; [
+                "identity",
+                "access",
+                "authentication",
+                "authorization"
+              ]) and
+              (.startedAt | fromdateiso8601) <=
+                (.completedAt | fromdateiso8601) and
+              .observation == {
+                priorState: "exact-operation-precondition",
+                finalState: "exact-aws-read-back"
+              } and
+              (
+                if $operation == "provision" then
+                  .priorState == {
+                    identity: "absent",
+                    access: "absent",
+                    authentication: "absent",
+                    authorization: "none"
+                  } and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation ==
+                    "not-applicable-fresh-identity" and
+                  .result == "provisioned-and-readback-verified"
+                elif $operation == "rotate" then
+                  .priorState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent",
+                    authorization: "sole-approver-group"
+                  } and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent-rotated",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation == "response-confirmed" and
+                  .result == "rotated-and-readback-verified"
+                elif $operation == "reactivate" then
+                  .priorState.identity == "exact-bound" and
+                  .priorState.access == "disabled" and
+                  (
+                    .priorState.authentication == "confirmed-contained" or
+                    .priorState.authentication == "bootstrap-contained"
+                  ) and
+                  .priorState.authorization == "none" and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent-rotated",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation == "response-confirmed" and
+                  .result == "reactivated-and-readback-verified"
+                elif $operation == "deactivate" then
+                  .priorState.identity == "exact-bound" and
+                  (
+                    .priorState.access == "enabled" or
+                    .priorState.access == "disabled" or
+                    .priorState.access == "unverified"
+                  ) and
+                  .priorState.authentication ==
+                    "not-relied-upon-for-containment" and
+                  .priorState.authorization ==
+                    "not-relied-upon-for-containment" and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "disabled",
+                    authentication: "disabled-containment-boundary",
+                    authorization: "none"
+                  } and
+                  (
+                    .sessionRevocation == "response-confirmed" or
+                    .sessionRevocation ==
+                      "contained-by-disabled-state"
+                  ) and
+                  .result == "deactivated-and-readback-verified"
+                else
+                  false
+                end
+              ) and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' "${state_receipt}" >/dev/null
+
+          workflow_file_sha256_json=null
+          if [[ "${CONTROL_PLANE_MODE}" == "full-green" ]]; then
+            test -z "${EMERGENCY_WORKFLOW_FILE_SHA256}"
+          elif [[ "${CONTROL_PLANE_MODE}" == \
+            "emergency-deactivate-current-master" ]]; then
+            test "${JUDGE_USER_OPERATION}" = "deactivate"
+            [[ "${EMERGENCY_WORKFLOW_FILE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+            workflow_file_sha256_json="$(
+              jq -cn --arg value "${EMERGENCY_WORKFLOW_FILE_SHA256}" '$value'
+            )"
+          else
+            echo "::error::Unsupported lifecycle control-plane mode"
+            exit 1
+          fi
+
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg identityDigest "$(
+              jq -er '.identityDigest' "${state_receipt}"
+            )" \
+            --arg cognitoSubjectDigest "$(
+              jq -er '.cognitoSubjectDigest' "${state_receipt}"
+            )" \
+            --arg applicationOriginSha256 "${application_origin_sha256}" \
+            --arg environmentName "judge-access-${ARCHON_STAGE}" \
+            --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
+            --arg approvalReceiptSha256 "${approval_receipt_sha256}" \
+            --arg targetSha256 "${EXPECTED_TARGET_SHA256}" \
+            --arg gateMode "${CONTROL_PLANE_MODE}" \
+            --arg gateSha256 "${EXPECTED_GATE_SHA256}" \
+            --argjson emergencyWorkflowFileSha256 \
+              "${workflow_file_sha256_json}" \
+            --arg stateReceiptSha256 "${state_receipt_sha256}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --slurpfile state "${state_receipt}" '
+              {
+                schemaVersion: "archon.judge-user-operation/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                source: {
+                  workflowPath: ".github/workflows/judge-user.yml",
+                  workflowRef: $workflowRef,
+                  controlPlaneSha: $releaseSha,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  event: $event
+                },
+                stage: $stage,
+                operation: $operation,
+                identityDigest: $identityDigest,
+                cognitoSubjectDigest: $cognitoSubjectDigest,
+                applicationOriginSha256: $applicationOriginSha256,
+                approval: {
+                  environment: $environmentName,
+                  approvalMode: "solo-owner",
+                  requestSha256: $requestSha256,
+                  approvalReceiptSha256: $approvalReceiptSha256,
+                  targetSha256: $targetSha256,
+                  exactReceiptVerified: true,
+                  soloOwnerApprovalVerified: true
+                },
+                controlPlane: {
+                  mode: $gateMode,
+                  gateSha256: $gateSha256,
+                  emergencyWorkflowFileSha256:
+                    $emergencyWorkflowFileSha256
+                },
+                transition: {
+                  stateReceiptSha256: $stateReceiptSha256,
+                  startedAt: $state[0].startedAt,
+                  completedAt: $state[0].completedAt,
+                  priorState: $state[0].priorState,
+                  finalState: $state[0].finalState,
+                  sessionRevocation: $state[0].sessionRevocation,
+                  operationResult: $state[0].result
+                },
+                performedAt: $state[0].completedAt,
+                result: $state[0].result,
+                sanitized: true,
+                secretMaterialRetained: false
+              }
+            ' >"${operation_receipt}"
+          operation_receipt_sha256="$(
+            sha256sum "${operation_receipt}" |
+              awk '{print $1}'
+          )"
+          operation_receipt_bytes="$(stat -c '%s' "${operation_receipt}")"
+          state_receipt_bytes="$(stat -c '%s' "${state_receipt}")"
+
+          jq -cnS \
+            --arg stateSha256 "${state_receipt_sha256}" \
+            --arg operationSha256 "${operation_receipt_sha256}" \
+            --argjson stateSizeBytes "${state_receipt_bytes}" \
+            --argjson operationSizeBytes "${operation_receipt_bytes}" '
+              {
+                schemaVersion: "archon.judge-user-operation-manifest/v1",
+                files: [
+                  {
+                    path: "judge-operation-state.json",
+                    sha256: $stateSha256,
+                    sizeBytes: $stateSizeBytes
+                  },
+                  {
+                    path: "operation-receipt.json",
+                    sha256: $operationSha256,
+                    sizeBytes: $operationSizeBytes
+                  }
+                ]
+              }
+            ' >"${manifest}"
+          manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
+
+          jq -cnS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg identityDigest "$(
+              jq -er '.identityDigest' "${state_receipt}"
+            )" \
+            --arg cognitoSubjectDigest "$(
+              jq -er '.cognitoSubjectDigest' "${state_receipt}"
+            )" \
+            --arg applicationOriginSha256 "${application_origin_sha256}" \
+            --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
+            --arg approvalReceiptSha256 "${approval_receipt_sha256}" \
+            --arg targetSha256 "${EXPECTED_TARGET_SHA256}" \
+            --arg environmentName "judge-access-${ARCHON_STAGE}" \
+            --arg gateMode "${CONTROL_PLANE_MODE}" \
+            --arg gateSha256 "${EXPECTED_GATE_SHA256}" \
+            --arg stateReceiptSha256 "${state_receipt_sha256}" \
+            --arg operationReceiptSha256 "${operation_receipt_sha256}" \
+            --arg manifestSha256 "${manifest_sha256}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --slurpfile state "${state_receipt}" '
+              {
+                schemaVersion:
+                  "archon.judge-user-operation-attestation/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                source: {
+                  workflowPath: ".github/workflows/judge-user.yml",
+                  controlPlaneSha: $releaseSha,
+                  runId: $runId,
+                  runAttempt: $runAttempt
+                },
+                stage: $stage,
+                operation: $operation,
+                identityDigest: $identityDigest,
+                cognitoSubjectDigest: $cognitoSubjectDigest,
+                applicationOriginSha256: $applicationOriginSha256,
+                approval: {
+                  environment: $environmentName,
+                  approvalMode: "solo-owner",
+                  requestSha256: $requestSha256,
+                  approvalReceiptSha256: $approvalReceiptSha256,
+                  targetSha256: $targetSha256,
+                  exactReceiptVerified: true,
+                  soloOwnerApprovalVerified: true
+                },
+                controlPlane: {
+                  mode: $gateMode,
+                  gateSha256: $gateSha256
+                },
+                transition: {
+                  startedAt: $state[0].startedAt,
+                  completedAt: $state[0].completedAt,
+                  sessionRevocation: $state[0].sessionRevocation,
+                  operationResult: $state[0].result
+                },
+                evidence: {
+                  stateReceiptSha256: $stateReceiptSha256,
+                  operationReceiptSha256: $operationReceiptSha256,
+                  manifestSha256: $manifestSha256
+                },
+                result: $state[0].result,
+                sanitized: true,
+                secretMaterialRetained: false
+              }
+            ' >"${predicate}"
+          predicate_sha256="$(sha256sum "${predicate}" | awk '{print $1}')"
+
+          (
+            cd "${evidence_dir}"
+            printf '%s  %s\n' \
+              "${state_receipt_sha256}" judge-operation-state.json \
+              "${operation_receipt_sha256}" operation-receipt.json \
+              "${manifest_sha256}" manifest.json \
+              >judge-user-operation-subject.sha256
+            sha256sum --check --strict judge-user-operation-subject.sha256
+            printf '%s  %s\n' \
+              "${predicate_sha256}" attestation-predicate.json \
+              "$(
+                sha256sum judge-user-operation-subject.sha256 |
+                  awk '{print $1}'
+              )" judge-user-operation-subject.sha256 \
+              "${state_receipt_sha256}" judge-operation-state.json \
+              "${operation_receipt_sha256}" operation-receipt.json \
+              "${manifest_sha256}" manifest.json \
+              >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          actual_inventory="$(
+            find "${evidence_dir}" \
+              -mindepth 1 -maxdepth 1 -type f -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              judge-operation-state.json \
+              judge-user-operation-subject.sha256 \
+              manifest.json \
+              operation-receipt.json
+          )"
+          test -z "$(
+            find "${evidence_dir}" \
+              -mindepth 1 -maxdepth 1 -type l -print -quit
+          )"
+          for name in \
+            SHA256SUMS \
+            attestation-predicate.json \
+            judge-operation-state.json \
+            judge-user-operation-subject.sha256 \
+            manifest.json \
+            operation-receipt.json; do
+            test -f "${evidence_dir}/${name}"
+            test ! -L "${evidence_dir}/${name}"
+          done
+          raw_subject_pattern='(^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}([^0-9a-f]|$)'
+          if grep -R -E -q \
+            -- "${raw_subject_pattern}|\"sub\"[[:space:]]*:" \
+            "${evidence_dir}"; then
+            echo "::error::Lifecycle evidence retained a raw Cognito subject"
+            exit 1
+          fi
+          {
+            echo "artifact_name=judge-user-operation-${JUDGE_USER_OPERATION}-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "predicate_sha256=${predicate_sha256}"
+            echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "producer_run_id=${GITHUB_RUN_ID}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Retain the exact sanitized lifecycle receipt
+        id: upload_primary
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.operation_receipt.outputs.artifact_name }}
+          path: ${{ runner.temp }}/judge-user-operation-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Decide whether a bounded artifact retry is required
+        id: upload_gate
+        if: always() && steps.operation_receipt.outcome == 'success'
+        env:
+          ARTIFACT_NAME: ${{ steps.operation_receipt.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          PRIMARY_OUTCOME: ${{ steps.upload_primary.outcome }}
+        run: |
+          set -euo pipefail
+          case "${PRIMARY_OUTCOME}" in
+            success)
+              need_recovery=false
+              ;;
+            failure)
+              artifacts="$(
+                gh api \
+                  --paginate \
+                  --slurp \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2026-03-10" \
+                  "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+              )"
+              matching_count="$(
+                jq -er \
+                  --arg name "${ARTIFACT_NAME}" '
+                    [
+                      .[] |
+                      .artifacts[] |
+                      select(.name == $name)
+                    ] |
+                    length
+                  ' <<<"${artifacts}"
+              )"
+              case "${matching_count}" in
+                0) need_recovery=true ;;
+                1) need_recovery=false ;;
+                *)
+                  echo "::error::Lifecycle upload produced an ambiguous artifact set"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::Lifecycle primary upload has an invalid outcome"
+              exit 1
+              ;;
+          esac
+          echo "need_recovery=${need_recovery}" >>"${GITHUB_OUTPUT}"
+
+      - name: Retry lifecycle artifact retention once when no artifact exists
+        id: upload_recovery
+        if: steps.upload_gate.outputs.need_recovery == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.operation_receipt.outputs.artifact_name }}
+          path: ${{ runner.temp }}/judge-user-operation-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Resolve one exact durable lifecycle artifact
+        id: resolve_artifact
+        if: always() && steps.operation_receipt.outcome == 'success'
+        env:
+          ARTIFACT_NAME: ${{ steps.operation_receipt.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          PRIMARY_DIGEST: ${{ steps.upload_primary.outputs['artifact-digest'] }}
+          PRIMARY_ID: ${{ steps.upload_primary.outputs['artifact-id'] }}
+          PRIMARY_OUTCOME: ${{ steps.upload_primary.outcome }}
+          RECOVERY_DIGEST: ${{ steps.upload_recovery.outputs['artifact-digest'] }}
+          RECOVERY_ID: ${{ steps.upload_recovery.outputs['artifact-id'] }}
+          RECOVERY_OUTCOME: ${{ steps.upload_recovery.outcome }}
+        run: |
+          set -euo pipefail
+          artifact_id=""
+          for resolve_attempt in 1 2 3 4 5; do
+            artifacts="$(
+              gh api \
+                --paginate \
+                --slurp \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+            )"
+            matching="$(
+              jq -ce \
+                --arg name "${ARTIFACT_NAME}" '
+                  [
+                    .[] |
+                    .artifacts[] |
+                    select(.name == $name)
+                  ]
+                ' <<<"${artifacts}"
+            )"
+            matching_count="$(jq -er 'length' <<<"${matching}")"
+            if test "${matching_count}" = "1"; then
+              artifact_id="$(jq -er '.[0].id' <<<"${matching}")"
+              break
+            fi
+            if test "${matching_count}" != "0"; then
+              echo "::error::Expected one exact lifecycle artifact, found ${matching_count}"
+              exit 1
+            fi
+            if test "${resolve_attempt}" != "5"; then
+              sleep 2
+            fi
+          done
+          [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::No durable lifecycle artifact exists after the bounded retry"
+            exit 1
+          }
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+          )"
+          artifact_digest="$(jq -er '.digest' <<<"${artifact}")"
+          jq -e \
+            --arg digest "${artifact_digest}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --arg sha "${GITHUB_SHA}" \
+            --argjson artifactId "${artifact_id}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              (.digest | test("^sha256:[0-9a-f]{64}$")) and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 10485760 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact}" >/dev/null
+          if test "${PRIMARY_OUTCOME}" = "success"; then
+            test "${PRIMARY_ID}" = "${artifact_id}"
+            test "sha256:${PRIMARY_DIGEST}" = "${artifact_digest}"
+          elif test "${RECOVERY_OUTCOME}" = "success"; then
+            test "${RECOVERY_ID}" = "${artifact_id}"
+            test "sha256:${RECOVERY_DIGEST}" = "${artifact_digest}"
+          fi
+          {
+            echo "artifact_digest=${artifact_digest}"
+            echo "artifact_id=${artifact_id}"
+            echo "artifact_name=${ARTIFACT_NAME}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Contain access when durable operation evidence was not retained
+        id: evidence_failure_containment
+        if: >-
+          ${{
+            failure() &&
+            (
+              inputs.operation == 'provision' ||
+              inputs.operation == 'rotate' ||
+              inputs.operation == 'reactivate'
+            )
+          }}
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+          JUDGE_ACCOUNT_ID: ${{ needs.control-plane.outputs.judge_account_id }}
+          JUDGE_USERNAME: ${{ secrets.JUDGE_USERNAME }}
+        run: |
+          set -euo pipefail
+          original="$(
+            printf '%s' \
+              "${RUNNER_TEMP}/judge-user-operation-evidence/judge-operation-state.json"
+          )"
+          if ! test -f "${original}" || test -L "${original}"; then
+            echo "::notice::No successful access-enabling state receipt requires workflow-level containment"
+            exit 0
+          fi
+          jq -e \
+            --arg operation "${{ inputs.operation }}" '
+              .schemaVersion ==
+                "archon.judge-user-state-transition/v1" and
+              .operation == $operation and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
+              .finalState.identity == "exact-bound" and
+              .finalState.access == "enabled" and
+              .finalState.authorization == "sole-approver-group" and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' "${original}" >/dev/null || {
+            echo "::error::Cannot classify the original operation for safe containment"
+            exit 1
+          }
+          containment_root="${RUNNER_TEMP}/judge-user-evidence-failure-containment"
+          test ! -e "${containment_root}"
+          mkdir --mode=0700 "${containment_root}"
+          containment_started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          containment_receipt="${containment_root}/judge-user-operation-evidence/judge-operation-state.json"
+          RUNNER_TEMP="${containment_root}" \
+          OUTPUT_PATH="${containment_receipt}" \
+          LIFECYCLE_STARTED_AT="${containment_started_at}" \
+          JUDGE_USER_OPERATION=deactivate \
+            bash scripts/manage-cognito-judge-user.sh apply
+          jq -e '
+            .schemaVersion ==
+              "archon.judge-user-state-transition/v1" and
+            .operation == "deactivate" and
+            (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
+            .finalState == {
+              identity: "exact-bound",
+              access: "disabled",
+              authentication: "disabled-containment-boundary",
+              authorization: "none"
+            } and
+            .result == "deactivated-and-readback-verified" and
+            .sanitized == true and
+            .secretMaterialRetained == false
+          ' "${containment_receipt}" >/dev/null
+          containment_digest="$(
+            sha256sum "${containment_receipt}" |
+              awk '{print $1}'
+          )"
+          {
+            echo "### Lifecycle evidence failure contained"
+            echo
+            echo "- Original operation: \`${{ inputs.operation }}\`"
+            echo "- Final access: \`disabled\`"
+            echo "- Sanitized containment receipt: \`sha256:${containment_digest}\`"
+            echo "- Result: create a separately reviewed replacement identity before a new final evidence chain"
+          } >>"${GITHUB_STEP_SUMMARY}"
+          echo "contained=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Retain sanitized evidence-failure containment
+        if: failure() && steps.evidence_failure_containment.outputs.contained == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: judge-user-evidence-failure-containment-${{ inputs.operation }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/judge-user-evidence-failure-containment/judge-user-operation-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    name: Secretless attestation of the sanitized lifecycle receipt
+    needs:
+      - control-plane
+      - manage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Revalidate exact retained lifecycle artifact metadata
+        env:
+          ARTIFACT_DIGEST: ${{ needs.manage.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.manage.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.manage.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.manage.outputs.producer_run_attempt }}
+          PRODUCER_RUN_ID: ${{ needs.manage.outputs.producer_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${PRODUCER_RUN_ID}" = "${GITHUB_RUN_ID}"
+          test "${ARTIFACT_NAME}" = \
+            "judge-user-operation-${JUDGE_USER_OPERATION}-${GITHUB_SHA}-${PRODUCER_RUN_ATTEMPT}"
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --arg sha "${GITHUB_SHA}" \
+            --argjson artifactId "${ARTIFACT_ID}" \
+            --argjson runId "${PRODUCER_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 10485760 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact}" >/dev/null || {
+            echo "::error::Lifecycle artifact metadata drifted before attestation"
+            exit 1
+          }
+
+      - name: Download only the exact lifecycle artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.manage.outputs.artifact_id }}
+          path: ${{ runner.temp }}/judge-user-operation-attestation
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Revalidate exact lifecycle inventory and bindings
+        env:
+          ARCHON_STAGE: ${{ inputs.stage }}
+          CONTROL_PLANE_MODE: ${{ needs.control-plane.outputs.gate_mode }}
+          EMERGENCY_WORKFLOW_FILE_SHA256: ${{ needs.control-plane.outputs.emergency_workflow_file_sha256 }}
+          EVIDENCE_DIR: ${{ runner.temp }}/judge-user-operation-attestation
+          EXPECTED_GATE_SHA256: ${{ needs.control-plane.outputs.gate_sha256 }}
+          EXPECTED_PREDICATE_DIGEST: ${{ needs.manage.outputs.predicate_digest }}
+          EXPECTED_REQUEST_SHA256: ${{ needs.control-plane.outputs.request_sha256 }}
+          EXPECTED_TARGET_SHA256: ${{ needs.control-plane.outputs.target_sha256 }}
+          JUDGE_USER_OPERATION: ${{ inputs.operation }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.manage.outputs.producer_run_attempt }}
+          PRODUCER_RUN_ID: ${{ needs.manage.outputs.producer_run_id }}
+          TARGET_APPLICATION_URL: ${{ needs.control-plane.outputs.target_application_url }}
+        run: |
+          set -euo pipefail
+          [[ "${PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${PRODUCER_RUN_ID}" = "${GITHUB_RUN_ID}"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              judge-operation-state.json \
+              judge-user-operation-subject.sha256 \
+              manifest.json \
+              operation-receipt.json
+          )"
+          actual_inventory="$(
+            find "${EVIDENCE_DIR}" \
+              -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}" || {
+            echo "::error::Downloaded lifecycle inventory is not exact"
+            exit 1
+          }
+          test -z "$(find "${EVIDENCE_DIR}" -type l -print -quit)"
+          for name in \
+            SHA256SUMS \
+            attestation-predicate.json \
+            judge-operation-state.json \
+            judge-user-operation-subject.sha256 \
+            manifest.json \
+            operation-receipt.json; do
+            test -f "${EVIDENCE_DIR}/${name}"
+            test ! -L "${EVIDENCE_DIR}/${name}"
+          done
+          raw_subject_pattern='(^|[^0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}([^0-9a-f]|$)'
+          if grep -R -E -q \
+            -- "${raw_subject_pattern}|\"sub\"[[:space:]]*:" \
+            "${EVIDENCE_DIR}"; then
+            echo "::error::Lifecycle evidence retained a raw Cognito subject"
+            exit 1
+          fi
+          (
+            cd "${EVIDENCE_DIR}"
+            sha256sum --check --strict SHA256SUMS
+            sha256sum --check --strict judge-user-operation-subject.sha256
+          )
+          test "$(
+            awk '{print $2}' \
+              "${EVIDENCE_DIR}/judge-user-operation-subject.sha256"
+          )" = "$(
+            printf '%s\n' \
+              judge-operation-state.json \
+              operation-receipt.json \
+              manifest.json
+          )"
+
+          state="${EVIDENCE_DIR}/judge-operation-state.json"
+          receipt="${EVIDENCE_DIR}/operation-receipt.json"
+          manifest="${EVIDENCE_DIR}/manifest.json"
+          predicate="${EVIDENCE_DIR}/attestation-predicate.json"
+          state_sha="$(sha256sum "${state}" | awk '{print $1}')"
+          receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
+          manifest_sha="$(sha256sum "${manifest}" | awk '{print $1}')"
+          application_origin_sha="$(
+            printf '%s' "${TARGET_APPLICATION_URL}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          approval_receipt_sha="$(
+            printf '%s' \
+              "ARCHON_JUDGE_ACCESS_APPROVAL_V3|run_id=${PRODUCER_RUN_ID}|run_attempt=${PRODUCER_RUN_ATTEMPT}|request_sha256=${EXPECTED_REQUEST_SHA256}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          if [[ "${CONTROL_PLANE_MODE}" == "full-green" ]]; then
+            test -z "${EMERGENCY_WORKFLOW_FILE_SHA256}"
+          else
+            test "${CONTROL_PLANE_MODE}" = \
+              "emergency-deactivate-current-master"
+            test "${JUDGE_USER_OPERATION}" = "deactivate"
+            [[ "${EMERGENCY_WORKFLOW_FILE_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          test "sha256:$(
+            sha256sum "${predicate}" |
+              awk '{print $1}'
+          )" = "${EXPECTED_PREDICATE_DIGEST}"
+
+          jq -e \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg applicationOriginSha256 "${application_origin_sha}" '
+              (keys | sort) == ([
+                "schemaVersion",
+                "stage",
+                "operation",
+                "identityDigest",
+                "cognitoSubjectDigest",
+                "applicationOriginSha256",
+                "priorState",
+                "finalState",
+                "sessionRevocation",
+                "startedAt",
+                "completedAt",
+                "observation",
+                "result",
+                "sanitized",
+                "secretMaterialRetained"
+              ] | sort) and
+              .schemaVersion == "archon.judge-user-state-transition/v1" and
+              .stage == $stage and
+              .operation == $operation and
+              (.identityDigest | test("^[0-9a-f]{64}$")) and
+              (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
+              .applicationOriginSha256 == $applicationOriginSha256 and
+              (.priorState | keys | sort) ==
+                (["identity", "access", "authentication", "authorization"] | sort) and
+              (.finalState | keys | sort) ==
+                (["identity", "access", "authentication", "authorization"] | sort) and
+              (.startedAt | fromdateiso8601) <=
+                (.completedAt | fromdateiso8601) and
+              .observation == {
+                priorState: "exact-operation-precondition",
+                finalState: "exact-aws-read-back"
+              } and
+              (
+                if $operation == "provision" then
+                  .priorState == {
+                    identity: "absent",
+                    access: "absent",
+                    authentication: "absent",
+                    authorization: "none"
+                  } and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation ==
+                    "not-applicable-fresh-identity" and
+                  .result == "provisioned-and-readback-verified"
+                elif $operation == "rotate" then
+                  .priorState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent",
+                    authorization: "sole-approver-group"
+                  } and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent-rotated",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation == "response-confirmed" and
+                  .result == "rotated-and-readback-verified"
+                elif $operation == "reactivate" then
+                  .priorState.identity == "exact-bound" and
+                  .priorState.access == "disabled" and
+                  (
+                    .priorState.authentication == "confirmed-contained" or
+                    .priorState.authentication == "bootstrap-contained"
+                  ) and
+                  .priorState.authorization == "none" and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "enabled",
+                    authentication: "confirmed-permanent-rotated",
+                    authorization: "sole-approver-group"
+                  } and
+                  .sessionRevocation == "response-confirmed" and
+                  .result == "reactivated-and-readback-verified"
+                else
+                  $operation == "deactivate" and
+                  .priorState.identity == "exact-bound" and
+                  (
+                    .priorState.access == "enabled" or
+                    .priorState.access == "disabled" or
+                    .priorState.access == "unverified"
+                  ) and
+                  .priorState.authentication ==
+                    "not-relied-upon-for-containment" and
+                  .priorState.authorization ==
+                    "not-relied-upon-for-containment" and
+                  .finalState == {
+                    identity: "exact-bound",
+                    access: "disabled",
+                    authentication: "disabled-containment-boundary",
+                    authorization: "none"
+                  } and
+                  (
+                    .sessionRevocation == "response-confirmed" or
+                    .sessionRevocation ==
+                      "contained-by-disabled-state"
+                  ) and
+                  .result == "deactivated-and-readback-verified"
+                end
+              ) and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' "${state}" >/dev/null || {
+            echo "::error::Operation state receipt failed isolated validation"
+            exit 1
+          }
+
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg applicationOriginSha256 "${application_origin_sha}" \
+            --arg environmentName "judge-access-${ARCHON_STAGE}" \
+            --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
+            --arg approvalReceiptSha256 "${approval_receipt_sha}" \
+            --arg targetSha256 "${EXPECTED_TARGET_SHA256}" \
+            --arg gateMode "${CONTROL_PLANE_MODE}" \
+            --arg gateSha256 "${EXPECTED_GATE_SHA256}" \
+            --arg emergencyWorkflowFileSha256 \
+              "${EMERGENCY_WORKFLOW_FILE_SHA256}" \
+            --arg stateSha "${state_sha}" \
+            --argjson runId "${PRODUCER_RUN_ID}" \
+            --argjson runAttempt "${PRODUCER_RUN_ATTEMPT}" \
+            --slurpfile state "${state}" '
+              (keys | sort) == ([
+                "schemaVersion",
+                "repository",
+                "releaseSha",
+                "source",
+                "stage",
+                "operation",
+                "identityDigest",
+                "cognitoSubjectDigest",
+                "applicationOriginSha256",
+                "approval",
+                "controlPlane",
+                "transition",
+                "performedAt",
+                "result",
+                "sanitized",
+                "secretMaterialRetained"
+              ] | sort) and
+              .schemaVersion == "archon.judge-user-operation/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .source == {
+                workflowPath: ".github/workflows/judge-user.yml",
+                workflowRef: $workflowRef,
+                controlPlaneSha: $releaseSha,
+                runId: $runId,
+                runAttempt: $runAttempt,
+                event: $event
+              } and
+              .stage == $stage and
+              .operation == $operation and
+              .identityDigest == $state[0].identityDigest and
+              .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
+              .applicationOriginSha256 == $applicationOriginSha256 and
+              .approval == {
+                environment: $environmentName,
+                approvalMode: "solo-owner",
+                requestSha256: $requestSha256,
+                approvalReceiptSha256: $approvalReceiptSha256,
+                targetSha256: $targetSha256,
+                exactReceiptVerified: true,
+                soloOwnerApprovalVerified: true
+              } and
+              .controlPlane == {
+                mode: $gateMode,
+                gateSha256: $gateSha256,
+                emergencyWorkflowFileSha256:
+                  (
+                    if $gateMode == "full-green" then
+                      null
+                    else
+                      $emergencyWorkflowFileSha256
+                    end
+                  )
+              } and
+              .transition == {
+                stateReceiptSha256: $stateSha,
+                startedAt: $state[0].startedAt,
+                completedAt: $state[0].completedAt,
+                priorState: $state[0].priorState,
+                finalState: $state[0].finalState,
+                sessionRevocation: $state[0].sessionRevocation,
+                operationResult: $state[0].result
+              } and
+              .performedAt == $state[0].completedAt and
+              .result == $state[0].result and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' "${receipt}" >/dev/null || {
+            echo "::error::Lifecycle receipt bindings are invalid"
+            exit 1
+          }
+
+          state_size="$(stat -c '%s' "${state}")"
+          receipt_size="$(stat -c '%s' "${receipt}")"
+          jq -e \
+            --arg stateSha "${state_sha}" \
+            --arg receiptSha "${receipt_sha}" \
+            --argjson stateSize "${state_size}" \
+            --argjson receiptSize "${receipt_size}" '
+              (keys | sort) == ["files", "schemaVersion"] and
+              .schemaVersion ==
+                "archon.judge-user-operation-manifest/v1" and
+              .files == [
+                {
+                  path: "judge-operation-state.json",
+                  sha256: $stateSha,
+                  sizeBytes: $stateSize
+                },
+                {
+                  path: "operation-receipt.json",
+                  sha256: $receiptSha,
+                  sizeBytes: $receiptSize
+                }
+              ]
+            ' "${manifest}" >/dev/null || {
+            echo "::error::Lifecycle manifest does not bind exact receipt bytes"
+            exit 1
+          }
+
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg stage "${ARCHON_STAGE}" \
+            --arg operation "${JUDGE_USER_OPERATION}" \
+            --arg applicationOriginSha256 "${application_origin_sha}" \
+            --arg requestSha256 "${EXPECTED_REQUEST_SHA256}" \
+            --arg approvalReceiptSha256 "${approval_receipt_sha}" \
+            --arg targetSha256 "${EXPECTED_TARGET_SHA256}" \
+            --arg environmentName "judge-access-${ARCHON_STAGE}" \
+            --arg gateMode "${CONTROL_PLANE_MODE}" \
+            --arg gateSha256 "${EXPECTED_GATE_SHA256}" \
+            --arg stateSha "${state_sha}" \
+            --arg receiptSha "${receipt_sha}" \
+            --arg manifestSha "${manifest_sha}" \
+            --argjson runId "${PRODUCER_RUN_ID}" \
+            --argjson runAttempt "${PRODUCER_RUN_ATTEMPT}" \
+            --slurpfile state "${state}" '
+              (keys | sort) == ([
+                "schemaVersion",
+                "repository",
+                "releaseSha",
+                "source",
+                "stage",
+                "operation",
+                "identityDigest",
+                "cognitoSubjectDigest",
+                "applicationOriginSha256",
+                "approval",
+                "controlPlane",
+                "transition",
+                "evidence",
+                "result",
+                "sanitized",
+                "secretMaterialRetained"
+              ] | sort) and
+              .schemaVersion ==
+                "archon.judge-user-operation-attestation/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .source == {
+                workflowPath: ".github/workflows/judge-user.yml",
+                controlPlaneSha: $releaseSha,
+                runId: $runId,
+                runAttempt: $runAttempt
+              } and
+              .stage == $stage and
+              .operation == $operation and
+              .identityDigest == $state[0].identityDigest and
+              .cognitoSubjectDigest == $state[0].cognitoSubjectDigest and
+              .applicationOriginSha256 == $applicationOriginSha256 and
+              .approval == {
+                environment: $environmentName,
+                approvalMode: "solo-owner",
+                requestSha256: $requestSha256,
+                approvalReceiptSha256: $approvalReceiptSha256,
+                targetSha256: $targetSha256,
+                exactReceiptVerified: true,
+                soloOwnerApprovalVerified: true
+              } and
+              .controlPlane == {
+                mode: $gateMode,
+                gateSha256: $gateSha256
+              } and
+              .transition == {
+                startedAt: $state[0].startedAt,
+                completedAt: $state[0].completedAt,
+                sessionRevocation: $state[0].sessionRevocation,
+                operationResult: $state[0].result
+              } and
+              .evidence == {
+                stateReceiptSha256: $stateSha,
+                operationReceiptSha256: $receiptSha,
+                manifestSha256: $manifestSha
+              } and
+              .result == $state[0].result and
+              .sanitized == true and
+              .secretMaterialRetained == false
+            ' "${predicate}" >/dev/null || {
+            echo "::error::Lifecycle attestation predicate is invalid"
+            exit 1
+          }
+
+      - name: Attest the exact sanitized lifecycle subjects
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/judge-user-operation-attestation/judge-user-operation-subject.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1
+          predicate-path: ${{ runner.temp }}/judge-user-operation-attestation/attestation-predicate.json
