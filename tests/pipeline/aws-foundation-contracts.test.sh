@@ -468,7 +468,7 @@ require_text "${foundation_workflow}" \
   'retention-days: 90' \
   'if: ${{ always() }}' \
   'Validate checksum-sealed sanitized failure evidence' \
-  'if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == ''true'' }}' \
+  'if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared' \
   'Retain checksum-sealed sanitized foundation failure evidence' \
   '-n "${AWS_ACCESS_KEY_ID:-}"' \
   '-n "${AWS_SECRET_ACCESS_KEY:-}"' \
