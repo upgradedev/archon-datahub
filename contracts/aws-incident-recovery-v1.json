@@ -36,7 +36,30 @@
         "zipDigest": "sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e"
       }
     },
-    "cleanupRun": {      "runId": "30571619440",
+    "authorizationReadbackRun": {
+      "runId": "30579644527",
+      "runAttempt": "1",
+      "headSha": "bce219b0a03a5d3a7e162edf81866d00848aaac9",
+      "result": "prepare-policy-readback-framing-mismatch",
+      "validator": "success",
+      "putRolePolicy": "request-succeeded",
+      "canonicalPolicyReadback": "not-proven",
+      "deleteStack": "skipped",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "githubAttestation": "not-created",
+      "artifact": {
+        "id": "8774187155",
+        "name": "aws-incident-recovery-30579644527-1",
+        "sizeBytes": 930,
+        "zipDigest": "sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8",
+        "expiresAt": "2026-10-28T20:32:58Z",
+        "uploadedFileCount": 3,
+        "evidenceScope": "cleanup-only"
+      }
+    },
+    "cleanupRun": {
+      "runId": "30571619440",
       "runAttempt": "1",
       "headSha": "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
       "result": "success",
@@ -223,6 +246,7 @@
   },
   "plan": {
     "schemaVersion": "archon.aws-incident-recovery-plan/v1",
+    "canonicalPolicyDigestBytes": "sorted-compact-json-utf8-without-trailing-newline",
     "fullStackIdStorage": "runner-private-only",
     "crossJobTransfer": "digests-and-nonsensitive-coordinates-only",
     "checksumSealed": true,

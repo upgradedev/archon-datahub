@@ -77,6 +77,7 @@ wait_for_policy_digest() {
   local output="$2"
   local attempt
   local observed_digest
+  local observed_policy_canonical
   [[ "${expected_digest}" =~ ^[a-f0-9]{64}$ ]] || fail "Expected policy digest is invalid"
   for ((attempt = 1; attempt <= IAM_PROPAGATION_ATTEMPTS; attempt++)); do
     if aws iam get-role-policy \
@@ -86,9 +87,15 @@ wait_for_policy_digest() {
       test -f "${output}"
       test ! -L "${output}"
       chmod 0600 "${output}"
-      observed_digest="$(jq -cS '.PolicyDocument' "${output}" | sha256sum | awk '{print $1}')"
-      if test "${observed_digest}" = "${expected_digest}"; then
-        return 0
+      if observed_policy_canonical="$(
+        jq -ceS '.PolicyDocument | select(type == "object")' "${output}" 2>/dev/null
+      )"; then
+        observed_digest="$(
+          printf '%s' "${observed_policy_canonical}" | sha256sum | awk '{print $1}'
+        )"
+        if test "${observed_digest}" = "${expected_digest}"; then
+          return 0
+        fi
       fi
     fi
     if ((attempt < IAM_PROPAGATION_ATTEMPTS)); then

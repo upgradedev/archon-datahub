@@ -20,6 +20,7 @@ ci="${repository_root}/.github/workflows/ci.yml"
 behavior_test="${repository_root}/tests/pipeline/aws-incident-recovery-driver.test.sh"
 validator_test="${repository_root}/tests/pipeline/aws-incident-recovery-validator.test.mjs"
 runbook="${repository_root}/docs/AWS_INCIDENT_RECOVERY.md"
+foundation_runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
 fail() { echo "::error::$*" >&2; exit 1; }
 require_text() {
@@ -48,7 +49,7 @@ for path in "${entry}" "${driver_workflow}" "${cleanup_workflow}" \
   "${foundation_workflow}" "${deploy_workflow}" "${canary_workflow}" \
   "${canary_recovery_workflow}" "${fixture_workflow}" "${contract}" "${foundation_contract}" \
   "${canary_roles}" "${driver}" "${validator}" "${reconciler}" "${ci}" \
-  "${behavior_test}" "${validator_test}" "${runbook}"; do
+  "${behavior_test}" "${validator_test}" "${runbook}" "${foundation_runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
@@ -89,6 +90,28 @@ jq --exit-status '
     result: "prepare-classified-delete-complete-no-physical-id",
     runAttempt: "1",
     runId: "30576390064"
+  } and
+  .execution.authorizationReadbackRun == {
+    artifact: {
+      evidenceScope: "cleanup-only",
+      expiresAt: "2026-10-28T20:32:58Z",
+      id: "8774187155",
+      name: "aws-incident-recovery-30579644527-1",
+      sizeBytes: 930,
+      uploadedFileCount: 3,
+      zipDigest: "sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8"
+    },
+    canonicalAbsenceProof: "proven",
+    canonicalPolicyReadback: "not-proven",
+    deleteStack: "skipped",
+    githubAttestation: "not-created",
+    headSha: "bce219b0a03a5d3a7e162edf81866d00848aaac9",
+    mandatoryRevocation: "success",
+    putRolePolicy: "request-succeeded",
+    result: "prepare-policy-readback-framing-mismatch",
+    runAttempt: "1",
+    runId: "30579644527",
+    validator: "success"
   } and
   .execution.cleanupRun == {
     artifact: {
@@ -155,6 +178,8 @@ jq --exit-status '
   .recoveryRole.attachedManagedPolicies == "forbidden" and
   .recoveryRole.temporaryPolicy.onlyMutatingAction == "cloudformation:DeleteStack" and
   .recoveryRole.temporaryPolicy.maximumTtlSeconds == 1800 and
+  .plan.canonicalPolicyDigestBytes ==
+    "sorted-compact-json-utf8-without-trailing-newline" and
   .delete == {
     callCount: 1,
     clientRequestToken: "deterministic-from-incident-attempt-and-control-plane-sha",
@@ -372,6 +397,9 @@ require_text "${driver}" \
   'iam list-attached-role-policies' \
   '.AttachedPolicies == []' \
   'iam put-role-policy' \
+  'observed_policy_canonical="$(' \
+  "jq -ceS '.PolicyDocument | select(type == \"object\")'" \
+  "printf '%s' \"\${observed_policy_canonical}\" | sha256sum" \
   'iam delete-role-policy' \
   'Unable to inspect recovery-role inline policies before revocation' \
   'local delete_required=false' \
@@ -398,6 +426,14 @@ require_text "${validator_test}" \
   'CLI_FAILURE_CODES.STACK_STATUS_INVALID' \
   'CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID' \
   'assert.equal(result.stderr'
+require_text "${behavior_test}" \
+  'policy digest domains must distinguish the trailing newline' \
+  'canonical IAM readback must hash the same no-newline bytes as the validator' \
+  'for rejection in mismatch malformed wrong-shape newline-domain' \
+  'must exhaust bounded policy-readback attempts' \
+  'validator and IAM readback canonical bytes differ' \
+  'canonicalJson' \
+  'cmp -s'
 require_count 3 "${driver}" 'mask_value "${stack_id}"'
 require_count 1 "${driver}" 'aws cloudformation delete-stack'
 require_count 1 "${driver}" 'aws iam put-role-policy'
@@ -411,7 +447,8 @@ forbid_text "${driver}" \
   '--role-arn' \
   '--deployment-config' \
   'NoSuchEntity' \
-  'delete-role-policy.error'
+  'delete-role-policy.error' \
+  "jq -cS '.PolicyDocument'"
 cleanup_function="$(sed -n '/^cleanup()/,/^}/p' "${driver}")"
 if grep -Fq 'delete-stack' <<<"${cleanup_function}"; then fail 'cleanup mode can call DeleteStack'; fi
 forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
@@ -441,6 +478,13 @@ require_text "${runbook}" \
   'https://github.com/upgradedev/archon-datahub/attestations/38026442' \
   '`sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878`' \
   '`sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e`' \
+  'Authorization-readback run | `30579644527`' \
+  '`PutRolePolicy` request succeeded; canonical readback not proven' \
+  '`sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8`' \
+  'Cleanup-only; `3` files uploaded; no GitHub attestation created' \
+  '## Canonical policy digest domain' \
+  'validator hashes recursively sorted, compact UTF-8 JSON bytes without a' \
+  'Modified, malformed, non-object, and newline-domain' \
   'ResourceStatus` as the resource' \
   '`ROLLBACK_COMPLETE`' \
   '`DELETE_SKIPPED`' \
@@ -463,3 +507,11 @@ forbid_text "${driver}" \
   '--max-results' \
   '--next-token' \
   '--starting-token'
+
+require_text "${foundation_runbook}" \
+  'Authorization-readback run `30579644527` passed' \
+  'legacy' \
+  'canonical JSON' \
+  '`DeleteStack` was skipped' \
+  'no stack' \
+  'deletion or GitHub-attestation claim is made'

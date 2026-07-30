@@ -489,8 +489,12 @@ status is `attempted-delete-not-executed-cleanup-proven`. Cleanup run
 `30571619440` proved canonical temporary-policy absence. Recovery run
 `30571830902` stopped on the historical generic mismatch; classified run
 `30576390064` then proved exact `DELETE_COMPLETE` without a physical ID. Both
-stopped before `PutRolePolicy`, skipped `DeleteStack`, and completed mandatory
-revocation plus the final canonical absence proof. See
+stopped before `PutRolePolicy`. Authorization-readback run `30579644527` passed
+the validator and reached `PutRolePolicy`, then failed closed because the legacy
+shell verifier hashed jq's trailing LF while the validator hashed no-LF
+canonical JSON. `DeleteStack` was skipped; mandatory revocation and the final
+canonical absence proof succeeded. The status is unchanged and no stack
+deletion or GitHub-attestation claim is made. See
 [`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
 `contracts/aws-incident-recovery-v1.json`.
 
