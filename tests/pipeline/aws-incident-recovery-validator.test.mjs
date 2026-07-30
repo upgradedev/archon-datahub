@@ -348,8 +348,22 @@ test("CLI exposes only allowlisted failure codes and never raw values or paths",
 test("CLI failure-code sanitizer rejects raw and spoofed error properties", () => {
   assert.deepEqual(Object.values(CLI_FAILURE_CODES), [
     "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+    "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+    "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
     "AWS_RECOVERY_INVALID_INVOCATION",
     "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+    "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+    "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+    "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+    "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+    "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+    "AWS_RECOVERY_STACK_ID_INVALID",
+    "AWS_RECOVERY_STACK_NESTING_INVALID",
+    "AWS_RECOVERY_STACK_STATUS_INVALID",
+    "AWS_RECOVERY_STACK_TAGS_INVALID",
+    "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+    "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+    "AWS_RECOVERY_TTL_INVALID",
     "AWS_RECOVERY_VALIDATOR_FAILED",
   ]);
   const privateMarker = "PRIVATE_SANITIZER_MARKER";
@@ -376,4 +390,67 @@ test("CLI failure-code sanitizer rejects raw and spoofed error properties", () =
     sanitizedCliFailureCode(invocationFailure),
     CLI_FAILURE_CODES.INVALID_INVOCATION
   );
+});
+test("CLI exposes distinct sanitized codes for stack status and physical survivors", () => {
+  const privateMarker = "PRIVATE_PLAN_INVARIANT_4b91";
+  const root = mkdtempSync(join(tmpdir(), `archon-${privateMarker}-`));
+  const stackPath = join(root, "stack.json");
+  const resourcesPath = join(root, "resources.json");
+  const planPath = join(root, "plan.json");
+  const policyPath = join(root, "policy.json");
+  const liveExpiry = new Date(Date.now() + 5 * 60 * 1_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/u, "Z");
+  const invoke = () =>
+    spawnSync(
+      process.execPath,
+      [
+        validatorCli,
+        "build-plan",
+        stackPath,
+        resourcesPath,
+        TARGET.sourceTemplateSemanticSha256,
+        accountId,
+        liveExpiry,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_ACTIONS: "true", RUNNER_TEMP: root },
+      }
+    );
+
+  try {
+    writeFileSync(
+      stackPath,
+      JSON.stringify(stackResponse({ StackStatus: `DELETE_FAILED_${privateMarker}` })),
+      "utf8"
+    );
+    writeFileSync(resourcesPath, JSON.stringify(resourcesResponse()), "utf8");
+    let result = invoke();
+    assert.equal(result.status, 1);
+    assert.equal(
+      result.stderr,
+      `::error::${CLI_FAILURE_CODES.STACK_STATUS_INVALID}\n`
+    );
+    assert.equal(result.stderr.includes(privateMarker), false);
+    assert.equal(result.stderr.includes("DELETE_FAILED"), false);
+
+    writeFileSync(stackPath, JSON.stringify(stackResponse()), "utf8");
+    const physicalSurvivor = resourcesResponse();
+    physicalSurvivor.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
+    writeFileSync(resourcesPath, JSON.stringify(physicalSurvivor), "utf8");
+    result = invoke();
+    assert.equal(result.status, 1);
+    assert.equal(
+      result.stderr,
+      `::error::${CLI_FAILURE_CODES.RESOURCE_CREATE_FAILED_PHYSICAL_ID}\n`
+    );
+    assert.equal(result.stderr.includes(privateMarker), false);
+    assert.equal(result.stderr.includes("PhysicalResourceId"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
