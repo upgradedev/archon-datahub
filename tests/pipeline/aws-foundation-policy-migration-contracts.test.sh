@@ -19,6 +19,7 @@ main_driver="${repository_root}/scripts/run-aws-foundation-policy-migration.sh"
 common="${repository_root}/scripts/aws-foundation-policy-migration-common.sh"
 authorization="${repository_root}/scripts/aws-foundation-policy-migration-authorization.sh"
 state="${repository_root}/scripts/aws-foundation-policy-migration-state.sh"
+behavior="${repository_root}/tests/pipeline/aws-foundation-policy-migration-driver.test.sh"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 
 fail() {
@@ -62,6 +63,7 @@ for path in \
   "${common}" \
   "${authorization}" \
   "${state}" \
+  "${behavior}" \
   "${ci_workflow}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must not be a symlink"
@@ -106,7 +108,9 @@ jq --exit-status '
     innerConcurrencyGroup: "archon-governed-canary-mutation-recovery",
     outerConcurrencyGroup: "archon-aws-control-plane",
     ownerActorOnly: true,
-    queue: "max"
+    queue: "max",
+    exactParentAttemptJobsRequired: true,
+    automaticCleanupCurrentHeadIndependent: true
   } and
   .implementation == {
     driver: "scripts/run-aws-foundation-policy-migration.sh",
@@ -157,6 +161,15 @@ jq --exit-status '
     freshRollbackOnlyAuthorization: true,
     mandatoryAuthorizationRevocation: true,
     manualDispatch: true,
+    manualDispatchMode: "cleanup-rollback",
+    parentOutcomeClassification: {
+      migrateSucceeded: "cleanup-migrated",
+      prepareNotSucceeded: "cleanup-revoke",
+      prepareSucceededWithoutSuccessfulMigrationOrRollback:
+        "cleanup-rollback",
+      rollbackSucceeded: "cleanup-revoke"
+    },
+    revokeOnlyPreservesExactTerminalState: true,
     rollbackToPreviousDefault: true
   } and
   .evidence == {
@@ -180,18 +193,22 @@ jq --exit-status \
       .aws.foundationPolicies.renderer
   ' "${foundation_contract}" >/dev/null
 
-entry_trigger="$(sed -n '/^on:/,/^permissions:/p' "${entry}" | sed '$d')"
-driver_trigger="$(sed -n '/^on:/,/^permissions:/p' "${driver_workflow}" | sed '$d')"
-cleanup_trigger="$(sed -n '/^on:/,/^permissions:/p' "${cleanup}" | sed '$d')"
-grep -Fq '  workflow_dispatch:' <<<"${entry_trigger}"
-grep -Fq '  workflow_call:' <<<"${driver_trigger}"
-grep -Fq '  workflow_run:' <<<"${cleanup_trigger}"
-grep -Fq '  workflow_dispatch:' <<<"${cleanup_trigger}"
-for trigger in push: pull_request: schedule: cron:; do
-  if grep -Fq "${trigger}" <<<"${entry_trigger}${driver_trigger}${cleanup_trigger}"; then
-    fail "migration control plane contains forbidden trigger ${trigger}"
-  fi
-done
+workflow_triggers() {
+  awk '
+    /^on:[[:space:]]*$/ { inside=1; next }
+    inside && /^[^[:space:]]/ { exit }
+    inside && /^  [A-Za-z0-9_]+:[[:space:]]*$/ {
+      key=$1
+      sub(/:$/, "", key)
+      print key
+    }
+  ' "$1" | LC_ALL=C sort
+}
+
+test "$(workflow_triggers "${entry}")" = "workflow_dispatch"
+test "$(workflow_triggers "${driver_workflow}")" = "workflow_call"
+test "$(workflow_triggers "${cleanup}")" = \
+  $'workflow_dispatch\nworkflow_run'
 
 require_text "${entry}" \
   'group: archon-aws-control-plane' \
@@ -226,7 +243,10 @@ require_text "${cleanup}" \
   'github.event.workflow_run.conclusion !=' \
   '.github/workflows/aws-foundation-policy-migration.yml' \
   'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION' \
-  'operation: cleanup' \
+  'cleanup-migrated' \
+  'cleanup-revoke' \
+  'cleanup-rollback' \
+  'needs.validate.outputs.cleanup_operation' \
   'uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml'
 
 for workflow in "${entry}" "${driver_workflow}" "${cleanup}"; do
@@ -239,9 +259,15 @@ for workflow in "${entry}" "${driver_workflow}" "${cleanup}"; do
     'pull-requests: write' \
     'security-events: write' \
     'secrets: inherit'
-  if grep -E '^[[:space:]]*uses: [^@]+@(main|master|v[0-9]+)' "${workflow}"; then
-    fail "${workflow#${repository_root}/} contains a mutable action reference"
-  fi
+  while IFS= read -r ref; do
+    [[ "${ref}" == ./* ]] && continue
+    [[ "${ref}" =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] ||
+      fail "${workflow#${repository_root}/} has non-SHA action ref: ${ref}"
+  done < <(
+    sed -nE \
+      's/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' \
+      "${workflow}"
+  )
 done
 
 require_text "${main_driver}" \
