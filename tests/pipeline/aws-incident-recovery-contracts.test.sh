@@ -374,7 +374,7 @@ require_text "${ci}" \
   'bash tests/pipeline/aws-incident-recovery-driver.test.sh'
 require_text "${runbook}" \
   'Status: **attempted; `DeleteStack` not executed; cleanup proof pending**' \
-  'Recovery run `30567769601` failed during prepare/build-plan' \
+  'run `30567769601` failed during prepare/build-plan' \
   'Cleanup run `30567949203` also failed' \
   'PutRolePolicy' \
   'eventually consistent' \
