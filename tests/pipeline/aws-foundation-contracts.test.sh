@@ -339,6 +339,10 @@ require_text "${foundation_workflow}" \
   'Clear AWS credentials before artifact handling' \
   'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
   'retention-days: 90'
+require_text "${foundation_workflow}" \
+  '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
+forbid_text "${foundation_workflow}" \
+  '"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi
