@@ -430,11 +430,17 @@
       ],
       "managedCommandOutput": "suppressed",
       "maxRecentEvents": 25,
+      "deprioritizedReasonCategories": [
+        "dependency-failure"
+      ],
+      "eventOrder": "cloudformation-newest-first",
+      "eventSelection": "newest-non-dependency-failed-else-newest-failed",
       "postCredentialDigestRecomputed": true,
       "rawReasonHashing": false,
       "rawReasonRetention": false,
       "recursiveInventory": "exact-two-root-regular-files",
       "stackIdentity": "allowlisted-label-only",
+      "unknownReasonCategoryEligible": true,
       "allowlistedStackLabels": [
         "governed-canary-roles",
         "production-bootstrap-edge",
