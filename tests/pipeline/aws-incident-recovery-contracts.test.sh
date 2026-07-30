@@ -57,7 +57,7 @@ jq --exit-status '
   .schemaVersion == "archon.aws-incident-recovery/v1" and
   .repository == "upgradedev/archon-datahub" and
   .defaultBranch == "master" and
-    .status == "attempted-delete-not-executed-cleanup-proof-pending" and
+  .status == "attempted-delete-not-executed-cleanup-proof-pending" and
   .execution == {
     cleanupRun: {
       canonicalAbsenceProof: "pending",
@@ -120,7 +120,7 @@ jq --exit-status '
     stackArgument: "sealed-full-stack-id",
     targetInput: false
   } and
-    .revocation.preDeleteInventoryRequired == true and
+  .revocation.preDeleteInventoryRequired == true and
   .revocation.deleteOnlyWhenTemporaryPolicyPresent == true and
   .revocation.baseOnlyDeleteCallCount == 0 and
   .revocation.temporaryPolicyPresentDeleteCallCount == 1 and
@@ -183,7 +183,7 @@ jq --exit-status '
   .evidence.failureDiagnostics.explicitIncidentRecoveryContract ==
     "contracts/aws-incident-recovery-v1.json" and
   .evidence.failureDiagnostics.explicitIncidentRecoveryStatus ==
-    "implemented-not-executed"
+    "attempted-delete-not-executed-cleanup-proof-pending"
 ' "${foundation_contract}" >/dev/null
 
 require_count 2 "${entry}" '        type: string'

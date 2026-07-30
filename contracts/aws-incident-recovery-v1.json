@@ -208,7 +208,8 @@
     "rawErrorMessages": false,
     "rawPaths": false,
     "rawValues": false
-  },  "delete": {
+  },
+  "delete": {
     "callCount": 1,
     "stackArgument": "sealed-full-stack-id",
     "clientRequestToken": "deterministic-from-incident-attempt-and-control-plane-sha",
@@ -247,7 +248,8 @@
     "cleanupNeverCallsDeleteStack": true,
     "cleanupIndependentOfLaterMasterAdvance": true,
     "ttlMakesDelayedCleanupEffectivelyNonprivileged": true
-  },  "postverification": {
+  },
+  "postverification": {
     "originalStackIdDigestMatches": true,
     "originalStackStatus": "DELETE_COMPLETE",
     "stackNameHasNoActiveStack": true,
