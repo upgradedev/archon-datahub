@@ -1,0 +1,3409 @@
+name: Submission content review
+
+run-name: >-
+  Review final submission content for ${{ inputs.release_sha }}
+  (run ${{ github.run_id }}, attempt ${{ github.run_attempt }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      project_access_run_id:
+        description: Exact successful attested project-access evidence run ID
+        required: true
+        type: string
+      video_url:
+        description: Exact final public YouTube, Vimeo, or Youku video URL
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-content-review-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-content-review/v1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare immutable final-content candidate
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.candidate.outputs.artifact_name }}
+      candidate_digest: ${{ steps.candidate.outputs.candidate_digest }}
+      content_digest: ${{ steps.candidate.outputs.content_digest }}
+      producer_attempt: ${{ steps.candidate.outputs.producer_attempt }}
+      project_access_binding_digest: ${{ steps.candidate.outputs.project_access_binding_digest }}
+      video_observation_digest: ${{ steps.candidate.outputs.video_observation_digest }}
+    steps:
+      - name: Bind dispatch to current master and protected review posture
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-content-review.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${PROJECT_ACCESS_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test -n "${VIDEO_URL}"
+          test "${#VIDEO_URL}" -le 2048
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg path ".github/workflows/submission-content-review.yml" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path == $path and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              (.actor.id | type) == "number" and
+              .actor.id > 0 and
+              (.actor.login | ascii_downcase) == "upgradedev" and
+              (.triggering_actor.id | type) == "number" and
+              .triggering_actor.id > 0 and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
+            ' <<<"${run}" >/dev/null
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review"
+          )"
+          jq -e '
+            .name == "submission-content-review" and
+            (.id | type) == "number" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] |
+              length
+            ) == 1 and
+            any(
+              .protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == false and
+              (.reviewers | length) == 1 and
+              all(
+                .reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0 and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
+              )
+            )
+          ' <<<"${environment_json}" >/dev/null || {
+            echo "::error::submission-content-review requires the sole owner reviewer, self-review enabled, and a custom branch policy"
+            exit 1
+          }
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"]
+          ' <<<"${policies}" >/dev/null
+
+      - name: Check out exact release and complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact attested project-access source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: project-access
+          SOURCE_RUN_ID: ${{ inputs.project_access_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-content-project-access-prepare
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          test ! -e "${SUBMISSION_EVIDENCE_DIR}"
+          mkdir --mode=0700 "${SUBMISSION_EVIDENCE_DIR}"
+          bash scripts/collect-submission-evidence-source.sh
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ3.json"
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ4.json"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${SOURCE_RUN_ID}" '
+              .releaseSha == $release and
+              .source.workflowPath ==
+                ".github/workflows/submission-project-access.yml" and
+              .source.runId == $runId
+            ' "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ3.json" >/dev/null
+
+      - name: Validate canonical final content and credentialless video
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          umask 077
+          content="docs/SUBMISSION_CONTENT.json"
+          test -f "${content}" || {
+            echo "::error::Final docs/SUBMISSION_CONTENT.json is intentionally required and still deferred"
+            exit 1
+          }
+          test ! -L "${content}"
+          test "$(wc -c <"${content}")" -le 1048576
+          projection="${RUNNER_TEMP}/submission-content-projection.json"
+          CONTENT_PATH="${content}" \
+          OUTPUT_PATH="${projection}" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          def reject_duplicates(pairs):
+              value = {}
+              for key, item in pairs:
+                  if key in value:
+                      raise SystemExit(f"duplicate JSON key: {key}")
+                  value[key] = item
+              return value
+
+          def exact(value, keys, label):
+              if not isinstance(value, dict) or set(value) != set(keys):
+                  raise SystemExit(f"{label} has missing or unknown fields")
+              return value
+
+          def text(value, label, maximum):
+              if (
+                  not isinstance(value, str)
+                  or value != value.strip()
+                  or not value
+                  or len(value) > maximum
+                  or any(ord(character) < 32 for character in value)
+              ):
+                  raise SystemExit(f"{label} is not canonical non-empty text")
+              if re.search(
+                  r"\b(?:todo|tbd|placeholder|replace(?:[\s-]+with))\b|example\.com|ArchonDemo1",
+                  value,
+                  re.IGNORECASE,
+              ):
+                  raise SystemExit(f"{label} contains deferred placeholder text")
+              return value
+
+          def canonical(value):
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode("utf-8")
+
+          def digest_bytes(value):
+              return "sha256:" + hashlib.sha256(value).hexdigest()
+
+          path = pathlib.Path(os.environ["CONTENT_PATH"])
+          raw = path.read_bytes()
+          try:
+              content = json.loads(
+                  raw.decode("utf-8"),
+                  object_pairs_hook=reject_duplicates,
+                  parse_constant=lambda value: (_ for _ in ()).throw(
+                      ValueError(f"invalid constant {value}")
+                  ),
+              )
+          except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+              raise SystemExit(f"submission content is not strict UTF-8 JSON: {error}")
+          exact(
+              content,
+              {
+                  "schemaVersion",
+                  "status",
+                  "writtenFields",
+                  "languages",
+                  "submissionClaims",
+                  "videoReview",
+                  "disclosures",
+                  "rules",
+              },
+              "submission content",
+          )
+          if content["schemaVersion"] != "archon.submission-content-input/v1":
+              raise SystemExit("submission content schema is not final v1")
+          if content["status"] != "final":
+              raise SystemExit("submission content remains deferred")
+          written = exact(
+              content["writtenFields"],
+              {
+                  "projectName",
+                  "tagline",
+                  "description",
+                  "builtWith",
+                  "testingInstructions",
+                  "applicationUrl",
+                  "repositoryUrl",
+              },
+              "writtenFields",
+          )
+          for key, maximum in {
+              "projectName": 120,
+              "tagline": 200,
+              "description": 12000,
+              "testingInstructions": 8000,
+              "applicationUrl": 2048,
+              "repositoryUrl": 2048,
+          }.items():
+              text(written[key], f"writtenFields.{key}", maximum)
+          if (
+              not isinstance(written["builtWith"], list)
+              or not 1 <= len(written["builtWith"]) <= 40
+              or written["builtWith"] != sorted(set(written["builtWith"]))
+          ):
+              raise SystemExit("writtenFields.builtWith must be a sorted unique list")
+          for index, item in enumerate(written["builtWith"]):
+              text(item, f"writtenFields.builtWith[{index}]", 120)
+          languages = exact(
+              content["languages"],
+              {"submission", "testingInstructions"},
+              "languages",
+          )
+          if languages != {"submission": "en", "testingInstructions": "en"}:
+              raise SystemExit("final written materials must be English")
+          claims = content["submissionClaims"]
+          if not isinstance(claims, list) or not 1 <= len(claims) <= 64:
+              raise SystemExit("submissionClaims must contain 1..64 claims")
+          claim_ids = []
+          for index, claim in enumerate(claims):
+              exact(claim, {"id", "text", "proofIds"}, f"submissionClaims[{index}]")
+              claim_id = text(claim["id"], f"submissionClaims[{index}].id", 80)
+              if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", claim_id) is None:
+                  raise SystemExit("submission claim ID is not canonical")
+              claim_ids.append(claim_id)
+              text(claim["text"], f"submissionClaims[{index}].text", 1000)
+              if (
+                  not isinstance(claim["proofIds"], list)
+                  or not claim["proofIds"]
+                  or claim["proofIds"] != sorted(set(claim["proofIds"]))
+                  or any(
+                      proof not in {
+                          "D4", "U3", "SQ3", "SQ4", "SQ5", "SQ10"
+                      }
+                      for proof in claim["proofIds"]
+                  )
+              ):
+                  raise SystemExit("submission claim proofIds are not exact")
+          if claim_ids != sorted(set(claim_ids)):
+              raise SystemExit("submission claim IDs must be sorted and unique")
+          video = exact(
+              content["videoReview"],
+              {
+                  "spokenLanguage",
+                  "subtitlesLanguage",
+                  "completeEnglishTranslation",
+                  "functioningProjectShown",
+                  "thirdPartyMarksAndMusicAuthorized",
+                  "allThirdPartyMaterialAuthorized",
+                  "claims",
+                  "mediaInventory",
+              },
+              "videoReview",
+          )
+          if video["spokenLanguage"] not in {"en", "none"}:
+              raise SystemExit("video spokenLanguage must be en or none")
+          if video["subtitlesLanguage"] not in {"en", "none"}:
+              raise SystemExit("video subtitlesLanguage must be en or none")
+          if (
+              video["spokenLanguage"] != "en"
+              and video["subtitlesLanguage"] != "en"
+          ):
+              raise SystemExit("video requires English narration or subtitles")
+          for key in (
+              "completeEnglishTranslation",
+              "functioningProjectShown",
+              "thirdPartyMarksAndMusicAuthorized",
+              "allThirdPartyMaterialAuthorized",
+          ):
+              if video[key] is not True:
+                  raise SystemExit(f"videoReview.{key} must be true")
+          video_claims = video["claims"]
+          if not isinstance(video_claims, list) or not 1 <= len(video_claims) <= 64:
+              raise SystemExit("videoReview.claims must contain 1..64 claims")
+          for index, claim in enumerate(video_claims):
+              text(claim, f"videoReview.claims[{index}]", 1000)
+          if video_claims != sorted(set(video_claims)):
+              raise SystemExit("video claims must be sorted and unique")
+          media = video["mediaInventory"]
+          if not isinstance(media, list) or not 1 <= len(media) <= 128:
+              raise SystemExit("videoReview.mediaInventory must not be empty")
+          for index, item in enumerate(media):
+              exact(
+                  item,
+                  {"name", "source", "authorization"},
+                  f"mediaInventory[{index}]",
+              )
+              for key in ("name", "source", "authorization"):
+                  text(item[key], f"mediaInventory[{index}].{key}", 2048)
+          disclosures = exact(
+              content["disclosures"],
+              {
+                  "preExistingWorkInventory",
+                  "thirdPartyInventory",
+                  "allNonStandardPreExistingWorkDisclosed",
+                  "workDescribedAndSubmittedBuiltDuringPeriod",
+                  "standardToolsOnlyExcludedFromDisclosure",
+                  "thirdPartyIntegrationsAuthorized",
+                  "originalWorkOwnershipReviewed",
+                  "crossMediumConsistent",
+              },
+              "disclosures",
+          )
+          for key in (
+              "allNonStandardPreExistingWorkDisclosed",
+              "workDescribedAndSubmittedBuiltDuringPeriod",
+              "standardToolsOnlyExcludedFromDisclosure",
+              "thirdPartyIntegrationsAuthorized",
+              "originalWorkOwnershipReviewed",
+              "crossMediumConsistent",
+          ):
+              if disclosures[key] is not True:
+                  raise SystemExit(f"disclosures.{key} must be true")
+          inventory_contracts = {
+              "preExistingWorkInventory": {
+                  "name", "source", "relationship", "disclosure"
+              },
+              "thirdPartyInventory": {
+                  "name", "purpose", "licenseOrTerms", "authorization"
+              },
+          }
+          for inventory_key, fields in inventory_contracts.items():
+              inventory = disclosures[inventory_key]
+              if (
+                  not isinstance(inventory, list)
+                  or not 1 <= len(inventory) <= 128
+              ):
+                  raise SystemExit(f"{inventory_key} must not be empty")
+              names = []
+              for index, item in enumerate(inventory):
+                  exact(item, fields, f"{inventory_key}[{index}]")
+                  names.append(
+                      text(
+                          item["name"],
+                          f"{inventory_key}[{index}].name",
+                          2048,
+                      )
+                  )
+                  for field in fields - {"name"}:
+                      text(
+                          item[field],
+                          f"{inventory_key}[{index}].{field}",
+                          4096,
+                      )
+              if names != sorted(set(names)):
+                  raise SystemExit(
+                      f"{inventory_key} names must be sorted and unique"
+                  )
+          rules = exact(
+              content["rules"],
+              {
+                  "officialRulesUrl",
+                  "submissionStart",
+                  "submissionEnd",
+              },
+              "rules",
+          )
+          if rules != {
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "submissionStart": "2026-07-06T13:00:00Z",
+              "submissionEnd": "2026-08-10T21:00:00Z",
+          }:
+              raise SystemExit("official rules projection is not exact")
+          if written["repositoryUrl"] != (
+              "https://github.com/upgradedev/archon-datahub"
+          ):
+              raise SystemExit("written repository URL is not canonical")
+          projection = {
+              "schemaVersion": "archon.submission-content-projection/v1",
+              "releaseSha": os.environ["RELEASE_SHA"],
+              "contentDigest": digest_bytes(raw),
+              "submissionFieldsDigest": digest_bytes(canonical(written)),
+              "submissionClaimsDigest": digest_bytes(canonical(claims)),
+              "videoClaimsDigest": digest_bytes(canonical(video_claims)),
+              "mediaReviewDigest": digest_bytes(canonical(video)),
+              "preExistingWorkInventoryDigest": digest_bytes(
+                  canonical(disclosures["preExistingWorkInventory"])
+              ),
+              "thirdPartyInventoryDigest": digest_bytes(
+                  canonical(disclosures["thirdPartyInventory"])
+              ),
+              "rulesSnapshotDigest": digest_bytes(canonical(rules)),
+              "writtenFields": written,
+              "languages": languages,
+              "videoReview": video,
+              "disclosures": disclosures,
+              "rules": rules,
+          }
+          pathlib.Path(os.environ["OUTPUT_PATH"]).write_bytes(canonical(projection))
+          PY
+          application_url="$(
+            jq -er '.facts.applicationUrl' \
+              "${RUNNER_TEMP}/submission-content-project-access-prepare/receipts/SQ3.json"
+          )"
+          test "$(
+            jq -er '.writtenFields.applicationUrl' "${projection}"
+          )" = "${application_url}"
+          video_preflight="${RUNNER_TEMP}/submission-video-preflight.json"
+          python3 scripts/validate-submission-video.py \
+            preflight \
+            --url "${VIDEO_URL}" \
+            --output "${video_preflight}"
+          probe_url="$(jq -er '.url' "${video_preflight}")"
+          test "${probe_url}" = "${VIDEO_URL}"
+          video_body="${RUNNER_TEMP}/submission-video.body"
+          video_meta="${RUNNER_TEMP}/submission-video.http"
+          curl \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --tlsv1.2 \
+            --max-redirs 0 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --max-filesize 10485760 \
+            --header 'Accept: text/html,application/xhtml+xml' \
+            --header 'User-Agent: archon-submission-content-review/1' \
+            --output "${video_body}" \
+            --write-out \
+              '%{http_code}\n%{num_redirects}\n%{url_effective}\n%{ssl_verify_result}\n%{size_download}\n' \
+            "${probe_url}" >"${video_meta}"
+          test "$(sed -n '1p' "${video_meta}")" = "200"
+          test "$(sed -n '2p' "${video_meta}")" = "0"
+          test "$(sed -n '3p' "${video_meta}")" = "${probe_url}"
+          test "$(sed -n '4p' "${video_meta}")" = "0"
+          video_projection="${RUNNER_TEMP}/submission-video.json"
+          python3 scripts/validate-submission-video.py \
+            observe \
+            --url "${probe_url}" \
+            --body "${video_body}" \
+            --output "${video_projection}"
+
+      - name: Capture exact repository history and immutable candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          history="${RUNNER_TEMP}/submission-history.json"
+          repository="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}"
+          )"
+          repository_created="$(jq -er '.created_at' <<<"${repository}")"
+          git rev-list --reverse "${RELEASE_SHA}" >"${RUNNER_TEMP}/submission-commits.txt"
+          test -s "${RUNNER_TEMP}/submission-commits.txt"
+          release_count="$(wc -l <"${RUNNER_TEMP}/submission-commits.txt")"
+          [[ "${release_count}" =~ ^[1-9][0-9]*$ ]]
+          first_commit="$(sed -n '1p' "${RUNNER_TEMP}/submission-commits.txt")"
+          test "$(git rev-list --parents -n 1 "${first_commit}" | wc -w)" = "1"
+          COMMITS_PATH="${RUNNER_TEMP}/submission-commits.txt" \
+          HISTORY_PATH="${history}" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+          REPOSITORY_CREATED="${repository_created}" \
+            python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          def git(*arguments):
+              return subprocess.run(
+                  ["git", *arguments],
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  text=True,
+              ).stdout.strip()
+
+          def canonical(value):
+              return (
+                  json.dumps(value, separators=(",", ":"), sort_keys=True)
+                  + "\n"
+              ).encode()
+
+          commits = pathlib.Path(os.environ["COMMITS_PATH"]).read_text().splitlines()
+          rows = []
+          start = dt.datetime(2026, 7, 6, 13, 0, 0, tzinfo=dt.timezone.utc)
+          end = dt.datetime(2026, 8, 10, 21, 0, 0, tzinfo=dt.timezone.utc)
+          for commit in commits:
+              fields = git(
+                  "show",
+                  "-s",
+                  "--format=%H%x00%aI%x00%cI%x00%P",
+                  commit,
+              ).split("\x00")
+              if len(fields) != 4 or fields[0] != commit:
+                  raise SystemExit("git history projection is malformed")
+              authored = dt.datetime.fromisoformat(fields[1])
+              committed = dt.datetime.fromisoformat(fields[2])
+              if not start <= authored.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit authored outside official period")
+              if not start <= committed.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit committed outside official period")
+              rows.append(
+                  {
+                      "sha": commit,
+                      "authoredAt": authored.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "committedAt": committed.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "parents": fields[3].split() if fields[3] else [],
+                  }
+              )
+          release = os.environ["RELEASE_SHA"]
+          if rows[-1]["sha"] != release:
+              raise SystemExit("release is not the final reachable commit")
+          inventory_digest = "sha256:" + hashlib.sha256(canonical(rows)).hexdigest()
+          projection = {
+              "schemaVersion": "archon.submission-history/v1",
+              "projectStartedAt": rows[0]["authoredAt"],
+              "repositoryCreatedAt": os.environ["REPOSITORY_CREATED"],
+              "rootCommitSha": rows[0]["sha"],
+              "rootCommitAuthoredAt": rows[0]["authoredAt"],
+              "rootCommitCommittedAt": rows[0]["committedAt"],
+              "rootCommitParentCount": len(rows[0]["parents"]),
+              "releaseCommitSha": rows[-1]["sha"],
+              "releaseCommitCommittedAt": rows[-1]["committedAt"],
+              "reachableCommitCount": len(rows),
+              "allReachableCommitsWithinSubmissionPeriod": True,
+              "historyDigest": inventory_digest,
+              "commits": rows,
+          }
+          pathlib.Path(os.environ["HISTORY_PATH"]).write_bytes(canonical(projection))
+          PY
+          candidate_dir="${RUNNER_TEMP}/submission-content-candidate"
+          test ! -e "${candidate_dir}"
+          mkdir --mode=0700 "${candidate_dir}"
+          cp docs/SUBMISSION_CONTENT.json "${candidate_dir}/content.json"
+          cp "${RUNNER_TEMP}/submission-content-projection.json" \
+            "${candidate_dir}/content-projection.json"
+          cp "${RUNNER_TEMP}/submission-video.json" "${candidate_dir}/video.json"
+          cp "${history}" "${candidate_dir}/history.json"
+          cp \
+            "${RUNNER_TEMP}/submission-content-project-access-prepare/upstream-verification/project-access/binding.json" \
+            "${candidate_dir}/project-access-binding.json"
+          finalized_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          run_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -cnS \
+            --arg contentDigest "$(
+              jq -er '.contentDigest' "${candidate_dir}/content-projection.json"
+            )" \
+            --arg finalizedAt "${finalized_at}" \
+            --arg historyDigest "$(
+              jq -er '.historyDigest' "${candidate_dir}/history.json"
+            )" \
+            --arg noticeDigest "sha256:$(sha256sum NOTICE.md | awk '{print $1}')" \
+            --arg projectAccessBindingDigest "sha256:$(
+              sha256sum "${candidate_dir}/project-access-binding.json" |
+                awk '{print $1}'
+            )" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg testingDigest "sha256:$(sha256sum docs/JUDGE_TESTING.md | awk '{print $1}')" \
+            --arg videoDigest "sha256:$(sha256sum "${candidate_dir}/video.json" | awk '{print $1}')" \
+            --arg workflowPath ".github/workflows/submission-content-review.yml" \
+            --argjson actorId "$(jq -er '.actor.id' <<<"${run_json}")" \
+            --argjson projectAccessRunId "${PROJECT_ACCESS_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "$(
+              jq -er '.triggering_actor.id' <<<"${run_json}"
+            )" '
+              {
+                schemaVersion:
+                  "archon.submission-content-review-candidate/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  actorId: $actorId,
+                  triggeringActorId: $triggeringActorId
+                },
+                projectAccessRunId: $projectAccessRunId,
+                projectAccessBindingDigest:
+                  $projectAccessBindingDigest,
+                finalizedAt: $finalizedAt,
+                contentDigest: $contentDigest,
+                videoObservationDigest: $videoDigest,
+                historyDigest: $historyDigest,
+                noticeDigest: $noticeDigest,
+                testingInstructionsDigest: $testingDigest
+              }
+            ' >"${candidate_dir}/candidate.json"
+          candidate_inventory="$(
+            mktemp "${RUNNER_TEMP}/submission-content-candidate.XXXXXX.SHA256SUMS"
+          )"
+          (
+            cd "${candidate_dir}"
+            find . -type f ! -name SHA256SUMS -printf '%P\n' |
+              LC_ALL=C sort |
+              while IFS= read -r name; do
+                printf '%s  %s\n' \
+                  "$(sha256sum "${name}" | awk '{print $1}')" \
+                  "${name}"
+              done >"${candidate_inventory}"
+            sha256sum --check --strict "${candidate_inventory}"
+            mv -- "${candidate_inventory}" SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            find "${candidate_dir}" -type f -printf '%P\n' |
+              LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              candidate.json \
+              content-projection.json \
+              content.json \
+              history.json \
+              project-access-binding.json \
+              video.json
+          )"
+          candidate_digest="sha256:$(
+            sha256sum "${candidate_dir}/candidate.json" | awk '{print $1}'
+          )"
+          {
+            echo "artifact_name=submission-content-review-candidate-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "candidate_digest=${candidate_digest}"
+            echo "content_digest=$(jq -er '.contentDigest' "${candidate_dir}/candidate.json")"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "project_access_binding_digest=$(jq -er '.projectAccessBindingDigest' "${candidate_dir}/candidate.json")"
+            echo "video_observation_digest=$(jq -er '.videoObservationDigest' "${candidate_dir}/candidate.json")"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Upload immutable final-content candidate
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.candidate.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-content-candidate
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 90
+
+      - name: Publish exact solo-owner approval request
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+          CANDIDATE_ARTIFACT_ID: ${{ steps.upload.outputs['artifact-id'] }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.candidate_digest }}
+          CONTENT_DIGEST: ${{ steps.candidate.outputs.content_digest }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          PROJECT_ACCESS_BINDING_DIGEST: ${{ steps.candidate.outputs.project_access_binding_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_OBSERVATION_DIGEST: ${{ steps.candidate.outputs.video_observation_digest }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CONTENT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PROJECT_ACCESS_BINDING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${VIDEO_OBSERVATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          approval="APPROVE ARCHON SUBMISSION CONTENT run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${GITHUB_RUN_ATTEMPT} release_sha=${RELEASE_SHA} project_access_run_id=${PROJECT_ACCESS_RUN_ID} project_access_binding_digest=${PROJECT_ACCESS_BINDING_DIGEST} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} content_digest=${CONTENT_DIGEST} video_observation_digest=${VIDEO_OBSERVATION_DIGEST}"
+          {
+            echo "### Solo-owner final-content approval required"
+            echo
+            echo "Approve the protected \`submission-content-review\` environment with this exact comment:"
+            echo
+            echo "\`${approval}\`"
+            echo
+            echo "For a partial retry, replace only \`run_attempt=${GITHUB_RUN_ATTEMPT}\`"
+            echo "with the current attempt shown in the Actions run title;"
+            echo "\`candidate_run_attempt=${GITHUB_RUN_ATTEMPT}\` and all candidate bindings remain unchanged."
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  review:
+    name: Approve and seal reviewed subjects as solo owner
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: submission-content-review
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      producer_attempt: ${{ steps.package.outputs.producer_attempt }}
+    steps:
+      - name: Verify exact solo-owner environment approval
+        id: approval
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          CONTENT_DIGEST: ${{ needs.prepare.outputs.content_digest }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          PROJECT_ACCESS_BINDING_DIGEST: ${{ needs.prepare.outputs.project_access_binding_digest }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_OBSERVATION_DIGEST: ${{ needs.prepare.outputs.video_observation_digest }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-content-review.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${CANDIDATE_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CANDIDATE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANDIDATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( CANDIDATE_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          [[ "${CONTENT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PROJECT_ACCESS_BINDING_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${VIDEO_OBSERVATION_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          expected_approval="APPROVE ARCHON SUBMISSION CONTENT run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} project_access_run_id=${PROJECT_ACCESS_RUN_ID} project_access_binding_digest=${PROJECT_ACCESS_BINDING_DIGEST} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${CANDIDATE_DIGEST} content_digest=${CONTENT_DIGEST} video_observation_digest=${VIDEO_OBSERVATION_DIGEST}"
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review"
+          )"
+          environment_id="$(jq -er '
+            select(
+              .name == "submission-content-review" and
+              (.id | type) == "number" and
+              .id > 0 and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              all(
+                $rules[0].reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0 and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
+              )
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid solo-owner reviewer posture")
+            end
+          ' <<<"${environment_json}")"
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"]
+          ' <<<"${policies}" >/dev/null
+          run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          actor_id="$(jq -er '.actor.id' <<<"${run}")"
+          triggering_actor_id="$(jq -er '.triggering_actor.id' <<<"${run}")"
+          [[ "${actor_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          jq -e '
+            (.actor.login | ascii_downcase) == "upgradedev" and
+            (.triggering_actor.login | ascii_downcase) == "upgradedev"
+          ' <<<"${run}" >/dev/null
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          matched="$(jq -ce \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | type) == "array" and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-content-review" and
+                  .environments[0].id == $environmentId and
+                  (.user.id | type) == "number" and
+                  (.user.login | type) == "string" and
+                  (.user.id as $id | ($reviewerIds | index($id)) != null) and
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
+                )
+              ] |
+              if length == 1 then .[0]
+              else error("expected exactly one matching solo-owner approval")
+              end
+            ' <<<"${approvals}")" || {
+            echo "::error::Missing one exact solo-owner content approval"
+            exit 1
+          }
+          receipt_dir="${RUNNER_TEMP}/submission-content-approval"
+          test ! -e "${receipt_dir}"
+          mkdir --mode=0700 "${receipt_dir}"
+          receipt="${receipt_dir}/approval-receipt.json"
+          jq -cnS \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched}")" \
+            --arg contentDigest "${CONTENT_DIGEST}" \
+            --arg projectAccessBindingDigest "${PROJECT_ACCESS_BINDING_DIGEST}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg reviewerLogin "$(jq -er '.user.login' <<<"${matched}")" \
+            --arg workflowPath ".github/workflows/submission-content-review.yml" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg videoObservationDigest "${VIDEO_OBSERVATION_DIGEST}" \
+            --argjson actorId "${actor_id}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson projectAccessRunId "${PROJECT_ACCESS_RUN_ID}" \
+            --argjson reviewerId "$(jq -er '.user.id' <<<"${matched}")" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              {
+                schemaVersion:
+                  "archon.submission-content-approval/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  ref: $workflowRef,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  actorId: $actorId,
+                  triggeringActorId: $triggeringActorId
+                },
+                environment: {
+                  name: "submission-content-review",
+                  id: $environmentId
+                },
+                approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
+                  reviewer: {
+                    id: $reviewerId,
+                    login: $reviewerLogin
+                  },
+                  comment: $comment
+                },
+                candidate: {
+                  runAttempt: $candidateRunAttempt,
+                  artifactId: $candidateArtifactId,
+                  artifactDigest: $candidateArtifactDigest,
+                  digest: $candidateDigest,
+                  contentDigest: $contentDigest,
+                  videoObservationDigest: $videoObservationDigest,
+                  projectAccessBindingDigest:
+                    $projectAccessBindingDigest
+                },
+                projectAccessRunId: $projectAccessRunId
+              }
+            ' >"${receipt}"
+          reviewed_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          receipt_digest="sha256:$(sha256sum "${receipt}" | awk '{print $1}')"
+          comment_digest="sha256:$(
+            printf '%s' "${expected_approval}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          {
+            echo "actor_id=${actor_id}"
+            echo "comment_digest=${comment_digest}"
+            echo "environment_id=${environment_id}"
+            echo "receipt_digest=${receipt_digest}"
+            echo "receipt_path=${receipt}"
+            echo "reviewed_at=${reviewed_at}"
+            echo "reviewer_id=$(jq -er '.user.id' <<<"${matched}")"
+            echo "triggering_actor_id=${triggering_actor_id}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Check out exact reviewed release and complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable candidate metadata before download
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact_name }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${CANDIDATE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          (( CANDIDATE_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          test "${CANDIDATE_ARTIFACT_NAME}" = \
+            "submission-content-review-candidate-${RELEASE_SHA}-${CANDIDATE_RUN_ATTEMPT}"
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name "${CANDIDATE_ARTIFACT_NAME}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 16777216 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${artifact}" >/dev/null
+
+      - name: Download exact immutable candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-content-candidate-reviewed
+          digest-mismatch: error
+
+      - name: Independently re-resolve the attested project-access source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: project-access
+          SOURCE_RUN_ID: ${{ inputs.project_access_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-content-project-access-review
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          test ! -e "${SUBMISSION_EVIDENCE_DIR}"
+          mkdir --mode=0700 "${SUBMISSION_EVIDENCE_DIR}"
+          bash scripts/collect-submission-evidence-source.sh
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ3.json"
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ4.json"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${SOURCE_RUN_ID}" '
+              .releaseSha == $release and
+              .source.workflowPath ==
+                ".github/workflows/submission-project-access.yml" and
+              .source.runId == $runId
+            ' "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ3.json" >/dev/null
+
+      - name: Independently revalidate exact candidate bytes and semantics
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="${RUNNER_TEMP}/submission-content-candidate-reviewed"
+          test -d "${root}"
+          test ! -L "${root}"
+          test -z "$(find "${root}" -type l -print -quit)"
+          test -z "$(
+            find "${root}" -mindepth 1 ! -type f -print -quit
+          )"
+          test "$(
+            find "${root}" -type f -printf '%P\n' |
+              LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              candidate.json \
+              content-projection.json \
+              content.json \
+              history.json \
+              project-access-binding.json \
+              video.json
+          )"
+          test "$(wc -l <"${root}/SHA256SUMS")" = "6"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "sha256:$(
+            sha256sum "${root}/candidate.json" | awk '{print $1}'
+          )" = "${CANDIDATE_DIGEST}"
+          cmp --silent docs/SUBMISSION_CONTENT.json "${root}/content.json"
+          cmp --silent \
+            "${RUNNER_TEMP}/submission-content-project-access-review/upstream-verification/project-access/binding.json" \
+            "${root}/project-access-binding.json"
+          candidate_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${CANDIDATE_RUN_ATTEMPT}"
+          )"
+          candidate_actor_id="$(jq -er '.actor.id' <<<"${candidate_run}")"
+          candidate_triggering_actor_id="$(
+            jq -er '.triggering_actor.id' <<<"${candidate_run}"
+          )"
+          [[ "${candidate_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${candidate_triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          jq -e \
+            --arg contentDigest "$(
+              jq -er '.contentDigest' "${root}/content-projection.json"
+            )" \
+            --arg historyDigest "$(
+              jq -er '.historyDigest' "${root}/history.json"
+            )" \
+            --arg noticeDigest "sha256:$(
+              sha256sum NOTICE.md | awk '{print $1}'
+            )" \
+            --arg projectAccessBindingDigest "sha256:$(
+              sha256sum "${root}/project-access-binding.json" |
+                awk '{print $1}'
+            )" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg testingDigest "sha256:$(
+              sha256sum docs/JUDGE_TESTING.md | awk '{print $1}'
+            )" \
+            --arg videoDigest "sha256:$(
+              sha256sum "${root}/video.json" | awk '{print $1}'
+            )" \
+            --argjson actorId "${candidate_actor_id}" \
+            --argjson attempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson projectRunId "${PROJECT_ACCESS_RUN_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${candidate_triggering_actor_id}" '
+              keys == [
+                "contentDigest",
+                "finalizedAt",
+                "historyDigest",
+                "noticeDigest",
+                "projectAccessBindingDigest",
+                "projectAccessRunId",
+                "releaseSha",
+                "repository",
+                "schemaVersion",
+                "testingInstructionsDigest",
+                "videoObservationDigest",
+                "workflow"
+              ] and
+              .schemaVersion ==
+                "archon.submission-content-review-candidate/v1" and
+              .repository == $repository and
+              .releaseSha == $release and
+              .projectAccessRunId == $projectRunId and
+              .projectAccessBindingDigest ==
+                $projectAccessBindingDigest and
+              .contentDigest == $contentDigest and
+              .videoObservationDigest == $videoDigest and
+              .historyDigest == $historyDigest and
+              .noticeDigest == $noticeDigest and
+              .testingInstructionsDigest == $testingDigest and
+              (
+                .finalizedAt |
+                type == "string" and
+                test(
+                  "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" +
+                  "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                )
+              ) and
+              .workflow == {
+                path: ".github/workflows/submission-content-review.yml",
+                runId: $runId,
+                runAttempt: $attempt,
+                actorId: $actorId,
+                triggeringActorId: $triggeringActorId
+              }
+            ' "${root}/candidate.json" >/dev/null
+          CONTENT_PATH="${root}/content.json" \
+          PROJECTION_PATH="${root}/content-projection.json" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          def reject_duplicates(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise SystemExit(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          def load(path):
+              raw = pathlib.Path(path).read_bytes()
+              try:
+                  value = json.loads(
+                      raw.decode("utf-8"),
+                      object_pairs_hook=reject_duplicates,
+                      parse_constant=lambda constant: (_ for _ in ()).throw(
+                          ValueError(f"invalid constant {constant}")
+                      ),
+                  )
+              except (UnicodeDecodeError, ValueError) as error:
+                  raise SystemExit(f"strict JSON validation failed: {error}")
+              return raw, value
+
+          def exact_keys(value, keys, label):
+              if not isinstance(value, dict) or set(value) != set(keys):
+                  raise SystemExit(f"{label} has missing or unknown fields")
+              return value
+
+          def canonical(value):
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode("utf-8")
+
+          def digest(value):
+              return "sha256:" + hashlib.sha256(value).hexdigest()
+
+          def text(value, label, maximum):
+              if (
+                  not isinstance(value, str)
+                  or not value
+                  or value != value.strip()
+                  or len(value) > maximum
+                  or any(ord(character) < 32 or ord(character) == 127 for character in value)
+                  or re.search(
+                      r"\b(?:todo|tbd|placeholder|replace(?:[\s-]+with))\b|example\.com|ArchonDemo1",
+                      value,
+                      re.IGNORECASE,
+                  )
+              ):
+                  raise SystemExit(f"{label} is not final canonical text")
+              return value
+
+          raw, content = load(os.environ["CONTENT_PATH"])
+          _, projection = load(os.environ["PROJECTION_PATH"])
+          exact_keys(
+              content,
+              {
+                  "schemaVersion",
+                  "status",
+                  "writtenFields",
+                  "languages",
+                  "submissionClaims",
+                  "videoReview",
+                  "disclosures",
+                  "rules",
+              },
+              "content",
+          )
+          if (
+              content["schemaVersion"] != "archon.submission-content-input/v1"
+              or content["status"] != "final"
+          ):
+              raise SystemExit("submission content is not final v1")
+          written = exact_keys(
+              content["writtenFields"],
+              {
+                  "projectName",
+                  "tagline",
+                  "description",
+                  "builtWith",
+                  "testingInstructions",
+                  "applicationUrl",
+                  "repositoryUrl",
+              },
+              "writtenFields",
+          )
+          for key, maximum in {
+              "projectName": 120,
+              "tagline": 200,
+              "description": 12000,
+              "testingInstructions": 8000,
+              "applicationUrl": 2048,
+              "repositoryUrl": 2048,
+          }.items():
+              text(written[key], f"writtenFields.{key}", maximum)
+          built_with = written["builtWith"]
+          if (
+              not isinstance(built_with, list)
+              or not 1 <= len(built_with) <= 40
+              or built_with != sorted(set(built_with))
+          ):
+              raise SystemExit("builtWith must be sorted and unique")
+          for index, value in enumerate(built_with):
+              text(value, f"builtWith[{index}]", 120)
+          languages = exact_keys(
+              content["languages"],
+              {"submission", "testingInstructions"},
+              "languages",
+          )
+          if languages != {"submission": "en", "testingInstructions": "en"}:
+              raise SystemExit("written materials must be English")
+          claims = content["submissionClaims"]
+          if not isinstance(claims, list) or not 1 <= len(claims) <= 64:
+              raise SystemExit("submissionClaims must contain 1..64 claims")
+          claim_ids = []
+          allowed_proofs = {"D4", "U3", "SQ3", "SQ4", "SQ5", "SQ10"}
+          for index, claim in enumerate(claims):
+              exact_keys(claim, {"id", "text", "proofIds"}, f"claim[{index}]")
+              claim_id = text(claim["id"], f"claim[{index}].id", 80)
+              if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", claim_id) is None:
+                  raise SystemExit("claim ID is not canonical")
+              claim_ids.append(claim_id)
+              text(claim["text"], f"claim[{index}].text", 1000)
+              proof_ids = claim["proofIds"]
+              if (
+                  not isinstance(proof_ids, list)
+                  or not proof_ids
+                  or proof_ids != sorted(set(proof_ids))
+                  or any(proof not in allowed_proofs for proof in proof_ids)
+              ):
+                  raise SystemExit("claim proof IDs are not exact")
+          if claim_ids != sorted(set(claim_ids)):
+              raise SystemExit("claim IDs must be sorted and unique")
+          video = exact_keys(
+              content["videoReview"],
+              {
+                  "spokenLanguage",
+                  "subtitlesLanguage",
+                  "completeEnglishTranslation",
+                  "functioningProjectShown",
+                  "thirdPartyMarksAndMusicAuthorized",
+                  "allThirdPartyMaterialAuthorized",
+                  "claims",
+                  "mediaInventory",
+              },
+              "videoReview",
+          )
+          if video["spokenLanguage"] not in {"en", "none"}:
+              raise SystemExit("spokenLanguage is invalid")
+          if video["subtitlesLanguage"] not in {"en", "none"}:
+              raise SystemExit("subtitlesLanguage is invalid")
+          if (
+              video["spokenLanguage"] != "en"
+              and video["subtitlesLanguage"] != "en"
+          ):
+              raise SystemExit("video requires English narration or subtitles")
+          for key in (
+              "completeEnglishTranslation",
+              "functioningProjectShown",
+              "thirdPartyMarksAndMusicAuthorized",
+              "allThirdPartyMaterialAuthorized",
+          ):
+              if video[key] is not True:
+                  raise SystemExit(f"videoReview.{key} must be true")
+          video_claims = video["claims"]
+          if (
+              not isinstance(video_claims, list)
+              or not 1 <= len(video_claims) <= 64
+              or video_claims != sorted(set(video_claims))
+          ):
+              raise SystemExit("video claims must be sorted and unique")
+          for index, value in enumerate(video_claims):
+              text(value, f"video claim[{index}]", 1000)
+          if (
+              not isinstance(video["mediaInventory"], list)
+              or not 1 <= len(video["mediaInventory"]) <= 128
+          ):
+              raise SystemExit("media inventory must not be empty")
+          for index, item in enumerate(video["mediaInventory"]):
+              exact_keys(
+                  item,
+                  {"name", "source", "authorization"},
+                  f"media inventory[{index}]",
+              )
+              for key in ("name", "source", "authorization"):
+                  text(item[key], f"media inventory[{index}].{key}", 2048)
+          disclosures = exact_keys(
+              content["disclosures"],
+              {
+                  "preExistingWorkInventory",
+                  "thirdPartyInventory",
+                  "allNonStandardPreExistingWorkDisclosed",
+                  "workDescribedAndSubmittedBuiltDuringPeriod",
+                  "standardToolsOnlyExcludedFromDisclosure",
+                  "thirdPartyIntegrationsAuthorized",
+                  "originalWorkOwnershipReviewed",
+                  "crossMediumConsistent",
+              },
+              "disclosures",
+          )
+          for key in (
+              "allNonStandardPreExistingWorkDisclosed",
+              "workDescribedAndSubmittedBuiltDuringPeriod",
+              "standardToolsOnlyExcludedFromDisclosure",
+              "thirdPartyIntegrationsAuthorized",
+              "originalWorkOwnershipReviewed",
+              "crossMediumConsistent",
+          ):
+              if disclosures[key] is not True:
+                  raise SystemExit(f"disclosures.{key} must be true")
+          inventory_contracts = {
+              "preExistingWorkInventory": {
+                  "name", "source", "relationship", "disclosure"
+              },
+              "thirdPartyInventory": {
+                  "name", "purpose", "licenseOrTerms", "authorization"
+              },
+          }
+          for key, fields in inventory_contracts.items():
+              inventory = disclosures[key]
+              if (
+                  not isinstance(inventory, list)
+                  or not 1 <= len(inventory) <= 128
+              ):
+                  raise SystemExit(f"{key} must not be empty")
+              names = []
+              for index, item in enumerate(inventory):
+                  exact_keys(item, fields, f"{key}[{index}]")
+                  names.append(
+                      text(item["name"], f"{key}[{index}].name", 2048)
+                  )
+                  for field in fields - {"name"}:
+                      text(
+                          item[field],
+                          f"{key}[{index}].{field}",
+                          4096,
+                      )
+              if names != sorted(set(names)):
+                  raise SystemExit(
+                      f"{key} names must be sorted and unique"
+                  )
+          rules = exact_keys(
+              content["rules"],
+              {"officialRulesUrl", "submissionStart", "submissionEnd"},
+              "rules",
+          )
+          if rules != {
+              "officialRulesUrl": "https://datahub.devpost.com/rules",
+              "submissionStart": "2026-07-06T13:00:00Z",
+              "submissionEnd": "2026-08-10T21:00:00Z",
+          }:
+              raise SystemExit("official rules are not exact")
+          if written["repositoryUrl"] != (
+              "https://github.com/upgradedev/archon-datahub"
+          ):
+              raise SystemExit("repository URL is not canonical")
+          expected = {
+              "schemaVersion": "archon.submission-content-projection/v1",
+              "releaseSha": os.environ["RELEASE_SHA"],
+              "contentDigest": digest(raw),
+              "submissionFieldsDigest": digest(canonical(written)),
+              "submissionClaimsDigest": digest(canonical(claims)),
+              "videoClaimsDigest": digest(canonical(video_claims)),
+              "mediaReviewDigest": digest(canonical(video)),
+              "preExistingWorkInventoryDigest": digest(
+                  canonical(disclosures["preExistingWorkInventory"])
+              ),
+              "thirdPartyInventoryDigest": digest(
+                  canonical(disclosures["thirdPartyInventory"])
+              ),
+              "rulesSnapshotDigest": digest(canonical(rules)),
+              "writtenFields": written,
+              "languages": languages,
+              "videoReview": video,
+              "disclosures": disclosures,
+              "rules": rules,
+          }
+          if projection != expected:
+              raise SystemExit("content projection was not independently reproduced")
+          PY
+          application_url="$(
+            jq -er '.facts.applicationUrl' \
+              "${RUNNER_TEMP}/submission-content-project-access-review/receipts/SQ3.json"
+          )"
+          test "$(
+            jq -er '.writtenFields.applicationUrl' \
+              "${root}/content-projection.json"
+          )" = "${application_url}"
+          repository_created="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}" \
+              --jq '.created_at'
+          )"
+          git rev-list --reverse "${RELEASE_SHA}" \
+            >"${RUNNER_TEMP}/submission-content-review-commits.txt"
+          HISTORY_PATH="${root}/history.json" \
+          COMMITS_PATH="${RUNNER_TEMP}/submission-content-review-commits.txt" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+          REPOSITORY_CREATED="${repository_created}" \
+            python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          def git(*arguments):
+              return subprocess.run(
+                  ["git", *arguments],
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  text=True,
+              ).stdout.strip()
+
+          def canonical(value):
+              return (
+                  json.dumps(value, separators=(",", ":"), sort_keys=True)
+                  + "\n"
+              ).encode()
+
+          commits = pathlib.Path(os.environ["COMMITS_PATH"]).read_text().splitlines()
+          if not commits:
+              raise SystemExit("release has no reachable commits")
+          rows = []
+          start = dt.datetime(2026, 7, 6, 13, 0, 0, tzinfo=dt.timezone.utc)
+          end = dt.datetime(2026, 8, 10, 21, 0, 0, tzinfo=dt.timezone.utc)
+          for commit in commits:
+              fields = git(
+                  "show",
+                  "-s",
+                  "--format=%H%x00%aI%x00%cI%x00%P",
+                  commit,
+              ).split("\x00")
+              if len(fields) != 4 or fields[0] != commit:
+                  raise SystemExit("Git history projection is malformed")
+              authored = dt.datetime.fromisoformat(fields[1])
+              committed = dt.datetime.fromisoformat(fields[2])
+              if not start <= authored.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit authored outside official period")
+              if not start <= committed.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit committed outside official period")
+              rows.append(
+                  {
+                      "sha": commit,
+                      "authoredAt": authored.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "committedAt": committed.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "parents": fields[3].split() if fields[3] else [],
+                  }
+              )
+          if rows[0]["parents"]:
+              raise SystemExit("root commit unexpectedly has parents")
+          if rows[-1]["sha"] != os.environ["RELEASE_SHA"]:
+              raise SystemExit("release is not the final reachable commit")
+          history_digest = (
+              "sha256:" + hashlib.sha256(canonical(rows)).hexdigest()
+          )
+          expected = {
+              "schemaVersion": "archon.submission-history/v1",
+              "projectStartedAt": rows[0]["authoredAt"],
+              "repositoryCreatedAt": os.environ["REPOSITORY_CREATED"],
+              "rootCommitSha": rows[0]["sha"],
+              "rootCommitAuthoredAt": rows[0]["authoredAt"],
+              "rootCommitCommittedAt": rows[0]["committedAt"],
+              "rootCommitParentCount": 0,
+              "releaseCommitSha": rows[-1]["sha"],
+              "releaseCommitCommittedAt": rows[-1]["committedAt"],
+              "reachableCommitCount": len(rows),
+              "allReachableCommitsWithinSubmissionPeriod": True,
+              "historyDigest": history_digest,
+              "commits": rows,
+          }
+          observed = json.loads(pathlib.Path(os.environ["HISTORY_PATH"]).read_text())
+          if observed != expected:
+              raise SystemExit("Git history was not independently reproduced")
+          PY
+          video_preflight="$(
+            mktemp "${RUNNER_TEMP}/submission-content-review-video-preflight.XXXXXX.json"
+          )"
+          python3 scripts/validate-submission-video.py \
+            preflight \
+            --url "${VIDEO_URL}" \
+            --output "${video_preflight}"
+          probe_url="$(jq -er '.url' "${video_preflight}")"
+          test "${probe_url}" = "${VIDEO_URL}"
+          video_body="${RUNNER_TEMP}/submission-content-review-video.body"
+          video_meta="${RUNNER_TEMP}/submission-content-review-video.http"
+          curl \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --tlsv1.2 \
+            --max-redirs 0 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --max-filesize 10485760 \
+            --header 'Accept: text/html,application/xhtml+xml' \
+            --header 'User-Agent: archon-submission-content-review/1' \
+            --output "${video_body}" \
+            --write-out \
+              '%{http_code}\n%{num_redirects}\n%{url_effective}\n%{ssl_verify_result}\n%{size_download}\n' \
+            "${probe_url}" >"${video_meta}"
+          test "$(sed -n '1p' "${video_meta}")" = "200"
+          test "$(sed -n '2p' "${video_meta}")" = "0"
+          test "$(sed -n '3p' "${video_meta}")" = "${probe_url}"
+          test "$(sed -n '4p' "${video_meta}")" = "0"
+          reviewed_video="${RUNNER_TEMP}/submission-content-review-video.json"
+          python3 scripts/validate-submission-video.py \
+            revalidate \
+            --url "${probe_url}" \
+            --body "${video_body}" \
+            --prepared "${root}/video.json" \
+            --output "${reviewed_video}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Assemble exact reviewed SQ6, SQ7, and SQ8 facts
+        id: package
+        env:
+          ACTOR_ID: ${{ steps.approval.outputs.actor_id }}
+          APPROVAL_COMMENT_DIGEST: ${{ steps.approval.outputs.comment_digest }}
+          APPROVAL_RECEIPT_DIGEST: ${{ steps.approval.outputs.receipt_digest }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_DIGEST: ${{ needs.prepare.outputs.candidate_digest }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          ENVIRONMENT_ID: ${{ steps.approval.outputs.environment_id }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          REVIEWED_AT: ${{ steps.approval.outputs.reviewed_at }}
+          REVIEWER_ID: ${{ steps.approval.outputs.reviewer_id }}
+          TRIGGERING_ACTOR_ID: ${{ steps.approval.outputs.triggering_actor_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          candidate="${RUNNER_TEMP}/submission-content-candidate-reviewed"
+          projection="${candidate}/content-projection.json"
+          video="${candidate}/video.json"
+          reviewed_video="${RUNNER_TEMP}/submission-content-review-video.json"
+          history="${candidate}/history.json"
+          facts="${RUNNER_TEMP}/submission-content-facts"
+          output="${RUNNER_TEMP}/submission-content-evidence"
+          test ! -e "${facts}"
+          test ! -e "${output}"
+          mkdir --mode=0700 "${facts}"
+          application_url="$(
+            jq -er '.facts.applicationUrl' \
+              "${RUNNER_TEMP}/submission-content-project-access-review/receipts/SQ3.json"
+          )"
+          notice_digest="sha256:$(sha256sum NOTICE.md | awk '{print $1}')"
+          testing_digest="sha256:$(
+            sha256sum docs/JUDGE_TESTING.md | awk '{print $1}'
+          )"
+          preexisting_digest="$(
+            jq -er '.preExistingWorkInventoryDigest' "${projection}"
+          )"
+          third_party_digest="$(
+            jq -er '.thirdPartyInventoryDigest' "${projection}"
+          )"
+          disclosure_set_digest="sha256:$(
+            jq -cnS \
+              --arg noticeDigest "${notice_digest}" \
+              --arg preExistingWorkInventoryDigest "${preexisting_digest}" \
+              --arg thirdPartyInventoryDigest "${third_party_digest}" '
+                {
+                  noticeDigest: $noticeDigest,
+                  preExistingWorkInventoryDigest:
+                    $preExistingWorkInventoryDigest,
+                  thirdPartyInventoryDigest: $thirdPartyInventoryDigest
+                }
+              ' |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -cnS \
+            --slurpfile projection "${projection}" \
+            --arg reviewedAt "${REVIEWED_AT}" \
+            --arg testingDigest "${testing_digest}" '
+              {
+                allWrittenFieldsComplete: true,
+                submissionLanguage:
+                  $projection[0].languages.submission,
+                testingInstructionsLanguage:
+                  $projection[0].languages.testingInstructions,
+                completeEnglishTranslation: true,
+                submissionFieldsDigest:
+                  $projection[0].submissionFieldsDigest,
+                testingInstructionsPath: "docs/JUDGE_TESTING.md",
+                testingInstructionsDigest: $testingDigest,
+                claimsDigest: $projection[0].submissionClaimsDigest,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${facts}/SQ6.json"
+          jq -cnS \
+            --slurpfile projection "${projection}" \
+            --slurpfile reviewedVideo "${reviewed_video}" \
+            --slurpfile video "${video}" \
+            --arg applicationUrl "${application_url}" \
+            --arg reviewedAt "${REVIEWED_AT}" '
+              {
+                videoUrl: $video[0].url,
+                publiclyAccessible: $video[0].publiclyAccessible,
+                loggedOutAccessible: $video[0].loggedOutAccessible,
+                durationSeconds: $video[0].durationSeconds,
+                providerResponseDigests: {
+                  preparedResponseDigest: $video[0].responseDigest,
+                  reviewResponseDigest: $reviewedVideo[0].responseDigest
+                },
+                spokenLanguage:
+                  $projection[0].videoReview.spokenLanguage,
+                subtitlesLanguage:
+                  $projection[0].videoReview.subtitlesLanguage,
+                completeEnglishTranslation:
+                  $projection[0].videoReview.completeEnglishTranslation,
+                functioningProjectShown:
+                  $projection[0].videoReview.functioningProjectShown,
+                thirdPartyMarksAndMusicAuthorized:
+                  $projection[0].videoReview
+                  .thirdPartyMarksAndMusicAuthorized,
+                allThirdPartyMaterialAuthorized:
+                  $projection[0].videoReview
+                  .allThirdPartyMaterialAuthorized,
+                mediaReviewDigest: $projection[0].mediaReviewDigest,
+                shownApplicationUrl: $applicationUrl,
+                claimsDigest: $projection[0].videoClaimsDigest,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${facts}/SQ7.json"
+          jq -cnS \
+            --slurpfile candidate "${candidate}/candidate.json" \
+            --slurpfile history "${history}" \
+            --slurpfile projection "${projection}" \
+            --arg approvalReceiptDigest "${APPROVAL_RECEIPT_DIGEST}" \
+            --arg approvalCommentDigest "${APPROVAL_COMMENT_DIGEST}" \
+            --arg candidateDigest "${CANDIDATE_DIGEST}" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg disclosureSetDigest "${disclosure_set_digest}" \
+            --arg noticeDigest "${notice_digest}" \
+            --arg reviewedAt "${REVIEWED_AT}" \
+            --arg testingDigest "${testing_digest}" \
+            --argjson actorId "${ACTOR_ID}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson environmentId "${ENVIRONMENT_ID}" \
+            --argjson reviewerId "${REVIEWER_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${TRIGGERING_ACTOR_ID}" '
+              {
+                rules: {
+                  officialRulesUrl:
+                    $projection[0].rules.officialRulesUrl,
+                  snapshotDigest:
+                    $projection[0].rulesSnapshotDigest,
+                  submissionStart:
+                    $projection[0].rules.submissionStart,
+                  submissionEnd:
+                    $projection[0].rules.submissionEnd
+                },
+                projectHistory:
+                  (
+                    $history[0] |
+                    del(.schemaVersion, .commits)
+                  ),
+                reviewedSurfaces: [
+                  "NOTICE.md",
+                  "repository-history",
+                  "submission-fields",
+                  "testing-instructions",
+                  "video"
+                ],
+                noticeDigest: $noticeDigest,
+                repositoryHistoryDigest:
+                  $history[0].historyDigest,
+                submissionFieldsDigest:
+                  $projection[0].submissionFieldsDigest,
+                testingInstructionsDigest: $testingDigest,
+                submissionClaimsDigest:
+                  $projection[0].submissionClaimsDigest,
+                videoClaimsDigest:
+                  $projection[0].videoClaimsDigest,
+                preExistingWorkInventoryDigest:
+                  $projection[0].preExistingWorkInventoryDigest,
+                thirdPartyInventoryDigest:
+                  $projection[0].thirdPartyInventoryDigest,
+                disclosureSetDigest: $disclosureSetDigest,
+                allNonStandardPreExistingWorkDisclosed:
+                  $projection[0].disclosures
+                  .allNonStandardPreExistingWorkDisclosed,
+                workDescribedAndSubmittedBuiltDuringPeriod:
+                  $projection[0].disclosures
+                  .workDescribedAndSubmittedBuiltDuringPeriod,
+                standardToolsOnlyExcludedFromDisclosure:
+                  $projection[0].disclosures
+                  .standardToolsOnlyExcludedFromDisclosure,
+                thirdPartyIntegrationsAuthorized:
+                  $projection[0].disclosures
+                  .thirdPartyIntegrationsAuthorized,
+                originalWorkOwnershipReviewed:
+                  $projection[0].disclosures
+                  .originalWorkOwnershipReviewed,
+                crossMediumConsistent:
+                  $projection[0].disclosures.crossMediumConsistent,
+                reviewApproval: {
+                  approvalMode: "solo-owner",
+                  environment: "submission-content-review",
+                  workflowPath:
+                    ".github/workflows/submission-content-review.yml",
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  environmentId: $environmentId,
+                  workflowActorId: $actorId,
+                  triggeringActorId: $triggeringActorId,
+                  reviewerId: $reviewerId,
+                  candidateRunAttempt: $candidateRunAttempt,
+                  candidateArtifactId: $candidateArtifactId,
+                  candidateArtifactDigest: $candidateArtifactDigest,
+                  candidateDigest: $candidateDigest,
+                  approvalCommentDigest: $approvalCommentDigest,
+                  approvalReceiptDigest: $approvalReceiptDigest
+                },
+                finalizedAt: $candidate[0].finalizedAt,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${facts}/SQ8.json"
+          test "$(
+            find "${facts}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' SQ6.json SQ7.json SQ8.json
+          )"
+          test "$(
+            jq -r '.reviewedAt' \
+              "${facts}/SQ6.json" \
+              "${facts}/SQ7.json" \
+              "${facts}/SQ8.json" |
+              LC_ALL=C sort -u |
+              wc -l
+          )" = "1"
+          validation="${RUNNER_TEMP}/submission-content-assembly.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            assemble-standard \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key content-review \
+            --facts-dir "${facts}" \
+            --output-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md >"${validation}"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" '
+              .schemaVersion ==
+                "archon.submission-standard-source-validation/v1" and
+              .repository == "upgradedev/archon-datahub" and
+              .releaseSha == $release and
+              .sourceKey == "content-review" and
+              .workflowPath ==
+                ".github/workflows/submission-content-review.yml" and
+              .artifactName ==
+                (
+                  "submission-content-review-" +
+                  $release + "-" + ($attempt | tostring)
+                ) and
+              .predicateType ==
+                "https://archon.datahub.dev/attestations/" +
+                "submission-content-review/v1" and
+              .subjectCount == 16 and
+              .proofIds == ["SQ6", "SQ7", "SQ8"] and
+              .result == "verified"
+            ' "${validation}" >/dev/null
+          test "$(
+            find "${output}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/SQ6.json \
+              proofs/SQ7.json \
+              proofs/SQ8.json \
+              support/SQ6/english-review.json \
+              support/SQ6/submission-fields.json \
+              support/SQ6/testing-instructions.json \
+              support/SQ7/english-accessibility.json \
+              support/SQ7/functioning-footage-review.json \
+              support/SQ7/logged-out-video-probe.json \
+              support/SQ7/media-rights.json \
+              support/SQ7/provider-metadata.json \
+              support/SQ8/cross-medium-review.json \
+              support/SQ8/solo-owner-approval.json \
+              support/SQ8/preexisting-work-inventory.json \
+              support/SQ8/repository-history.json
+          )"
+          test "$(wc -l <"${output}/SHA256SUMS")" = "16"
+          (
+            cd "${output}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          if grep \
+            --recursive \
+            --binary-files=without-match \
+            --extended-regexp \
+            '(bedrock-api-key-[A-Za-z0-9_+/=-]{16,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})' \
+            "${output}" "${candidate}"; then
+            echo "::error::Retained submission evidence contains credential-shaped bytes"
+            exit 1
+          fi
+          {
+            echo "artifact_name=submission-content-review-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Recheck exact source selection and canonical state before retention
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          CANDIDATE_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact_name }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.prepare.outputs.producer_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "${CANDIDATE_ARTIFACT_NAME}" = \
+            "submission-content-review-candidate-${RELEASE_SHA}-${CANDIDATE_RUN_ATTEMPT}"
+          current_release="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${current_release}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          candidate="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name "${CANDIDATE_ARTIFACT_NAME}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $release
+            ' <<<"${candidate}" >/dev/null
+          upstream_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${PROJECT_ACCESS_RUN_ID}"
+          )"
+          upstream_attempt="$(jq -er '.run_attempt' <<<"${upstream_run}")"
+          upstream_artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${PROJECT_ACCESS_RUN_ID}/artifacts?per_page=100"
+          )"
+          upstream_selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-project-access-${RELEASE_SHA}-" \
+              --run-id "${PROJECT_ACCESS_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${upstream_attempt}" \
+              <<<"${upstream_artifacts}"
+          )"
+          binding="$(
+            cat \
+              "${RUNNER_TEMP}/submission-content-candidate-reviewed/project-access-binding.json"
+          )"
+          jq -e \
+            --argjson binding "${binding}" '
+              .producerAttempt == $binding.source.runAttempt and
+              .metadata.id == $binding.artifact.id and
+              .metadata.name == $binding.artifact.name and
+              .metadata.digest == $binding.artifact.digest
+            ' <<<"${upstream_selected}" >/dev/null
+
+      - name: Retain exact reviewed content subjects
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-content-evidence
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 90
+
+  attest:
+    name: Independently revalidate and attest reviewed subjects
+    needs: review
+    if: needs.review.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind attester to exact current workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-content-review.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${PROJECT_ACCESS_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test -n "${VIDEO_URL}"
+          current_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          )"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .path ==
+                ".github/workflows/submission-content-review.yml" and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              (.actor.id | type) == "number" and
+              .actor.id > 0 and
+              (.triggering_actor.id | type) == "number" and
+              .triggering_actor.id > 0
+            ' <<<"${current_run}" >/dev/null
+
+      - name: Check out exact unprivileged release with complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve latest retained reviewed producer
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-content-review-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          producer_attempt="$(jq -er '.producerAttempt' <<<"${selected}")"
+          [[ "${producer_attempt}" =~ ^[1-9][0-9]*$ ]]
+          (( producer_attempt <= GITHUB_RUN_ATTEMPT ))
+          artifact_id="$(jq -er '.metadata.id' <<<"${selected}")"
+          artifact_digest="$(jq -er '.metadata.digest' <<<"${selected}")"
+          [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo "artifact_id=${artifact_id}"
+            echo "artifact_name=$(jq -er '.metadata.name' <<<"${selected}")"
+            echo "artifact_digest=${artifact_digest}"
+            echo "producer_attempt=${producer_attempt}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact retained reviewed subjects
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.artifacts.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-content-attestation
+          digest-mismatch: error
+
+      - name: Validate exact retry-safe standard-v1 source
+        env:
+          ARTIFACT_NAME: ${{ steps.artifacts.outputs.artifact_name }}
+          PRODUCER_ATTEMPT: ${{ steps.artifacts.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-content-attestation"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          validation="${RUNNER_TEMP}/submission-content-attester-validation.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key content-review \
+            --source-dir "${root}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${PRODUCER_ATTEMPT}" \
+            --notice NOTICE.md >"${validation}"
+          jq -e \
+            --arg artifactName "${ARTIFACT_NAME}" \
+            --arg release "${RELEASE_SHA}" '
+              .schemaVersion ==
+                "archon.submission-standard-source-validation/v1" and
+              .sourceKey == "content-review" and
+              .releaseSha == $release and
+              .artifactName == $artifactName and
+              .subjectCount == 16 and
+              .proofIds == ["SQ6", "SQ7", "SQ8"] and
+              .result == "verified"
+            ' "${validation}" >/dev/null
+          test "$(
+            find "${root}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/SQ6.json \
+              proofs/SQ7.json \
+              proofs/SQ8.json \
+              support/SQ6/english-review.json \
+              support/SQ6/submission-fields.json \
+              support/SQ6/testing-instructions.json \
+              support/SQ7/english-accessibility.json \
+              support/SQ7/functioning-footage-review.json \
+              support/SQ7/logged-out-video-probe.json \
+              support/SQ7/media-rights.json \
+              support/SQ7/provider-metadata.json \
+              support/SQ8/cross-medium-review.json \
+              support/SQ8/solo-owner-approval.json \
+              support/SQ8/preexisting-work-inventory.json \
+              support/SQ8/repository-history.json
+          )"
+          test "$(wc -l <"${root}/SHA256SUMS")" = "16"
+
+      - name: Resolve exact signed candidate provenance
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ steps.artifacts.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          retained="${RUNNER_TEMP}/submission-content-attestation"
+          candidate_attempt="$(
+            jq -er '.facts.reviewApproval.candidateRunAttempt' \
+              "${retained}/proofs/SQ8.json"
+          )"
+          candidate_id="$(
+            jq -er '.facts.reviewApproval.candidateArtifactId' \
+              "${retained}/proofs/SQ8.json"
+          )"
+          candidate_digest="$(
+            jq -er '.facts.reviewApproval.candidateArtifactDigest' \
+              "${retained}/proofs/SQ8.json"
+          )"
+          [[ "${candidate_attempt}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${candidate_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${candidate_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          (( candidate_attempt <= PRODUCER_ATTEMPT ))
+          candidate_name="submission-content-review-candidate-${RELEASE_SHA}-${candidate_attempt}"
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy exact-current \
+              --artifact-prefix "submission-content-review-candidate-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${candidate_attempt}" \
+              <<<"${artifacts}"
+          )"
+          jq -e \
+            --arg digest "${candidate_digest}" \
+            --arg name "${candidate_name}" \
+            --argjson artifactId "${candidate_id}" \
+            --argjson attempt "${candidate_attempt}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest
+            ' <<<"${selected}" >/dev/null
+          {
+            echo "artifact_digest=${candidate_digest}"
+            echo "artifact_id=${candidate_id}"
+            echo "artifact_name=${candidate_name}"
+            echo "run_attempt=${candidate_attempt}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact signed immutable candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.candidate.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-content-candidate-attester
+          digest-mismatch: error
+
+      - name: Independently re-resolve exact project-access attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: project-access
+          SOURCE_RUN_ID: ${{ inputs.project_access_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-content-project-access-attester
+        run: |
+          set -euo pipefail
+          test ! -e "${SUBMISSION_EVIDENCE_DIR}"
+          mkdir --mode=0700 "${SUBMISSION_EVIDENCE_DIR}"
+          bash scripts/collect-submission-evidence-source.sh
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ3.json"
+          test -f "${SUBMISSION_EVIDENCE_DIR}/receipts/SQ4.json"
+
+      - name: Independently reproduce candidate content and Git history
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.artifact_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.candidate.outputs.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-content-candidate-attester"
+          test -d "${root}"
+          test ! -L "${root}"
+          test -z "$(find "${root}" -type l -print -quit)"
+          test -z "$(
+            find "${root}" -mindepth 1 ! -type f -print -quit
+          )"
+          test "$(
+            find "${root}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              candidate.json \
+              content-projection.json \
+              content.json \
+              history.json \
+              project-access-binding.json \
+              video.json
+          )"
+          test "$(wc -l <"${root}/SHA256SUMS")" = "6"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          candidate_digest="sha256:$(
+            sha256sum "${root}/candidate.json" | awk '{print $1}'
+          )"
+          test "${candidate_digest}" = "$(
+            jq -er '.facts.reviewApproval.candidateDigest' \
+              "${RUNNER_TEMP}/submission-content-attestation/proofs/SQ8.json"
+          )"
+          cmp --silent docs/SUBMISSION_CONTENT.json "${root}/content.json"
+          cmp --silent \
+            "${RUNNER_TEMP}/submission-content-project-access-attester/upstream-verification/project-access/binding.json" \
+            "${root}/project-access-binding.json"
+          candidate_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${CANDIDATE_RUN_ATTEMPT}"
+          )"
+          candidate_actor_id="$(jq -er '.actor.id' <<<"${candidate_run}")"
+          candidate_triggering_actor_id="$(
+            jq -er '.triggering_actor.id' <<<"${candidate_run}"
+          )"
+          [[ "${candidate_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${candidate_triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          jq -e \
+            --arg contentDigest "$(
+              jq -er '.contentDigest' "${root}/content-projection.json"
+            )" \
+            --arg historyDigest "$(
+              jq -er '.historyDigest' "${root}/history.json"
+            )" \
+            --arg noticeDigest "sha256:$(
+              sha256sum NOTICE.md | awk '{print $1}'
+            )" \
+            --arg projectAccessBindingDigest "sha256:$(
+              sha256sum "${root}/project-access-binding.json" |
+                awk '{print $1}'
+            )" \
+            --arg release "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg testingDigest "sha256:$(
+              sha256sum docs/JUDGE_TESTING.md | awk '{print $1}'
+            )" \
+            --arg videoDigest "sha256:$(
+              sha256sum "${root}/video.json" | awk '{print $1}'
+            )" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --arg artifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --argjson actorId "${candidate_actor_id}" \
+            --argjson attempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson projectRunId "${PROJECT_ACCESS_RUN_ID}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${candidate_triggering_actor_id}" '
+              keys == [
+                "contentDigest",
+                "finalizedAt",
+                "historyDigest",
+                "noticeDigest",
+                "projectAccessBindingDigest",
+                "projectAccessRunId",
+                "releaseSha",
+                "repository",
+                "schemaVersion",
+                "testingInstructionsDigest",
+                "videoObservationDigest",
+                "workflow"
+              ] and
+              .schemaVersion ==
+                "archon.submission-content-review-candidate/v1" and
+              .repository == $repository and
+              .releaseSha == $release and
+              .projectAccessRunId == $projectRunId and
+              .projectAccessBindingDigest ==
+                $projectAccessBindingDigest and
+              .contentDigest == $contentDigest and
+              .videoObservationDigest == $videoDigest and
+              .historyDigest == $historyDigest and
+              .noticeDigest == $noticeDigest and
+              .testingInstructionsDigest == $testingDigest and
+              .workflow == {
+                path: ".github/workflows/submission-content-review.yml",
+                runId: $runId,
+                runAttempt: $attempt,
+                actorId: $actorId,
+                triggeringActorId: $triggeringActorId
+              } and
+              ($artifactId > 0) and
+              ($artifactDigest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${root}/candidate.json" >/dev/null
+          CONTENT_PATH="${root}/content.json" \
+          PROJECTION_PATH="${root}/content-projection.json" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+            python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+
+          def reject_duplicates(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise SystemExit(f"duplicate JSON key: {key}")
+                  result[key] = value
+              return result
+
+          def load(path):
+              raw = pathlib.Path(path).read_bytes()
+              value = json.loads(
+                  raw.decode("utf-8"),
+                  object_pairs_hook=reject_duplicates,
+                  parse_constant=lambda constant: (_ for _ in ()).throw(
+                      ValueError(f"invalid constant {constant}")
+                  ),
+              )
+              return raw, value
+
+          def canonical(value):
+              return (
+                  json.dumps(
+                      value,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                      sort_keys=True,
+                  )
+                  + "\n"
+              ).encode()
+
+          def digest(value):
+              return "sha256:" + hashlib.sha256(value).hexdigest()
+
+          raw, content = load(os.environ["CONTENT_PATH"])
+          _, projection = load(os.environ["PROJECTION_PATH"])
+          if set(content) != {
+              "schemaVersion",
+              "status",
+              "writtenFields",
+              "languages",
+              "submissionClaims",
+              "videoReview",
+              "disclosures",
+              "rules",
+          }:
+              raise SystemExit("content has missing or unknown fields")
+          if (
+              content["schemaVersion"] != "archon.submission-content-input/v1"
+              or content["status"] != "final"
+              or content["languages"]
+              != {"submission": "en", "testingInstructions": "en"}
+              or content["rules"]
+              != {
+                  "officialRulesUrl": "https://datahub.devpost.com/rules",
+                  "submissionStart": "2026-07-06T13:00:00Z",
+                  "submissionEnd": "2026-08-10T21:00:00Z",
+              }
+              or content["writtenFields"]["repositoryUrl"]
+              != "https://github.com/upgradedev/archon-datahub"
+          ):
+              raise SystemExit("final content bindings are not exact")
+          for value in content["writtenFields"].values():
+              values = value if isinstance(value, list) else [value]
+              if any(
+                  not isinstance(item, str)
+                  or re.search(
+                      r"\b(?:todo|tbd|placeholder|replace(?:[\s-]+with))\b|example\.com|ArchonDemo1",
+                      item,
+                      re.IGNORECASE,
+                  )
+                  for item in values
+              ):
+                  raise SystemExit("written content contains deferred text")
+          video = content["videoReview"]
+          disclosures = content["disclosures"]
+          for key in (
+              "completeEnglishTranslation",
+              "functioningProjectShown",
+              "thirdPartyMarksAndMusicAuthorized",
+              "allThirdPartyMaterialAuthorized",
+          ):
+              if video.get(key) is not True:
+                  raise SystemExit("video review is not finalized")
+          for key in (
+              "allNonStandardPreExistingWorkDisclosed",
+              "workDescribedAndSubmittedBuiltDuringPeriod",
+              "standardToolsOnlyExcludedFromDisclosure",
+              "thirdPartyIntegrationsAuthorized",
+              "originalWorkOwnershipReviewed",
+              "crossMediumConsistent",
+          ):
+              if disclosures.get(key) is not True:
+                  raise SystemExit("disclosure review is not finalized")
+          inventory_contracts = {
+              "preExistingWorkInventory": {
+                  "name", "source", "relationship", "disclosure"
+              },
+              "thirdPartyInventory": {
+                  "name", "purpose", "licenseOrTerms", "authorization"
+              },
+          }
+          for key, fields in inventory_contracts.items():
+              inventory = disclosures.get(key)
+              if (
+                  not isinstance(inventory, list)
+                  or not 1 <= len(inventory) <= 128
+              ):
+                  raise SystemExit("disclosure inventory is not final")
+              names = []
+              for item in inventory:
+                  if not isinstance(item, dict) or set(item) != fields:
+                      raise SystemExit("disclosure inventory schema differs")
+                  names.append(item["name"])
+                  if any(
+                      not isinstance(value, str)
+                      or not value
+                      or re.search(
+                          r"\b(?:todo|tbd|placeholder|replace(?:[\s-]+with))\b|" +
+                          r"example\.com|ArchonDemo1",
+                          value,
+                          re.IGNORECASE,
+                      )
+                      for value in item.values()
+                  ):
+                      raise SystemExit(
+                          "disclosure inventory contains deferred text"
+                      )
+              if names != sorted(set(names)):
+                  raise SystemExit(
+                      "disclosure inventory names are not canonical"
+                  )
+          expected_digests = {
+              "contentDigest": digest(raw),
+              "submissionFieldsDigest": digest(
+                  canonical(content["writtenFields"])
+              ),
+              "submissionClaimsDigest": digest(
+                  canonical(content["submissionClaims"])
+              ),
+              "videoClaimsDigest": digest(canonical(video["claims"])),
+              "mediaReviewDigest": digest(canonical(video)),
+              "preExistingWorkInventoryDigest": digest(
+                  canonical(disclosures["preExistingWorkInventory"])
+              ),
+              "thirdPartyInventoryDigest": digest(
+                  canonical(disclosures["thirdPartyInventory"])
+              ),
+              "rulesSnapshotDigest": digest(canonical(content["rules"])),
+          }
+          if (
+              projection.get("schemaVersion")
+              != "archon.submission-content-projection/v1"
+              or projection.get("releaseSha") != os.environ["RELEASE_SHA"]
+          ):
+              raise SystemExit("content projection binding is invalid")
+          for key, value in expected_digests.items():
+              if projection.get(key) != value:
+                  raise SystemExit(f"{key} was not independently reproduced")
+          for key in (
+              "writtenFields",
+              "languages",
+              "videoReview",
+              "disclosures",
+              "rules",
+          ):
+              if projection.get(key) != content[key]:
+                  raise SystemExit(f"{key} projection differs from source")
+          PY
+          application_url="$(
+            jq -er '.facts.applicationUrl' \
+              "${RUNNER_TEMP}/submission-content-project-access-attester/receipts/SQ3.json"
+          )"
+          test "$(
+            jq -er '.writtenFields.applicationUrl' \
+              "${root}/content-projection.json"
+          )" = "${application_url}"
+          repository_created="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}" \
+              --jq '.created_at'
+          )"
+          git rev-list --reverse "${RELEASE_SHA}" \
+            >"${RUNNER_TEMP}/submission-content-attester-commits.txt"
+          HISTORY_PATH="${root}/history.json" \
+          COMMITS_PATH="${RUNNER_TEMP}/submission-content-attester-commits.txt" \
+          RELEASE_SHA="${RELEASE_SHA}" \
+          REPOSITORY_CREATED="${repository_created}" \
+            python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          def git(*arguments):
+              return subprocess.run(
+                  ["git", *arguments],
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  text=True,
+              ).stdout.strip()
+
+          def canonical(value):
+              return (
+                  json.dumps(value, separators=(",", ":"), sort_keys=True)
+                  + "\n"
+              ).encode()
+
+          commits = pathlib.Path(os.environ["COMMITS_PATH"]).read_text().splitlines()
+          if not commits:
+              raise SystemExit("release has no reachable commits")
+          start = dt.datetime(2026, 7, 6, 13, 0, 0, tzinfo=dt.timezone.utc)
+          end = dt.datetime(2026, 8, 10, 21, 0, 0, tzinfo=dt.timezone.utc)
+          rows = []
+          for commit in commits:
+              fields = git(
+                  "show",
+                  "-s",
+                  "--format=%H%x00%aI%x00%cI%x00%P",
+                  commit,
+              ).split("\x00")
+              if len(fields) != 4 or fields[0] != commit:
+                  raise SystemExit("Git history projection is malformed")
+              authored = dt.datetime.fromisoformat(fields[1])
+              committed = dt.datetime.fromisoformat(fields[2])
+              if not start <= authored.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit authored outside official period")
+              if not start <= committed.astimezone(dt.timezone.utc) <= end:
+                  raise SystemExit("commit committed outside official period")
+              rows.append(
+                  {
+                      "sha": commit,
+                      "authoredAt": authored.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "committedAt": committed.astimezone(dt.timezone.utc)
+                      .isoformat()
+                      .replace("+00:00", "Z"),
+                      "parents": fields[3].split() if fields[3] else [],
+                  }
+              )
+          expected = {
+              "schemaVersion": "archon.submission-history/v1",
+              "projectStartedAt": rows[0]["authoredAt"],
+              "repositoryCreatedAt": os.environ["REPOSITORY_CREATED"],
+              "rootCommitSha": rows[0]["sha"],
+              "rootCommitAuthoredAt": rows[0]["authoredAt"],
+              "rootCommitCommittedAt": rows[0]["committedAt"],
+              "rootCommitParentCount": len(rows[0]["parents"]),
+              "releaseCommitSha": rows[-1]["sha"],
+              "releaseCommitCommittedAt": rows[-1]["committedAt"],
+              "reachableCommitCount": len(rows),
+              "allReachableCommitsWithinSubmissionPeriod": True,
+              "historyDigest": (
+                  "sha256:" + hashlib.sha256(canonical(rows)).hexdigest()
+              ),
+              "commits": rows,
+          }
+          observed = json.loads(pathlib.Path(os.environ["HISTORY_PATH"]).read_text())
+          if (
+              rows[0]["parents"]
+              or rows[-1]["sha"] != os.environ["RELEASE_SHA"]
+              or observed != expected
+          ):
+              raise SystemExit("Git history was not independently reproduced")
+          PY
+
+      - name: Independently repeat credentialless exact video observation
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          set -euo pipefail
+          candidate="${RUNNER_TEMP}/submission-content-candidate-attester/video.json"
+          video_preflight="$(
+            mktemp "${RUNNER_TEMP}/submission-content-attester-video-preflight.XXXXXX.json"
+          )"
+          python3 scripts/validate-submission-video.py \
+            preflight \
+            --url "${VIDEO_URL}" \
+            --output "${video_preflight}"
+          probe_url="$(jq -er '.url' "${video_preflight}")"
+          test "${probe_url}" = "${VIDEO_URL}"
+          video_body="${RUNNER_TEMP}/submission-content-attester-video.body"
+          video_meta="${RUNNER_TEMP}/submission-content-attester-video.http"
+          curl \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --tlsv1.2 \
+            --max-redirs 0 \
+            --connect-timeout 15 \
+            --max-time 60 \
+            --max-filesize 10485760 \
+            --header 'Accept: text/html,application/xhtml+xml' \
+            --header 'User-Agent: archon-submission-content-review/1' \
+            --output "${video_body}" \
+            --write-out \
+              '%{http_code}\n%{num_redirects}\n%{url_effective}\n%{ssl_verify_result}\n%{size_download}\n' \
+            "${probe_url}" >"${video_meta}"
+          test "$(sed -n '1p' "${video_meta}")" = "200"
+          test "$(sed -n '2p' "${video_meta}")" = "0"
+          test "$(sed -n '3p' "${video_meta}")" = "${probe_url}"
+          test "$(sed -n '4p' "${video_meta}")" = "0"
+          attester_video="${RUNNER_TEMP}/submission-content-attester-video.json"
+          python3 scripts/validate-submission-video.py \
+            revalidate \
+            --url "${probe_url}" \
+            --body "${video_body}" \
+            --prepared "${candidate}" \
+            --output "${attester_video}"
+
+      - name: Reconstruct exact approval receipt and all retained facts
+        env:
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.artifact_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.candidate.outputs.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ steps.artifacts.outputs.producer_attempt }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          candidate="${RUNNER_TEMP}/submission-content-candidate-attester"
+          retained="${RUNNER_TEMP}/submission-content-attestation"
+          candidate_digest="sha256:$(
+            sha256sum "${candidate}/candidate.json" | awk '{print $1}'
+          )"
+          candidate_json="$(cat "${candidate}/candidate.json")"
+          content_digest="$(jq -er '.contentDigest' <<<"${candidate_json}")"
+          project_access_binding_digest="$(
+            jq -er '.projectAccessBindingDigest' <<<"${candidate_json}"
+          )"
+          video_observation_digest="$(
+            jq -er '.videoObservationDigest' <<<"${candidate_json}"
+          )"
+          test "${content_digest}" = "$(
+            jq -er '.contentDigest' "${candidate}/content-projection.json"
+          )"
+          test "${project_access_binding_digest}" = "sha256:$(
+            sha256sum "${candidate}/project-access-binding.json" |
+              awk '{print $1}'
+          )"
+          test "${video_observation_digest}" = "sha256:$(
+            sha256sum "${candidate}/video.json" | awk '{print $1}'
+          )"
+          actor_id="$(
+            jq -er '.facts.reviewApproval.workflowActorId' \
+              "${retained}/proofs/SQ8.json"
+          )"
+          triggering_actor_id="$(
+            jq -er '.facts.reviewApproval.triggeringActorId' \
+              "${retained}/proofs/SQ8.json"
+          )"
+          [[ "${actor_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${triggering_actor_id}" =~ ^[1-9][0-9]*$ ]]
+          producer_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${PRODUCER_ATTEMPT}"
+          )"
+          jq -e \
+            --argjson actorId "${actor_id}" \
+            --argjson attempt "${PRODUCER_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              .id == $runId and
+              .run_attempt == $attempt and
+              .actor.id == $actorId and
+              .triggering_actor.id == $triggeringActorId and
+              (.actor.login | ascii_downcase) == "upgradedev" and
+              (.triggering_actor.login | ascii_downcase) == "upgradedev"
+            ' <<<"${producer_run}" >/dev/null
+          expected_approval="APPROVE ARCHON SUBMISSION CONTENT run_id=${GITHUB_RUN_ID} run_attempt=${PRODUCER_ATTEMPT} candidate_run_attempt=${CANDIDATE_RUN_ATTEMPT} release_sha=${RELEASE_SHA} project_access_run_id=${PROJECT_ACCESS_RUN_ID} project_access_binding_digest=${project_access_binding_digest} candidate_artifact_id=${CANDIDATE_ARTIFACT_ID} candidate_artifact_digest=${CANDIDATE_ARTIFACT_DIGEST} candidate_digest=${candidate_digest} content_digest=${content_digest} video_observation_digest=${video_observation_digest}"
+          environment_json="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review"
+          )"
+          environment_id="$(jq -er '
+            select(
+              .name == "submission-content-review" and
+              (.id | type) == "number" and
+              .id > 0 and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              all(
+                $rules[0].reviewers[];
+                .type == "User" and
+                (.reviewer.id | type) == "number" and
+                .reviewer.id > 0 and
+                (.reviewer.login | type) == "string" and
+                (.reviewer.login | ascii_downcase) == "upgradedev"
+              )
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid solo-owner reviewer posture")
+            end
+          ' <<<"${environment_json}")"
+          policies="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/environments/submission-content-review/deployment-branch-policies?per_page=100"
+          )"
+          jq -e '
+            ([.[].branch_policies[]] | length) == 1 and
+            [.[].branch_policies[].name] == ["master"]
+          ' <<<"${policies}" >/dev/null
+          approvals="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals"
+          )"
+          matched="$(jq -ce \
+            --arg expected "${expected_approval}" \
+            --argjson actorId "${actor_id}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              [
+                .[] |
+                select(
+                  .state == "approved" and
+                  .comment == $expected and
+                  (.environments | type) == "array" and
+                  (.environments | length) == 1 and
+                  .environments[0].name == "submission-content-review" and
+                  .environments[0].id == $environmentId and
+                  (.user.id | type) == "number" and
+                  (.user.login | type) == "string" and
+                  (.user.id as $id | ($reviewerIds | index($id)) != null) and
+                  (.user.login | ascii_downcase) == "upgradedev" and
+                  .user.id == $actorId and
+                  .user.id == $triggeringActorId
+                )
+              ] |
+              if length == 1 then .[0]
+              else error("expected exactly one matching solo-owner approval")
+              end
+            ' <<<"${approvals}")"
+          reviewer_id="$(jq -er '.user.id' <<<"${matched}")"
+          receipt_dir="${RUNNER_TEMP}/submission-content-attester-approval"
+          test ! -e "${receipt_dir}"
+          mkdir --mode=0700 "${receipt_dir}"
+          receipt="${receipt_dir}/approval-receipt.json"
+          jq -cnS \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${candidate_digest}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched}")" \
+            --arg contentDigest "${content_digest}" \
+            --arg projectAccessBindingDigest "${project_access_binding_digest}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg reviewerLogin "$(jq -er '.user.login' <<<"${matched}")" \
+            --arg workflowPath ".github/workflows/submission-content-review.yml" \
+            --arg workflowRef "${GITHUB_WORKFLOW_REF}" \
+            --arg videoObservationDigest "${video_observation_digest}" \
+            --argjson actorId "${actor_id}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson projectAccessRunId "${PROJECT_ACCESS_RUN_ID}" \
+            --argjson reviewerId "${reviewer_id}" \
+            --argjson runAttempt "${PRODUCER_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              {
+                schemaVersion:
+                  "archon.submission-content-approval/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflow: {
+                  path: $workflowPath,
+                  ref: $workflowRef,
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  actorId: $actorId,
+                  triggeringActorId: $triggeringActorId
+                },
+                environment: {
+                  name: "submission-content-review",
+                  id: $environmentId
+                },
+                approval: {
+                  mode: "solo-owner",
+                  selfApproved: true,
+                  reviewer: {
+                    id: $reviewerId,
+                    login: $reviewerLogin
+                  },
+                  comment: $comment
+                },
+                candidate: {
+                  runAttempt: $candidateRunAttempt,
+                  artifactId: $candidateArtifactId,
+                  artifactDigest: $candidateArtifactDigest,
+                  digest: $candidateDigest,
+                  contentDigest: $contentDigest,
+                  videoObservationDigest: $videoObservationDigest,
+                  projectAccessBindingDigest:
+                    $projectAccessBindingDigest
+                },
+                projectAccessRunId: $projectAccessRunId
+              }
+            ' >"${receipt}"
+          receipt_digest="sha256:$(sha256sum "${receipt}" | awk '{print $1}')"
+          comment_digest="sha256:$(
+            printf '%s' "${expected_approval}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          mapfile -t reviewed_at_values < <(
+            jq -er '.facts.reviewedAt' \
+              "${retained}/proofs/SQ6.json" \
+              "${retained}/proofs/SQ7.json" \
+              "${retained}/proofs/SQ8.json" |
+              LC_ALL=C sort -u
+          )
+          test "${#reviewed_at_values[@]}" = "1"
+          reviewed_at="${reviewed_at_values[0]}"
+          projection="${candidate}/content-projection.json"
+          video="${candidate}/video.json"
+          history="${candidate}/history.json"
+          expected="${RUNNER_TEMP}/submission-content-attester-facts"
+          test ! -e "${expected}"
+          mkdir --mode=0700 "${expected}"
+          application_url="$(
+            jq -er '.facts.applicationUrl' \
+              "${RUNNER_TEMP}/submission-content-project-access-attester/receipts/SQ3.json"
+          )"
+          notice_digest="sha256:$(sha256sum NOTICE.md | awk '{print $1}')"
+          testing_digest="sha256:$(
+            sha256sum docs/JUDGE_TESTING.md | awk '{print $1}'
+          )"
+          preexisting_digest="$(
+            jq -er '.preExistingWorkInventoryDigest' "${projection}"
+          )"
+          third_party_digest="$(
+            jq -er '.thirdPartyInventoryDigest' "${projection}"
+          )"
+          review_response_digest="$(
+            jq -er \
+              '.facts.providerResponseDigests.reviewResponseDigest' \
+              "${retained}/proofs/SQ7.json"
+          )"
+          [[ "${review_response_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          disclosure_set_digest="sha256:$(
+            jq -cnS \
+              --arg noticeDigest "${notice_digest}" \
+              --arg preExistingWorkInventoryDigest "${preexisting_digest}" \
+              --arg thirdPartyInventoryDigest "${third_party_digest}" '
+                {
+                  noticeDigest: $noticeDigest,
+                  preExistingWorkInventoryDigest:
+                    $preExistingWorkInventoryDigest,
+                  thirdPartyInventoryDigest: $thirdPartyInventoryDigest
+                }
+              ' |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -cnS \
+            --slurpfile projection "${projection}" \
+            --arg reviewedAt "${reviewed_at}" \
+            --arg testingDigest "${testing_digest}" '
+              {
+                allWrittenFieldsComplete: true,
+                submissionLanguage:
+                  $projection[0].languages.submission,
+                testingInstructionsLanguage:
+                  $projection[0].languages.testingInstructions,
+                completeEnglishTranslation: true,
+                submissionFieldsDigest:
+                  $projection[0].submissionFieldsDigest,
+                testingInstructionsPath: "docs/JUDGE_TESTING.md",
+                testingInstructionsDigest: $testingDigest,
+                claimsDigest: $projection[0].submissionClaimsDigest,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${expected}/SQ6.json"
+          jq -cnS \
+            --slurpfile projection "${projection}" \
+            --slurpfile video "${video}" \
+            --arg applicationUrl "${application_url}" \
+            --arg reviewResponseDigest "${review_response_digest}" \
+            --arg reviewedAt "${reviewed_at}" '
+              {
+                videoUrl: $video[0].url,
+                publiclyAccessible: $video[0].publiclyAccessible,
+                loggedOutAccessible: $video[0].loggedOutAccessible,
+                durationSeconds: $video[0].durationSeconds,
+                providerResponseDigests: {
+                  preparedResponseDigest: $video[0].responseDigest,
+                  reviewResponseDigest: $reviewResponseDigest
+                },
+                spokenLanguage:
+                  $projection[0].videoReview.spokenLanguage,
+                subtitlesLanguage:
+                  $projection[0].videoReview.subtitlesLanguage,
+                completeEnglishTranslation:
+                  $projection[0].videoReview.completeEnglishTranslation,
+                functioningProjectShown:
+                  $projection[0].videoReview.functioningProjectShown,
+                thirdPartyMarksAndMusicAuthorized:
+                  $projection[0].videoReview
+                  .thirdPartyMarksAndMusicAuthorized,
+                allThirdPartyMaterialAuthorized:
+                  $projection[0].videoReview
+                  .allThirdPartyMaterialAuthorized,
+                mediaReviewDigest: $projection[0].mediaReviewDigest,
+                shownApplicationUrl: $applicationUrl,
+                claimsDigest: $projection[0].videoClaimsDigest,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${expected}/SQ7.json"
+          jq -cnS \
+            --slurpfile candidate "${candidate}/candidate.json" \
+            --slurpfile history "${history}" \
+            --slurpfile projection "${projection}" \
+            --arg approvalCommentDigest "${comment_digest}" \
+            --arg approvalReceiptDigest "${receipt_digest}" \
+            --arg candidateArtifactDigest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg candidateDigest "${candidate_digest}" \
+            --arg disclosureSetDigest "${disclosure_set_digest}" \
+            --arg noticeDigest "${notice_digest}" \
+            --arg reviewedAt "${reviewed_at}" \
+            --arg testingDigest "${testing_digest}" \
+            --argjson actorId "${actor_id}" \
+            --argjson candidateArtifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson candidateRunAttempt "${CANDIDATE_RUN_ATTEMPT}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerId "${reviewer_id}" \
+            --argjson runAttempt "${PRODUCER_ATTEMPT}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson triggeringActorId "${triggering_actor_id}" '
+              {
+                rules: {
+                  officialRulesUrl:
+                    $projection[0].rules.officialRulesUrl,
+                  snapshotDigest:
+                    $projection[0].rulesSnapshotDigest,
+                  submissionStart:
+                    $projection[0].rules.submissionStart,
+                  submissionEnd:
+                    $projection[0].rules.submissionEnd
+                },
+                projectHistory:
+                  ($history[0] | del(.schemaVersion, .commits)),
+                reviewedSurfaces: [
+                  "NOTICE.md",
+                  "repository-history",
+                  "submission-fields",
+                  "testing-instructions",
+                  "video"
+                ],
+                noticeDigest: $noticeDigest,
+                repositoryHistoryDigest:
+                  $history[0].historyDigest,
+                submissionFieldsDigest:
+                  $projection[0].submissionFieldsDigest,
+                testingInstructionsDigest: $testingDigest,
+                submissionClaimsDigest:
+                  $projection[0].submissionClaimsDigest,
+                videoClaimsDigest:
+                  $projection[0].videoClaimsDigest,
+                preExistingWorkInventoryDigest:
+                  $projection[0].preExistingWorkInventoryDigest,
+                thirdPartyInventoryDigest:
+                  $projection[0].thirdPartyInventoryDigest,
+                disclosureSetDigest: $disclosureSetDigest,
+                allNonStandardPreExistingWorkDisclosed:
+                  $projection[0].disclosures
+                  .allNonStandardPreExistingWorkDisclosed,
+                workDescribedAndSubmittedBuiltDuringPeriod:
+                  $projection[0].disclosures
+                  .workDescribedAndSubmittedBuiltDuringPeriod,
+                standardToolsOnlyExcludedFromDisclosure:
+                  $projection[0].disclosures
+                  .standardToolsOnlyExcludedFromDisclosure,
+                thirdPartyIntegrationsAuthorized:
+                  $projection[0].disclosures
+                  .thirdPartyIntegrationsAuthorized,
+                originalWorkOwnershipReviewed:
+                  $projection[0].disclosures
+                  .originalWorkOwnershipReviewed,
+                crossMediumConsistent:
+                  $projection[0].disclosures.crossMediumConsistent,
+                reviewApproval: {
+                  approvalMode: "solo-owner",
+                  environment: "submission-content-review",
+                  workflowPath:
+                    ".github/workflows/submission-content-review.yml",
+                  runId: $runId,
+                  runAttempt: $runAttempt,
+                  environmentId: $environmentId,
+                  workflowActorId: $actorId,
+                  triggeringActorId: $triggeringActorId,
+                  reviewerId: $reviewerId,
+                  candidateRunAttempt: $candidateRunAttempt,
+                  candidateArtifactId: $candidateArtifactId,
+                  candidateArtifactDigest: $candidateArtifactDigest,
+                  candidateDigest: $candidateDigest,
+                  approvalCommentDigest: $approvalCommentDigest,
+                  approvalReceiptDigest: $approvalReceiptDigest
+                },
+                finalizedAt: $candidate[0].finalizedAt,
+                reviewedAt: $reviewedAt
+              }
+            ' >"${expected}/SQ8.json"
+          for proof_id in SQ6 SQ7 SQ8; do
+            jq -cS . "${expected}/${proof_id}.json" \
+              >"${RUNNER_TEMP}/${proof_id}-expected.json"
+            jq -cS '.facts' "${retained}/proofs/${proof_id}.json" \
+              >"${RUNNER_TEMP}/${proof_id}-retained.json"
+            cmp --silent \
+              "${RUNNER_TEMP}/${proof_id}-expected.json" \
+              "${RUNNER_TEMP}/${proof_id}-retained.json"
+          done
+
+      - name: Recheck latest producer, upstream source, and current master
+        env:
+          ARTIFACT_DIGEST: ${{ steps.artifacts.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ steps.artifacts.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.artifacts.outputs.artifact_name }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact_digest }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.artifact_id }}
+          CANDIDATE_ARTIFACT_NAME: ${{ steps.candidate.outputs.artifact_name }}
+          CANDIDATE_RUN_ATTEMPT: ${{ steps.candidate.outputs.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_ATTEMPT: ${{ steps.artifacts.outputs.producer_attempt }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          (( CANDIDATE_RUN_ATTEMPT <= PRODUCER_ATTEMPT ))
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-content-review-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          candidate="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy exact-current \
+              --artifact-prefix "submission-content-review-candidate-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${CANDIDATE_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --argjson artifactId "${ARTIFACT_ID}" \
+            --argjson attempt "${PRODUCER_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest
+            ' <<<"${selected}" >/dev/null
+          jq -e \
+            --arg digest "${CANDIDATE_ARTIFACT_DIGEST}" \
+            --arg name "${CANDIDATE_ARTIFACT_NAME}" \
+            --argjson artifactId "${CANDIDATE_ARTIFACT_ID}" \
+            --argjson attempt "${CANDIDATE_RUN_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest
+            ' <<<"${candidate}" >/dev/null
+          upstream_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${PROJECT_ACCESS_RUN_ID}"
+          )"
+          upstream_attempt="$(jq -er '.run_attempt' <<<"${upstream_run}")"
+          upstream_artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${PROJECT_ACCESS_RUN_ID}/artifacts?per_page=100"
+          )"
+          upstream_selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-project-access-${RELEASE_SHA}-" \
+              --run-id "${PROJECT_ACCESS_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${upstream_attempt}" \
+              <<<"${upstream_artifacts}"
+          )"
+          binding="$(
+            cat \
+              "${RUNNER_TEMP}/submission-content-candidate-attester/project-access-binding.json"
+          )"
+          jq -e \
+            --argjson binding "${binding}" '
+              .producerAttempt == $binding.source.runAttempt and
+              .metadata.id == $binding.artifact.id and
+              .metadata.name == $binding.artifact.name and
+              .metadata.digest == $binding.artifact.digest
+            ' <<<"${upstream_selected}" >/dev/null
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          (
+            cd "${RUNNER_TEMP}/submission-content-attestation"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Attest all sixteen exact reviewed subjects
+        id: attest
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-content-attestation/SHA256SUMS
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-content-attestation/attestation-predicate.json
+
+      - name: Verify persisted signed full-subject attestation
+        env:
+          ATTESTATION_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${ATTESTATION_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${ATTESTATION_URL}" = \
+            "https://github.com/${GITHUB_REPOSITORY}/attestations/${ATTESTATION_ID}"
+          test -f "${ATTESTATION_BUNDLE_PATH}"
+          test ! -L "${ATTESTATION_BUNDLE_PATH}"
+          bundle_size="$(stat --format='%s' "${ATTESTATION_BUNDLE_PATH}")"
+          (( bundle_size >= 1 && bundle_size <= 16777216 ))
+          root="${RUNNER_TEMP}/submission-content-attestation"
+          expected_subjects="$(
+            jq -Rn '
+              [
+                inputs |
+                capture(
+                  "^(?<sha>[0-9a-f]{64})  " +
+                  "(?<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+                ) |
+                {
+                  name: .name,
+                  digest: {sha256: .sha}
+                }
+              ] |
+              sort_by(.name)
+            ' <"${root}/SHA256SUMS"
+          )"
+          verification_dir="$(
+            mktemp -d "${RUNNER_TEMP}/submission-content-verification.XXXXXX"
+          )"
+          validate_verification_result() {
+            local output_path="$1"
+            jq -e \
+              --slurpfile predicate "${root}/attestation-predicate.json" \
+              --arg predicateType "${PREDICATE_TYPE}" \
+              --argjson expectedSubjects "${expected_subjects}" '
+                [
+                  .[] |
+                  select(
+                    .verificationResult.statement.predicateType ==
+                      $predicateType and
+                    .verificationResult.statement.predicate ==
+                      $predicate[0] and
+                    (
+                      .verificationResult.statement.subject |
+                      sort_by(.name)
+                    ) == $expectedSubjects
+                  ) |
+                  .verificationResult.statement
+                ] |
+                unique |
+                length == 1
+              ' "${output_path}" >/dev/null
+          }
+          verify_subject() {
+            local subject_path="$1"
+            local output_path="$2"
+            local attempt
+            for attempt in {1..12}; do
+              if gh attestation verify \
+                "${subject_path}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --predicate-type "${PREDICATE_TYPE}" \
+                --signer-workflow \
+                  "${GITHUB_REPOSITORY}/.github/workflows/submission-content-review.yml" \
+                --signer-digest "${RELEASE_SHA}" \
+                --source-digest "${RELEASE_SHA}" \
+                --source-ref refs/heads/master \
+                --deny-self-hosted-runners \
+                --format json >"${output_path}" &&
+                validate_verification_result "${output_path}"; then
+                return 0
+              fi
+              if (( attempt < 12 )); then
+                sleep 5
+              fi
+            done
+            echo "::error::Persisted full-subject content attestation could not be verified"
+            return 1
+          }
+          verify_subject \
+            "${root}/proofs/SQ6.json" \
+            "${verification_dir}/SQ6.json"
+          verify_subject \
+            "${root}/attestation-predicate.json" \
+            "${verification_dir}/predicate.json"
+          {
+            echo "### Final submission content evidence sealed"
+            echo
+            echo "- Artifact: \`${{ steps.artifacts.outputs.artifact_name }}\`"
+            echo "- Subjects: 16 plus \`SHA256SUMS\`"
+            echo "- Attestation: ${ATTESTATION_URL}"
+          } >>"${GITHUB_STEP_SUMMARY}"
