@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   rmSync,
   symlinkSync,
@@ -654,6 +655,8 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
         result.stderr,
         /DELETE_FAILED|PhysicalResourceId|UPDATE_FAILED|ENOENT/u
       );
+      assert.equal(existsSync(planPath), false);
+      assert.equal(existsSync(policyPath), false);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
