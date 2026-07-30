@@ -2,10 +2,11 @@
 
 Status: **attempted; `DeleteStack` not executed; cleanup proof successful**.
 Cleanup-only run `30571619440` proved canonical temporary-policy absence. The
-subsequent recovery run `30571830902` failed during prepare with the historical
-`AWS_RECOVERY_INCIDENT_RECORD_MISMATCH` code, before `PutRolePolicy`; its
-one-shot delete job was skipped. Mandatory revocation and the final canonical
-absence proof still succeeded. The machine-readable status is
+first recovery run `30571830902` stopped on the historical generic incident
+mismatch. Classified recovery run `30576390064` then proved the exact live class
+`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`. Both runs stopped before
+`PutRolePolicy`, skipped `DeleteStack`, and completed mandatory revocation plus
+the final canonical absence proof. The machine-readable status remains
 `attempted-delete-not-executed-cleanup-proven`; no stack-deletion claim is made.
 
 This runbook covers one historical CloudFormation incident only. It is not a
@@ -43,10 +44,14 @@ cross-job value. It remains runner-private; only its SHA-256 crosses jobs.
 | Cleanup artifact ZIP SHA-256 | `sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0` |
 | Canonical `cleanup.json` SHA-256 | `8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2` |
 | Cleanup attestation | [GitHub attestation `38026442`](https://github.com/upgradedev/archon-datahub/attestations/38026442) |
-| Recovery run | `30571830902`, attempt `1`, commit `dd9b6f8c4c23bed290871c89a505ec12422d8caa`, prepare failed |
-| Recovery diagnostic | Historical `AWS_RECOVERY_INCIDENT_RECORD_MISMATCH`; `PutRolePolicy` not reached; `DeleteStack` skipped |
-| Recovery artifact | `8771158101`, `aws-incident-recovery-30571830902-1` |
-| Recovery artifact ZIP SHA-256 | `sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878` |
+| Prior recovery run | `30571830902`, attempt `1`, commit `dd9b6f8c4c23bed290871c89a505ec12422d8caa`, prepare failed |
+| Prior recovery diagnostic | Historical `AWS_RECOVERY_INCIDENT_RECORD_MISMATCH`; `PutRolePolicy` not reached; `DeleteStack` skipped |
+| Prior recovery artifact | `8771158101`, `aws-incident-recovery-30571830902-1` |
+| Prior recovery artifact ZIP SHA-256 | `sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878` |
+| Classified recovery run | `30576390064`, attempt `1`, commit `9b9ed35e4c5a5bf0bfed4aa0b049ff654ad2d0b9`, prepare failed closed |
+| Classified diagnostic | `AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`; `PutRolePolicy` not reached; `DeleteStack` skipped |
+| Classified recovery artifact | `8773039467`, `aws-incident-recovery-30576390064-1` |
+| Classified artifact ZIP SHA-256 | `sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e` |
 | Recovery finalization | Mandatory revocation succeeded; canonical absence proved |
 
 ## Operator interface
@@ -77,29 +82,39 @@ It also follows an incomplete recovery only for exact `action_required`,
 already includes mandatory final cleanup and does not enqueue another approval.
 
 
-## Current-state classification is diagnostic only
+## Current-state classification and narrow terminal acceptance
 
 The recovery validator reads live `StackResourceSummary` values. AWS defines
-[`ResourceStatus` as the resource's current status](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_StackResourceSummary.html),
-not as a replay of the historical failure event. AWS also defines
+[`ResourceStatus` as the resource's current status](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_StackResourceSummary.html)
+and makes `PhysicalResourceId` optional. AWS also defines
 [`ROLLBACK_COMPLETE`](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/view-stack-events.html)
 as successful cleanup after a failed stack creation: resources created during
 that operation are deleted and only deletion of the stack is then allowed.
-Therefore a live incident record can differ from the immutable historical
-`CREATE_FAILED` evidence without changing that evidence.
+Resources deliberately retained during stack deletion use
+[`DELETE_SKIPPED`](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-delete-stack.html),
+which this validator rejects. The immutable historical `CREATE_FAILED` event
+therefore remains true even when the live current state is `DELETE_COMPLETE`.
 
-The classifier exposes four new sanitized, pre-authorization diagnostics:
+Classified run `30576390064` proved the incident summary is the unique exact
+logical ID and `AWS::IAM::ManagedPolicy` type, has current status
+`DELETE_COMPLETE`, and omits `PhysicalResourceId`. The reviewed acceptance now
+allows only that conjunction, in addition to exact `CREATE_FAILED` without an
+ID. Missing `PhysicalResourceId` alone is never treated as proof. The root
+`ROLLBACK_COMPLETE` stack identity, no service role, disabled termination
+protection, exact tags, exact source template, globally constrained resource
+statuses, and unique incident record remain mandatory.
 
-- `AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID`
+Current rejected classes still fail before authorization with sanitized codes:
+
 - `AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID`
 - `AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH`
+- `AWS_RECOVERY_RESOURCE_STATE_PAGINATED`
 - `AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID`
 
-These codes classify only; they do not authorize or relax recovery. The accepted
-incident class remains exact `CREATE_FAILED` without a physical resource ID.
-Both `DELETE_COMPLETE` classes still fail before `PutRolePolicy`, so
-`DeleteStack` remains unreachable. A new classified rerun is required before
-any separately reviewed acceptance change can be considered.
+`AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID` remains in the immutable
+run receipt but is retired from the current failure-code allowlist. This change
+does not alter the workflow, IAM policy, one-shot `DeleteStack` implementation,
+or separate `governed-canary-recovery` approval.
 
 ## Recovery flow
 
@@ -113,7 +128,9 @@ any separately reviewed acceptance change can be considered.
 3. It accepts only the exact root `ROLLBACK_COMPLETE` target with no service
    role, no termination protection, exact tags and source identity. Every
    resource must be `DELETE_COMPLETE` or exact `CREATE_FAILED` without a
-   physical ID; the incident resource record must occur once.
+   physical ID. Any remaining `NextToken` fails before private outputs or
+   authorization. The incident record must occur once, keep the exact logical ID
+   and type, and be either `CREATE_FAILED` or `DELETE_COMPLETE` without an ID.
 4. It seals a private plan and exact two-statement temporary policy.
    `PutRolePolicy` is followed by bounded canonical readback.
 5. Separately approved `governed-canary-recovery` OIDC re-reads only the exact

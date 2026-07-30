@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -192,6 +193,7 @@ test("fails closed for every surviving or non-create failed resource state", () 
     "CREATE_COMPLETE",
     "UPDATE_FAILED",
     "DELETE_FAILED",
+    "DELETE_SKIPPED",
     "UPDATE_ROLLBACK_FAILED",
   ]) {
     const resources = resourcesResponse();
@@ -205,6 +207,14 @@ test("fails closed for every surviving or non-create failed resource state", () 
   const physicalCreateFailure = resourcesResponse();
   physicalCreateFailure.StackResourceSummaries[0].PhysicalResourceId = "survivor";
   assert.throws(() => build({ resourcesResponse: physicalCreateFailure }));
+});
+
+test("rejects resource inventories that retain a pagination token", () => {
+  const resources = resourcesResponse({ NextToken: "opaque-next-page" });
+  assert.throws(
+    () => build({ resourcesResponse: resources }),
+    (error) => error.publicCode === CLI_FAILURE_CODES.RESOURCE_STATE_PAGINATED
+  );
 });
 
 test("classifies every incident type, status, and physical-ID combination", () => {
@@ -221,8 +231,7 @@ test("classifies every incident type, status, and physical-ID combination", () =
       resourceType: "AWS::IAM::ManagedPolicy",
     },
     {
-      expected:
-        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID,
+      expected: null,
       resourceStatus: "DELETE_COMPLETE",
       resourceType: "AWS::IAM::ManagedPolicy",
     },
@@ -273,6 +282,84 @@ test("classifies every incident type, status, and physical-ID combination", () =
         (error) => error.publicCode === testCase.expected
       );
     }
+  }
+});
+
+test("CLI accepts the exact deleted incident class and emits only safe digests", () => {
+  const root = mkdtempSync(join(tmpdir(), "archon-accepted-deleted-incident-"));
+  const stackPath = join(root, "stack.json");
+  const resourcesPath = join(root, "resources.json");
+  const planPath = join(root, "plan.json");
+  const policyPath = join(root, "policy.json");
+  const liveExpiry = new Date(Date.now() + 5 * 60 * 1_000)
+    .toISOString()
+    .replace(/\.\d{3}Z$/u, "Z");
+  const resources = resourcesResponse();
+  resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
+
+  try {
+    writeFileSync(stackPath, JSON.stringify(stackResponse()), "utf8");
+    writeFileSync(resourcesPath, JSON.stringify(resources), "utf8");
+    const result = spawnSync(
+      process.execPath,
+      [
+        validatorCli,
+        "build-plan",
+        stackPath,
+        resourcesPath,
+        TARGET.sourceTemplateSemanticSha256,
+        accountId,
+        liveExpiry,
+        controlPlaneSha,
+        planPath,
+        policyPath,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_ACTIONS: "true", RUNNER_TEMP: root },
+      }
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(output).sort(), [
+      "clientRequestToken",
+      "expiresAt",
+      "planDigest",
+      "policyDocumentSha256",
+      "resourceStateSha256",
+      "stackIdSha256",
+    ]);
+    assert.equal(output.expiresAt, liveExpiry);
+    for (const field of [
+      "planDigest",
+      "policyDocumentSha256",
+      "resourceStateSha256",
+      "stackIdSha256",
+    ]) {
+      assert.match(output[field], /^sha256:[a-f0-9]{64}$/u);
+    }
+    assert.equal(existsSync(planPath), true);
+    assert.equal(existsSync(policyPath), true);
+
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    const policy = JSON.parse(readFileSync(policyPath, "utf8"));
+    assert.equal(plan.target.status, "ROLLBACK_COMPLETE");
+    assert.deepEqual(plan.delete, {
+      action: "cloudformation:DeleteStack",
+      clientRequestToken: output.clientRequestToken,
+      deletionMode: "STANDARD",
+      deploymentConfigOverride: false,
+      retainResources: false,
+      roleOverride: false,
+    });
+    assert.deepEqual(
+      policy.Statement.map((statement) => statement.Action),
+      ["cloudformation:DescribeStacks", "cloudformation:DeleteStack"]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -441,7 +528,6 @@ test("CLI exposes only allowlisted failure codes and never raw values or paths",
 test("CLI failure-code sanitizer rejects raw and spoofed error properties", () => {
   assert.deepEqual(Object.values(CLI_FAILURE_CODES), [
     "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
     "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
     "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
@@ -449,6 +535,7 @@ test("CLI failure-code sanitizer rejects raw and spoofed error properties", () =
     "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
     "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+    "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
     "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
     "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
     "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
@@ -539,6 +626,10 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
       resources: { StackResourceSummaries: [] },
     },
     {
+      expected: CLI_FAILURE_CODES.RESOURCE_STATE_PAGINATED,
+      resources: resourcesResponse({ NextToken: privateMarker }),
+    },
+    {
       expected: CLI_FAILURE_CODES.RESOURCE_UNSUPPORTED_STATUS,
       mutateResources(resources) {
         resources.StackResourceSummaries[1].ResourceStatus =
@@ -570,13 +661,6 @@ test("CLI maps every plan invariant to an exact sanitized code", () => {
         resources.StackResourceSummaries[0].PhysicalResourceId = privateMarker;
         resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
         resources.StackResourceSummaries[0].ResourceType = privateMarker;
-      },
-    },
-    {
-      expected:
-        CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID,
-      mutateResources(resources) {
-        resources.StackResourceSummaries[0].ResourceStatus = "DELETE_COMPLETE";
       },
     },
     {

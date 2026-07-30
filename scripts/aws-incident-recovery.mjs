@@ -71,8 +71,6 @@ const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u;
 
 export const CLI_FAILURE_CODES = Object.freeze({
   ARTIFACT_VALIDATION_FAILED: "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-  INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID:
-    "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
   INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID:
     "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
   INCIDENT_RECORD_NOT_UNIQUE: "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
@@ -83,6 +81,7 @@ export const CLI_FAILURE_CODES = Object.freeze({
   RESOURCE_CREATE_FAILED_PHYSICAL_ID:
     "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
   RESOURCE_STATE_EMPTY: "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+  RESOURCE_STATE_PAGINATED: "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
   RESOURCE_STATE_UNAVAILABLE: "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
   RESOURCE_SUMMARY_SHAPE_INVALID:
     "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
@@ -262,6 +261,11 @@ function exactTags(tags) {
 }
 function validateResourceSummaries(resources) {
   invariant(
+    !Object.hasOwn(resources, "NextToken"),
+    "stack resource inventory retains a pagination token",
+    CLI_FAILURE_CODES.RESOURCE_STATE_PAGINATED
+  );
+  invariant(
     Array.isArray(resources.StackResourceSummaries),
     "stack resources are unavailable",
     CLI_FAILURE_CODES.RESOURCE_STATE_UNAVAILABLE
@@ -333,11 +337,6 @@ function validateResourceSummaries(resources) {
       !incidentRecord.hasPhysicalResourceId,
       "the DELETE_COMPLETE incident resource retains a physical ID",
       CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID
-    );
-    invariant(
-      false,
-      "the incident resource is DELETE_COMPLETE without a physical ID",
-      CLI_FAILURE_CODES.INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID
     );
   }
 

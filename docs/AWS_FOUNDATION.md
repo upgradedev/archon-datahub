@@ -486,9 +486,11 @@ historical `staging-iam` exception is a separate CI-only, two-environment
 control plane with immutable incident coordinates, short-lived exact-stack
 authorization, mandatory revocation, and sanitized attested evidence. Its
 status is `attempted-delete-not-executed-cleanup-proven`. Cleanup run
-`30571619440` proved canonical temporary-policy absence and recovery run
-`30571830902` stopped before `PutRolePolicy` with `DeleteStack` skipped;
-mandatory revocation and its final absence proof succeeded. See
+`30571619440` proved canonical temporary-policy absence. Recovery run
+`30571830902` stopped on the historical generic mismatch; classified run
+`30576390064` then proved exact `DELETE_COMPLETE` without a physical ID. Both
+stopped before `PutRolePolicy`, skipped `DeleteStack`, and completed mandatory
+revocation plus the final canonical absence proof. See
 [`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
 `contracts/aws-incident-recovery-v1.json`.
 

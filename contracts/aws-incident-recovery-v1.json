@@ -20,8 +20,23 @@
         "zipDigest": "sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878"
       }
     },
-    "cleanupRun": {
-      "runId": "30571619440",
+    "classifiedRecoveryRun": {
+      "runId": "30576390064",
+      "runAttempt": "1",
+      "headSha": "9b9ed35e4c5a5bf0bfed4aa0b049ff654ad2d0b9",
+      "result": "prepare-classified-delete-complete-no-physical-id",
+      "diagnosticCode": "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+      "putRolePolicy": "not-reached",
+      "deleteStack": "skipped",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "artifact": {
+        "id": "8773039467",
+        "name": "aws-incident-recovery-30576390064-1",
+        "zipDigest": "sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e"
+      }
+    },
+    "cleanupRun": {      "runId": "30571619440",
       "runAttempt": "1",
       "headSha": "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
       "result": "success",
@@ -131,16 +146,19 @@
           "DELETE_COMPLETE"
         ],
         "allOtherStatuses": "forbidden",
-        "survivingPhysicalResources": "forbidden"
+        "survivingPhysicalResources": "forbidden",
+        "paginationToken": "forbidden"
       },
       "incidentResourceCurrentState": {
-        "acceptedClass": "CREATE_FAILED-without-PhysicalResourceId",
+        "acceptedClasses": [
+          "CREATE_FAILED-without-PhysicalResourceId",
+          "exact-logical-id-and-type-DELETE_COMPLETE-without-PhysicalResourceId"
+        ],
         "diagnosticOnlyRejectedClasses": [
-          "DELETE_COMPLETE-without-PhysicalResourceId",
           "DELETE_COMPLETE-with-PhysicalResourceId"
         ],
         "rejectionPoint": "before-PutRolePolicy",
-        "acceptanceChange": "none-pending-classified-rerun"
+        "acceptanceChange": "narrow-reviewed-after-classified-run-30576390064"
       }
     }
   },
@@ -215,7 +233,6 @@
   "validator": {
     "cliFailureCodes": [
       "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
-      "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
       "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
       "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
       "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
@@ -223,6 +240,7 @@
       "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
       "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
       "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+      "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
       "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
       "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
       "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
@@ -241,12 +259,12 @@
     "rawPaths": false,
     "rawValues": false,
     "diagnosticOnlyCodes": [
-      "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
       "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
       "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
+      "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
       "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID"
     ],
-    "diagnosticOnlySemantics": "fail-closed-preauthorization-classification-without-acceptance-change"
+    "diagnosticOnlySemantics": "remaining-nonaccepted-classes-fail-closed-before-authorization"
   },
   "delete": {
     "callCount": 1,
