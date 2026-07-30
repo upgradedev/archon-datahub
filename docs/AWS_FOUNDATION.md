@@ -198,8 +198,8 @@ region. The foundation resolves that singleton in exactly one of two modes:
 - In `external-pinned`, an existing non-Archon binding must be a strict
   same-account IAM role ARN and its exact SHA-256 must match the protected
   `aws-foundation` variable `AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`. The
-  managed stack must be absent. This path performs no API Gateway account
-  mutation, no IAM role inspection, and no takeover.
+  managed stack must be absent. This path performs no API Gateway account mutation,
+  no IAM role inspection, and no takeover.
 
 A foreign binding without an exact pin fails before mutation and exposes only
 its SHA-256 for deliberate operator pinning. A malformed or cross-account ARN,
