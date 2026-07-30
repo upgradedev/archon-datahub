@@ -189,6 +189,8 @@ jobs:
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-canonical-flow-yaml.mjs \
+            scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/render-aws-foundation-policy.mjs \
@@ -232,6 +234,33 @@ jobs:
               "archon-aws-foundation-identity",
               "archon-aws-foundation-attachments"
             ] and
+            .aws.inlineTemplateRendering == {
+              deployedOriginalMatchesSemanticSha256: true,
+              flowEmitter: {
+                name: "scripts/render-canonical-flow-yaml.mjs",
+                runtime: "node-22.23.1",
+                scalarPolicy: "strict-ascii-plain-or-json-quoted"
+              },
+              format: "canonical-flow-yaml",
+              maximumTemplateBodyBytes: 51200,
+              outputRoot: "RUNNER_TEMP",
+              renderer: "scripts/render-inline-cloudformation-template.sh",
+              sameBytesForValidationAndDeploy: true,
+              semanticRoundTrip: "rain-json-canonical-equality",
+              source: "infra/aws/foundation/cdk-execution-policy.yml",
+              tool: {
+                linuxAmd64ArchiveSha256:
+                  "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
+                name: "aws-cloudformation/rain",
+                version: "v1.24.4"
+              },
+              yamlParser: {
+                linuxAmd64Sha256:
+                  "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+                name: "mikefarah/yq",
+                version: "v4.47.2"
+              }
+            } and
             .aws.sharedApiGatewayLogging == {
               inlinePolicyName: "archon-apigateway-cloudwatch-logs",
               region: "eu-west-1",
@@ -413,6 +442,32 @@ jobs:
         id: bootstrap_template
         run: bash scripts/seal-cdk-bootstrap-templates.sh
 
+      - name: Render the inline-safe IAM foundation template
+        id: iam_foundation_template
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"
+          canonical="${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            "${output}" \
+            "${canonical}"
+          yq_bin="${RUNNER_TEMP}/archon-inline-cfn-yq"
+          test -f "${yq_bin}"
+          test ! -L "${yq_bin}"
+          test -x "${yq_bin}"
+          output_sha="$(sha256sum "${output}" | awk '{print $1}')"
+          canonical_sha="$(sha256sum "${canonical}" | awk '{print $1}')"
+          yq_sha="$(sha256sum "${yq_bin}" | awk '{print $1}')"
+          {
+            echo "path=${output}"
+            echo "sha=${output_sha}"
+            echo "canonical_path=${canonical}"
+            echo "canonical_sha=${canonical_sha}"
+            echo "yq_path=${yq_bin}"
+            echo "yq_sha=${yq_sha}"
+          } >>"${GITHUB_OUTPUT}"
+
       - name: Prove exact synthesized runtime action equality for both stages
         run: |
           set -euo pipefail
@@ -438,6 +493,12 @@ jobs:
           CONTROL_PLANE_SHA: ${{ github.sha }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
@@ -458,6 +519,26 @@ jobs:
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
           test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
             "${BOOTSTRAP_TEMPLATE_SHA}"
+          test "$(sha256sum "${IAM_FOUNDATION_TEMPLATE}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_TEMPLATE_SHA}"
+          test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
+            -le 51200
+          test "$(sha256sum "${IAM_FOUNDATION_CANONICAL_JSON}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_SEMANTIC_SHA}"
+          jq -e '
+            type == "object" and
+            (.Resources | type == "object" and length > 0)
+          ' "${IAM_FOUNDATION_CANONICAL_JSON}" >/dev/null
+          test -f "${IAM_FOUNDATION_YQ_BIN}"
+          test ! -L "${IAM_FOUNDATION_YQ_BIN}"
+          test -x "${IAM_FOUNDATION_YQ_BIN}"
+          test "${IAM_FOUNDATION_YQ_SHA}" = "$(
+            jq -er \
+              '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
+              contracts/aws-foundation-v1.json
+          )"
+          test "$(sha256sum "${IAM_FOUNDATION_YQ_BIN}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_YQ_SHA}"
           for tuple in \
             "STAGING_PRIMARY_BOOTSTRAP_TEMPLATE STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
             "STAGING_EDGE_BOOTSTRAP_TEMPLATE STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA" \
@@ -660,6 +741,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}

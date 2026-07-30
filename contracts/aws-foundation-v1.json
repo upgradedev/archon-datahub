@@ -47,6 +47,31 @@
         "archon-aws-foundation-attachments"
       ]
     },
+    "inlineTemplateRendering": {
+      "source": "infra/aws/foundation/cdk-execution-policy.yml",
+      "renderer": "scripts/render-inline-cloudformation-template.sh",
+      "outputRoot": "RUNNER_TEMP",
+      "maximumTemplateBodyBytes": 51200,
+      "sameBytesForValidationAndDeploy": true,
+      "deployedOriginalMatchesSemanticSha256": true,
+      "format": "canonical-flow-yaml",
+      "semanticRoundTrip": "rain-json-canonical-equality",
+      "flowEmitter": {
+        "name": "scripts/render-canonical-flow-yaml.mjs",
+        "runtime": "node-22.23.1",
+        "scalarPolicy": "strict-ascii-plain-or-json-quoted"
+      },
+      "yamlParser": {
+        "name": "mikefarah/yq",
+        "version": "v4.47.2",
+        "linuxAmd64Sha256": "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0"
+      },
+      "tool": {
+        "name": "aws-cloudformation/rain",
+        "version": "v1.24.4",
+        "linuxAmd64ArchiveSha256": "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"
+      }
+    },
     "sharedApiGatewayLogging": {
       "stackName": "Archon-Shared-ApiGateway-Logging",
       "region": "eu-west-1",

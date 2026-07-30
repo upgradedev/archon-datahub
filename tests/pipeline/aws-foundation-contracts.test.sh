@@ -17,6 +17,8 @@ execution_policy="${repository_root}/infra/aws/foundation/cdk-execution-policy.y
 api_gateway_account="${repository_root}/infra/aws/foundation/api-gateway-account.yml"
 bootstrap_patcher="${repository_root}/scripts/patch-cdk-bootstrap-template.mjs"
 bootstrap_sealer="${repository_root}/scripts/seal-cdk-bootstrap-templates.sh"
+canonical_flow_renderer="${repository_root}/scripts/render-canonical-flow-yaml.mjs"
+inline_template_renderer="${repository_root}/scripts/render-inline-cloudformation-template.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
@@ -62,6 +64,7 @@ for path in \
   "${api_gateway_account}" \
   "${bootstrap_patcher}" \
   "${bootstrap_sealer}" \
+  "${inline_template_renderer}" \
   "${foundation_renderer}" \
   "${foundation_bootstrap}" \
   "${reconciler}" \
@@ -113,6 +116,33 @@ jq --exit-status '
     roleManagedPolicyQuota: 10,
     sourceBundle: "infra/aws/foundation/github-actions-foundation-policy.json",
     sourceBundleAttachable: false
+  } and
+  .aws.inlineTemplateRendering == {
+    deployedOriginalMatchesSemanticSha256: true,
+    flowEmitter: {
+      name: "scripts/render-canonical-flow-yaml.mjs",
+      runtime: "node-22.23.1",
+      scalarPolicy: "strict-ascii-plain-or-json-quoted"
+    },
+    format: "canonical-flow-yaml",
+    maximumTemplateBodyBytes: 51200,
+    outputRoot: "RUNNER_TEMP",
+    renderer: "scripts/render-inline-cloudformation-template.sh",
+    sameBytesForValidationAndDeploy: true,
+    semanticRoundTrip: "rain-json-canonical-equality",
+    source: "infra/aws/foundation/cdk-execution-policy.yml",
+    tool: {
+      linuxAmd64ArchiveSha256:
+        "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
+      name: "aws-cloudformation/rain",
+      version: "v1.24.4"
+    },
+    yamlParser: {
+      linuxAmd64Sha256:
+        "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+      name: "mikefarah/yq",
+      version: "v4.47.2"
+    }
   } and
   .aws.governedCanaryRoles.stackName == "Archon-Governed-Canary-Roles" and
   .aws.governedCanaryRoles.region == "eu-west-1" and
@@ -732,7 +762,58 @@ require_text "${bootstrap_patcher}" \
   'UseOnlyCdkDeployChangeSets' \
   'cloudformation:ChangeSetName' \
   'cloudformation:RoleArn'
+require_text "${inline_template_renderer}" \
+  'if [[ "${GITHUB_ACTIONS:-}" != "true" ]]' \
+  'RAIN_VERSION="v1.24.4"' \
+  'RAIN_LINUX_AMD64_ARCHIVE_SHA256="5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"' \
+  'YQ_VERSION="v4.47.2"' \
+  'YQ_LINUX_AMD64_SHA256="1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0"' \
+  'CLOUDFORMATION_TEMPLATE_BODY_MAX_BYTES=51200' \
+  'test ! -L "$1"' \
+  'sha256sum --check --strict' \
+  '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
+  '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
+  'node "${workspace_root}/scripts/render-canonical-flow-yaml.mjs"' \
+  'jq -cS' \
+  'cmp -s "${canonical_json}" "${round_trip}"' \
+  '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
+require_text "${canonical_flow_renderer}" \
+  'process.env.GITHUB_ACTIONS !== "true"' \
+  'process.env.RUNNER_TEMP' \
+  'requestedInputStat.isSymbolicLink()' \
+  'safePlainScalar' \
+  'implicitYamlScalar' \
+  'JSON.stringify(value)' \
+  'Object.entries(value)' \
+  'process.stdout.write(`${emit(document)}\n`)'
+test "$(
+  grep -nF 'test ! -L "$1"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" -lt "$(
+  grep -nF 'source_path="$(realpath "$1")"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" ||
+  fail "renderer must reject a source symlink before realpath resolution"
 require_text "${reconciler}" \
+  'IAM_FOUNDATION_TEMPLATE' \
+  'IAM_FOUNDATION_TEMPLATE_SHA' \
+  'IAM_FOUNDATION_CANONICAL_JSON' \
+  'IAM_FOUNDATION_SEMANTIC_SHA' \
+  'IAM_FOUNDATION_YQ_BIN' \
+  'IAM_FOUNDATION_YQ_SHA' \
+  '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
+  '--template-file "${IAM_FOUNDATION_TEMPLATE}"' \
+  '--template-stage Original' \
+  '.TemplateBody |' \
+  'if type == "string" then . else tojson end' \
+  '--output-format=json' \
+  'mktemp "${RUNNER_TEMP}/archon-deployed-template.XXXXXX' \
+  'iamFoundationTemplateSha256: $iamFoundationTemplateSha256' \
+  'iamFoundationSemanticSha256: $iamFoundationSemanticSha256' \
+  'IAM_TEMPLATE_SHA["${stage}"]' \
+  '"${IAM_FOUNDATION_SEMANTIC_SHA}"' \
+  'deployed Original template does not match the pre-OIDC canonical template' \
+  '.iamDeployedTemplateSha256 == $expected' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME' \
@@ -758,6 +839,10 @@ require_text "${reconciler}" \
   'deployRequirement: "explicit-role-migration"' \
   'applicationStackRoleTransition: $applicationStackRoleTransition' \
   'application_stack_role_transition=${application_stack_role_transition_state}'
+test "$(
+  grep -Fc 'infra/aws/foundation/cdk-execution-policy.yml' "${reconciler}"
+)" -eq 1 ||
+  fail "reconciler may reference the oversized source template only as evidence"
 
 require_text "${runtime_verifier}" \
   'const uncovered' \
@@ -769,10 +854,15 @@ require_text "${ci_workflow}" \
   'scripts/bootstrap-aws-foundation-role.sh' \
   'scripts/reconcile-aws-foundation.sh' \
   'scripts/patch-cdk-bootstrap-template.mjs' \
+  'scripts/render-canonical-flow-yaml.mjs' \
+  'scripts/render-inline-cloudformation-template.sh' \
   'scripts/seal-cdk-bootstrap-templates.sh' \
   'Seal the exact CDK bootstrap templates without AWS access' \
   'EXPECTED_BOOTSTRAP_VERSION: "32"' \
   'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
+  'Render the exact inline-safe IAM foundation template' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
   'node scripts/verify-aws-runtime-boundary.mjs'
 require_text "${deploy_workflow}" \
@@ -783,6 +873,14 @@ require_text "${deploy_workflow}" \
   'ALLOW_ROLE_MIGRATION=false' \
   'bash scripts/validate-cloudformation-role-bindings.sh'
 require_text "${foundation_workflow}" \
+  'Render the inline-safe IAM foundation template' \
+  'scripts/render-canonical-flow-yaml.mjs' \
+  'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
+  'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
+  'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \
+  'IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}' \
+  'IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}' \
+  'IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \
