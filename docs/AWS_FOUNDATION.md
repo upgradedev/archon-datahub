@@ -444,8 +444,8 @@ recent CloudFormation events in their API-provided newest-first order, while
 sanitizer input remains hard-capped at 1,048,576 bytes. It
 selects the newest failed event whose safe reason category is not
 `dependency-failure`; `unknown` remains eligible because it may be the true
-root cause. Only when every failed event is `dependency-failure` does it fall
-back to the newest failed event. The chosen event then passes the existing
+root cause. Only when every failed event is `dependency-failure` does it
+fall back to the newest failed event. The chosen event then passes the existing
 fail-closed identity and reason validation before one canonical
 `cfn-failure.json` record is written containing only an allowlisted stack label, stack
 status, logical resource ID, resource type and status, a safe reason category,
