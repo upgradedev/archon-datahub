@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: Exact internal operation: recover or cleanup
+        description: "Exact internal operation: recover or cleanup"
         required: true
         type: string
       expected_head_sha:

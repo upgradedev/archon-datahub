@@ -147,6 +147,7 @@ forbid_text "${entry}" 'secrets: inherit' 'stack_name:' 'stack_id:' 'target:'
 
 require_text "${driver_workflow}" \
   'workflow_call:' \
+  'description: "Exact internal operation: recover or cleanup"' \
   'group: archon-governed-canary-mutation-recovery' \
   'cancel-in-progress: false' \
   'name: aws-foundation' \
@@ -303,4 +304,4 @@ require_text "${runbook}" \
   'Status: **implemented, not executed**' \
   'PutRolePolicy' \
   'eventually consistent' \
-  'success or the exact AWS `NoSuchEntity`'
+  'exact AWS `NoSuchEntity` code for `DeleteRolePolicy`'
