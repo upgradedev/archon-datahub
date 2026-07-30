@@ -449,8 +449,8 @@ jobs:
               diagnosticCount: 1,
               fields: [
                 "deniedAwsAction",
-                "logicalResourceId",
                 "diagnosticSha256",
+                "logicalResourceId",
                 "reasonCategory",
                 "resourceStatus",
                 "resourceType",
@@ -906,8 +906,8 @@ jobs:
           jq -e '
             (keys | sort) == [
               "deniedAwsAction",
-              "logicalResourceId",
               "diagnosticSha256",
+              "logicalResourceId",
               "reasonCategory",
               "resourceStatus",
               "resourceType",

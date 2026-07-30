@@ -313,8 +313,8 @@ capture_managed_stack_failure() {
   jq -e '
     (keys | sort) == [
       "deniedAwsAction",
-      "logicalResourceId",
       "diagnosticSha256",
+      "logicalResourceId",
       "reasonCategory",
       "resourceStatus",
       "resourceType",

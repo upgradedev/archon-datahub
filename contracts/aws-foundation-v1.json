@@ -434,8 +434,8 @@
       ],
       "fields": [
         "deniedAwsAction",
-        "logicalResourceId",
         "diagnosticSha256",
+        "logicalResourceId",
         "reasonCategory",
         "resourceStatus",
         "resourceType",

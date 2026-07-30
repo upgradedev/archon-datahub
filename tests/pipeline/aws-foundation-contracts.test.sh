@@ -369,8 +369,8 @@ jq --exit-status '
     diagnosticCount: 1,
     fields: [
       "deniedAwsAction",
-      "logicalResourceId",
       "diagnosticSha256",
+      "logicalResourceId",
       "reasonCategory",
       "resourceStatus",
       "resourceType",
