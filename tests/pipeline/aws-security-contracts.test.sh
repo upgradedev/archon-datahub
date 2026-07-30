@@ -2182,7 +2182,11 @@ test "$(
     "${deploy_workflow}"
 )" -eq 2
 test "$(
-  grep -Fc 'test "${DEPLOYMENT_MODE}" = "promote"' \
+  grep -Fxc '          if test "${DEPLOYMENT_MODE}" = "promote"; then' \
+    "${deploy_workflow}"
+)" -eq 1
+test "$(
+  grep -Fxc '          test "${DEPLOYMENT_MODE}" = "promote"' \
     "${deploy_workflow}"
 )" -eq 2
 grep -Fq 'promote|staging-bootstrap) ;;' "${deploy_workflow}"
