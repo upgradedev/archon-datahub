@@ -98,4 +98,3 @@ jobs:
       operation: cleanup
       expected_head_sha: ${{ needs.validate.outputs.control_plane_sha }}
       confirmation: REVOKE SEALED INCIDENT POLICY
-    secrets: inherit

@@ -21,6 +21,8 @@ readonly BASE_POLICY_NAME="archon-staging-stack-read"
 readonly TEMP_POLICY_NAME="archon-incident-30546241677-delete"
 readonly WORK_ROOT="${RUNNER_TEMP}/archon-aws-incident-recovery"
 readonly VALIDATOR="scripts/aws-incident-recovery.mjs"
+readonly IAM_PROPAGATION_ATTEMPTS="12"
+readonly IAM_PROPAGATION_DELAY_SECONDS="5"
 
 mkdir -p "${WORK_ROOT}"
 chmod 0700 "${WORK_ROOT}"
@@ -40,6 +42,74 @@ safe_aws() {
   test -f "${output}"
   test ! -L "${output}"
   chmod 0600 "${output}"
+}
+
+retry_safe_aws() {
+  local label="$1"
+  local output="$2"
+  shift 2
+  local attempt
+  for ((attempt = 1; attempt <= IAM_PROPAGATION_ATTEMPTS; attempt++)); do
+    if aws "$@" >"${output}" 2>/dev/null; then
+      test -f "${output}"
+      test ! -L "${output}"
+      chmod 0600 "${output}"
+      return 0
+    fi
+    if ((attempt < IAM_PROPAGATION_ATTEMPTS)); then
+      sleep "${IAM_PROPAGATION_DELAY_SECONDS}"
+    fi
+  done
+  fail "${label} after bounded IAM propagation retries"
+}
+
+wait_for_policy_digest() {
+  local expected_digest="$1"
+  local output="$2"
+  local attempt
+  local observed_digest
+  [[ "${expected_digest}" =~ ^[a-f0-9]{64}$ ]] || fail "Expected policy digest is invalid"
+  for ((attempt = 1; attempt <= IAM_PROPAGATION_ATTEMPTS; attempt++)); do
+    if aws iam get-role-policy \
+      --role-name "${RECOVERY_ROLE_NAME}" \
+      --policy-name "${TEMP_POLICY_NAME}" \
+      --output json >"${output}" 2>/dev/null; then
+      test -f "${output}"
+      test ! -L "${output}"
+      chmod 0600 "${output}"
+      observed_digest="$(jq -cS '.PolicyDocument' "${output}" | sha256sum | awk '{print $1}')"
+      if test "${observed_digest}" = "${expected_digest}"; then
+        return 0
+      fi
+    fi
+    if ((attempt < IAM_PROPAGATION_ATTEMPTS)); then
+      sleep "${IAM_PROPAGATION_DELAY_SECONDS}"
+    fi
+  done
+  fail "The temporary recovery authorization was not canonically readable after bounded IAM propagation retries"
+}
+
+wait_for_policy_absence() {
+  local output="$1"
+  local attempt
+  for ((attempt = 1; attempt <= IAM_PROPAGATION_ATTEMPTS; attempt++)); do
+    if aws iam list-role-policies \
+      --role-name "${RECOVERY_ROLE_NAME}" \
+      --output json >"${output}" 2>/dev/null; then
+      test -f "${output}"
+      test ! -L "${output}"
+      chmod 0600 "${output}"
+      if jq -e --arg base "${BASE_POLICY_NAME}" '
+        (.PolicyNames | sort) == [$base]
+      ' "${output}" >/dev/null; then
+        return 0
+      fi
+    fi
+    if ((attempt < IAM_PROPAGATION_ATTEMPTS)); then
+      sleep "${IAM_PROPAGATION_DELAY_SECONDS}"
+    fi
+  done
+  fail "The temporary recovery authorization remains observable after bounded IAM propagation retries"
 }
 
 validate_common() {
@@ -90,7 +160,7 @@ snapshot_target() {
   local resources="${WORK_ROOT}/${prefix}-resources.json"
   local template="${WORK_ROOT}/${prefix}-template.json"
   local body="${WORK_ROOT}/${prefix}-template.body"
-  safe_aws "Unable to inspect the sealed incident stack" "${stack}" \
+  retry_safe_aws "Unable to inspect the sealed incident stack" "${stack}" \
     cloudformation describe-stacks \
     --region "${TARGET_REGION}" \
     --stack-name "${TARGET_STACK_NAME}" \
@@ -117,7 +187,7 @@ snapshot_target() {
 snapshot_stack_only() {
   local prefix="$1"
   local stack="${WORK_ROOT}/${prefix}-stack.json"
-  safe_aws "Unable to inspect the sealed incident stack" "${stack}" \
+  retry_safe_aws "Unable to inspect the sealed incident stack" "${stack}" \
     cloudformation describe-stacks \
     --region "${TARGET_REGION}" \
     --stack-name "${TARGET_STACK_NAME}" \
@@ -287,14 +357,9 @@ prepare() {
     fail "Unable to install the temporary recovery authorization"
   fi
   local observed="${WORK_ROOT}/observed-temp-policy.json"
-  safe_aws "Unable to verify the temporary recovery authorization" "${observed}" \
-    iam get-role-policy \
-    --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    --output json
-  test "$(jq -cS '.PolicyDocument' "${observed}" | sha256sum | awk '{print $1}')" = \
-    "$(jq -er '.policyDocumentSha256 | sub("^sha256:"; "")' <<<"${safe}")" || \
-    fail "The temporary recovery authorization differs"
+  local expected_policy_digest
+  expected_policy_digest="$(jq -er '.policyDocumentSha256 | sub("^sha256:"; "")' <<<"${safe}")"
+  wait_for_policy_digest "${expected_policy_digest}" "${observed}"
   {
     printf 'client_token=%s\n' "$(jq -er '.clientRequestToken' <<<"${safe}")"
     printf 'expires_at=%s\n' "$(jq -er '.expiresAt' <<<"${safe}")"
@@ -361,21 +426,13 @@ revoke_policy() {
       "archon-staging-stack-read"
     ]
   ' "${before}" >/dev/null || fail "Recovery-role policy inventory differs before revocation"
-  if jq -e --arg policy "${TEMP_POLICY_NAME}" '
-    .PolicyNames | index($policy) != null
-  ' "${before}" >/dev/null; then
-    if ! aws iam delete-role-policy \
-      --role-name "${RECOVERY_ROLE_NAME}" \
-      --policy-name "${TEMP_POLICY_NAME}" \
-      >/dev/null 2>&1; then
-      fail "Unable to revoke the temporary recovery authorization"
-    fi
-  fi
-  safe_aws "Unable to enumerate recovery-role policies after revocation" "${after}" \
-    iam list-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
-  jq -e '
-    (.PolicyNames | sort) == ["archon-staging-stack-read"]
-  ' "${after}" >/dev/null || fail "The temporary recovery authorization remains attached"
+  # Idempotently target only the incident-scoped policy. A failed delete is accepted
+  # only if bounded, canonical inventory readback proves that it is already absent.
+  aws iam delete-role-policy \
+    --role-name "${RECOVERY_ROLE_NAME}" \
+    --policy-name "${TEMP_POLICY_NAME}" \
+    >/dev/null 2>&1 || true
+  wait_for_policy_absence "${after}"
 }
 postverify() {
   validate_common

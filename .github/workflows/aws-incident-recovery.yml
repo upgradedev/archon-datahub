@@ -38,4 +38,3 @@ jobs:
       operation: recover
       expected_head_sha: ${{ inputs.expected_head_sha }}
       confirmation: ${{ inputs.confirmation }}
-    secrets: inherit
