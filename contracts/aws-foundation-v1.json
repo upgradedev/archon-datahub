@@ -79,10 +79,23 @@
       }
     },
     "sharedApiGatewayLogging": {
-      "stackName": "Archon-Shared-ApiGateway-Logging",
       "region": "eu-west-1",
-      "roleName": "archon-datahub-apigateway-cloudwatch-logs",
-      "inlinePolicyName": "archon-apigateway-cloudwatch-logs"
+      "ownershipModes": [
+        "foundation-managed",
+        "external-pinned"
+      ],
+      "managed": {
+        "stackName": "Archon-Shared-ApiGateway-Logging",
+        "roleName": "archon-datahub-apigateway-cloudwatch-logs",
+        "inlinePolicyName": "archon-apigateway-cloudwatch-logs"
+      },
+      "external": {
+        "bindingSha256Variable": "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+        "sameAccountRoleArnRequired": true,
+        "managedStackMustBeAbsent": true,
+        "mutation": "none",
+        "takeover": "forbidden"
+      }
     },
     "deployRoles": {
       "staging": {
