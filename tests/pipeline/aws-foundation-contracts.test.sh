@@ -362,6 +362,10 @@ require_text "${bootstrap_sealer}" \
   'echo "sha=${template_sha}"' \
   'echo "version=${template_version}"' \
   'Sealed CDK bootstrap v${template_version}'
+require_text "${bootstrap_patcher}" \
+  "Default: 'AWS CDK: Default Resources'" \
+  'Default: "AWS CDK: Default Resources"' \
+  'defaultVariantCount !== 1'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi

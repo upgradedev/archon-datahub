@@ -148,10 +148,20 @@ ${stackResources}
 const patchedRole =
   role.slice(0, policiesStart) + customPolicies + role.slice(roleNameStart);
 let output = input.slice(0, roleStart) + patchedRole + input.slice(roleEnd);
-const defaultVariant = "    Default: 'AWS CDK: Default Resources'";
-if (output.split(defaultVariant).length !== 2) {
+const defaultVariants = [
+  "    Default: 'AWS CDK: Default Resources'",
+  '    Default: "AWS CDK: Default Resources"'
+];
+const defaultVariantCount = defaultVariants.reduce(
+  (count, variant) => count + output.split(variant).length - 1,
+  0
+);
+if (defaultVariantCount !== 1) {
   fail("expected exactly one default BootstrapVariant marker");
 }
+const defaultVariant = defaultVariants.find((variant) =>
+  output.includes(variant)
+);
 output = output.replace(
   defaultVariant,
   `    Default: 'Archon DataHub ${args.stage} ${args.region} isolated bootstrap v1'`
