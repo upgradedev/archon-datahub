@@ -2,7 +2,7 @@
   "schemaVersion": "archon.aws-incident-recovery/v1",
   "repository": "upgradedev/archon-datahub",
   "defaultBranch": "master",
-  "status": "attempted-delete-not-executed-cleanup-proven",
+  "status": "recovered-delete-complete-cleanup-proven",
   "execution": {
     "recoveryRun": {
       "runId": "30571830902",
@@ -74,7 +74,60 @@
     },
     "temporaryPolicyInstalled": false,
     "temporaryPolicyAbsent": "proven",
-    "deleteStackExecuted": false
+    "deleteStackExecuted": true,
+    "successfulRecoveryRun": {
+      "runId": "30582684638",
+      "runAttempt": "1",
+      "headSha": "8b7451da65d1bf1ed14b17e0c1f0cc5d43d6cf40",
+      "completedAt": "2026-07-30T21:19:41Z",
+      "result": "success",
+      "validator": "success",
+      "putRolePolicy": "request-succeeded",
+      "canonicalPolicyReadback": "proven",
+      "deleteStack": "executed-once",
+      "deletionMode": "STANDARD",
+      "stackDeletionProof": "original-id-delete-complete-and-no-active-name",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "githubAttestation": {
+        "id": "38051531",
+        "url": "https://github.com/upgradedev/archon-datahub/attestations/38051531",
+        "subject": "recovery.json",
+        "subjectDigest": "sha256:44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef"
+      },
+      "artifact": {
+        "id": "8775321544",
+        "name": "aws-incident-recovery-30582684638-1",
+        "createdAt": "2026-07-30T21:19:37Z",
+        "expiresAt": "2026-10-28T21:15:52Z",
+        "sizeBytes": 2085,
+        "uploadedFileCount": 6,
+        "zipDigest": "sha256:dddf3d887781c18d2b1578c8083e450c41ba120753206b5f2f80b50031eee155",
+        "evidenceScope": "recovery-and-cleanup"
+      },
+      "cleanupFollower": {
+        "runId": "30582939537",
+        "result": "skipped-on-success"
+      },
+      "preflightGates": {
+        "ci": {
+          "runId": "30582157198",
+          "result": "success"
+        },
+        "codeql": {
+          "runId": "30582157151",
+          "result": "success"
+        },
+        "workflowSecurity": {
+          "runId": "30582157207",
+          "result": "success"
+        },
+        "productionSupplyChain": {
+          "runId": "30582494521",
+          "result": "success"
+        }
+      }
+    }
   },
   "controlPlane": {
     "entryWorkflow": ".github/workflows/aws-incident-recovery.yml",
