@@ -1715,6 +1715,111 @@ jobs:
 #| )
 #| rollback_subject = file_sha(canary_dir / "rollback-evidence.json")
 #| rollback_digest = digest(rollback["digest"], "rollback evidence digest")
+#| fixture_binding = canary_predicate["fixtureBinding"]
+#| if not isinstance(fixture_binding, dict):
+#|     fail("canary fixture binding must be an object")
+#| exact_keys(
+#|     fixture_binding,
+#|     {
+#|         "schemaVersion",
+#|         "repository",
+#|         "releaseSha",
+#|         "workflowRunId",
+#|         "workflowRunAttempt",
+#|         "artifactId",
+#|         "artifactName",
+#|         "artifactDigest",
+#|         "receiptSha256",
+#|         "stateContractSha256",
+#|         "postStateSha256",
+#|         "gmsEndpointFingerprint",
+#|         "isolationMarkerSha256",
+#|         "attestationPredicateSha256",
+#|         "target",
+#|     },
+#|     "canary fixture binding",
+#| )
+#| exact(
+#|     fixture_binding["schemaVersion"],
+#|     "archon.governed-canary-fixture-binding/v1",
+#|     "canary fixture binding schema",
+#| )
+#| exact(
+#|     fixture_binding["repository"],
+#|     repository,
+#|     "canary fixture repository",
+#| )
+#| exact(
+#|     fixture_binding["releaseSha"],
+#|     release,
+#|     "canary fixture release",
+#| )
+#| fixture_run_id = positive_decimal(
+#|     fixture_binding["workflowRunId"],
+#|     "canary fixture workflowRunId",
+#| )
+#| fixture_run_attempt = positive_decimal(
+#|     fixture_binding["workflowRunAttempt"],
+#|     "canary fixture workflowRunAttempt",
+#| )
+#| if len(fixture_binding["workflowRunAttempt"]) > 10:
+#|     fail("canary fixture workflowRunAttempt exceeds ten digits")
+#| positive_decimal(fixture_binding["artifactId"], "canary fixture artifactId")
+#| exact(
+#|     fixture_binding["artifactName"],
+#|     (
+#|         "datahub-canary-fixture-receipt-"
+#|         f"{fixture_run_id}-{fixture_run_attempt}"
+#|     ),
+#|     "canary fixture artifactName",
+#| )
+#| digest(fixture_binding["artifactDigest"], "canary fixture artifactDigest")
+#| for fixture_digest_field in (
+#|     "receiptSha256",
+#|     "stateContractSha256",
+#|     "postStateSha256",
+#|     "gmsEndpointFingerprint",
+#|     "isolationMarkerSha256",
+#|     "attestationPredicateSha256",
+#| ):
+#|     raw_digest(
+#|         fixture_binding[fixture_digest_field],
+#|         f"canary fixture {fixture_digest_field}",
+#|     )
+#| fixture_target = fixture_binding["target"]
+#| if not isinstance(fixture_target, dict):
+#|     fail("canary fixture target must be an object")
+#| exact_keys(
+#|     fixture_target,
+#|     {"query", "targetUrn"},
+#|     "canary fixture target",
+#| )
+#| exact(
+#|     fixture_target,
+#|     {
+#|         "query": "archon_governed_canary_fixture",
+#|         "targetUrn": (
+#|             "urn:li:dataset:(urn:li:dataPlatform:snowflake,"
+#|             "archon_governed_canary_fixture,TEST)"
+#|         ),
+#|     },
+#|     "canary fixture target",
+#| )
+#| fixture_binding_digest = digest(
+#|     canary_predicate["fixtureBindingDigest"],
+#|     "canary fixture binding digest",
+#| )
+#| fixture_binding_bytes = json.dumps(
+#|     fixture_binding,
+#|     ensure_ascii=False,
+#|     separators=(",", ":"),
+#|     sort_keys=True,
+#| ).encode("utf-8")
+#| exact(
+#|     fixture_binding_digest,
+#|     "sha256:" + hashlib.sha256(fixture_binding_bytes).hexdigest(),
+#|     "canary fixture binding content digest",
+#| )
 #| exact(
 #|     canary_predicate,
 #|     {
@@ -1729,6 +1834,8 @@ jobs:
 #|         "recoveryDigest": rollback["recoveryDigest"],
 #|         "rollbackProposalDigest": rollback["rollbackProposalDigest"],
 #|         "rollbackEvidenceDigest": rollback_digest,
+#|         "fixtureBinding": fixture_binding,
+#|         "fixtureBindingDigest": fixture_binding_digest,
 #|         "result": "write-verified-and-rollback-proven",
 #|     },
 #|     "canary predicate",
@@ -1791,6 +1898,14 @@ jobs:
 #|     embedded_canary["rollbackEvidenceDigest"],
 #|     rollback_digest,
 #|     "embedded rollback evidence",
+#| )
+#| exact(
+#|     digest(
+#|         embedded_canary["fixtureBindingDigest"],
+#|         "embedded canary fixture binding digest",
+#|     ),
+#|     fixture_binding_digest,
+#|     "embedded/canary fixture binding digest",
 #| )
 #| exact(
 #|     raw_digest(

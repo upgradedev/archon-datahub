@@ -4243,6 +4243,7 @@ def derive_live(
             "rollbackEvidenceDigest",
             "attestationPredicateSha256",
             "attestationVerificationSha256",
+            "fixtureBindingDigest",
             "result",
         },
         "deployment evidence.pipelineSecurity.preProductionGovernedCanary",
@@ -4272,6 +4273,10 @@ def derive_live(
         canary["attestationVerificationSha256"],
         "canary.attestationVerificationSha256",
     )
+    fixture_binding = sha256_digest(
+        canary["fixtureBindingDigest"], "canary.fixtureBindingDigest"
+    )
+    del fixture_binding
 
     predicate = exact_keys(
         load_json(predicate_path, "live predicate"),
