@@ -1872,6 +1872,8 @@ source_hashes="$(
   for source_path in \
     .github/workflows/aws-foundation.yml \
     contracts/aws-foundation-v1.json \
+    infra/aws/package.json \
+    infra/aws/package-lock.json \
     infra/aws/foundation/api-gateway-account.yml \
     infra/aws/foundation/cdk-execution-policy.yml \
     infra/aws/foundation/github-actions-deploy-role.yml \
@@ -1879,12 +1881,16 @@ source_hashes="$(
     infra/aws/foundation/github-actions-foundation-role.yml \
     infra/aws/foundation/governed-canary-roles.yml \
     scripts/bootstrap-aws-foundation-role.sh \
+    scripts/patch-cdk-brace-expansion.sh \
     scripts/patch-cdk-bootstrap-template.mjs \
     scripts/render-canonical-flow-yaml.mjs \
     scripts/reconcile-aws-foundation.sh \
     scripts/render-inline-cloudformation-template.sh \
     scripts/render-aws-foundation-policy.mjs \
-    scripts/verify-aws-runtime-boundary.mjs; do
+    scripts/seal-cdk-bootstrap-templates.sh \
+    scripts/verify-aws-runtime-boundary.mjs \
+    scripts/verify-cdk-npm-audit-compensation.sh \
+    scripts/verify-exact-npm-overrides.mjs; do
     jq -cn \
       --arg path "${source_path}" \
       --arg sha256 "$(sha256sum "${source_path}" | awk '{print $1}')" \

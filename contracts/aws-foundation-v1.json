@@ -16,6 +16,12 @@
       "eu-west-1",
       "us-east-1"
     ],
+    "toolchain": {
+      "nodeVersion": "22.23.1",
+      "npmVersion": "10.9.8",
+      "awsCdkCliVersionSource": "infra/aws/package-lock.json#packages/node_modules/aws-cdk/version",
+      "installedAwsCdkCliMatchesLock": true
+    },
     "foundationRoleVariable": "AWS_FOUNDATION_ROLE_ARN",
     "foundationRoleName": "archon-datahub-github-foundation",
     "foundationRoleAdoption": {
