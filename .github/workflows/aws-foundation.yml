@@ -448,6 +448,7 @@ jobs:
               artifactUpload: "explicit-files-only",
               autoRecovery: "forbidden",
               canonicalJson: true,
+              credentialClearProofRequired: true,
               diagnosticCount: 1,
               digestFields: [
                 "logicalResourceId",
@@ -879,6 +880,7 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Clear AWS credentials before artifact handling
+        id: clear_aws_credentials
         if: ${{ always() }}
         run: |
           set -euo pipefail
@@ -888,14 +890,22 @@ jobs:
             echo "AWS_SESSION_TOKEN="
             echo "AWS_SECURITY_TOKEN="
           } >>"${GITHUB_ENV}"
+          echo "cleared=true" >>"${GITHUB_OUTPUT}"
 
       - name: Validate checksum-sealed sanitized failure evidence
         id: failure_evidence
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == 'true' }}
         env:
           FAILURE_EVIDENCE_DIR: ${{ runner.temp }}/aws-foundation-failure
         run: |
           set -euo pipefail
+          if [[ -n "${AWS_ACCESS_KEY_ID:-}" || \
+            -n "${AWS_SECRET_ACCESS_KEY:-}" || \
+            -n "${AWS_SESSION_TOKEN:-}" || \
+            -n "${AWS_SECURITY_TOKEN:-}" ]]; then
+            echo "::error::AWS credentials remained available during failure evidence validation" >&2
+            exit 1
+          fi
           if [[ ! -e "${FAILURE_EVIDENCE_DIR}" && ! -L "${FAILURE_EVIDENCE_DIR}" ]]; then
             echo "available=false" >>"${GITHUB_OUTPUT}"
             exit 0
@@ -1052,7 +1062,7 @@ jobs:
           echo "available=true" >>"${GITHUB_OUTPUT}"
 
       - name: Retain checksum-sealed sanitized foundation failure evidence
-        if: ${{ failure() && steps.failure_evidence.outputs.available == 'true' }}
+        if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == 'true' && steps.failure_evidence.outputs.available == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: aws-foundation-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

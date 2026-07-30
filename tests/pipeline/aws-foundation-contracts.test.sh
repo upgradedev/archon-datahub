@@ -368,6 +368,7 @@ jq --exit-status '
     artifactUpload: "explicit-files-only",
     autoRecovery: "forbidden",
     canonicalJson: true,
+    credentialClearProofRequired: true,
     diagnosticCount: 1,
     digestFields: [
       "logicalResourceId",
@@ -461,12 +462,18 @@ require_text "${foundation_workflow}" \
   'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
   'run: bash scripts/reconcile-aws-foundation.sh' \
   'Clear AWS credentials before artifact handling' \
+  'id: clear_aws_credentials' \
+  'echo "cleared=true" >>"${GITHUB_OUTPUT}"' \
   'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
   'retention-days: 90' \
   'if: ${{ always() }}' \
   'Validate checksum-sealed sanitized failure evidence' \
-  'if: ${{ failure() }}' \
+  'if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == ''true'' }}' \
   'Retain checksum-sealed sanitized foundation failure evidence' \
+  '-n "${AWS_ACCESS_KEY_ID:-}"' \
+  '-n "${AWS_SECRET_ACCESS_KEY:-}"' \
+  '-n "${AWS_SESSION_TOKEN:-}"' \
+  '-n "${AWS_SECURITY_TOKEN:-}"' \
   'find -P "${FAILURE_EVIDENCE_DIR}"' \
   'LC_ALL=C sort -z' \
   'jq -cS .' \
@@ -512,6 +519,9 @@ if grep -Fq 'path: ${{ runner.temp }}/aws-foundation-failure/' \
   "${foundation_workflow}"; then
   fail "failure evidence upload must name only the two sealed files"
 fi
+grep -Fq "steps.clear_aws_credentials.outputs.cleared == 'true'" \
+  "${foundation_workflow}" ||
+  fail "failure evidence handling must require credential-clear proof"
 grep -Fq "steps.failure_evidence.outputs.available == 'true'" \
   "${foundation_workflow}" ||
   fail "failure evidence upload must require a validated diagnostic"

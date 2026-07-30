@@ -451,8 +451,9 @@ resource ID, or denied action. It seals inside a private staging directory,
 requires the exact recursive inventory of two root regular non-symlink files,
 and only then atomically publishes the final directory.
 
-After AWS credentials are cleared, the workflow repeats the exact recursive
-inventory and checksum checks and requires canonical JSON bytes. It
+After the credential-clear step succeeds, the validator first proves that all
+four AWS credential environment variables are empty. It then repeats the exact
+recursive inventory and checksum checks and requires canonical JSON bytes. It
 recomputes the diagnostic digest from the seven safe fields. Only `cfn-failure.json` and
 `SHA256SUMS` are passed as explicit upload paths and retained for 90 days. A
 missing, malformed, oversized, non-canonical, non-allowlisted, or digest-mismatched
