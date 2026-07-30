@@ -180,7 +180,7 @@
   },
   "revocation": {
     "jobCondition": "always",
-    "decisionSource": "fail-closed-ListRolePolicies",
+    "decisionSource": "exact-delete-then-repeated-fail-closed-ListRolePolicies",
     "exactPolicyDeletion": true,
     "postDeleteRelistRequired": true,
     "deleteFailureHandling": "success-or-exact-NoSuchEntity-only",

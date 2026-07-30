@@ -23,7 +23,11 @@ case "${1:-}:${2:-}" in
     ;;
   iam:list-role-policies)
     increment list-role-policies >/dev/null
-    printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+    if [[ "${FAKE_LIST_MODE:-base}" == "unexpected" ]]; then
+      printf '%s\n' '{"PolicyNames":["archon-staging-stack-read","unreviewed-policy"]}'
+    else
+      printf '%s\n' '{"PolicyNames":["archon-staging-stack-read"]}'
+    fi
     ;;
   iam:delete-role-policy)
     increment delete-role-policy >/dev/null
@@ -60,10 +64,15 @@ case "${1:-}:${2:-}" in
 esac
 FAKE_AWS
 chmod 0700 "${test_root}/bin/aws"
+cat >"${test_root}/bin/sleep" <<'FAKE_SLEEP'
+#!/usr/bin/env bash
+exit 0
+FAKE_SLEEP
+chmod 0700 "${test_root}/bin/sleep"
 
 fail() { echo "::error::$*" >&2; exit 1; }
 run_driver() {
-  local case_name="$1" mode="$2" delete_mode="$3"
+  local case_name="$1" mode="$2" delete_mode="$3" list_mode="${4:-base}"
   local case_root="${test_root}/${case_name}"
   mkdir -p "${case_root}/state"
   : >"${case_root}/output"
@@ -71,6 +80,7 @@ run_driver() {
   FAKE_AWS_STATE="${case_root}/state" \
   FAKE_ACCOUNT_ID="123456789012" \
   FAKE_DELETE_MODE="${delete_mode}" \
+  FAKE_LIST_MODE="${list_mode}" \
   GITHUB_ACTIONS=true \
   RUNNER_TEMP="${case_root}" \
   GITHUB_OUTPUT="${case_root}/output" \
@@ -100,6 +110,12 @@ for rejected in access-denied throttled wrong-operation; do
     fail "raw AWS error leaked to stderr"
   fi
 done
+
+if run_driver cleanup-unexpected-policy cleanup success unexpected; then
+  fail 'unexpected inline policy inventory must fail evidence'
+fi
+test "$(<"${test_root}/cleanup-unexpected-policy/state/delete-role-policy.count")" = 1 || fail 'exact temporary policy was not deleted before drift failure'
+grep -Fq 'lacks repeated canonical absence' "${test_root}/cleanup-unexpected-policy/stderr" || fail 'unexpected inventory did not fail closed'
 
 if run_driver postverify-generic-failure postverify no-such; then
   fail 'generic ListStacks failure must not prove target-name absence'

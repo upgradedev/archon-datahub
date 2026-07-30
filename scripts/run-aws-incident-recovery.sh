@@ -438,17 +438,9 @@ delete_once() {
   echo "delete_called=true" >>"${GITHUB_OUTPUT}"
 }
 revoke_policy() {
-  local before="${WORK_ROOT}/revoke-policies-before.json"
   local after="${WORK_ROOT}/revoke-policies-after.json"
-  retry_safe_aws "Unable to enumerate recovery-role policies before revocation" "${before}" \
-    iam list-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
-  jq -e '
-    (.PolicyNames | sort) == ["archon-staging-stack-read"] or
-    (.PolicyNames | sort) == [
-      "archon-incident-30546241677-delete",
-      "archon-staging-stack-read"
-    ]
-  ' "${before}" >/dev/null || fail "Recovery-role policy inventory differs before revocation"
+  # Exact incident-policy deletion is privilege-reducing even when unrelated
+  # role drift exists. Delete first; then fail closed on the full inventory.
   local delete_error="${WORK_ROOT}/delete-role-policy.error"
   if ! aws iam delete-role-policy \
     --role-name "${RECOVERY_ROLE_NAME}" \

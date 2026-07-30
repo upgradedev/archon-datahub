@@ -9,6 +9,7 @@ foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
 deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 canary_workflow="${repository_root}/.github/workflows/governed-canary.yml"
 canary_recovery_workflow="${repository_root}/.github/workflows/governed-canary-recovery.yml"
+fixture_workflow="${repository_root}/.github/workflows/datahub-canary-fixture.yml"
 contract="${repository_root}/contracts/aws-incident-recovery-v1.json"
 foundation_contract="${repository_root}/contracts/aws-foundation-v1.json"
 canary_roles="${repository_root}/infra/aws/foundation/governed-canary-roles.yml"
@@ -44,7 +45,7 @@ require_count() {
 
 for path in "${entry}" "${driver_workflow}" "${cleanup_workflow}" \
   "${foundation_workflow}" "${deploy_workflow}" "${canary_workflow}" \
-  "${canary_recovery_workflow}" "${contract}" "${foundation_contract}" \
+  "${canary_recovery_workflow}" "${fixture_workflow}" "${contract}" "${foundation_contract}" \
   "${canary_roles}" "${driver}" "${validator}" "${reconciler}" "${ci}" \
   "${behavior_test}" "${validator_test}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
@@ -168,15 +169,81 @@ require_text "${cleanup_workflow}" \
   'cancel-in-progress: false'
 forbid_text "${cleanup_workflow}" 'schedule:' 'cron:' "conclusion == 'success'" 'secrets: inherit'
 
-require_text "${foundation_workflow}" \
-  'group: archon-aws-control-plane' \
-  'group: archon-governed-canary-mutation-recovery' \
-  'cancel-in-progress: false'
+entry_trigger="$(sed -n '/^on:/,/^permissions:/p' "${entry}" | sed '$d')"
+driver_trigger="$(sed -n '/^on:/,/^permissions:/p' "${driver_workflow}" | sed '$d')"
+cleanup_trigger="$(sed -n '/^on:/,/^permissions:/p' "${cleanup_workflow}" | sed '$d')"
+grep -Fq '  workflow_dispatch:' <<<"${entry_trigger}" || fail 'entry must be manual-only'
+grep -Fq '  workflow_call:' <<<"${driver_trigger}" || fail 'driver must be callable-only'
+grep -Fq '  workflow_run:' <<<"${cleanup_trigger}" || fail 'cleanup workflow_run trigger is missing'
+grep -Fq '  workflow_dispatch:' <<<"${cleanup_trigger}" || fail 'cleanup manual trigger is missing'
+for forbidden in '  push:' '  pull_request:' '  schedule:' '  workflow_call:'; do
+  grep -Fq "${forbidden}" <<<"${entry_trigger}" && fail "entry has forbidden trigger ${forbidden}"
+done
+for forbidden in '  push:' '  pull_request:' '  schedule:' '  workflow_dispatch:' '  workflow_run:'; do
+  grep -Fq "${forbidden}" <<<"${driver_trigger}" && fail "driver has forbidden trigger ${forbidden}"
+done
+for forbidden in '  push:' '  pull_request:' '  schedule:' '  workflow_call:'; do
+  grep -Fq "${forbidden}" <<<"${cleanup_trigger}" && fail "cleanup has forbidden trigger ${forbidden}"
+done
+
+entry_lock="$(sed -n '/^concurrency:/,/^jobs:/p' "${entry}" | sed '$d')"
+driver_lock="$(sed -n '/^concurrency:/,/^env:/p' "${driver_workflow}" | sed '$d')"
+foundation_outer_lock="$(sed -n '/^concurrency:/,/^env:/p' "${foundation_workflow}" | sed '$d')"
+foundation_inner_lock="$(sed -n '/^  foundation:/,/^    runs-on:/p' "${foundation_workflow}" | sed '$d')"
+cleanup_outer_lock="$(sed -n '/^  cleanup:/,/^    permissions:/p' "${cleanup_workflow}" | sed '$d')"
+for blob in "${entry_lock}" "${foundation_outer_lock}" "${cleanup_outer_lock}"; do
+  grep -Fq 'group: archon-aws-control-plane' <<<"${blob}" || fail 'outer lock is out of scope'
+  grep -Fq 'cancel-in-progress: false' <<<"${blob}" || fail 'outer lock must not cancel'
+done
+for blob in "${driver_lock}" "${foundation_inner_lock}"; do
+  grep -Fq 'group: archon-governed-canary-mutation-recovery' <<<"${blob}" || fail 'inner lock is out of scope'
+  grep -Fq 'cancel-in-progress: false' <<<"${blob}" || fail 'inner lock must not cancel'
+done
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
   '/actions/workflows/governed-canary.yml/dispatches'
-require_text "${canary_workflow}" 'group: archon-governed-canary-mutation-recovery'
-require_text "${canary_recovery_workflow}" 'group: archon-governed-canary-mutation-recovery'
+for workflow in "${fixture_workflow}" "${canary_workflow}" "${canary_recovery_workflow}"; do
+  lock="$(sed -n '/^concurrency:/,/^env:/p' "${workflow}" | sed '$d')"
+  grep -Fq 'group: archon-governed-canary-mutation-recovery' <<<"${lock}" || fail "${workflow#${repository_root}/} inner lock differs"
+  grep -Fq 'cancel-in-progress: false' <<<"${lock}" || fail "${workflow#${repository_root}/} lock must not cancel"
+done
+
+for workflow in "${entry}" "${driver_workflow}" "${cleanup_workflow}"; do
+  while IFS= read -r action; do
+    [[ "${action}" == ./* ]] && continue
+    ref="${action##*@}"
+    ref="${ref%% *}"
+    [[ "${ref}" =~ ^[0-9a-f]{40}$ ]] || fail "${workflow#${repository_root}/} has a non-SHA action pin: ${action}"
+  done < <(sed -nE 's/^[[:space:]]*(- )?uses:[[:space:]]+([^#[:space:]]+).*/\2/p' "${workflow}")
+done
+require_text "${driver_workflow}" \
+  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' \
+  'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' \
+  'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' \
+  'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
+  'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
+  'aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c'
+for workflow in "${entry}" "${driver_workflow}" "${cleanup_workflow}"; do
+  forbid_text "${workflow}" \
+    'contents: write' 'checks: write' 'deployments: write' 'issues: write' \
+    'packages: write' 'pull-requests: write' 'security-events: write'
+done
+for section in \
+  "$(sed -n '/^  recover:/,$p' "${entry}")" \
+  "$(sed -n '/^  cleanup:/,$p' "${cleanup_workflow}")" \
+  "$(sed -n '/^  revoke-and-postverify:/,/^  cleanup:/p' "${driver_workflow}")" \
+  "$(sed -n '/^  cleanup:/,$p' "${driver_workflow}")"; do
+  grep -Fq 'actions: read' <<<"${section}" || fail 'caller/called permissions omit actions:read'
+  grep -Fq 'attestations: write' <<<"${section}" || fail 'caller/called permissions omit attestations:write'
+  grep -Fq 'contents: read' <<<"${section}" || fail 'caller/called permissions omit contents:read'
+  grep -Fq 'id-token: write' <<<"${section}" || fail 'caller/called permissions omit id-token:write'
+done
+for section in \
+  "$(sed -n '/^  prepare:/,/^  delete-once:/p' "${driver_workflow}")" \
+  "$(sed -n '/^  delete-once:/,/^  revoke-and-postverify:/p' "${driver_workflow}")"; do
+  grep -Fq 'contents: read' <<<"${section}" || fail 'prepare/delete permissions omit contents:read'
+  grep -Fq 'id-token: write' <<<"${section}" || fail 'prepare/delete permissions omit id-token:write'
+done
 
 require_text "${driver}" \
   'AWS incident recovery is CI-only' \
@@ -190,8 +257,11 @@ require_text "${driver}" \
   'iam delete-role-policy' \
   'NoSuchEntity' \
   'consecutive_absent' \
+  'original-id-delete-complete-and-no-active-name' \
+  '--deletion-mode STANDARD'
+require_text "${validator}" \
   'cloudformation:RoleArn' \
-  'original-id-delete-complete-and-no-active-name'
+  'Null: { "cloudformation:RoleArn": "true" }'
 require_count 3 "${driver}" 'mask_value "${stack_id}"'
 require_count 1 "${driver}" 'aws cloudformation delete-stack'
 require_count 1 "${driver}" 'aws iam put-role-policy'
@@ -204,6 +274,8 @@ forbid_text "${driver}" \
   '--retain-resources' \
   '--role-arn' \
   '--deployment-config'
+cleanup_function="$(sed -n '/^cleanup()/,/^}/p' "${driver}")"
+if grep -Fq 'delete-stack' <<<"${cleanup_function}"; then fail 'cleanup mode can call DeleteStack'; fi
 forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
 forbid_text "${reconciler}" 'cloudformation delete-stack' 'delete-stack' 'continue-update-rollback'
 

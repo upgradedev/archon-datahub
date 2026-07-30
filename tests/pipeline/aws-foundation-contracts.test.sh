@@ -1166,7 +1166,6 @@ require_text "${ci_workflow}" \
   'node scripts/verify-aws-runtime-boundary.mjs'
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
-  'group: archon-governed-canary-mutation-recovery' \
   'cancel-in-progress: false' \
   'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
   'ALLOW_ABSENT=false' \
