@@ -6,9 +6,8 @@ import json
 import os
 import pathlib
 import tempfile
-import unittest
 from types import SimpleNamespace
-from unittest import mock
+from unittest import TestCase, main, mock, skipUnless
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -179,7 +178,7 @@ def observed_state(
     }
 
 
-class DataHubCanaryFixtureContractsTest(unittest.TestCase):
+class DataHubCanaryFixtureContractsTest(TestCase):
     def test_contract_is_the_single_owned_test_fixture(self) -> None:
         contract = DRIVER.validate_contract(copy.deepcopy(REVIEWED_CONTRACT))
         binding = contract["binding"]
@@ -545,7 +544,6 @@ class DataHubCanaryFixtureContractsTest(unittest.TestCase):
     def test_seed_plan_creates_absent_is_noop_when_exact_and_rejects_drift(
         self,
     ) -> None:
-        contract = copy.deepcopy(REVIEWED_CONTRACT)
         release_sha = "a" * 40
         cases = (
             (
@@ -1181,7 +1179,7 @@ class DataHubCanaryFixtureContractsTest(unittest.TestCase):
         self.assertNotIn(DRIVER.TARGET_URN, output.call_args.args[0])
         self.assertNotIn(DRIVER.DOMAIN_URN, output.call_args.args[0])
 
-    @unittest.skipUnless(
+    @skipUnless(
         os.environ.get("ARCHON_LOCKED_DATAHUB_RUNTIME") == "true",
         "requires the CI-materialized locked acryl-datahub runtime",
     )
@@ -1237,4 +1235,4 @@ class DataHubCanaryFixtureContractsTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
