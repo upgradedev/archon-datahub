@@ -23,6 +23,7 @@ readonly WORK_ROOT="${RUNNER_TEMP}/archon-aws-incident-recovery"
 readonly VALIDATOR="scripts/aws-incident-recovery.mjs"
 readonly IAM_PROPAGATION_ATTEMPTS="12"
 readonly IAM_PROPAGATION_DELAY_SECONDS="5"
+readonly IAM_ABSENCE_CONFIRMATIONS="3"
 
 mkdir -p "${WORK_ROOT}"
 chmod 0700 "${WORK_ROOT}"
@@ -92,6 +93,7 @@ wait_for_policy_digest() {
 wait_for_policy_absence() {
   local output="$1"
   local attempt
+  local consecutive_absent=0
   for ((attempt = 1; attempt <= IAM_PROPAGATION_ATTEMPTS; attempt++)); do
     if aws iam list-role-policies \
       --role-name "${RECOVERY_ROLE_NAME}" \
@@ -102,14 +104,21 @@ wait_for_policy_absence() {
       if jq -e --arg base "${BASE_POLICY_NAME}" '
         (.PolicyNames | sort) == [$base]
       ' "${output}" >/dev/null; then
-        return 0
+        consecutive_absent=$((consecutive_absent + 1))
+        if ((consecutive_absent >= IAM_ABSENCE_CONFIRMATIONS)); then
+          return 0
+        fi
+      else
+        consecutive_absent=0
       fi
+    else
+      consecutive_absent=0
     fi
     if ((attempt < IAM_PROPAGATION_ATTEMPTS)); then
       sleep "${IAM_PROPAGATION_DELAY_SECONDS}"
     fi
   done
-  fail "The temporary recovery authorization remains observable after bounded IAM propagation retries"
+  fail "The temporary recovery authorization lacks repeated canonical absence after bounded IAM propagation retries"
 }
 
 validate_common() {
@@ -205,6 +214,7 @@ validate_recovery_role() {
   local role_body="${WORK_ROOT}/role-template.body"
   local role="${WORK_ROOT}/role.json"
   local policies="${WORK_ROOT}/role-policies.json"
+  local attached_policies="${WORK_ROOT}/role-attached-policies.json"
   local base_policy="${WORK_ROOT}/base-policy.json"
   local expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
 
@@ -270,6 +280,11 @@ validate_recovery_role() {
   jq -e '
     (.PolicyNames | sort) == ["archon-staging-stack-read"]
   ' "${policies}" >/dev/null || fail "The recovery role contains an unexpected inline policy"
+  retry_safe_aws "Unable to inspect recovery-role attached policies" "${attached_policies}" \
+    iam list-attached-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
+  jq -e '
+    .AttachedPolicies == []
+  ' "${attached_policies}" >/dev/null || fail "The recovery role contains an attached managed policy"
   safe_aws "Unable to inspect the recovery-role base policy" "${base_policy}" \
     iam get-role-policy \
     --role-name "${RECOVERY_ROLE_NAME}" \
@@ -417,7 +432,7 @@ delete_once() {
 revoke_policy() {
   local before="${WORK_ROOT}/revoke-policies-before.json"
   local after="${WORK_ROOT}/revoke-policies-after.json"
-  safe_aws "Unable to enumerate recovery-role policies before revocation" "${before}" \
+  retry_safe_aws "Unable to enumerate recovery-role policies before revocation" "${before}" \
     iam list-role-policies --role-name "${RECOVERY_ROLE_NAME}" --output json
   jq -e '
     (.PolicyNames | sort) == ["archon-staging-stack-read"] or
@@ -426,12 +441,16 @@ revoke_policy() {
       "archon-staging-stack-read"
     ]
   ' "${before}" >/dev/null || fail "Recovery-role policy inventory differs before revocation"
-  # Idempotently target only the incident-scoped policy. A failed delete is accepted
-  # only if bounded, canonical inventory readback proves that it is already absent.
-  aws iam delete-role-policy \
-    --role-name "${RECOVERY_ROLE_NAME}" \
-    --policy-name "${TEMP_POLICY_NAME}" \
-    >/dev/null 2>&1 || true
+  if jq -e --arg policy "${TEMP_POLICY_NAME}" '
+    .PolicyNames | index($policy) != null
+  ' "${before}" >/dev/null; then
+    if ! aws iam delete-role-policy \
+      --role-name "${RECOVERY_ROLE_NAME}" \
+      --policy-name "${TEMP_POLICY_NAME}" \
+      >/dev/null 2>&1; then
+      fail "Unable to revoke the observed temporary recovery authorization"
+    fi
+  fi
   wait_for_policy_absence "${after}"
 }
 postverify() {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
-  mkdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -89,7 +88,7 @@ test("accepts only the exact canonical incident artifact", () => {
       failurePayloadSha256:
         "sha256:187d4cf683a61a778feec2051f1ef5c99b60cc58344edbf1a7d0189f28c67442",
       inventorySha256:
-        "sha256:8151995fbf11520b43f6658f98a7733482f5fe54095a5c0e9937b37d38e3fddd",
+        "sha256:eab331323a1b4e40e28b5bfef5e7b502ca3b44fe183550362070b469c6abbdef",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -123,23 +122,38 @@ test("seals one exact expiring read and one exact mutating DeleteStack permissio
   assert.match(result.resourceStateSha256, /^sha256:[a-f0-9]{64}$/u);
   assert.equal(result.plan.target.stackId, stackId);
   assert.equal(result.plan.target.resourceStateSha256, result.resourceStateSha256);
-  assert.deepEqual(
-    result.policyDocument.Statement.map((statement) => statement.Action),
-    ["cloudformation:DescribeStacks", "cloudformation:DeleteStack"]
-  );
-  for (const statement of result.policyDocument.Statement) {
-    assert.equal(statement.Resource, stackId);
-    assert.equal(statement.Condition.DateLessThan["aws:CurrentTime"], expiresAt);
-    assert.equal(statement.Condition.StringEquals["aws:RequestedRegion"], "eu-west-1");
-    for (const [key, value] of Object.entries(TARGET.tags)) {
-      assert.equal(statement.Condition.StringEquals[`aws:ResourceTag/${key}`], value);
-    }
-  }
-  assert.deepEqual(
-    result.policyDocument.Statement[1].Condition.Null,
-    { "cloudformation:RoleArn": "true" }
-  );
-  assert.equal(result.policyDocument.Statement[0].Condition.Null, undefined);
+  const exactConditions = {
+    DateLessThan: { "aws:CurrentTime": expiresAt },
+    StringEquals: {
+      "aws:RequestedRegion": "eu-west-1",
+      "aws:ResourceTag/Application": "archon-datahub",
+      "aws:ResourceTag/Environment": "staging",
+      "aws:ResourceTag/ManagedBy": "github-actions",
+      "aws:ResourceTag/Purpose": "stage-iam-foundation",
+    },
+  };
+  assert.deepEqual(result.policyDocument, {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "ReadExactSealedIncidentStackBeforeExpiry",
+        Effect: "Allow",
+        Action: "cloudformation:DescribeStacks",
+        Resource: stackId,
+        Condition: exactConditions,
+      },
+      {
+        Sid: "DeleteExactSealedIncidentStackBeforeExpiry",
+        Effect: "Allow",
+        Action: "cloudformation:DeleteStack",
+        Resource: stackId,
+        Condition: {
+          ...exactConditions,
+          Null: { "cloudformation:RoleArn": "true" },
+        },
+      },
+    ],
+  });
   assert.deepEqual(result.plan.delete, {
     action: "cloudformation:DeleteStack",
     clientRequestToken: `archon-30546241677-a1-${controlPlaneSha.slice(0, 12)}`,
@@ -210,6 +224,52 @@ test("fails closed on target identity, authority, tags, source, and TTL drift", 
   );
 });
 
+
+test("rejects malformed or differently bound stack ARNs", () => {
+  const invalidStackIds = [
+    stackId.replace(":eu-west-1:", ":us-east-1:"),
+    stackId.replace(accountId, "210987654321"),
+    stackId.replace(TARGET.stackName, "Archon-production"),
+    `arn:aws:cloudformation:eu-west-1:${accountId}:stack/${TARGET.stackName}/not-a-uuid`,
+    `${stackId}/extra`,
+  ];
+  for (const invalidStackId of invalidStackIds) {
+    assert.throws(() =>
+      build({ stackResponse: stackResponse({ StackId: invalidStackId }) })
+    );
+  }
+});
+
+test("requires exactly one target stack and one incident resource record", () => {
+  assert.throws(() => build({ stackResponse: { Stacks: [] } }));
+  const duplicateStacks = stackResponse();
+  duplicateStacks.Stacks.push({ ...duplicateStacks.Stacks[0] });
+  assert.throws(() => build({ stackResponse: duplicateStacks }));
+
+  const missingIncident = resourcesResponse();
+  missingIncident.StackResourceSummaries.shift();
+  assert.throws(() => build({ resourcesResponse: missingIncident }));
+
+  const duplicateIncident = resourcesResponse();
+  duplicateIncident.StackResourceSummaries.push({
+    ...duplicateIncident.StackResourceSummaries[0],
+  });
+  assert.throws(() => build({ resourcesResponse: duplicateIncident }));
+});
+
+test("rejects malformed account and control-plane identities", () => {
+  for (const invalidAccountId of ["123", "12345678901x", "1234567890123"]) {
+    assert.throws(() => build({ accountId: invalidAccountId }));
+  }
+  for (const invalidControlPlaneSha of [
+    "",
+    "0".repeat(39),
+    "0".repeat(41),
+    "A".repeat(40),
+  ]) {
+    assert.throws(() => build({ controlPlaneSha: invalidControlPlaneSha }));
+  }
+});
 test("rejects invalid prepared resource digests during delete reconstruction", () => {
   for (const digest of ["", "sha256:*", `sha256:${"0".repeat(63)}`]) {
     assert.throws(() =>
