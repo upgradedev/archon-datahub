@@ -1,0 +1,2229 @@
+name: Submission operations
+
+run-name: Prove judging-period operations for ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      availability_run_id:
+        description: Exact fresh production availability run ID retained by project access
+        required: true
+        type: string
+      posture_run_id:
+        description: Exact fresh production posture run ID
+        required: true
+        type: string
+      paging_run_id:
+        description: Exact successful production paging-delivery run ID
+        required: true
+        type: string
+      governed_canary_run_id:
+        description: Exact governed-canary run bound by live deployment evidence
+        required: true
+        type: string
+      project_access_run_id:
+        description: Exact successful standard-v1 project-access run ID
+        required: true
+        type: string
+      live_datahub_run_id:
+        description: Exact successful live-datahub v4 run ID carrying D4
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-operations-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-operations/v1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  produce:
+    name: Produce exact operational-readiness evidence
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      predicate_digest: ${{ steps.package.outputs.predicate_digest }}
+      producer_run_attempt: ${{ steps.package.outputs.producer_attempt }}
+      producer_run_id: ${{ github.run_id }}
+    steps:
+      - name: Bind dispatch to exact scalar source identifiers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          AVAILABILITY_RUN_ID: ${{ inputs.availability_run_id }}
+          POSTURE_RUN_ID: ${{ inputs.posture_run_id }}
+          PAGING_RUN_ID: ${{ inputs.paging_run_id }}
+          GOVERNED_CANARY_RUN_ID: ${{ inputs.governed_canary_run_id }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          LIVE_DATAHUB_RUN_ID: ${{ inputs.live_datahub_run_id }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-operations.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          source_ids=(
+            "${AVAILABILITY_RUN_ID}"
+            "${POSTURE_RUN_ID}"
+            "${PAGING_RUN_ID}"
+            "${GOVERNED_CANARY_RUN_ID}"
+            "${PROJECT_ACCESS_RUN_ID}"
+            "${LIVE_DATAHUB_RUN_ID}"
+          )
+          for run_id in "${source_ids[@]}"; do
+            [[ "${run_id}" =~ ^[1-9][0-9]*$ ]]
+          done
+          test "$(
+            printf '%s\n' "${source_ids[@]}" | LC_ALL=C sort -u | wc -l
+          )" = "${#source_ids[@]}"
+          current_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path == ".github/workflows/submission-operations.yml" and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${current_run}" >/dev/null
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+
+      - name: Check out the exact unprivileged producer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact producer control plane
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          gate="${RUNNER_TEMP}/submission-operations-producer-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
+      - name: Materialize exact reviewed operations collector
+        id: collector
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          workflow=".github/workflows/submission-operations.yml"
+          collector="${RUNNER_TEMP}/collect-submission-operations.sh"
+          test ! -e "${collector}"
+          awk '
+            /^# BEGIN ARCHON SUBMISSION OPERATIONS COLLECTOR$/ {
+              if (active || seen) exit 21
+              active = 1
+              seen = 1
+              next
+            }
+            /^# END ARCHON SUBMISSION OPERATIONS COLLECTOR$/ {
+              if (!active) exit 22
+              active = 0
+              ended = 1
+              next
+            }
+            active {
+              if ($0 == "#|") {
+                print ""
+                next
+              }
+              if (substr($0, 1, 3) != "#| ") exit 23
+              print substr($0, 4)
+            }
+            END {
+              if (!seen || active || !ended) exit 24
+            }
+          ' "${workflow}" >"${collector}"
+          test -s "${collector}"
+          test "$(head -n 1 "${collector}")" = "#!/usr/bin/env bash"
+          chmod 0500 "${collector}"
+          bash -n "${collector}"
+          echo "path=${collector}" >>"${GITHUB_OUTPUT}"
+
+      - name: Independently collect and reconstruct exact SQ10 facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATIONS_COLLECTOR: ${{ steps.collector.outputs.path }}
+          OPERATIONS_ROOT: ${{ runner.temp }}/submission-operations-producer
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          AVAILABILITY_RUN_ID: ${{ inputs.availability_run_id }}
+          POSTURE_RUN_ID: ${{ inputs.posture_run_id }}
+          PAGING_RUN_ID: ${{ inputs.paging_run_id }}
+          GOVERNED_CANARY_RUN_ID: ${{ inputs.governed_canary_run_id }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          LIVE_DATAHUB_RUN_ID: ${{ inputs.live_datahub_run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          "${OPERATIONS_COLLECTOR}"
+
+      - name: Assemble exact registered SQ10 subjects
+        id: package
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          OPERATIONS_ROOT: ${{ runner.temp }}/submission-operations-producer
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          facts="${OPERATIONS_ROOT}/facts"
+          output="${RUNNER_TEMP}/submission-operations-evidence"
+          validation="${RUNNER_TEMP}/submission-operations-assembly.json"
+          test -f "${facts}/SQ10.json"
+          test ! -L "${facts}/SQ10.json"
+          test ! -e "${output}"
+          python3 scripts/validate-submission-proof-receipts.py \
+            assemble-standard \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key operations \
+            --facts-dir "${facts}" \
+            --output-dir "${output}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --notice NOTICE.md >"${validation}"
+          jq -e \
+            --arg release "${RELEASE_SHA}" \
+            --argjson attempt "${GITHUB_RUN_ATTEMPT}" '
+              .schemaVersion ==
+                "archon.submission-standard-source-validation/v1" and
+              .repository == "upgradedev/archon-datahub" and
+              .releaseSha == $release and
+              .sourceKey == "operations" and
+              .workflowPath ==
+                ".github/workflows/submission-operations.yml" and
+              .artifactName ==
+                ("submission-operations-" + $release + "-" +
+                  ($attempt | tostring)) and
+              .predicateType ==
+                "https://archon.datahub.dev/attestations/" +
+                "submission-operations/v1" and
+              .subjectCount == 9 and
+              .proofIds == ["SQ10"]
+            ' "${validation}" >/dev/null
+          test "$(
+            find "${output}" -type f -printf '%P\n' | LC_ALL=C sort
+          )" = "$(
+            printf '%s\n' \
+              SHA256SUMS \
+              attestation-predicate.json \
+              proofs/SQ10.json \
+              support/SQ10/availability-attestation.json \
+              support/SQ10/credential-rotation.json \
+              support/SQ10/judge-access-validity.json \
+              support/SQ10/monitor-configuration.json \
+              support/SQ10/paging-delivery.json \
+              support/SQ10/posture-attestation.json \
+              support/SQ10/rollback-recovery.json
+          )"
+          test "$(wc -l <"${output}/SHA256SUMS")" = "9"
+          (
+            cd "${output}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          predicate_digest="sha256:$(
+            sha256sum "${output}/attestation-predicate.json" |
+              awk '{print $1}'
+          )"
+          {
+            echo "artifact_name=submission-operations-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "predicate_digest=${predicate_digest}"
+            echo "producer_attempt=${GITHUB_RUN_ATTEMPT}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Recheck canonical state before retention
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+
+      - name: Retain exact standard operations subjects
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-operations-evidence
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 90
+
+  attest:
+    name: Independently revalidate and attest operations subjects
+    needs: produce
+    if: needs.produce.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind attester to exact current workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-operations.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          current_run="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          )"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GITHUB_RUN_ID}" \
+            --argjson runAttempt "${GITHUB_RUN_ATTEMPT}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .path == ".github/workflows/submission-operations.yml" and
+              .event == "workflow_dispatch" and
+              .head_sha == $release and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository
+            ' <<<"${current_run}" >/dev/null
+
+      - name: Check out the exact unprivileged attester
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact attester control plane
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          gate="${RUNNER_TEMP}/submission-operations-attester-gate"
+          test ! -e "${gate}"
+          mkdir --mode=0700 "${gate}"
+          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
+          OUTPUT_PATH="${gate}/control-plane-security-gates.json" \
+            bash scripts/verify-github-control-plane.sh
+
+      - name: Resolve one immutable operations producer artifact
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          artifact_prefix="submission-operations-${RELEASE_SHA}-"
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "${artifact_prefix}" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          artifact_id="$(jq -er '.metadata.id' <<<"${selected}")"
+          artifact_name="$(jq -er '.metadata.name' <<<"${selected}")"
+          artifact_digest="$(jq -er '.metadata.digest' <<<"${selected}")"
+          producer_attempt="$(jq -er '.producerAttempt' <<<"${selected}")"
+          [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${producer_attempt}" =~ ^[1-9][0-9]*$ ]]
+          (( producer_attempt <= GITHUB_RUN_ATTEMPT ))
+          {
+            echo "artifact_id=${artifact_id}"
+            echo "artifact_name=${artifact_name}"
+            echo "artifact_digest=${artifact_digest}"
+            echo "producer_attempt=${producer_attempt}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact immutable operations archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/submission-operations-source.zip"
+          root="${RUNNER_TEMP}/submission-operations-attestation"
+          test ! -e "${archive}"
+          test ! -e "${root}"
+          mkdir --mode=0700 "${root}"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            >"${archive}"
+          test "sha256:$(
+            sha256sum "${archive}" | awk '{print $1}'
+          )" = "${ARTIFACT_DIGEST}"
+          python3 - "${archive}" "${root}" <<'PY'
+          import pathlib
+          import posixpath
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          root = pathlib.Path(sys.argv[2])
+          expected = {
+              "SHA256SUMS",
+              "attestation-predicate.json",
+              "proofs/SQ10.json",
+              "support/SQ10/availability-attestation.json",
+              "support/SQ10/credential-rotation.json",
+              "support/SQ10/judge-access-validity.json",
+              "support/SQ10/monitor-configuration.json",
+              "support/SQ10/paging-delivery.json",
+              "support/SQ10/posture-attestation.json",
+              "support/SQ10/rollback-recovery.json",
+          }
+          expected_directories = {"proofs", "support", "support/SQ10"}
+          total = 0
+          seen: set[str] = set()
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              for entry in entries:
+                  raw = entry.filename
+                  canonical = posixpath.normpath(raw.rstrip("/"))
+                  expected_raw = canonical + "/" if entry.is_dir() else canonical
+                  mode = stat.S_IFMT(entry.external_attr >> 16)
+                  if (
+                      not raw
+                      or raw.startswith("/")
+                      or "\\" in raw
+                      or "\x00" in raw
+                      or canonical in ("", ".", "..")
+                      or canonical.startswith("../")
+                      or raw != expected_raw
+                      or canonical in seen
+                  ):
+                      raise SystemExit(f"unsafe operations archive path: {raw!r}")
+                  seen.add(canonical)
+                  if entry.is_dir():
+                      if canonical not in expected_directories:
+                          raise SystemExit("unexpected archive directory")
+                      if mode not in (0, stat.S_IFDIR):
+                          raise SystemExit("invalid directory entry")
+                      continue
+                  if mode not in (0, stat.S_IFREG):
+                      raise SystemExit("non-regular archive entry")
+                  if entry.flag_bits & 0x1:
+                      raise SystemExit("encrypted archive entry")
+                  if entry.file_size > 10 * 1024 * 1024:
+                      raise SystemExit("oversized archive entry")
+                  total += entry.file_size
+                  if total > 64 * 1024 * 1024:
+                      raise SystemExit("oversized extracted archive")
+              files = {entry.filename for entry in entries if not entry.is_dir()}
+              if files != expected:
+                  raise SystemExit("operations archive file inventory differs")
+              bundle.extractall(root)
+          for path in root.rglob("*"):
+              if path.is_symlink():
+                  raise SystemExit("operations archive contains a symlink")
+          PY
+
+      - name: Validate exact retry-safe standard-v1 source
+        env:
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+          PRODUCER_ATTEMPT: ${{ steps.artifact.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/submission-operations-attestation"
+          (
+            cd "${root}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          validation="${RUNNER_TEMP}/submission-operations-attester-validation.json"
+          python3 scripts/validate-submission-proof-receipts.py \
+            validate-standard-source \
+            --registry scripts/submission-evidence-registry.json \
+            --source-key operations \
+            --source-dir "${root}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${PRODUCER_ATTEMPT}" \
+            --notice NOTICE.md >"${validation}"
+          jq -e \
+            --arg artifactName "${ARTIFACT_NAME}" \
+            --arg release "${RELEASE_SHA}" '
+              .schemaVersion ==
+                "archon.submission-standard-source-validation/v1" and
+              .sourceKey == "operations" and
+              .releaseSha == $release and
+              .artifactName == $artifactName and
+              .subjectCount == 9 and
+              .proofIds == ["SQ10"]
+            ' "${validation}" >/dev/null
+
+      - name: Materialize exact reviewed operations collector
+        id: collector
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          workflow=".github/workflows/submission-operations.yml"
+          collector="${RUNNER_TEMP}/collect-submission-operations.sh"
+          test ! -e "${collector}"
+          awk '
+            /^# BEGIN ARCHON SUBMISSION OPERATIONS COLLECTOR$/ {
+              if (active || seen) exit 21
+              active = 1
+              seen = 1
+              next
+            }
+            /^# END ARCHON SUBMISSION OPERATIONS COLLECTOR$/ {
+              if (!active) exit 22
+              active = 0
+              ended = 1
+              next
+            }
+            active {
+              if ($0 == "#|") {
+                print ""
+                next
+              }
+              if (substr($0, 1, 3) != "#| ") exit 23
+              print substr($0, 4)
+            }
+            END {
+              if (!seen || active || !ended) exit 24
+            }
+          ' "${workflow}" >"${collector}"
+          test -s "${collector}"
+          test "$(head -n 1 "${collector}")" = "#!/usr/bin/env bash"
+          chmod 0500 "${collector}"
+          bash -n "${collector}"
+          echo "path=${collector}" >>"${GITHUB_OUTPUT}"
+
+      - name: Independently recollect every upstream and compare SQ10 facts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATIONS_COLLECTOR: ${{ steps.collector.outputs.path }}
+          OPERATIONS_ROOT: ${{ runner.temp }}/submission-operations-attester-reconstruction
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          AVAILABILITY_RUN_ID: ${{ inputs.availability_run_id }}
+          POSTURE_RUN_ID: ${{ inputs.posture_run_id }}
+          PAGING_RUN_ID: ${{ inputs.paging_run_id }}
+          GOVERNED_CANARY_RUN_ID: ${{ inputs.governed_canary_run_id }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          LIVE_DATAHUB_RUN_ID: ${{ inputs.live_datahub_run_id }}
+        run: |
+          set -euo pipefail
+          "${OPERATIONS_COLLECTOR}"
+          jq -cS . \
+            "${OPERATIONS_ROOT}/facts/SQ10.json" \
+            >"${RUNNER_TEMP}/submission-operations-expected-facts.json"
+          jq -cS '.facts' \
+            "${RUNNER_TEMP}/submission-operations-attestation/proofs/SQ10.json" \
+            >"${RUNNER_TEMP}/submission-operations-retained-facts.json"
+          cmp --silent \
+            "${RUNNER_TEMP}/submission-operations-expected-facts.json" \
+            "${RUNNER_TEMP}/submission-operations-retained-facts.json"
+
+      - name: Recheck producer artifact and canonical state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.artifact_name }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact_digest }}
+          PRODUCER_ATTEMPT: ${{ steps.artifact.outputs.producer_attempt }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          artifacts="$(
+            gh api \
+              --paginate \
+              --slurp \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          )"
+          selected="$(
+            python3 scripts/validate-submission-proof-receipts.py \
+              select-run-artifact \
+              --policy latest-retained \
+              --artifact-prefix "submission-operations-${RELEASE_SHA}-" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --release-sha "${RELEASE_SHA}" \
+              --maximum-attempt "${GITHUB_RUN_ATTEMPT}" \
+              <<<"${artifacts}"
+          )"
+          jq -e \
+            --arg name "${ARTIFACT_NAME}" \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --argjson artifactId "${ARTIFACT_ID}" \
+            --argjson attempt "${PRODUCER_ATTEMPT}" '
+              .producerAttempt == $attempt and
+              .metadata.id == $artifactId and
+              .metadata.name == $name and
+              .metadata.digest == $digest
+            ' <<<"${selected}" >/dev/null
+          test "$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Attest all nine exact operations subjects
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-operations-attestation/SHA256SUMS
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-operations-attestation/attestation-predicate.json
+
+# BEGIN ARCHON SUBMISSION OPERATIONS COLLECTOR
+#| #!/usr/bin/env bash
+#| set -euo pipefail
+#|
+#| # The producer and attester materialize this exact release-bound collector
+#| # independently. It accepts only scalar run IDs and writes only beneath
+#| # RUNNER_TEMP; all upstream paths, predicates and schemas remain constants.
+#| required_environment=(
+#|   GH_TOKEN
+#|   GITHUB_ACTIONS
+#|   GITHUB_REPOSITORY
+#|   OPERATIONS_ROOT
+#|   RELEASE_SHA
+#|   RUNNER_TEMP
+#|   AVAILABILITY_RUN_ID
+#|   POSTURE_RUN_ID
+#|   PAGING_RUN_ID
+#|   GOVERNED_CANARY_RUN_ID
+#|   PROJECT_ACCESS_RUN_ID
+#|   LIVE_DATAHUB_RUN_ID
+#| )
+#| for name in "${required_environment[@]}"; do
+#|   test -n "${!name:-}" || {
+#|     echo "::error::Missing operations collector environment: ${name}"
+#|     exit 1
+#|   }
+#| done
+#| test "${GITHUB_ACTIONS}" = "true"
+#| test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+#| [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+#| case "${OPERATIONS_ROOT}" in
+#|   "${RUNNER_TEMP}"/*) ;;
+#|   *)
+#|     echo "::error::OPERATIONS_ROOT must be below RUNNER_TEMP"
+#|     exit 1
+#|     ;;
+#| esac
+#| test ! -e "${OPERATIONS_ROOT}"
+#| mkdir --mode=0700 "${OPERATIONS_ROOT}"
+#| for run_id in \
+#|   "${AVAILABILITY_RUN_ID}" \
+#|   "${POSTURE_RUN_ID}" \
+#|   "${PAGING_RUN_ID}" \
+#|   "${GOVERNED_CANARY_RUN_ID}" \
+#|   "${PROJECT_ACCESS_RUN_ID}" \
+#|   "${LIVE_DATAHUB_RUN_ID}"; do
+#|   [[ "${run_id}" =~ ^[1-9][0-9]*$ ]]
+#| done
+#|
+#| api() {
+#|   gh api \
+#|     -H "Accept: application/vnd.github+json" \
+#|     -H "X-GitHub-Api-Version: 2026-03-10" \
+#|     "$@"
+#| }
+#|
+#| test "$(
+#|   api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha'
+#| )" = "${RELEASE_SHA}"
+#|
+#| registered="${OPERATIONS_ROOT}/registered"
+#| mkdir --mode=0700 "${registered}"
+#| for row in \
+#|   "live-datahub:${LIVE_DATAHUB_RUN_ID}" \
+#|   "project-access:${PROJECT_ACCESS_RUN_ID}"; do
+#|   key="${row%%:*}"
+#|   run_id="${row#*:}"
+#|   SOURCE_KEY="${key}" \
+#|   SOURCE_RUN_ID="${run_id}" \
+#|   SUBMISSION_EVIDENCE_DIR="${registered}" \
+#|   RELEASE_SHA="${RELEASE_SHA}" \
+#|     bash scripts/collect-submission-evidence-source.sh
+#| done
+#|
+#| native="${OPERATIONS_ROOT}/native"
+#| mkdir --mode=0700 "${native}"
+#|
+#| resolve_native() {
+#|   local key="$1"
+#|   local run_id="$2"
+#|   local workflow_path="$3"
+#|   local event_policy="$4"
+#|   local artifact_prefix="$5"
+#|   local selection_policy="$6"
+#|   local predicate_type="$7"
+#|   local subject_inventory="$8"
+#|   local predicate_file="$9"
+#|   local expected_files="${10}"
+#|   local run
+#|   local current_attempt
+#|   local maximum_attempt
+#|   local artifacts
+#|   local selected
+#|   local producer_attempt
+#|   local artifact_id
+#|   local artifact_name
+#|   local artifact_digest
+#|   local artifact_size
+#|   local work
+#|   local archive
+#|   local source
+#|   local signer
+#|   local predicate_digest
+#|   local expected_predicate
+#|   local expected_subjects
+#|   local expected_subject_files
+#|
+#|   run="$(api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+#|   jq -e \
+#|     --arg repository "${GITHUB_REPOSITORY}" \
+#|     --arg release "${RELEASE_SHA}" \
+#|     --arg path "${workflow_path}" \
+#|     --arg eventPolicy "${event_policy}" \
+#|     --argjson runId "${run_id}" '
+#|       .id == $runId and
+#|       .path == $path and
+#|       .head_sha == $release and
+#|       .head_branch == "master" and
+#|       .head_repository.full_name == $repository and
+#|       .repository.full_name == $repository and
+#|       .status == "completed" and
+#|       .conclusion == "success" and
+#|       (.run_attempt | type) == "number" and
+#|       .run_attempt > 0 and
+#|       (
+#|         if $eventPolicy == "dispatch" then
+#|           .event == "workflow_dispatch" and .run_attempt == 1
+#|         else
+#|           $eventPolicy == "monitor" and
+#|           (.event == "workflow_dispatch" or .event == "schedule")
+#|         end
+#|       )
+#|     ' <<<"${run}" >/dev/null || {
+#|     echo "::error::${key} is not the exact successful release source"
+#|     exit 1
+#|   }
+#|   current_attempt="$(jq -er '.run_attempt' <<<"${run}")"
+#|   maximum_attempt="${current_attempt}"
+#|   if test "${event_policy}" = "dispatch"; then
+#|     maximum_attempt=1
+#|   fi
+#|   artifacts="$(
+#|     api \
+#|       --paginate \
+#|       --slurp \
+#|       "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
+#|   )"
+#|   selected="$(
+#|     python3 scripts/validate-submission-proof-receipts.py \
+#|       select-run-artifact \
+#|       --policy "${selection_policy}" \
+#|       --artifact-prefix "${artifact_prefix}" \
+#|       --run-id "${run_id}" \
+#|       --release-sha "${RELEASE_SHA}" \
+#|       --maximum-attempt "${maximum_attempt}" \
+#|       <<<"${artifacts}"
+#|   )"
+#|   producer_attempt="$(jq -er '.producerAttempt' <<<"${selected}")"
+#|   artifact_id="$(jq -er '.metadata.id' <<<"${selected}")"
+#|   artifact_name="$(jq -er '.metadata.name' <<<"${selected}")"
+#|   artifact_digest="$(jq -er '.metadata.digest' <<<"${selected}")"
+#|   artifact_size="$(jq -er '.metadata.size_in_bytes' <<<"${selected}")"
+#|   [[ "${producer_attempt}" =~ ^[1-9][0-9]*$ ]]
+#|   [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+#|   [[ "${artifact_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+#|   [[ "${artifact_size}" =~ ^[1-9][0-9]*$ ]]
+#|   test "${artifact_size}" -le 52428800
+#|   work="${native}/${key}"
+#|   test ! -e "${work}"
+#|   mkdir --mode=0700 "${work}"
+#|   archive="${work}/source.zip"
+#|   source="${work}/source"
+#|   mkdir --mode=0700 "${source}"
+#|   api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+#|     >"${archive}"
+#|   test "sha256:$(
+#|     sha256sum "${archive}" | awk '{print $1}'
+#|   )" = "${artifact_digest}"
+#|   python3 - \
+#|     "${archive}" \
+#|     "${source}" \
+#|     "${expected_files}" <<'PY'
+#| import pathlib
+#| import posixpath
+#| import stat
+#| import sys
+#| import zipfile
+#|
+#| archive = pathlib.Path(sys.argv[1])
+#| destination = pathlib.Path(sys.argv[2])
+#| expected = set(sys.argv[3].split(","))
+#| expected_directories = {
+#|     parent.as_posix()
+#|     for name in expected
+#|     for parent in pathlib.PurePosixPath(name).parents
+#|     if parent.as_posix() != "."
+#| }
+#| total = 0
+#| seen: set[str] = set()
+#| with zipfile.ZipFile(archive) as bundle:
+#|     entries = bundle.infolist()
+#|     if not 1 <= len(entries) <= 32:
+#|         raise SystemExit("native artifact has an invalid entry count")
+#|     for entry in entries:
+#|         raw = entry.filename
+#|         canonical = posixpath.normpath(raw.rstrip("/"))
+#|         expected_raw = canonical + "/" if entry.is_dir() else canonical
+#|         mode = stat.S_IFMT(entry.external_attr >> 16)
+#|         if (
+#|             not raw
+#|             or raw.startswith("/")
+#|             or "\\" in raw
+#|             or "\x00" in raw
+#|             or canonical in ("", ".", "..")
+#|             or canonical.startswith("../")
+#|             or raw != expected_raw
+#|             or canonical in seen
+#|         ):
+#|             raise SystemExit(f"unsafe native ZIP path: {raw!r}")
+#|         seen.add(canonical)
+#|         if entry.is_dir():
+#|             if canonical not in expected_directories:
+#|                 raise SystemExit("unexpected native artifact directory")
+#|             if mode not in (0, stat.S_IFDIR):
+#|                 raise SystemExit("invalid native directory entry")
+#|             continue
+#|         if mode not in (0, stat.S_IFREG):
+#|             raise SystemExit("native artifact has a non-regular entry")
+#|         if entry.flag_bits & 0x1:
+#|             raise SystemExit("native artifact has an encrypted entry")
+#|         if entry.file_size > 10 * 1024 * 1024:
+#|             raise SystemExit("native artifact entry is oversized")
+#|         total += entry.file_size
+#|         if total > 32 * 1024 * 1024:
+#|             raise SystemExit("native artifact is oversized")
+#|     files = {entry.filename for entry in entries if not entry.is_dir()}
+#|     if files != expected:
+#|         raise SystemExit(
+#|             f"native artifact inventory differs: {sorted(files)}"
+#|         )
+#|     bundle.extractall(destination)
+#| for path in destination.rglob("*"):
+#|     if path.is_symlink():
+#|         raise SystemExit("native artifact contains a symlink")
+#| PY
+#|   test -f "${source}/${predicate_file}"
+#|   test ! -L "${source}/${predicate_file}"
+#|   test -f "${source}/${subject_inventory}"
+#|   test ! -L "${source}/${subject_inventory}"
+#|   if test -f "${source}/SHA256SUMS"; then
+#|     if ! awk '
+#|       BEGIN { ok = 1 }
+#|       !/^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._-]*$/ { ok = 0 }
+#|       { if (seen[$2]++) ok = 0 }
+#|       END { exit(ok ? 0 : 1) }
+#|     ' "${source}/SHA256SUMS"; then
+#|       echo "::error::${key} SHA256SUMS is malformed"
+#|       exit 1
+#|     fi
+#|     awk '{print $2}' "${source}/SHA256SUMS" |
+#|       LC_ALL=C sort >"${work}/actual-checksum-files.txt"
+#|     printf '%s' "${expected_files}" |
+#|       tr ',' '\n' |
+#|       grep -v '^SHA256SUMS$' |
+#|       LC_ALL=C sort >"${work}/expected-checksum-files.txt"
+#|     diff -u \
+#|       "${work}/expected-checksum-files.txt" \
+#|       "${work}/actual-checksum-files.txt"
+#|     (
+#|       cd "${source}"
+#|       sha256sum --check --strict SHA256SUMS
+#|     )
+#|   fi
+#|   if ! awk '
+#|     BEGIN { ok = 1 }
+#|     !/^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._-]*$/ { ok = 0 }
+#|     { if (seen[$2]++) ok = 0 }
+#|     END { exit(ok ? 0 : 1) }
+#|   ' "${source}/${subject_inventory}"; then
+#|     echo "::error::${key} subject inventory is malformed"
+#|     exit 1
+#|   fi
+#|   case "${key}" in
+#|     availability)
+#|       expected_subject_files="availability.json,manifest.json"
+#|       ;;
+#|     posture)
+#|       expected_subject_files="production-posture.json"
+#|       ;;
+#|     paging)
+#|       expected_subject_files="manifest.json,paging-delivery.json"
+#|       ;;
+#|     canary)
+#|       expected_subject_files="rollback-evidence.json"
+#|       ;;
+#|     *)
+#|       echo "::error::Unknown native subject inventory"
+#|       exit 1
+#|       ;;
+#|   esac
+#|   awk '{print $2}' "${source}/${subject_inventory}" |
+#|     LC_ALL=C sort >"${work}/actual-subject-files.txt"
+#|   printf '%s' "${expected_subject_files}" |
+#|     tr ',' '\n' |
+#|     LC_ALL=C sort >"${work}/expected-subject-files.txt"
+#|   diff -u \
+#|     "${work}/expected-subject-files.txt" \
+#|     "${work}/actual-subject-files.txt"
+#|   (
+#|     cd "${source}"
+#|     sha256sum --check --strict "${subject_inventory}"
+#|   )
+#|   predicate_digest="sha256:$(
+#|     sha256sum "${source}/${predicate_file}" | awk '{print $1}'
+#|   )"
+#|   expected_predicate="$(jq -cS . "${source}/${predicate_file}")"
+#|   expected_subjects="$(
+#|     jq -Rn '
+#|       [
+#|         inputs |
+#|         capture(
+#|           "^(?<sha>[0-9a-f]{64})  (?<name>[A-Za-z0-9][A-Za-z0-9._-]*)$"
+#|         ) |
+#|         {name: .name, digest: {sha256: .sha}}
+#|       ] |
+#|       sort_by(.name)
+#|     ' <"${source}/${subject_inventory}"
+#|   )"
+#|   signer="github.com/${GITHUB_REPOSITORY}/${workflow_path}"
+#|   mkdir --mode=0700 "${work}/verification"
+#|   while read -r expected_sha subject_name; do
+#|     verification="${work}/verification/${subject_name}.json"
+#|     raw_verification="${work}/verification/${subject_name}.raw.json"
+#|     gh attestation verify "${source}/${subject_name}" \
+#|       --repo "${GITHUB_REPOSITORY}" \
+#|       --signer-workflow "${signer}" \
+#|       --signer-digest "${RELEASE_SHA}" \
+#|       --source-digest "${RELEASE_SHA}" \
+#|       --source-ref refs/heads/master \
+#|       --predicate-type "${predicate_type}" \
+#|       --deny-self-hosted-runners \
+#|       --format json >"${raw_verification}"
+#|     jq -ceS \
+#|       --arg predicateType "${predicate_type}" \
+#|       --arg subjectName "${subject_name}" \
+#|       --arg subjectSha "${expected_sha}" \
+#|       --argjson expectedPredicate "${expected_predicate}" \
+#|       --argjson expectedSubjects "${expected_subjects}" '
+#|         [
+#|           .[] |
+#|           select(
+#|             .verificationResult.statement.predicateType ==
+#|               $predicateType and
+#|             .verificationResult.statement.predicate ==
+#|               $expectedPredicate and
+#|             (
+#|               .verificationResult.statement.subject |
+#|               sort_by(.name)
+#|             ) == $expectedSubjects and
+#|             any(
+#|               .verificationResult.statement.subject[];
+#|               .name == $subjectName and
+#|               .digest.sha256 == $subjectSha
+#|             )
+#|           ) |
+#|           .verificationResult.statement
+#|         ] |
+#|         unique |
+#|         if length == 1 then .[0]
+#|         else error("exactly one native attestation must match")
+#|         end
+#|       ' "${raw_verification}" >"${verification}"
+#|   done <"${source}/${subject_inventory}"
+#|   jq -cnS \
+#|     --arg key "${key}" \
+#|     --arg workflowPath "${workflow_path}" \
+#|     --arg predicateType "${predicate_type}" \
+#|     --arg predicateDigest "${predicate_digest}" \
+#|     --arg artifactName "${artifact_name}" \
+#|     --arg artifactDigest "${artifact_digest}" \
+#|     --argjson runId "${run_id}" \
+#|     --argjson currentRunAttempt "${current_attempt}" \
+#|     --argjson producerAttempt "${producer_attempt}" \
+#|     --argjson artifactId "${artifact_id}" \
+#|     --argjson artifactSize "${artifact_size}" '
+#|       {
+#|         key: $key,
+#|         source: {
+#|           workflowPath: $workflowPath,
+#|           runId: $runId,
+#|           currentRunAttempt: $currentRunAttempt,
+#|           runAttempt: $producerAttempt
+#|         },
+#|         artifact: {
+#|           id: $artifactId,
+#|           name: $artifactName,
+#|           digest: $artifactDigest,
+#|           size: $artifactSize
+#|         },
+#|         attestation: {
+#|           predicateType: $predicateType,
+#|           predicateDigest: $predicateDigest
+#|         }
+#|       }
+#|     ' >"${work}/binding.json"
+#| }
+#|
+#| resolve_native \
+#|   availability \
+#|   "${AVAILABILITY_RUN_ID}" \
+#|   .github/workflows/availability.yml \
+#|   monitor \
+#|   "production-availability-${RELEASE_SHA}-" \
+#|   latest-retained \
+#|   "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v1" \
+#|   availability-subject.sha256 \
+#|   attestation-predicate.json \
+#|   "SHA256SUMS,attestation-predicate.json,availability-subject.sha256,availability.json,manifest.json"
+#| resolve_native \
+#|   posture \
+#|   "${POSTURE_RUN_ID}" \
+#|   .github/workflows/production-posture.yml \
+#|   monitor \
+#|   "production-posture-${RELEASE_SHA}-" \
+#|   latest-retained \
+#|   "https://github.com/upgradedev/archon-datahub/attestations/production-posture/v1" \
+#|   posture-subject.sha256 \
+#|   attestation-predicate.json \
+#|   "SHA256SUMS,attestation-predicate.json,control-plane-gates.json,manifest.json,posture-subject.sha256,production-posture.json"
+#| resolve_native \
+#|   paging \
+#|   "${PAGING_RUN_ID}" \
+#|   .github/workflows/production-paging-test.yml \
+#|   monitor \
+#|   "production-paging-delivery-${RELEASE_SHA}-" \
+#|   latest-retained \
+#|   "https://archon.datahub.dev/attestations/production-paging-delivery/v1" \
+#|   paging-subject.sha256 \
+#|   attestation-predicate.json \
+#|   "SHA256SUMS,attestation-predicate.json,manifest.json,paging-delivery.json,paging-subject.sha256"
+#| resolve_native \
+#|   canary \
+#|   "${GOVERNED_CANARY_RUN_ID}" \
+#|   .github/workflows/governed-canary.yml \
+#|   dispatch \
+#|   "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-" \
+#|   exact-current \
+#|   "https://github.com/upgradedev/archon-datahub/attestations/governed-canary/v1" \
+#|   rollback-subject.sha256 \
+#|   attestation-predicate.json \
+#|   "attestation-predicate.json,rollback-evidence.json,rollback-subject.sha256"
+#|
+#| monitor="$(
+#|   api "/repos/${GITHUB_REPOSITORY}/actions/workflows/availability.yml"
+#| )"
+#| jq -e '
+#|   .path == ".github/workflows/availability.yml" and
+#|   .state == "active" and
+#|   (.id | type) == "number" and
+#|   .id > 0
+#| ' <<<"${monitor}" >/dev/null
+#| jq -cS '{id, name, path, state}' <<<"${monitor}" \
+#|   >"${OPERATIONS_ROOT}/monitor.json"
+#| test "$(
+#|   grep -Fxc '    - cron: "17 */6 * * *"' \
+#|     .github/workflows/availability.yml
+#| )" = "1"
+#|
+#| export OPERATIONS_ROOT RELEASE_SHA
+#| python3 - <<'PY'
+#| from __future__ import annotations
+#|
+#| import datetime as dt
+#| import hashlib
+#| import json
+#| import os
+#| import pathlib
+#| import re
+#| from typing import Any
+#|
+#| root = pathlib.Path(os.environ["OPERATIONS_ROOT"])
+#| release = os.environ["RELEASE_SHA"]
+#| repository = os.environ["GITHUB_REPOSITORY"]
+#| judging_end = "2026-08-31T21:00:00Z"
+#| sha_re = re.compile(r"^sha256:[0-9a-f]{64}$")
+#| raw_sha_re = re.compile(r"^[0-9a-f]{64}$")
+#|
+#|
+#| def fail(message: str) -> None:
+#|     raise SystemExit(message)
+#|
+#|
+#| def load(path: pathlib.Path) -> dict[str, Any]:
+#|     if not path.is_file() or path.is_symlink():
+#|         fail(f"required regular JSON file is absent: {path}")
+#|     try:
+#|         value = json.loads(path.read_bytes())
+#|     except (OSError, json.JSONDecodeError) as error:
+#|         fail(f"invalid JSON at {path}: {error}")
+#|     if not isinstance(value, dict):
+#|         fail(f"JSON object required at {path}")
+#|     return value
+#|
+#|
+#| def exact_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
+#|     if set(value) != keys:
+#|         fail(
+#|             f"{label} keys differ: missing={sorted(keys - set(value))}, "
+#|             f"unknown={sorted(set(value) - keys)}"
+#|         )
+#|
+#|
+#| def exact(value: Any, expected: Any, label: str) -> None:
+#|     if value != expected or type(value) is not type(expected):
+#|         fail(f"{label} must equal {expected!r}")
+#|
+#|
+#| def positive(value: Any, label: str) -> int:
+#|     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+#|         fail(f"{label} must be a positive integer")
+#|     return value
+#|
+#|
+#| def positive_decimal(value: Any, label: str) -> int:
+#|     if (
+#|         not isinstance(value, str)
+#|         or re.fullmatch(r"[1-9][0-9]{0,19}", value) is None
+#|     ):
+#|         fail(f"{label} must be a canonical positive decimal string")
+#|     return int(value)
+#|
+#|
+#| def digest(value: Any, label: str) -> str:
+#|     if not isinstance(value, str) or sha_re.fullmatch(value) is None:
+#|         fail(f"{label} must be an exact sha256 digest")
+#|     return value
+#|
+#|
+#| def raw_digest(value: Any, label: str) -> str:
+#|     if not isinstance(value, str) or raw_sha_re.fullmatch(value) is None:
+#|         fail(f"{label} must be an exact raw sha256 digest")
+#|     return value
+#|
+#|
+#| def file_sha(path: pathlib.Path, *, prefixed: bool = True) -> str:
+#|     value = hashlib.sha256(path.read_bytes()).hexdigest()
+#|     return f"sha256:{value}" if prefixed else value
+#|
+#|
+#| def instant(value: Any, label: str) -> dt.datetime:
+#|     if not isinstance(value, str) or not value.endswith("Z"):
+#|         fail(f"{label} must be canonical UTC")
+#|     try:
+#|         parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00")
+#|     except ValueError as error:
+#|         fail(f"{label} is invalid: {error}")
+#|     if parsed.tzinfo is None:
+#|         fail(f"{label} must be timezone-aware")
+#|     return parsed.astimezone(dt.timezone.utc)
+#|
+#|
+#| def fresh(value: Any, maximum: dt.timedelta, label: str) -> dt.datetime:
+#|     parsed = instant(value, label)
+#|     now = dt.datetime.now(dt.timezone.utc)
+#|     if parsed > now + dt.timedelta(minutes=5):
+#|         fail(f"{label} is in the future")
+#|     if now - parsed > maximum:
+#|         fail(f"{label} is stale")
+#|     return parsed
+#|
+#|
+#| def receipt(proof_id: str) -> dict[str, Any]:
+#|     value = load(root / "registered" / "receipts" / f"{proof_id}.json")
+#|     exact(value.get("id"), proof_id, f"{proof_id}.id")
+#|     exact(value.get("releaseSha"), release, f"{proof_id}.releaseSha")
+#|     return value
+#|
+#|
+#| def native_source(key: str) -> tuple[
+#|     dict[str, Any], pathlib.Path, dict[str, Any]
+#| ]:
+#|     directory = root / "native" / key / "source"
+#|     binding = load(root / "native" / key / "binding.json")
+#|     exact(binding.get("key"), key, f"{key}.binding.key")
+#|     return binding, directory, load(directory / "attestation-predicate.json")
+#|
+#|
+#| d4_receipt = receipt("D4")
+#| sq3_receipt = receipt("SQ3")
+#| sq4_receipt = receipt("SQ4")
+#| d4 = d4_receipt["facts"]
+#| sq3 = sq3_receipt["facts"]
+#| sq4 = sq4_receipt["facts"]
+#| application_url = sq3["applicationUrl"]
+#| exact(sq4["applicationUrl"], application_url, "SQ3/SQ4 applicationUrl")
+#| exact(d4["applicationUrl"], application_url, "D4/SQ3 applicationUrl")
+#| exact(sq4["deployment"], sq3["deployment"], "SQ3/SQ4 deployment")
+#|
+#| availability_binding, availability_dir, availability_predicate = (
+#|     native_source("availability")
+#| )
+#| availability = load(availability_dir / "availability.json")
+#| availability_manifest = load(availability_dir / "manifest.json")
+#| exact_keys(
+#|     availability,
+#|     {
+#|         "schemaVersion",
+#|         "observedAt",
+#|         "source",
+#|         "publicRuntime",
+#|         "readOnlyAudit",
+#|         "releaseEvidence",
+#|         "result",
+#|     },
+#|     "availability",
+#| )
+#| exact(
+#|     availability["schemaVersion"],
+#|     "archon.production-availability/v2",
+#|     "availability.schemaVersion",
+#| )
+#| exact(availability["result"], "passed", "availability.result")
+#| availability_observed = fresh(
+#|     availability["observedAt"],
+#|     dt.timedelta(hours=7),
+#|     "availability.observedAt",
+#| )
+#| availability_source = availability["source"]
+#| exact(availability_source["repository"], repository, "availability.repository")
+#| exact(availability_source["branch"], "master", "availability.branch")
+#| exact(
+#|     availability_source["controlPlaneSha"],
+#|     release,
+#|     "availability.controlPlaneSha",
+#| )
+#| exact(
+#|     availability_source["workflowRunId"],
+#|     availability_binding["source"]["runId"],
+#|     "availability workflow run",
+#| )
+#| exact(
+#|     availability_source["workflowRunAttempt"],
+#|     availability_binding["source"]["runAttempt"],
+#|     "availability workflow attempt",
+#| )
+#| availability_sha = file_sha(
+#|     availability_dir / "availability.json", prefixed=False
+#| )
+#| availability_size = (
+#|     availability_dir / "availability.json"
+#| ).stat().st_size
+#| exact(
+#|     availability_manifest,
+#|     {
+#|         "schemaVersion": "archon.production-availability-manifest/v1",
+#|         "files": [
+#|             {
+#|                 "path": "availability.json",
+#|                 "sha256": availability_sha,
+#|                 "sizeBytes": availability_size,
+#|             }
+#|         ],
+#|     },
+#|     "availability manifest",
+#| )
+#| availability_manifest_sha = file_sha(
+#|     availability_dir / "manifest.json", prefixed=False
+#| )
+#| exact_keys(
+#|     availability_predicate,
+#|     {
+#|         "schemaVersion",
+#|         "repository",
+#|         "releaseSha",
+#|         "source",
+#|         "monitor",
+#|         "deployment",
+#|         "evidence",
+#|         "result",
+#|     },
+#|     "availability predicate",
+#| )
+#| exact(
+#|     availability_predicate["schemaVersion"],
+#|     "archon.production-availability-attestation/v1",
+#|     "availability predicate schema",
+#| )
+#| exact(
+#|     availability_predicate["repository"],
+#|     repository,
+#|     "availability predicate repository",
+#| )
+#| exact(
+#|     availability_predicate["releaseSha"],
+#|     release,
+#|     "availability predicate release",
+#| )
+#| exact(
+#|     availability_predicate["source"]["workflowPath"],
+#|     ".github/workflows/availability.yml",
+#|     "availability predicate workflow",
+#| )
+#| exact(
+#|     availability_predicate["source"]["runId"],
+#|     availability_binding["source"]["runId"],
+#|     "availability predicate run",
+#| )
+#| exact(
+#|     availability_predicate["source"]["runAttempt"],
+#|     availability_binding["source"]["runAttempt"],
+#|     "availability predicate attempt",
+#| )
+#| if availability_predicate["source"]["event"] not in {
+#|     "schedule",
+#|     "workflow_dispatch",
+#| }:
+#|     fail("availability predicate event is not reviewed")
+#| exact(
+#|     availability_predicate["monitor"],
+#|     {
+#|         "cron": "17 */6 * * *",
+#|         "maximumExpectedGapMinutes": 420,
+#|         "observedAt": availability["observedAt"],
+#|         "result": "passed",
+#|     },
+#|     "availability monitor binding",
+#| )
+#| exact(
+#|     availability_predicate["deployment"],
+#|     {
+#|         "runId":
+#|             availability["releaseEvidence"]["deploymentRunId"],
+#|         "runAttempt":
+#|             availability["releaseEvidence"]["deploymentRunAttempt"],
+#|         "artifactId":
+#|             availability["releaseEvidence"]["deploymentArtifactId"],
+#|         "artifactDigest":
+#|             availability["releaseEvidence"]["deploymentArtifactDigest"],
+#|         "deploymentEvidenceSha256":
+#|             availability["releaseEvidence"][
+#|                 "deploymentEvidenceSha256"
+#|             ],
+#|     },
+#|     "availability predicate deployment binding",
+#| )
+#| exact(
+#|     availability_predicate["evidence"]["availabilitySha256"],
+#|     availability_sha,
+#|     "availability predicate evidence digest",
+#| )
+#| exact(
+#|     availability_predicate["evidence"]["manifestSha256"],
+#|     availability_manifest_sha,
+#|     "availability predicate manifest digest",
+#| )
+#| exact(
+#|     availability_predicate["evidence"]["applicationOriginSha256"],
+#|     availability["publicRuntime"]["applicationOriginSha256"],
+#|     "availability application digest",
+#| )
+#| exact(
+#|     availability_predicate["result"],
+#|     "public-read-path-verified",
+#|     "availability predicate result",
+#| )
+#| exact(
+#|     availability["publicRuntime"]["applicationOriginSha256"],
+#|     sq3["applicationOriginDigest"].removeprefix("sha256:"),
+#|     "SQ3/availability application origin",
+#| )
+#| exact(
+#|     availability["releaseEvidence"]["deploymentRunId"],
+#|     sq3["deployment"]["runId"],
+#|     "SQ3/availability deployment run",
+#| )
+#| exact(
+#|     availability["releaseEvidence"]["deploymentArtifactId"],
+#|     sq3["deployment"]["artifactId"],
+#|     "SQ3/availability deployment artifact",
+#| )
+#| observation = sq3["observation"]
+#| exact(
+#|     observation["availabilityObservedAt"],
+#|     availability["observedAt"],
+#|     "SQ3 availabilityObservedAt",
+#| )
+#| expected_availability_observation = {
+#|     "availabilityRunId": availability_binding["source"]["runId"],
+#|     "availabilityRunAttempt": availability_binding["source"]["runAttempt"],
+#|     "availabilityArtifactId": availability_binding["artifact"]["id"],
+#|     "availabilityArtifactName": availability_binding["artifact"]["name"],
+#|     "availabilityArtifactDigest": availability_binding["artifact"]["digest"],
+#|     "availabilityPredicateType": (
+#|         availability_binding["attestation"]["predicateType"]
+#|     ),
+#|     "availabilityPredicateDigest": (
+#|         availability_binding["attestation"]["predicateDigest"]
+#|     ),
+#| }
+#| for key, expected in expected_availability_observation.items():
+#|     exact(observation[key], expected, f"SQ3 observation {key}")
+#| if availability_observed > instant(
+#|     observation["observedAt"], "SQ3 public observation"
+#| ):
+#|     fail("availability observation follows the SQ3 public probe")
+#|
+#| posture_binding, posture_dir, posture_predicate = native_source("posture")
+#| posture = load(posture_dir / "production-posture.json")
+#| posture_manifest = load(posture_dir / "manifest.json")
+#| exact(
+#|     posture["schemaVersion"],
+#|     "archon.production-posture-evidence/v1",
+#|     "posture schema",
+#| )
+#| exact(posture["repository"], repository, "posture repository")
+#| exact(
+#|     posture["controlPlane"]["sha"],
+#|     release,
+#|     "posture control plane",
+#| )
+#| exact(
+#|     posture["verification"]["result"],
+#|     "passed",
+#|     "posture result",
+#| )
+#| posture_observed = posture["verification"]["completedAt"]
+#| fresh(posture_observed, dt.timedelta(hours=30), "posture observedAt")
+#| alarms = posture["alarms"]
+#| exact(alarms["pendingConfirmation"], False, "posture pending confirmation")
+#| exact(alarms["unchangedAfterVerification"], True, "posture alarm TOCTOU")
+#| alarm_inventory = alarms["alarmInventory"]
+#| exact(
+#|     alarm_inventory,
+#|     {
+#|         "observedAt": posture_observed,
+#|         "alarmCount": 10,
+#|         "allActionsEnabled": True,
+#|         "alarmActionsBoundToTopic": True,
+#|         "okActionsBoundToTopic": True,
+#|         "insufficientDataActionsEmpty": True,
+#|         "inventoryDigest": alarm_inventory["inventoryDigest"],
+#|     },
+#|     "posture alarm inventory",
+#| )
+#| digest(
+#|     alarm_inventory["inventoryDigest"],
+#|     "posture alarm inventory digest",
+#| )
+#| digest(alarms["topicArnSha256"], "posture topic digest")
+#| digest(
+#|     alarms["subscriptionArnSha256"],
+#|     "posture subscription digest",
+#| )
+#| posture_sha = file_sha(posture_dir / "production-posture.json")
+#| posture_manifest_sha = file_sha(posture_dir / "manifest.json")
+#| exact(
+#|     posture_manifest["schemaVersion"],
+#|     "archon.production-posture-manifest/v1",
+#|     "posture manifest schema",
+#| )
+#| exact(posture_manifest["repository"], repository, "posture manifest repository")
+#| exact(
+#|     posture_manifest["controlPlaneSha"],
+#|     release,
+#|     "posture manifest release",
+#| )
+#| exact(
+#|     posture_manifest["workflow"],
+#|     {
+#|         "path": ".github/workflows/production-posture.yml",
+#|         "runId": posture_binding["source"]["runId"],
+#|         "runAttempt": posture_binding["source"]["runAttempt"],
+#|     },
+#|     "posture manifest workflow",
+#| )
+#| exact(
+#|     posture_manifest["files"]["production-posture.json"],
+#|     posture_sha,
+#|     "posture manifest evidence digest",
+#| )
+#| posture_binding_values = {
+#|     "observedAt": posture_observed,
+#|     "topicArnSha256": alarms["topicArnSha256"],
+#|     "subscriptionArnSha256": alarms["subscriptionArnSha256"],
+#|     "alarmInventoryDigest": alarm_inventory["inventoryDigest"],
+#| }
+#| exact(
+#|     posture_manifest["postureBinding"],
+#|     posture_binding_values,
+#|     "posture manifest binding",
+#| )
+#| exact(
+#|     posture_predicate,
+#|     {
+#|         "schemaVersion": "archon.production-posture-attestation/v1",
+#|         "repository": repository,
+#|         "controlPlaneSha": release,
+#|         "evidenceSha256": posture_sha,
+#|         "manifestSha256": posture_manifest_sha,
+#|         "postureBinding": posture_binding_values,
+#|         "verificationResult": "passed",
+#|     },
+#|     "posture predicate",
+#| )
+#|
+#| paging_binding, paging_dir, paging_predicate = native_source("paging")
+#| paging = load(paging_dir / "paging-delivery.json")
+#| paging_manifest = load(paging_dir / "manifest.json")
+#| exact(
+#|     paging["schemaVersion"],
+#|     "archon.production-paging-delivery/v1",
+#|     "paging schema",
+#| )
+#| exact(paging["repository"], repository, "paging repository")
+#| exact(paging["releaseSha"], release, "paging release")
+#| exact(
+#|     paging["workflow"],
+#|     {
+#|         "path": ".github/workflows/production-paging-test.yml",
+#|         "runId": paging_binding["source"]["runId"],
+#|         "producerAttempt": paging_binding["source"]["runAttempt"],
+#|     },
+#|     "paging workflow binding",
+#| )
+#| delivery = paging["delivery"]
+#| for key in (
+#|     "syntheticTest",
+#|     "externalHttpsAccepted",
+#|     "destinationMatched",
+#|     "exactMessageIdMatched",
+#|     "uniqueDestinationMatch",
+#| ):
+#|     exact(delivery[key], True, f"paging delivery {key}")
+#| exact(delivery["status"], "SUCCESS", "paging delivery status")
+#| paging_observed = delivery["observedAt"]
+#| fresh(paging_observed, dt.timedelta(days=7), "paging observedAt")
+#| for key in (
+#|     "completePagination",
+#|     "boundedPoll",
+#|     "stackUnchanged",
+#|     "topicUnchanged",
+#|     "subscriptionUnchanged",
+#| ):
+#|     exact(paging["verification"][key], True, f"paging verification {key}")
+#| exact(
+#|     paging["target"]["topicArnSha256"],
+#|     alarms["topicArnSha256"],
+#|     "paging/posture topic",
+#| )
+#| exact(
+#|     paging["target"]["subscriptionArnSha256"],
+#|     alarms["subscriptionArnSha256"],
+#|     "paging/posture subscription",
+#| )
+#| paging_sha = file_sha(paging_dir / "paging-delivery.json")
+#| paging_manifest_sha = file_sha(paging_dir / "manifest.json")
+#| exact(
+#|     paging_manifest["schemaVersion"],
+#|     "archon.production-paging-delivery-manifest/v1",
+#|     "paging manifest schema",
+#| )
+#| exact(paging_manifest["repository"], repository, "paging manifest repository")
+#| exact(paging_manifest["releaseSha"], release, "paging manifest release")
+#| exact(
+#|     paging_manifest["workflow"],
+#|     paging["workflow"],
+#|     "paging manifest workflow",
+#| )
+#| exact(
+#|     paging_manifest["files"],
+#|     {"paging-delivery.json": paging_sha},
+#|     "paging manifest files",
+#| )
+#| exact(
+#|     paging_manifest["subjects"],
+#|     ["manifest.json", "paging-delivery.json"],
+#|     "paging manifest subjects",
+#| )
+#| exact(paging_manifest["subjectCount"], 2, "paging subject count")
+#| exact(
+#|     paging_predicate,
+#|     {
+#|         "schemaVersion":
+#|             "archon.production-paging-delivery-attestation/v1",
+#|         "repository": repository,
+#|         "releaseSha": release,
+#|         "workflow": paging["workflow"],
+#|         "controlPlaneGateReceiptSha256":
+#|             paging_manifest["controlPlaneGateReceiptSha256"],
+#|         "subjects": {
+#|             "manifest.json": paging_manifest_sha,
+#|             "paging-delivery.json": paging_sha,
+#|         },
+#|         "verificationResult": "passed",
+#|     },
+#|     "paging predicate",
+#| )
+#|
+#| canary_binding, canary_dir, canary_predicate = native_source("canary")
+#| rollback = load(canary_dir / "rollback-evidence.json")
+#| exact(
+#|     rollback["schemaVersion"],
+#|     "archon.governed-canary-rollback-evidence/v1",
+#|     "canary rollback schema",
+#| )
+#| exact(rollback["repository"], repository, "canary repository")
+#| exact(
+#|     positive_decimal(rollback["workflowRunId"], "canary workflowRunId"),
+#|     canary_binding["source"]["runId"],
+#|     "canary workflow run",
+#| )
+#| exact(
+#|     positive_decimal(
+#|         rollback["workflowRunAttempt"],
+#|         "canary workflowRunAttempt",
+#|     ),
+#|     canary_binding["source"]["runAttempt"],
+#|     "canary workflow attempt",
+#| )
+#| exact(
+#|     positive_decimal(
+#|         rollback["recoveryWorkflowRunId"],
+#|         "canary recoveryWorkflowRunId",
+#|     ),
+#|     canary_binding["source"]["runId"],
+#|     "canary recovery run",
+#| )
+#| exact(
+#|     positive_decimal(
+#|         rollback["recoveryWorkflowRunAttempt"],
+#|         "canary recoveryWorkflowRunAttempt",
+#|     ),
+#|     canary_binding["source"]["runAttempt"],
+#|     "canary recovery attempt",
+#| )
+#| exact(rollback["releaseSha"], release, "canary release")
+#| exact(
+#|     positive_decimal(rollback["deploymentRunId"], "canary deploymentRunId"),
+#|     sq3["deployment"]["runId"],
+#|     "project/canary deployment run",
+#| )
+#| if rollback["disposition"] not in {"ROLLED_BACK", "ALREADY_RESTORED"}:
+#|     fail("governed canary did not prove rollback")
+#| canary_verified_at = rollback["verifiedAt"]
+#| fresh(
+#|     canary_verified_at,
+#|     dt.timedelta(days=7),
+#|     "canary verifiedAt",
+#| )
+#| rollback_subject = file_sha(canary_dir / "rollback-evidence.json")
+#| rollback_digest = digest(rollback["digest"], "rollback evidence digest")
+#| exact(
+#|     canary_predicate,
+#|     {
+#|         "schemaVersion": "archon.governed-canary-attestation/v1",
+#|         "repository": repository,
+#|         "workflowRunId": str(canary_binding["source"]["runId"]),
+#|         "controlPlaneSha": release,
+#|         "deploymentRunId": str(rollback["deploymentRunId"]),
+#|         "deploymentEvidenceSha256":
+#|             canary_predicate["deploymentEvidenceSha256"],
+#|         "releaseSha": release,
+#|         "recoveryDigest": rollback["recoveryDigest"],
+#|         "rollbackProposalDigest": rollback["rollbackProposalDigest"],
+#|         "rollbackEvidenceDigest": rollback_digest,
+#|         "result": "write-verified-and-rollback-proven",
+#|     },
+#|     "canary predicate",
+#| )
+#| raw_digest(
+#|     canary_predicate["deploymentEvidenceSha256"],
+#|     "canary deployment evidence digest",
+#| )
+#|
+#| deployment = load(
+#|     root
+#|     / "registered"
+#|     / "upstream-subjects"
+#|     / "live-datahub"
+#|     / "deployment-evidence.json"
+#| )
+#| embedded_canary = deployment["pipelineSecurity"][
+#|     "preProductionGovernedCanary"
+#| ]
+#| exact(
+#|     positive(
+#|         embedded_canary["deploymentWorkflowRunId"],
+#|         "embedded deployment run",
+#|     ),
+#|     sq3["deployment"]["runId"],
+#|     "project/live deployment run",
+#| )
+#| exact(
+#|     positive(embedded_canary["workflowRunId"], "embedded canary run"),
+#|     canary_binding["source"]["runId"],
+#|     "embedded/canary run",
+#| )
+#| exact(
+#|     embedded_canary["releaseSha"],
+#|     release,
+#|     "embedded canary release",
+#| )
+#| exact(
+#|     embedded_canary["controlPlaneSha"],
+#|     release,
+#|     "embedded canary control plane",
+#| )
+#| exact(
+#|     raw_digest(
+#|         embedded_canary["artifactSha256"],
+#|         "embedded canary artifact",
+#|     ),
+#|     canary_binding["artifact"]["digest"].removeprefix("sha256:"),
+#|     "embedded canary artifact",
+#| )
+#| exact(
+#|     raw_digest(
+#|         embedded_canary["rollbackSubjectSha256"],
+#|         "embedded rollback subject",
+#|     ),
+#|     rollback_subject.removeprefix("sha256:"),
+#|     "embedded rollback subject",
+#| )
+#| exact(
+#|     embedded_canary["rollbackEvidenceDigest"],
+#|     rollback_digest,
+#|     "embedded rollback evidence",
+#| )
+#| exact(
+#|     raw_digest(
+#|         embedded_canary["attestationPredicateSha256"],
+#|         "embedded canary predicate",
+#|     ),
+#|     canary_binding["attestation"]["predicateDigest"].removeprefix(
+#|         "sha256:"
+#|     ),
+#|     "embedded canary predicate",
+#| )
+#| embedded_verification = "sha256:" + raw_digest(
+#|     embedded_canary["attestationVerificationSha256"],
+#|     "embedded canary verification",
+#| )
+#| exact(
+#|     embedded_canary["result"],
+#|     "write-verified-and-rollback-proven",
+#|     "embedded canary result",
+#| )
+#| governed_write = d4["governedWrite"]
+#| exact(
+#|     governed_write,
+#|     {
+#|         "workflowRunId": canary_binding["source"]["runId"],
+#|         "result": "write-verified-and-rollback-proven",
+#|         "rollbackSubjectDigest": rollback_subject,
+#|         "rollbackEvidenceDigest": rollback_digest,
+#|         "attestationPredicateDigest":
+#|             canary_binding["attestation"]["predicateDigest"],
+#|         "attestationVerificationDigest": embedded_verification,
+#|     },
+#|     "D4/canary binding",
+#| )
+#| if instant(canary_verified_at, "canary verifiedAt") > instant(
+#|     d4["provenAt"], "D4 provenAt"
+#| ):
+#|     fail("D4 predates governed-canary verification")
+#|
+#| operations = sq4["judgeUserLifecycle"]["operations"]
+#| rotations = [
+#|     operation
+#|     for operation in operations
+#|     if operation.get("operation") == "rotate"
+#| ]
+#| if len(rotations) != 1:
+#|     fail("SQ4 must retain exactly one credential rotation")
+#| rotation = rotations[0]
+#| rotation_time = rotation["performedAt"]
+#| fresh(
+#|     rotation_time,
+#|     dt.timedelta(days=7),
+#|     "credential rotation performedAt",
+#| )
+#| fresh(
+#|     sq4["observedAt"],
+#|     dt.timedelta(hours=24),
+#|     "project access observedAt",
+#| )
+#| if instant(sq4["accessValidThrough"], "access validThrough") < instant(
+#|     judging_end, "judging end"
+#| ):
+#|     fail("judge access ends before judging")
+#| exact(sq4["freeAccess"], True, "free judge access")
+#| exact(
+#|     sq4["accessMode"],
+#|     "pipeline-managed-confirmed",
+#|     "judge access mode",
+#| )
+#| exact(
+#|     sq4["credentialRotation"],
+#|     {
+#|         "pipelineManagedConfirmed": True,
+#|         "secretMaterialRetained": False,
+#|         "rotationTested": True,
+#|         "recoveryTested": True,
+#|     },
+#|     "credential rotation contract",
+#| )
+#| project_source = sq4_receipt["source"]
+#| project_artifact = project_source["artifact"]
+#| project_attestation = project_source["attestation"]
+#| project_access = {
+#|     "workflowPath": project_source["workflowPath"],
+#|     "runId": project_source["runId"],
+#|     "runAttempt": project_source["runAttempt"],
+#|     "artifactId": project_artifact["id"],
+#|     "artifactName": project_artifact["name"],
+#|     "artifactDigest": project_artifact["digest"],
+#|     "predicateType": project_attestation["predicateType"],
+#|     "predicateDigest": project_attestation["predicateDigest"],
+#|     "observedAt": sq4["observedAt"],
+#|     "credentialRotationPerformedAt": rotation_time,
+#| }
+#|
+#| monitor = load(root / "monitor.json")
+#| exact(
+#|     monitor,
+#|     {
+#|         "id": positive(monitor["id"], "availability workflow id"),
+#|         "name": monitor["name"],
+#|         "path": ".github/workflows/availability.yml",
+#|         "state": "active",
+#|     },
+#|     "availability monitor state",
+#| )
+#| if not isinstance(monitor["name"], str) or not monitor["name"]:
+#|     fail("availability monitor name is absent")
+#|
+#| def provenance(
+#|     binding: dict[str, Any],
+#|     *,
+#|     extra: dict[str, Any],
+#| ) -> dict[str, Any]:
+#|     return {
+#|         "workflowPath": binding["source"]["workflowPath"],
+#|         "runId": binding["source"]["runId"],
+#|         "runAttempt": binding["source"]["runAttempt"],
+#|         "artifactId": binding["artifact"]["id"],
+#|         "artifactName": binding["artifact"]["name"],
+#|         "artifactDigest": binding["artifact"]["digest"],
+#|         "predicateType": binding["attestation"]["predicateType"],
+#|         "predicateDigest": binding["attestation"]["predicateDigest"],
+#|         **extra,
+#|     }
+#|
+#|
+#| facts = {
+#|     "applicationUrl": application_url,
+#|     "availability": provenance(
+#|         availability_binding,
+#|         extra={
+#|             "observedAt": availability["observedAt"],
+#|             "result": "passed",
+#|         },
+#|     ),
+#|     "posture": provenance(
+#|         posture_binding,
+#|         extra={
+#|             "observedAt": posture_observed,
+#|             "result": "passed",
+#|             "topicArnSha256": alarms["topicArnSha256"],
+#|             "subscriptionArnSha256":
+#|                 alarms["subscriptionArnSha256"],
+#|             "alarmInventory": alarm_inventory,
+#|         },
+#|     ),
+#|     "alerting": {
+#|         "alarmsActive": True,
+#|         "snsSubscriptionConfirmed": True,
+#|         "externalPagingDeliveryTested": True,
+#|         "lastPagingTestAt": paging_observed,
+#|         "pagingDelivery": provenance(
+#|             paging_binding,
+#|             extra={
+#|                 "observedAt": paging_observed,
+#|                 "topicArnSha256":
+#|                     paging["target"]["topicArnSha256"],
+#|                 "subscriptionArnSha256":
+#|                     paging["target"]["subscriptionArnSha256"],
+#|             },
+#|         ),
+#|     },
+#|     "recovery": {
+#|         "rollbackPathTested": True,
+#|         "credentialRotationTested": True,
+#|         "lastRollbackTestAt": canary_verified_at,
+#|         "lastCredentialRotationTestAt": rotation_time,
+#|         "governedCanary": provenance(
+#|             canary_binding,
+#|             extra={
+#|                 "verifiedAt": canary_verified_at,
+#|                 "subjectDigest": rollback_subject,
+#|                 "rollbackEvidenceDigest": rollback_digest,
+#|                 "attestationVerificationDigest":
+#|                     embedded_verification,
+#|             },
+#|         ),
+#|     },
+#|     "access": {
+#|         "freeJudgeAccess": True,
+#|         "confirmedCredentialOrPublicNoAuth": True,
+#|         "validThrough": sq4["accessValidThrough"],
+#|         "projectAccess": project_access,
+#|     },
+#|     "monitoringWindow": {
+#|         "schedule": "17 */6 * * *",
+#|         "active": True,
+#|         "through": judging_end,
+#|     },
+#| }
+#|
+#| facts_dir = root / "facts"
+#| facts_dir.mkdir(mode=0o700)
+#| encoded = (
+#|     json.dumps(
+#|         facts,
+#|         ensure_ascii=False,
+#|         separators=(",", ":"),
+#|         sort_keys=True,
+#|     )
+#|     + "\n"
+#| ).encode("utf-8")
+#| (facts_dir / "SQ10.json").write_bytes(encoded)
+#| PY
+#|
+#| PYTHONDONTWRITEBYTECODE=1 \
+#|   python3 scripts/validate-submission-proof-receipts.py \
+#|     assemble-standard \
+#|     --registry scripts/submission-evidence-registry.json \
+#|     --source-key operations \
+#|     --facts-dir "${OPERATIONS_ROOT}/facts" \
+#|     --output-dir "${OPERATIONS_ROOT}/validation-source" \
+#|     --repository "${GITHUB_REPOSITORY}" \
+#|     --release-sha "${RELEASE_SHA}" \
+#|     --run-id "${GITHUB_RUN_ID}" \
+#|     --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+#|     --notice NOTICE.md >/dev/null
+#|
+#| recheck_native() {
+#|   local key="$1"
+#|   local run_id
+#|   local current_attempt
+#|   local artifact_id
+#|   local artifact_name
+#|   local artifact_digest
+#|   local artifact_size
+#|   local workflow_path
+#|   local artifact_prefix
+#|   local selection_policy
+#|   local maximum_attempt
+#|   local artifacts
+#|   local selected
+#|   local binding
+#|   local run
+#|   local artifact
+#|
+#|   binding="$(cat "${native}/${key}/binding.json")"
+#|   run_id="$(jq -er '.source.runId' <<<"${binding}")"
+#|   current_attempt="$(jq -er '.source.currentRunAttempt' <<<"${binding}")"
+#|   artifact_id="$(jq -er '.artifact.id' <<<"${binding}")"
+#|   artifact_name="$(jq -er '.artifact.name' <<<"${binding}")"
+#|   artifact_digest="$(jq -er '.artifact.digest' <<<"${binding}")"
+#|   artifact_size="$(jq -er '.artifact.size' <<<"${binding}")"
+#|   workflow_path="$(jq -er '.source.workflowPath' <<<"${binding}")"
+#|   case "${key}" in
+#|     availability)
+#|       artifact_prefix="production-availability-${RELEASE_SHA}-"
+#|       selection_policy=latest-retained
+#|       maximum_attempt="${current_attempt}"
+#|       ;;
+#|     posture)
+#|       artifact_prefix="production-posture-${RELEASE_SHA}-"
+#|       selection_policy=latest-retained
+#|       maximum_attempt="${current_attempt}"
+#|       ;;
+#|     paging)
+#|       artifact_prefix="production-paging-delivery-${RELEASE_SHA}-"
+#|       selection_policy=latest-retained
+#|       maximum_attempt="${current_attempt}"
+#|       ;;
+#|     canary)
+#|       artifact_prefix="governed-canary-rollback-${run_id}-"
+#|       selection_policy=exact-current
+#|       maximum_attempt=1
+#|       ;;
+#|     *)
+#|       echo "::error::Unknown native source during re-selection"
+#|       exit 1
+#|       ;;
+#|   esac
+#|   run="$(api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+#|   jq -e \
+#|     --arg repository "${GITHUB_REPOSITORY}" \
+#|     --arg release "${RELEASE_SHA}" \
+#|     --arg path "${workflow_path}" \
+#|     --argjson runId "${run_id}" \
+#|     --argjson attempt "${current_attempt}" '
+#|       .id == $runId and
+#|       .run_attempt == $attempt and
+#|       .path == $path and
+#|       .head_sha == $release and
+#|       .head_branch == "master" and
+#|       .head_repository.full_name == $repository and
+#|       .repository.full_name == $repository and
+#|       .status == "completed" and
+#|       .conclusion == "success"
+#|     ' <<<"${run}" >/dev/null
+#|   artifacts="$(
+#|     api \
+#|       --paginate \
+#|       --slurp \
+#|       "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
+#|   )"
+#|   selected="$(
+#|     python3 scripts/validate-submission-proof-receipts.py \
+#|       select-run-artifact \
+#|       --policy "${selection_policy}" \
+#|       --artifact-prefix "${artifact_prefix}" \
+#|       --run-id "${run_id}" \
+#|       --release-sha "${RELEASE_SHA}" \
+#|       --maximum-attempt "${maximum_attempt}" \
+#|       <<<"${artifacts}"
+#|   )"
+#|   jq -e \
+#|     --arg name "${artifact_name}" \
+#|     --arg digest "${artifact_digest}" \
+#|     --argjson artifactId "${artifact_id}" \
+#|     --argjson attempt "$(
+#|       jq -er '.source.runAttempt' <<<"${binding}"
+#|     )" '
+#|       .producerAttempt == $attempt and
+#|       .metadata.id == $artifactId and
+#|       .metadata.name == $name and
+#|       .metadata.digest == $digest
+#|     ' <<<"${selected}" >/dev/null
+#|   artifact="$(api \
+#|     "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}")"
+#|   jq -e \
+#|     --arg name "${artifact_name}" \
+#|     --arg digest "${artifact_digest}" \
+#|     --arg release "${RELEASE_SHA}" \
+#|     --argjson artifactId "${artifact_id}" \
+#|     --argjson runId "${run_id}" \
+#|     --argjson size "${artifact_size}" '
+#|       .id == $artifactId and
+#|       .name == $name and
+#|       .digest == $digest and
+#|       .expired == false and
+#|       .size_in_bytes == $size and
+#|       .workflow_run.id == $runId and
+#|       .workflow_run.head_sha == $release
+#|     ' <<<"${artifact}" >/dev/null
+#| }
+#|
+#| for key in availability posture paging canary; do
+#|   recheck_native "${key}"
+#| done
+#| for key in live-datahub project-access; do
+#|   binding="$(
+#|     cat "${registered}/upstream-verification/${key}/binding.json"
+#|   )"
+#|   run_id="$(jq -er '.source.runId' <<<"${binding}")"
+#|   attempt="$(jq -er '.source.runAttempt' <<<"${binding}")"
+#|   artifact_id="$(jq -er '.artifact.id' <<<"${binding}")"
+#|   artifact_name="$(jq -er '.artifact.name' <<<"${binding}")"
+#|   artifact_digest="$(jq -er '.artifact.digest' <<<"${binding}")"
+#|   workflow_path="$(jq -er '.source.workflowPath' <<<"${binding}")"
+#|   run="$(api "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+#|   jq -e \
+#|     --arg repository "${GITHUB_REPOSITORY}" \
+#|     --arg release "${RELEASE_SHA}" \
+#|     --arg path "${workflow_path}" \
+#|     --argjson runId "${run_id}" '
+#|       .id == $runId and
+#|       .path == $path and
+#|       .head_sha == $release and
+#|       .head_branch == "master" and
+#|       .head_repository.full_name == $repository and
+#|       .repository.full_name == $repository and
+#|       .status == "completed" and
+#|       .conclusion == "success"
+#|     ' <<<"${run}" >/dev/null
+#|   current_attempt="$(jq -er '.run_attempt' <<<"${run}")"
+#|   case "${key}" in
+#|     live-datahub)
+#|       artifact_prefix="live-datahub-proof-${RELEASE_SHA}-"
+#|       selection_policy=exact-current
+#|       ;;
+#|     project-access)
+#|       artifact_prefix="submission-project-access-${RELEASE_SHA}-"
+#|       selection_policy=latest-retained
+#|       ;;
+#|     *)
+#|       echo "::error::Unknown registered source during re-selection"
+#|       exit 1
+#|       ;;
+#|   esac
+#|   artifacts="$(
+#|     api \
+#|       --paginate \
+#|       --slurp \
+#|       "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
+#|   )"
+#|   selected="$(
+#|     python3 scripts/validate-submission-proof-receipts.py \
+#|       select-run-artifact \
+#|       --policy "${selection_policy}" \
+#|       --artifact-prefix "${artifact_prefix}" \
+#|       --run-id "${run_id}" \
+#|       --release-sha "${RELEASE_SHA}" \
+#|       --maximum-attempt "${current_attempt}" \
+#|       <<<"${artifacts}"
+#|   )"
+#|   jq -e \
+#|     --arg name "${artifact_name}" \
+#|     --arg digest "${artifact_digest}" \
+#|     --argjson artifactId "${artifact_id}" \
+#|     --argjson attempt "${attempt}" '
+#|       .producerAttempt == $attempt and
+#|       .metadata.id == $artifactId and
+#|       .metadata.name == $name and
+#|       .metadata.digest == $digest
+#|     ' <<<"${selected}" >/dev/null
+#|   artifact="$(api \
+#|     "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}")"
+#|   jq -e \
+#|     --arg name "${artifact_name}" \
+#|     --arg digest "${artifact_digest}" \
+#|     --arg release "${RELEASE_SHA}" \
+#|     --argjson artifactId "${artifact_id}" \
+#|     --argjson runId "${run_id}" '
+#|       .id == $artifactId and
+#|       .name == $name and
+#|       .digest == $digest and
+#|       .expired == false and
+#|       .workflow_run.id == $runId and
+#|       .workflow_run.head_sha == $release
+#|     ' <<<"${artifact}" >/dev/null
+#|   test "${attempt}" -le "$(jq -er '.run_attempt' <<<"${run}")"
+#| done
+#| final_monitor="$(
+#|   api "/repos/${GITHUB_REPOSITORY}/actions/workflows/availability.yml"
+#| )"
+#| jq -e '
+#|   .path == ".github/workflows/availability.yml" and
+#|   .state == "active"
+#| ' <<<"${final_monitor}" >/dev/null
+#| test "$(
+#|   api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq '.object.sha'
+#| )" = "${RELEASE_SHA}"
+#| test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+#| git diff --quiet
+#| git diff --cached --quiet
+#| test -z "$(git ls-files --others --exclude-standard)"
+# END ARCHON SUBMISSION OPERATIONS COLLECTOR
