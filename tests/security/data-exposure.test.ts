@@ -24,6 +24,8 @@ import type { LlmClient } from "../../src/llm/client.js";
 const SENTINEL = "SENTINEL_PAT_a1b2c3d4e5f6_do_not_leak";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL; // keep offline — token-only sentinel does NOT flip the client
 delete process.env.DATAHUB_GMS_URL;
 process.env.DATAHUB_GMS_TOKEN = SENTINEL;
@@ -31,6 +33,10 @@ process.env.DATAHUB_GMS_TOKEN = SENTINEL;
 // A stub LLM that never returns a usable tool call — forces the loop's no-progress fallback,
 // which logs via console.warn. This exercises the realistic offline leak surface (logging).
 class NoOpLlm implements LlmClient {
+  readonly runtime = {
+    source: "deterministic-fixture",
+    provider: "fixture",
+  } as const;
   chat = { completions: { create: async () => ({ choices: [{ message: { content: null, tool_calls: undefined } }] }) } };
 }
 
@@ -51,12 +57,19 @@ test("data-exposure: the token never appears in the pipeline report (findings + 
 });
 
 test("data-exposure: the token never appears in the MCP tool output", async () => {
-  const { server } = await buildMcpServer({ datahub: new FakeDataHubMcpClient(), pipeline: new AuditPipeline() });
+  const { server } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    pipeline: new AuditPipeline(),
+    demoQuery: "sales",
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "pentest", version: "0.0.0" }, { capabilities: {} });
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    const res = (await client.callTool({ name: "audit_catalog", arguments: {} })) as { content: Array<{ text: string }> };
+    const res = (await client.callTool({
+      name: "audit_catalog",
+      arguments: { query: "sales" },
+    })) as { content: Array<{ text: string }> };
     assert.ok(!JSON.stringify(res).includes(SENTINEL), "token leaked over the MCP surface");
   } finally {
     await client.close();

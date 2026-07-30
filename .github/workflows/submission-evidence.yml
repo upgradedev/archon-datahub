@@ -1,0 +1,542 @@
+name: Submission evidence
+
+# Deterministic aggregate producer. Inputs are exact upstream run IDs only;
+# source workflow paths, artifact names, schemas, predicate types, proof IDs,
+# and semantic contracts are immutable registry data in the selected release.
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Exact current master release commit
+        required: true
+        type: string
+      live_datahub_run_id:
+        description: Exact successful live-datahub-proof run ID
+        required: true
+        type: string
+      project_access_run_id:
+        description: Exact successful project-access evidence run ID
+        required: true
+        type: string
+      content_review_run_id:
+        description: Exact successful content-review evidence run ID
+        required: true
+        type: string
+      operations_run_id:
+        description: Exact successful judging-operations evidence run ID
+        required: true
+        type: string
+      judge_pack_run_id:
+        description: Optional exact successful recommended judge-pack evidence run ID
+        required: false
+        default: ""
+        type: string
+      bonus_oss_run_id:
+        description: Optional exact successful accepted-upstream-contribution run ID
+        required: false
+        default: ""
+        type: string
+      bonus_feedback_run_id:
+        description: Optional exact successful feedback-confirmation run ID
+        required: false
+        default: ""
+        type: string
+      post_submit_run_id:
+        description: Optional exact successful post-submit Devpost confirmation run ID
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: submission-evidence-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-readiness/v1
+
+jobs:
+  produce:
+    name: Verify exact upstream sources and retain canonical receipts
+    if: github.repository == 'upgradedev/archon-datahub'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      artifact_name: ${{ steps.bundle.outputs.artifact_name }}
+      predicate_digest: ${{ steps.bundle.outputs.predicate_digest }}
+      producer_run_attempt: ${{ steps.bundle.outputs.producer_run_attempt }}
+      producer_run_id: ${{ steps.bundle.outputs.producer_run_id }}
+    steps:
+      - name: Bind controller to the exact current release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          LIVE_DATAHUB_RUN_ID: ${{ inputs.live_datahub_run_id }}
+          PROJECT_ACCESS_RUN_ID: ${{ inputs.project_access_run_id }}
+          CONTENT_REVIEW_RUN_ID: ${{ inputs.content_review_run_id }}
+          OPERATIONS_RUN_ID: ${{ inputs.operations_run_id }}
+          JUDGE_PACK_RUN_ID: ${{ inputs.judge_pack_run_id }}
+          BONUS_OSS_RUN_ID: ${{ inputs.bonus_oss_run_id }}
+          BONUS_FEEDBACK_RUN_ID: ${{ inputs.bonus_feedback_run_id }}
+          POST_SUBMIT_RUN_ID: ${{ inputs.post_submit_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-evidence.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          for run_id in \
+            "${LIVE_DATAHUB_RUN_ID}" \
+            "${PROJECT_ACCESS_RUN_ID}" \
+            "${CONTENT_REVIEW_RUN_ID}" \
+            "${OPERATIONS_RUN_ID}"; do
+            [[ "${run_id}" =~ ^[1-9][0-9]*$ ]]
+          done
+          for optional_run_id in \
+            "${JUDGE_PACK_RUN_ID}" \
+            "${BONUS_OSS_RUN_ID}" \
+            "${BONUS_FEEDBACK_RUN_ID}" \
+            "${POST_SUBMIT_RUN_ID}"; do
+            if test -n "${optional_run_id}"; then
+              [[ "${optional_run_id}" =~ ^[1-9][0-9]*$ ]]
+            fi
+          done
+          default_sha="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          test "${default_sha}" = "${RELEASE_SHA}" || {
+            echo "::error::submission evidence only accepts the current exact master"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Initialize isolated aggregate
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          output="${RUNNER_TEMP}/submission-evidence"
+          test ! -e "${output}"
+          mkdir --mode=0700 "${output}"
+
+      - name: Collect attested live DataHub receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: live-datahub
+          SOURCE_RUN_ID: ${{ inputs.live_datahub_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect attested public project and judge-access receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: project-access
+          SOURCE_RUN_ID: ${{ inputs.project_access_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect attested final content and disclosure receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: content-review
+          SOURCE_RUN_ID: ${{ inputs.content_review_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect attested judging-operations receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: operations
+          SOURCE_RUN_ID: ${{ inputs.operations_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect optional attested judge-pack receipt
+        if: inputs.judge_pack_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: judge-pack
+          SOURCE_RUN_ID: ${{ inputs.judge_pack_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect optional accepted OSS contribution receipt
+        if: inputs.bonus_oss_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: bonus-oss
+          SOURCE_RUN_ID: ${{ inputs.bonus_oss_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect optional feedback confirmation receipt
+        if: inputs.bonus_feedback_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: bonus-feedback
+          SOURCE_RUN_ID: ${{ inputs.bonus_feedback_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Collect optional post-submit Devpost confirmation
+        if: inputs.post_submit_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          SOURCE_KEY: devpost-confirmation
+          SOURCE_RUN_ID: ${{ inputs.post_submit_run_id }}
+          SUBMISSION_EVIDENCE_DIR: ${{ runner.temp }}/submission-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/collect-submission-evidence-source.sh
+
+      - name: Build and semantically revalidate canonical claims
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/submission-evidence"
+          python3 scripts/validate-submission-proof-receipts.py build-bundle \
+            --registry scripts/submission-evidence-registry.json \
+            --receipt-dir "${output}/receipts" \
+            --claims "${output}/claims.json" \
+            --predicate "${output}/predicate.json" \
+            --notice NOTICE.md \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          python3 scripts/validate-submission-proof-receipts.py validate-bundle \
+            --registry scripts/submission-evidence-registry.json \
+            --receipt-dir "${output}/receipts" \
+            --claims "${output}/claims.json" \
+            --notice NOTICE.md \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            >"${output}/semantic-validation.json"
+
+      - name: Seal exact aggregate inventory
+        id: bundle
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/submission-evidence"
+          test ! -e "${output}/SHA256SUMS"
+          (
+            cd "${output}"
+            find . -type f -printf '%P\n' |
+              LC_ALL=C sort |
+              while IFS= read -r relative; do
+                sha256sum "${relative}"
+              done >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          actual_files="$(
+            find "${output}" -type f -printf '%P\n' |
+              grep -v '^SHA256SUMS$' |
+              LC_ALL=C sort
+          )"
+          inventoried_files="$(
+            awk '{print $2}' "${output}/SHA256SUMS" |
+              LC_ALL=C sort
+          )"
+          test "${actual_files}" = "${inventoried_files}"
+          predicate_digest="sha256:$(
+            sha256sum "${output}/predicate.json" | awk '{print $1}'
+          )"
+          {
+            echo "artifact_name=submission-evidence-${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}"
+            echo "predicate_digest=${predicate_digest}"
+            echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "producer_run_id=${GITHUB_RUN_ID}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "### Canonical submission evidence"
+            echo
+            echo "- Release: \`${RELEASE_SHA}\`"
+            echo "- Predicate: \`${predicate_digest}\`"
+            echo "- Verified proof IDs: \`$(
+              jq -r '
+                [.proofs[].id, .bonuses[].id] |
+                sort |
+                join(",")
+              ' "${output}/claims.json"
+            )\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain canonical submission evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: ${{ runner.temp }}/submission-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish exact aggregate binding
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
+          ARTIFACT_ID: ${{ steps.upload.outputs['artifact-id'] }}
+          ARTIFACT_NAME: ${{ steps.bundle.outputs.artifact_name }}
+          PREDICATE_DIGEST: ${{ steps.bundle.outputs.predicate_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${PREDICATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo
+            echo "- Artifact: \`${ARTIFACT_NAME}\`"
+            echo "- Artifact ID: \`${ARTIFACT_ID}\`"
+            echo "- Artifact digest: \`sha256:${ARTIFACT_DIGEST}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  attest:
+    name: Independently revalidate and attest canonical receipts
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Revalidate exact retained aggregate metadata
+        env:
+          ARTIFACT_DIGEST: ${{ needs.produce.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.produce.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.produce.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          PREDICATE_DIGEST: ${{ needs.produce.outputs.predicate_digest }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.produce.outputs.producer_run_attempt }}
+          PRODUCER_RUN_ID: ${{ needs.produce.outputs.producer_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_ref="${GITHUB_REPOSITORY}/.github/workflows/submission-evidence.yml@refs/heads/master"
+          test "${GITHUB_WORKFLOW_REF}" = "${expected_ref}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PREDICATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${PRODUCER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${PRODUCER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${PRODUCER_RUN_ID}" = "${GITHUB_RUN_ID}"
+          (( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))
+          test "${ARTIFACT_NAME}" = \
+            "submission-evidence-${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}"
+          artifact="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}"
+          )"
+          jq -e \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --arg name "${ARTIFACT_NAME}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson artifactId "${ARTIFACT_ID}" \
+            --argjson runId "${PRODUCER_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 536870912 and
+              .workflow_run.id == $runId and
+              .workflow_run.head_sha == $sha
+            ' <<<"${artifact}" >/dev/null || {
+            echo "::error::Submission aggregate metadata drifted before attestation"
+            exit 1
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download only the exact retained aggregate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.produce.outputs.artifact_id }}
+          path: ${{ runner.temp }}/submission-evidence-attestation
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Rebuild and revalidate exact aggregate subjects
+        env:
+          EXPECTED_PREDICATE_DIGEST: ${{ needs.produce.outputs.predicate_digest }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.produce.outputs.producer_run_attempt }}
+          PRODUCER_RUN_ID: ${{ needs.produce.outputs.producer_run_id }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          output="${RUNNER_TEMP}/submission-evidence-attestation"
+          test -d "${output}"
+          test ! -L "${output}"
+          if find "${output}" -type l -print -quit | grep -q .; then
+            echo "::error::Submission aggregate contains a symbolic link"
+            exit 1
+          fi
+          for required in \
+            SHA256SUMS \
+            claims.json \
+            predicate.json \
+            semantic-validation.json; do
+            test -f "${output}/${required}"
+            test ! -L "${output}/${required}"
+          done
+          test -d "${output}/receipts"
+          test ! -L "${output}/receipts"
+          (
+            cd "${output}"
+            sha256sum --check --strict SHA256SUMS
+            find . -type f -printf '%P\n' |
+              grep -v '^SHA256SUMS$' |
+              LC_ALL=C sort >"${RUNNER_TEMP}/aggregate-actual-files.txt"
+            awk '{print $2}' SHA256SUMS |
+              LC_ALL=C sort >"${RUNNER_TEMP}/aggregate-inventory-files.txt"
+          )
+          diff -u \
+            "${RUNNER_TEMP}/aggregate-actual-files.txt" \
+            "${RUNNER_TEMP}/aggregate-inventory-files.txt"
+          test "sha256:$(
+            sha256sum "${output}/predicate.json" |
+              awk '{print $1}'
+          )" = "${EXPECTED_PREDICATE_DIGEST}"
+
+          derived="${RUNNER_TEMP}/submission-evidence-derived"
+          test ! -e "${derived}"
+          mkdir --mode=0700 "${derived}"
+          python3 scripts/validate-submission-proof-receipts.py build-bundle \
+            --registry scripts/submission-evidence-registry.json \
+            --receipt-dir "${output}/receipts" \
+            --claims "${derived}/claims.json" \
+            --predicate "${derived}/predicate.json" \
+            --notice NOTICE.md \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${PRODUCER_RUN_ID}" \
+            --run-attempt "${PRODUCER_RUN_ATTEMPT}"
+          python3 scripts/validate-submission-proof-receipts.py validate-bundle \
+            --registry scripts/submission-evidence-registry.json \
+            --receipt-dir "${output}/receipts" \
+            --claims "${derived}/claims.json" \
+            --notice NOTICE.md \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-sha "${RELEASE_SHA}" \
+            >"${derived}/semantic-validation.json"
+          cmp --silent "${derived}/claims.json" "${output}/claims.json"
+          cmp --silent "${derived}/predicate.json" "${output}/predicate.json"
+          cmp --silent \
+            "${derived}/semantic-validation.json" \
+            "${output}/semantic-validation.json"
+
+          subjects="${RUNNER_TEMP}/submission-evidence-subjects.sha256"
+          test ! -e "${subjects}"
+          (
+            cd "${output}"
+            sha256sum claims.json SHA256SUMS >"${subjects}"
+            sha256sum --check --strict "${subjects}"
+          )
+          test "$(
+            awk '{print $2}' "${subjects}"
+          )" = "$(
+            printf '%s\n' claims.json SHA256SUMS
+          )"
+
+      - name: Attest canonical claims and complete inventory
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/submission-evidence-subjects.sha256
+          predicate-type: ${{ env.PREDICATE_TYPE }}
+          predicate-path: ${{ runner.temp }}/submission-evidence-attestation/predicate.json
+
+      - name: Publish attested aggregate binding
+        env:
+          ARTIFACT_DIGEST: ${{ needs.produce.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.produce.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.produce.outputs.artifact_name }}
+          ATTESTATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PREDICATE_DIGEST: ${{ needs.produce.outputs.predicate_digest }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.produce.outputs.producer_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Submission evidence attested"
+            echo
+            echo "- Artifact: \`${ARTIFACT_NAME}\`"
+            echo "- Artifact ID: \`${ARTIFACT_ID}\`"
+            echo "- Artifact digest: \`${ARTIFACT_DIGEST}\`"
+            echo "- Predicate digest: \`${PREDICATE_DIGEST}\`"
+            echo "- Producer attempt: \`${PRODUCER_RUN_ATTEMPT}\`"
+            echo "- Successful attestation attempt: \`${ATTESTATION_RUN_ATTEMPT}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

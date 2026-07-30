@@ -53,4 +53,7 @@ contribution-ready.
 ## Status
 
 **Staged, not submitted.** This is prepared for a maintainer-reviewed upstream PR; the repo
-owner decides when to open it. Nothing here is auto-published.
+owner decides when to open it. Nothing here is auto-published. In this repository it is a
+supplemental draft, not the primary open-source bonus candidate; the pinned
+`contrib/mcp-get-aspect-history/` contribution supplies the missing read surface that makes
+provenance-aware contradiction audits possible.

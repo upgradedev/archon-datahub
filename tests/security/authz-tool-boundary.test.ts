@@ -21,6 +21,8 @@ import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
 import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 
 delete process.env.LLM_API_KEY;
+delete process.env.LLM_PROVIDER;
+delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 
@@ -83,7 +85,8 @@ test("authz: a mutation-named tool call is refused over the dispatch layer (no w
     const res = await callAuditTool(deps, m, { urn: "urn:li:dataset:(x)", tag: "PII" });
     assert.equal(res.isError, true, `mutation tool '${m}' must be rejected`);
     const text = (res.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
-    assert.match(text, /unknown tool/i);
+    assert.equal(text, "error: unknown_tool");
+    assert.doesNotMatch(text, new RegExp(m, "iu"));
   }
 });
 

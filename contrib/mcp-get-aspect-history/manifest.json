@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 2,
+  "name": "get-aspect-history",
+  "target": {
+    "repository": "https://github.com/acryldata/mcp-server-datahub",
+    "branch": "main",
+    "baseCommit": "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "baseCommitUrl": "https://github.com/acryldata/mcp-server-datahub/commit/9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "license": "Apache-2.0"
+  },
+  "artifacts": [
+    {
+      "source": "upstream/src/mcp_server_datahub/tools/aspect_history.py",
+      "destination": "src/mcp_server_datahub/tools/aspect_history.py",
+      "kind": "source"
+    },
+    {
+      "source": "upstream/tests/test_mcp/test_get_aspect_history.py",
+      "destination": "tests/test_mcp/test_get_aspect_history.py",
+      "kind": "test"
+    }
+  ],
+  "integrationPatch": "integration.patch",
+  "upstreamInspection": {
+    "performedAt": "2026-07-25",
+    "method": "read-only GitHub API and official source inspection",
+    "pullRequestStatesInspected": [
+      "open",
+      "closed"
+    ],
+    "issueStatesInspected": [
+      "open"
+    ],
+    "codeSearched": true,
+    "openPullRequestOverlapFound": false,
+    "closedPullRequestOverlapFound": false,
+    "issueOverlapFound": false,
+    "existingSymbolFound": false,
+    "queries": [
+      "get_aspect_history",
+      "aspect history",
+      "versioned aspect"
+    ]
+  },
+  "status": {
+    "state": "staged-not-submitted",
+    "pullRequestOpened": false,
+    "appliedToUpstream": false,
+    "localBuildRun": false,
+    "localTestsRun": false,
+    "localSecurityScanRun": false
+  },
+  "ciEnvironment": {
+    "runner": "ubuntu-24.04",
+    "uvVersion": "0.11.31",
+    "setupCommand": "uv sync --frozen --all-groups --no-cache"
+  },
+  "requiredCi": [
+    {
+      "id": "candidate-lint",
+      "kind": "lint",
+      "scope": "candidate",
+      "command": "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py"
+    },
+    {
+      "id": "candidate-typecheck",
+      "kind": "typecheck",
+      "scope": "candidate",
+      "command": "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py"
+    },
+    {
+      "id": "candidate-tests",
+      "kind": "test",
+      "scope": "candidate",
+      "command": "uv run --frozen pytest tests/test_mcp/test_get_aspect_history.py --quiet"
+    },
+    {
+      "id": "read-only-regression",
+      "kind": "test",
+      "scope": "candidate",
+      "command": "uv run --frozen pytest tests/test_mcp/test_read_only.py --quiet"
+    },
+    {
+      "id": "repository-format-check",
+      "kind": "lint",
+      "scope": "repository",
+      "command": "uv run --frozen ruff format --check src tests scripts"
+    },
+    {
+      "id": "repository-lint",
+      "kind": "lint",
+      "scope": "repository",
+      "command": "uv run --frozen ruff check src tests scripts"
+    },
+    {
+      "id": "repository-typecheck",
+      "kind": "typecheck",
+      "scope": "repository",
+      "command": "uv run --frozen mypy src tests scripts"
+    },
+    {
+      "id": "repository-test-suite",
+      "kind": "test",
+      "scope": "repository",
+      "command": "uv run --frozen pytest --quiet"
+    }
+  ],
+  "validationReceipt": {
+    "schemaVersion": "archon.oss-validation-receipt/v1",
+    "artifactNamePrefix": "oss-validation-receipt-",
+    "retentionDays": 90
+  }
+}

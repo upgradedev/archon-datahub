@@ -1,0 +1,1742 @@
+name: DataHub demo state
+
+run-name: ${{ inputs.action }} exact DataHub demo state at ${{ inputs.release_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Idempotently seed, or explicitly reset, the exact reviewed demo state
+        required: true
+        type: choice
+        options:
+          - seed
+          - reset
+      release_sha:
+        description: Current master 40-character commit SHA
+        required: true
+        type: string
+      query:
+        description: Exact contract query (must equal the target dataset URN)
+        required: true
+        type: string
+      confirmation:
+        description: Reset only — type RESET ARCHON DATAHUB DEMO
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: datahub-demo-state
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.31"
+  STATE_CONTRACT: contracts/datahub-demo-state-v1.json
+
+jobs:
+  plan:
+    name: Read-only dry-run and sealed plan
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: datahub-demo
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+      baseline_manifest_sha256: ${{ steps.seal.outputs.baseline_manifest_sha256 }}
+      mutation_required: ${{ steps.seal.outputs.mutation_required }}
+      plan_sha256: ${{ steps.seal.outputs.plan_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind current master, green security control plane, and approval environment
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::release_sha must be a full lowercase commit SHA"
+            exit 1
+          }
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          repository_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
+          default_ref="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}")"
+          test "$(jq -er '.object.sha' <<<"${default_ref}")" = "${RELEASE_SHA}" || {
+            echo "::error::dispatch SHA is no longer the current default-branch head"
+            exit 1
+          }
+
+          workflow_success() {
+            local file="$1"
+            local expected_name="$2"
+            local expected_path=".github/workflows/${file}"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg name "${expected_name}" \
+              --arg path "${expected_path}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .name == $name and
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  . != null and
+                  .status == "completed" and
+                  .conclusion == "success"
+                ) |
+                {
+                  path,
+                  workflowId: .workflow_id,
+                  runId: .id,
+                  runAttempt: .run_attempt,
+                  headSha: .head_sha,
+                  conclusion
+                }
+              ' <<<"${response}"
+          }
+
+          evidence_dir="${RUNNER_TEMP}/datahub-demo-plan"
+          test ! -e "${evidence_dir}"
+          mkdir --mode=0700 "${evidence_dir}"
+          ci="$(workflow_success ci.yml CI)" || {
+            echo "::error::exact-SHA CI is not green"
+            exit 1
+          }
+          codeql="$(workflow_success codeql.yml CodeQL)" || {
+            echo "::error::exact-SHA CodeQL is not green"
+            exit 1
+          }
+          workflow_security="$(
+            workflow_success workflow-security.yml "Workflow security"
+          )" || {
+            echo "::error::exact-SHA Workflow security is not green"
+            exit 1
+          }
+
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed")"
+          jq -e --arg owner "${GITHUB_REPOSITORY_OWNER}" '
+            .name == "datahub-demo-seed" and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            (
+              [
+                .protection_rules[]? |
+                select(.type == "required_reviewers")
+              ] as $rules |
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
+            )
+          ' <<<"${environment_json}" >/dev/null || {
+            echo "::error::datahub-demo-seed needs the explicit solo-owner User reviewer, self-review enabled, and a custom branch policy"
+            exit 1
+          }
+          branch_policies="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed/deployment-branch-policies?per_page=100")"
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and .branch_policies[0].name == $branch
+          ' <<<"${branch_policies}" >/dev/null || {
+            echo "::error::datahub-demo-seed must allow only master"
+            exit 1
+          }
+
+          upstream_commit="$(jq -er '.officialBaseline.commit' "${STATE_CONTRACT}")"
+          upstream_tree="$(jq -er '.officialBaseline.tree' "${STATE_CONTRACT}")"
+          upstream_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/datahub-project/static-assets/commits/${upstream_commit}")"
+          jq -e \
+            --arg commit "${upstream_commit}" \
+            --arg tree "${upstream_tree}" '
+              .sha == $commit and
+              .commit.tree.sha == $tree and
+              .commit.verification.verified == true and
+              .commit.verification.reason == "valid"
+            ' <<<"${upstream_json}" >/dev/null || {
+              echo "::error::official showcase upstream commit signature/tree binding failed"
+              exit 1
+            }
+          tree_child() {
+            local parent_tree="$1"
+            local child_path="$2"
+            local response
+            response="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/datahub-project/static-assets/git/trees/${parent_tree}")"
+            jq -er --arg childPath "${child_path}" '
+              select(.truncated == false) |
+              [
+                .tree[] |
+                select(
+                  .path == $childPath and
+                  .mode == "040000" and
+                  .type == "tree" and
+                  (.sha | test("^[0-9a-f]{40}$"))
+                )
+              ] |
+              if length == 1 then
+                .[0].sha
+              else
+                error("expected one exact tree child")
+              end
+            ' <<<"${response}"
+          }
+          datapacks_tree="$(tree_child "${upstream_tree}" datapacks)"
+          upstream_pack_tree="$(
+            tree_child "${datapacks_tree}" showcase-ecommerce
+          )"
+          pack_tree_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/datahub-project/static-assets/git/trees/${upstream_pack_tree}")"
+          expected_pack_files="$(jq -cS '
+            [
+              .officialBaseline.files[] |
+              {
+                mode: "100644",
+                path,
+                sha: .gitBlob,
+                type: "blob"
+              }
+            ] |
+            sort_by(.path)
+          ' "${STATE_CONTRACT}")"
+          observed_pack_files="$(jq -cS \
+            --argjson expected "${expected_pack_files}" '
+              select(.truncated == false) |
+              [
+                $expected[] as $wanted |
+                (
+                  [
+                    .tree[] |
+                    select(.path == $wanted.path)
+                  ] |
+                  if length == 1 then
+                    .[0]
+                  else
+                    error("expected one exact pack file")
+                  end
+                ) |
+                {mode, path, sha, type}
+              ] |
+              sort_by(.path)
+            ' <<<"${pack_tree_json}")"
+          test "${observed_pack_files}" = "${expected_pack_files}" || {
+            echo "::error::official showcase files are not members of the verified tree"
+            exit 1
+          }
+          jq -cnS \
+            --arg schemaVersion "archon.datahub-demo-control-plane/v1" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg defaultBranch "${default_branch}" \
+            --arg upstreamCommit "${upstream_commit}" \
+            --arg upstreamPackTree "${upstream_pack_tree}" \
+            --arg upstreamTree "${upstream_tree}" \
+            --argjson ci "${ci}" \
+            --argjson codeql "${codeql}" \
+            --argjson workflowSecurity "${workflow_security}" '
+              {
+                schemaVersion: $schemaVersion,
+                repository: $repository,
+                releaseSha: $releaseSha,
+                defaultBranch: $defaultBranch,
+                mutationEnvironment: {
+                  name: "datahub-demo-seed",
+                  requiredReviewers: true,
+                  individualUserReviewersOnly: true,
+                  preventSelfReview: true,
+                  onlyDefaultBranch: true,
+                  exactApprovalReceiptRequiredAtApply: true
+                },
+                officialBaseline: {
+                  repository: "datahub-project/static-assets",
+                  commit: $upstreamCommit,
+                  packTree: $upstreamPackTree,
+                  tree: $upstreamTree,
+                  signatureVerified: true
+                },
+                successfulRuns: [$ci, $codeql, $workflowSecurity]
+              }
+            ' >"${evidence_dir}/control-plane.json"
+          chmod 0600 "${evidence_dir}/control-plane.json"
+          echo "evidence_dir=${evidence_dir}" >>"${GITHUB_OUTPUT}"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Materialize the exact wheel-only DataHub runtime
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-demo-runtime
+        run: bash scripts/materialize-datahub-mcp-lock.sh "${RUNTIME}"
+
+      - name: Materialize and verify the immutable official baseline
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-demo-runtime
+          BASELINE: ${{ runner.temp }}/datahub-demo-baseline
+        run: |
+          set -euo pipefail
+          "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py \
+            materialize-baseline \
+            --contract "${STATE_CONTRACT}" \
+            --output-dir "${BASELINE}"
+
+      - name: Official DataHub dry-run and exact live-state plan
+        env:
+          DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_GMS_TOKEN }}
+          DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
+          RUNTIME: ${{ runner.temp }}/datahub-demo-runtime
+          BASELINE: ${{ runner.temp }}/datahub-demo-baseline
+          PLAN_DIR: ${{ steps.gate.outputs.evidence_dir }}
+          ACTION: ${{ inputs.action }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          QUERY: ${{ inputs.query }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_GMS_URL:?DATAHUB_GMS_URL is required}"
+          : "${DATAHUB_GMS_TOKEN:?DATAHUB_GMS_TOKEN is required}"
+          env -i \
+            DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+            DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+            "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py \
+            validate-config >/dev/null
+          if ! env -i \
+              DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+              DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+              "${RUNTIME}/.venv/bin/datahub" datapack load showcase-ecommerce \
+              --url "file://${BASELINE}/index.json" \
+              --trust-custom \
+              --no-cache \
+              --no-time-shift \
+              --dry-run >/dev/null 2>&1; then
+            echo "::error::official DataHub dry-run failed"
+            exit 1
+          fi
+          env -i \
+            DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+            DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+            "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py plan \
+            --contract "${STATE_CONTRACT}" \
+            --baseline-manifest "${BASELINE}/baseline-manifest.json" \
+            --action "${ACTION}" \
+            --confirmation "${CONFIRMATION}" \
+            --query "${QUERY}" \
+            --release-sha "${RELEASE_SHA}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output "${PLAN_DIR}/plan.json"
+          unset DATAHUB_GMS_TOKEN DATAHUB_GMS_URL
+          cp -- "${BASELINE}/baseline-manifest.json" \
+            "${PLAN_DIR}/baseline-manifest.json"
+          chmod 0600 "${PLAN_DIR}/plan.json" \
+            "${PLAN_DIR}/baseline-manifest.json"
+
+      - name: Seal digest receipt before any mutation
+        id: seal
+        env:
+          PLAN_DIR: ${{ steps.gate.outputs.evidence_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLAN_DIR}"
+          for path in baseline-manifest.json control-plane.json plan.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          sha256sum baseline-manifest.json control-plane.json plan.json >SHA256SUMS
+          chmod 0600 SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              baseline-manifest.json \
+              control-plane.json \
+              plan.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}" || {
+            echo "::error::plan evidence directory contains an unexpected entry"
+            exit 1
+          }
+          for path in \
+            SHA256SUMS \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          plan_sha256="$(sha256sum plan.json | awk '{print $1}')"
+          baseline_manifest_sha256="$(
+            sha256sum baseline-manifest.json | awk '{print $1}'
+          )"
+          mutation_required="$(jq -er '.mutationRequired | tostring' plan.json)"
+          [[ "${plan_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${baseline_manifest_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${mutation_required}" =~ ^(true|false)$ ]]
+          {
+            echo "plan_sha256=${plan_sha256}"
+            echo "baseline_manifest_sha256=${baseline_manifest_sha256}"
+            echo "mutation_required=${mutation_required}"
+          } >>"${GITHUB_OUTPUT}"
+          {
+            echo "### DataHub demo plan sealed"
+            echo
+            echo "- Action: \`$(jq -r '.action' plan.json)\`"
+            echo "- Operation: \`$(jq -r '.operation' plan.json)\`"
+            echo "- Mutation required: \`${mutation_required}\`"
+            echo "- Plan SHA-256: \`${plan_sha256}\`"
+            echo "- Before-state SHA-256: \`$(jq -r '.before.digest' plan.json)\`"
+            echo "- Baseline content digest: \`$(jq -r '.baselineContentDigest' plan.json)\`"
+            approval_phrase="APPROVE ARCHON DATAHUB DEMO run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=$(jq -r '.action' plan.json) release_sha=$(jq -r '.releaseSha' plan.json) plan_sha256=${plan_sha256}"
+            echo "- Required approval comment: \`${approval_phrase}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the immutable pre-mutation plan receipt
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-demo-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.gate.outputs.evidence_dir }}
+          if-no-files-found: error
+          retention-days: 90
+
+  apply:
+    name: Solo-owner-approved apply of plan ${{ needs.plan.outputs.plan_sha256 }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: datahub-demo-seed
+      url: ${{ vars.DATAHUB_URL }}
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      receipt_artifact_digest: "sha256:${{ steps.receipt-upload.outputs['artifact-digest'] }}"
+      receipt_artifact_id: ${{ steps.receipt-upload.outputs['artifact-id'] }}
+    steps:
+      - name: Bind the exact solo-owner environment approval receipt
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ inputs.action }}
+          PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[0-9]+$ ]]
+          [[ "${ACTION}" =~ ^(seed|reset)$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          expected_approval="APPROVE ARCHON DATAHUB DEMO run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=${ACTION} release_sha=${RELEASE_SHA} plan_sha256=${PLAN_SHA256}"
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed")"
+          environment_id="$(jq -er '
+            select(
+              .name == "datahub-demo-seed" and
+              (.id | type) == "number"
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid individual-reviewer posture")
+            end
+          ' <<<"${environment_json}")" || {
+            echo "::error::configured environment reviewers are not exact individual Users"
+            exit 1
+          }
+          approvals="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
+          matched_approval="$(jq -ce \
+            --arg environment "datahub-demo-seed" \
+            --arg expected "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" '
+              if type != "array" then
+                error("approval response is not an array")
+              else
+                [
+                  .[] |
+                  select(
+                    .state == "approved" and
+                    .comment == $expected and
+                    (.environments | type) == "array" and
+                    (.environments | length) == 1 and
+                    .environments[0].name == $environment and
+                    .environments[0].id == $environmentId and
+                    (.user | type) == "object" and
+                    (.user.id | type) == "number" and
+                    (.user.login | type) == "string" and
+                    (.user.id as $userId |
+                      ($reviewerIds | index($userId)) != null) and
+                    (.user.login | ascii_downcase) ==
+                      ($owner | ascii_downcase)
+                  )
+                ] |
+                if length == 1 then
+                  .[0]
+                else
+                  error("expected exactly one matching approval")
+                end
+              end
+            ' <<<"${approvals}")" || {
+              echo "::error::missing exact solo-owner approval comment: ${expected_approval}"
+              exit 1
+            }
+          approval_dir="${RUNNER_TEMP}/datahub-demo-approval"
+          approval_receipt="${approval_dir}/approval-receipt.json"
+          test ! -e "${approval_dir}"
+          mkdir --mode=0700 "${approval_dir}"
+          jq -cnS \
+            --arg action "${ACTION}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg comment "$(jq -er '.comment' <<<"${matched_approval}")" \
+            --arg environment "datahub-demo-seed" \
+            --arg planSha256 "${PLAN_SHA256}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg state "$(jq -er '.state' <<<"${matched_approval}")" \
+            --arg triggeringActor "${GITHUB_TRIGGERING_ACTOR}" \
+            --arg userLogin "$(jq -er '.user.login' <<<"${matched_approval}")" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --argjson configuredReviewerIds "${reviewer_ids}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson userId "$(jq -er '.user.id' <<<"${matched_approval}")" '
+              {
+                schemaVersion: "archon.datahub-demo-approval/v1",
+                repository: $repository,
+                workflowRunId: $workflowRunId,
+                workflowRunAttempt: $workflowRunAttempt,
+                action: $action,
+                releaseSha: $releaseSha,
+                planSha256: $planSha256,
+                initiators: {
+                  actor: $actor,
+                  triggeringActor: $triggeringActor
+                },
+                environment: {
+                  id: $environmentId,
+                  name: $environment
+                },
+                configuredReviewerIds: $configuredReviewerIds,
+                approval: {
+                  state: $state,
+                  comment: $comment,
+                  user: {
+                    id: $userId,
+                    login: $userLogin
+                  }
+                }
+              }
+            ' >"${approval_receipt}"
+          chmod 0600 "${approval_receipt}"
+          test -f "${approval_receipt}"
+          test ! -L "${approval_receipt}"
+          echo "receipt_path=${approval_receipt}" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate exact master and green control plane after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          default_sha="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          test "${default_sha}" = "${RELEASE_SHA}" || {
+            echo "::error::master changed while the plan awaited approval"
+            exit 1
+          }
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f branch=master \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(.status == "completed" and .conclusion == "success")
+              ' <<<"${response}" >/dev/null
+          }
+          workflow_success ci.yml
+          workflow_success codeql.yml
+          workflow_success workflow-security.yml
+          upstream_commit="$(jq -er '.officialBaseline.commit' "${STATE_CONTRACT}")"
+          upstream_tree="$(jq -er '.officialBaseline.tree' "${STATE_CONTRACT}")"
+          upstream_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/datahub-project/static-assets/commits/${upstream_commit}")"
+          jq -e \
+            --arg commit "${upstream_commit}" \
+            --arg tree "${upstream_tree}" '
+              .sha == $commit and
+              .commit.tree.sha == $tree and
+              .commit.verification.verified == true and
+              .commit.verification.reason == "valid"
+            ' <<<"${upstream_json}" >/dev/null
+          tree_child() {
+            local parent_tree="$1"
+            local child_path="$2"
+            local response
+            response="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/datahub-project/static-assets/git/trees/${parent_tree}")"
+            jq -er --arg childPath "${child_path}" '
+              select(.truncated == false) |
+              [
+                .tree[] |
+                select(
+                  .path == $childPath and
+                  .mode == "040000" and
+                  .type == "tree" and
+                  (.sha | test("^[0-9a-f]{40}$"))
+                )
+              ] |
+              if length == 1 then
+                .[0].sha
+              else
+                error("expected one exact tree child")
+              end
+            ' <<<"${response}"
+          }
+          datapacks_tree="$(tree_child "${upstream_tree}" datapacks)"
+          upstream_pack_tree="$(
+            tree_child "${datapacks_tree}" showcase-ecommerce
+          )"
+          pack_tree_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/datahub-project/static-assets/git/trees/${upstream_pack_tree}")"
+          expected_pack_files="$(jq -cS '
+            [
+              .officialBaseline.files[] |
+              {
+                mode: "100644",
+                path,
+                sha: .gitBlob,
+                type: "blob"
+              }
+            ] |
+            sort_by(.path)
+          ' "${STATE_CONTRACT}")"
+          observed_pack_files="$(jq -cS \
+            --argjson expected "${expected_pack_files}" '
+              select(.truncated == false) |
+              [
+                $expected[] as $wanted |
+                (
+                  [
+                    .tree[] |
+                    select(.path == $wanted.path)
+                  ] |
+                  if length == 1 then
+                    .[0]
+                  else
+                    error("expected one exact pack file")
+                  end
+                ) |
+                {mode, path, sha, type}
+              ] |
+              sort_by(.path)
+            ' <<<"${pack_tree_json}")"
+          test "${observed_pack_files}" = "${expected_pack_files}" || {
+            echo "::error::official showcase files are not members of the verified tree"
+            exit 1
+          }
+          echo "REVALIDATED_UPSTREAM_PACK_TREE=${upstream_pack_tree}" \
+            >>"${GITHUB_ENV}"
+
+      - name: Verify GitHub artifact metadata before download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.plan.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")"
+          jq -e \
+            --argjson id "${ARTIFACT_ID}" \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $id and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${artifact}" >/dev/null
+
+      - name: Download the exact sealed plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.plan.outputs.artifact_id }}
+          path: ${{ runner.temp }}/datahub-demo-approved-plan
+
+      - name: Verify the inner plan receipt
+        env:
+          PLAN_DIR: ${{ runner.temp }}/datahub-demo-approved-plan
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          EXPECTED_BASELINE_MANIFEST_SHA256: ${{ needs.plan.outputs.baseline_manifest_sha256 }}
+          EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          EXPECTED_QUERY: ${{ inputs.query }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLAN_DIR}"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              baseline-manifest.json \
+              control-plane.json \
+              plan.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}" || {
+            echo "::error::downloaded plan contains an unexpected entry"
+            exit 1
+          }
+          for path in \
+            SHA256SUMS \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          sha256sum --check --strict SHA256SUMS
+          test "$(sha256sum plan.json | awk '{print $1}')" = \
+            "${EXPECTED_PLAN_SHA256}"
+          test "$(sha256sum baseline-manifest.json | awk '{print $1}')" = \
+            "${EXPECTED_BASELINE_MANIFEST_SHA256}"
+          test "$(jq -er '.releaseSha' plan.json)" = "${EXPECTED_RELEASE_SHA}"
+          test "$(jq -er '.queryBinding.query' plan.json)" = "${EXPECTED_QUERY}"
+          test "$(jq -er '.officialBaseline.packTree' control-plane.json)" = \
+            "${REVALIDATED_UPSTREAM_PACK_TREE}"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Recreate the exact wheel-only runtime and official baseline
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-demo-runtime
+          BASELINE: ${{ runner.temp }}/datahub-demo-baseline
+          APPROVED_PLAN: ${{ runner.temp }}/datahub-demo-approved-plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/materialize-datahub-mcp-lock.sh "${RUNTIME}"
+          "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py \
+            materialize-baseline \
+            --contract "${STATE_CONTRACT}" \
+            --output-dir "${BASELINE}"
+          cmp --silent \
+            "${BASELINE}/baseline-manifest.json" \
+            "${APPROVED_PLAN}/baseline-manifest.json"
+
+      - name: Final exact-SHA green recheck before DataHub credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          default_sha="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')"
+          test "${default_sha}" = "${RELEASE_SHA}" || {
+            echo "::error::master changed before the credential-bearing apply step"
+            exit 1
+          }
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f branch=master \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == "master" and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+          workflow_success ci.yml
+          workflow_success codeql.yml
+          workflow_success workflow-security.yml
+
+      - name: Repeat official dry-run, apply exact plan, and post-read
+        env:
+          DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_GMS_TOKEN }}
+          DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
+          RUNTIME: ${{ runner.temp }}/datahub-demo-runtime
+          BASELINE: ${{ runner.temp }}/datahub-demo-baseline
+          APPROVED_PLAN: ${{ runner.temp }}/datahub-demo-approved-plan
+          APPROVAL_RECEIPT: ${{ steps.approval.outputs.receipt_path }}
+          EVIDENCE: ${{ runner.temp }}/datahub-demo-receipt
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_GMS_URL:?DATAHUB_GMS_URL is required}"
+          : "${DATAHUB_GMS_TOKEN:?DATAHUB_GMS_TOKEN is required}"
+          test ! -e "${EVIDENCE}"
+          mkdir --mode=0700 "${EVIDENCE}"
+          expected_gms_endpoint_fingerprint="$(
+            jq -er '
+              .gmsEndpointFingerprint |
+              select(test("^[0-9a-f]{64}$"))
+            ' "${APPROVED_PLAN}/plan.json"
+          )"
+          env -i \
+            DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+            DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+            "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py \
+            validate-config \
+            --expected-fingerprint "${expected_gms_endpoint_fingerprint}" \
+            >/dev/null
+          if ! env -i \
+              DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+              DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+              "${RUNTIME}/.venv/bin/datahub" datapack load showcase-ecommerce \
+              --url "file://${BASELINE}/index.json" \
+              --trust-custom \
+              --no-cache \
+              --no-time-shift \
+              --dry-run >/dev/null 2>&1; then
+            echo "::error::official DataHub dry-run failed"
+            exit 1
+          fi
+          env -i \
+            DATAHUB_GMS_URL="${DATAHUB_GMS_URL}" \
+            DATAHUB_GMS_TOKEN="${DATAHUB_GMS_TOKEN}" \
+            "${RUNTIME}/.venv/bin/python" scripts/datahub-demo-state.py apply \
+            --contract "${STATE_CONTRACT}" \
+            --baseline-manifest "${BASELINE}/baseline-manifest.json" \
+            --plan "${APPROVED_PLAN}/plan.json" \
+            --approval-receipt "${APPROVAL_RECEIPT}" \
+            --expected-plan-sha256 "${EXPECTED_PLAN_SHA256}" \
+            --release-sha "${RELEASE_SHA}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --actor "${GITHUB_ACTOR}" \
+            --triggering-actor "${GITHUB_TRIGGERING_ACTOR}" \
+            --datahub-cli "${RUNTIME}/.venv/bin/datahub" \
+            --receipt "${EVIDENCE}/receipt.json"
+          unset DATAHUB_GMS_TOKEN DATAHUB_GMS_URL
+          cp -- "${APPROVAL_RECEIPT}" "${EVIDENCE}/approval-receipt.json"
+          cp -- "${APPROVED_PLAN}/plan.json" "${EVIDENCE}/plan.json"
+          cp -- "${BASELINE}/baseline-manifest.json" \
+            "${EVIDENCE}/baseline-manifest.json"
+          cp -- "${APPROVED_PLAN}/control-plane.json" \
+            "${EVIDENCE}/control-plane.json"
+          chmod 0600 "${EVIDENCE}"/*.json
+          cd "${EVIDENCE}"
+          sha256sum \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json >SHA256SUMS
+          chmod 0600 SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              approval-receipt.json \
+              baseline-manifest.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}" || {
+            echo "::error::receipt evidence directory contains an unexpected entry"
+            exit 1
+          }
+          for path in \
+            SHA256SUMS \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          {
+            echo "### DataHub demo state verified"
+            echo
+            echo "- Outcome: \`$(jq -r '.outcome' receipt.json)\`"
+            echo "- Plan SHA-256: \`$(jq -r '.planSha256' receipt.json)\`"
+            echo "- Approval receipt SHA-256: \`$(jq -r '.approvalReceiptSha256' receipt.json)\`"
+            echo "- Post-state SHA-256: \`$(jq -r '.postStateSha256' receipt.json)\`"
+            echo "- Baseline commit: \`$(jq -r '.baselineCommit' receipt.json)\`"
+            echo "- Retained sources: \`$(jq -r '[.retainedOwnershipHistory[].pipelineName] | join(\", \")' receipt.json)\`"
+            echo "- G6 gap: \`$(jq -r '.g6Gap.fieldPath' receipt.json)\` intentionally unclassified"
+            echo "- Dangling upstream remains absent: \`$(jq -r '.danglingLineage.upstreamAbsent' receipt.json)\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the sealed live receipt
+        id: receipt-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-demo-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/datahub-demo-receipt
+          if-no-files-found: error
+          retention-days: 90
+
+  attest-receipt:
+    name: Secretless attestation of the sealed live receipt
+    needs:
+      - plan
+      - apply
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Verify receipt artifact metadata before download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.apply.outputs.receipt_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.apply.outputs.receipt_artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${ARTIFACT_ID}" =~ ^[0-9]+$ ]]
+          [[ "${ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for key in \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_SESSION_TOKEN \
+            DATAHUB_GMS_TOKEN \
+            DATAHUB_GMS_URL; do
+            test -z "${!key:-}"
+          done
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}")"
+          jq -e \
+            --argjson id "${ARTIFACT_ID}" \
+            --arg digest "${ARTIFACT_DIGEST}" \
+            --argjson runId "${GITHUB_RUN_ID}" '
+              .id == $id and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId
+            ' <<<"${artifact}" >/dev/null
+
+      - name: Download the exact sealed live receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.apply.outputs.receipt_artifact_id }}
+          path: ${{ runner.temp }}/datahub-demo-attestation
+
+      - name: Verify inner checksums and release bindings
+        env:
+          ACTION: ${{ inputs.action }}
+          EVIDENCE: ${{ runner.temp }}/datahub-demo-attestation
+          EXPECTED_PLAN_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+          EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[0-9]+$ ]]
+          [[ "${ACTION}" =~ ^(seed|reset)$ ]]
+          [[ "${EXPECTED_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          expected_approval="APPROVE ARCHON DATAHUB DEMO run_id=${GITHUB_RUN_ID} run_attempt=${GITHUB_RUN_ATTEMPT} action=${ACTION} release_sha=${EXPECTED_RELEASE_SHA} plan_sha256=${EXPECTED_PLAN_SHA256}"
+
+          environment_json="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/environments/datahub-demo-seed")"
+          environment_id="$(jq -er '
+            select(
+              .name == "datahub-demo-seed" and
+              (.id | type) == "number"
+            ) |
+            .id
+          ' <<<"${environment_json}")"
+          reviewer_ids="$(jq -ce \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" '
+            [
+              .protection_rules[]? |
+              select(.type == "required_reviewers")
+            ] as $rules |
+            if (
+              ($rules | length) == 1 and
+              $rules[0].prevent_self_review == false and
+              ($rules[0].reviewers | length) == 1 and
+              $rules[0].reviewers[0].type == "User" and
+              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
+              $rules[0].reviewers[0].reviewer.id > 0 and
+              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
+            )
+            then (
+              [$rules[0].reviewers[].reviewer.id] |
+              sort |
+              unique
+            )
+            else error("invalid individual-reviewer posture")
+            end
+          ' <<<"${environment_json}")"
+          approvals="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals")"
+          matched_approval="$(jq -ce \
+            --arg environment "datahub-demo-seed" \
+            --arg expected "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson reviewerIds "${reviewer_ids}" '
+              if type != "array" then
+                error("approval response is not an array")
+              else
+                [
+                  .[] |
+                  select(
+                    .state == "approved" and
+                    .comment == $expected and
+                    (.environments | type) == "array" and
+                    (.environments | length) == 1 and
+                    .environments[0].name == $environment and
+                    .environments[0].id == $environmentId and
+                    (.user | type) == "object" and
+                    (.user.id | type) == "number" and
+                    (.user.login | type) == "string" and
+                    (.user.id as $userId |
+                      ($reviewerIds | index($userId)) != null) and
+                    (.user.login | ascii_downcase) ==
+                      ($owner | ascii_downcase)
+                  )
+                ] |
+                if length == 1 then
+                  .[0]
+                else
+                  error("expected exactly one matching approval")
+                end
+              end
+            ' <<<"${approvals}")"
+
+          cd "${EVIDENCE}"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              approval-receipt.json \
+              baseline-manifest.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_inventory="$(
+            find . -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}" || {
+            echo "::error::downloaded evidence contains an unexpected entry"
+            exit 1
+          }
+          for path in \
+            SHA256SUMS \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            test -f "${path}"
+            test ! -L "${path}"
+          done
+          sha256sum --check --strict SHA256SUMS
+          expected_subjects="$(
+            printf '%s\n' \
+              approval-receipt.json \
+              baseline-manifest.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_subjects="$(
+            awk 'NF == 2 { print $2 }' SHA256SUMS |
+              LC_ALL=C sort
+          )"
+          test "${actual_subjects}" = "${expected_subjects}"
+          for path in \
+            approval-receipt.json \
+            baseline-manifest.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            jq -cS . "${path}" | cmp --silent - "${path}" || {
+              echo "::error::${path} is not canonical JSON"
+              exit 1
+            }
+          done
+
+          approval_sha256="$(sha256sum approval-receipt.json | awk '{print $1}')"
+          baseline_manifest_sha256="$(
+            sha256sum baseline-manifest.json | awk '{print $1}'
+          )"
+          baseline_content_digest="$(
+            jq -cS 'del(.contentDigest)' baseline-manifest.json |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          test "$(
+            jq -er '.contentDigest' baseline-manifest.json
+          )" = "${baseline_content_digest}" || {
+            echo "::error::baseline manifest content digest is invalid"
+            exit 1
+          }
+          empty_list_sha256="$(printf '[]\n' | sha256sum | awk '{print $1}')"
+          reset_confirmation_sha256="$(
+            printf '%s' 'RESET ARCHON DATAHUB DEMO' |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          test "$(sha256sum plan.json | awk '{print $1}')" = \
+            "${EXPECTED_PLAN_SHA256}"
+
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg comment "${expected_approval}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg releaseSha "${EXPECTED_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg state "$(jq -er '.state' <<<"${matched_approval}")" \
+            --arg triggeringActor "${GITHUB_TRIGGERING_ACTOR}" \
+            --arg userLogin "$(jq -er '.user.login' <<<"${matched_approval}")" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --argjson configuredReviewerIds "${reviewer_ids}" \
+            --argjson environmentId "${environment_id}" \
+            --argjson userId "$(jq -er '.user.id' <<<"${matched_approval}")" '
+              (keys | sort) == ([
+                "action",
+                "approval",
+                "configuredReviewerIds",
+                "environment",
+                "initiators",
+                "planSha256",
+                "releaseSha",
+                "repository",
+                "schemaVersion",
+                "workflowRunAttempt",
+                "workflowRunId"
+              ] | sort) and
+              (.initiators | keys | sort) == ["actor", "triggeringActor"] and
+              (.environment | keys | sort) == ["id", "name"] and
+              (.approval | keys | sort) == ["comment", "state", "user"] and
+              (.approval.user | keys | sort) == ["id", "login"] and
+              .schemaVersion == "archon.datahub-demo-approval/v1" and
+              .repository == $repository and
+              .workflowRunId == $workflowRunId and
+              .workflowRunAttempt == $workflowRunAttempt and
+              .action == $action and
+              .releaseSha == $releaseSha and
+              .planSha256 == $planSha256 and
+              .initiators.actor == $actor and
+              .initiators.triggeringActor == $triggeringActor and
+              .environment == {
+                id: $environmentId,
+                name: "datahub-demo-seed"
+              } and
+              .configuredReviewerIds == $configuredReviewerIds and
+              .approval == {
+                state: $state,
+                comment: $comment,
+                user: {
+                  id: $userId,
+                  login: $userLogin
+                }
+              } and
+              (.approval.user.login | ascii_downcase) ==
+                ($owner | ascii_downcase)
+            ' approval-receipt.json >/dev/null
+
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg baselineManifestSha256 "${baseline_manifest_sha256}" \
+            --arg domainUrn "urn:li:domain:archonShowcaseEcommerce" \
+            --arg emptyListSha256 "${empty_list_sha256}" \
+            --arg releaseSha "${EXPECTED_RELEASE_SHA}" \
+            --arg resetConfirmationSha256 "${reset_confirmation_sha256}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg targetUrn "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.archon_demo.archon_orders_audit_target,PROD)" '
+              (keys | sort) == ([
+                "action",
+                "baselineBefore",
+                "baselineContentDigest",
+                "baselineManifestSha256",
+                "before",
+                "gmsEndpointFingerprint",
+                "mutationRequired",
+                "operation",
+                "ownedUrns",
+                "queryBinding",
+                "releaseSha",
+                "repository",
+                "resetConfirmationSha256",
+                "schemaVersion",
+                "stateContractSha256"
+              ] | sort) and
+              (.baselineBefore | keys | sort) ==
+                ["complete", "expected", "missingDigest", "present"] and
+              (.queryBinding | keys | sort) == ["query", "targetUrn"] and
+              (.before | keys | sort) ==
+                ["classification", "digest", "ownedUrnPresence"] and
+              (.before.ownedUrnPresence | length) == 2 and
+              all(
+                .before.ownedUrnPresence[];
+                (keys | sort) == ["present", "urn"] and
+                (.present | type) == "boolean"
+              ) and
+              .schemaVersion == "archon.datahub-demo-plan/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .action == $action and
+              .baselineManifestSha256 == $baselineManifestSha256 and
+              (.baselineContentDigest | test("^[0-9a-f]{64}$")) and
+              (.gmsEndpointFingerprint | test("^[0-9a-f]{64}$")) and
+              (.stateContractSha256 | test("^[0-9a-f]{64}$")) and
+              .baselineBefore.expected == 11 and
+              (.baselineBefore.present | type) == "number" and
+              (.baselineBefore.present | floor) == .baselineBefore.present and
+              .baselineBefore.present >= 0 and
+              .baselineBefore.present <= .baselineBefore.expected and
+              (.baselineBefore.complete | type) == "boolean" and
+              .baselineBefore.complete ==
+                (.baselineBefore.present == .baselineBefore.expected) and
+              (.baselineBefore.missingDigest | test("^[0-9a-f]{64}$")) and
+              (
+                .baselineBefore.complete == false or
+                .baselineBefore.missingDigest == $emptyListSha256
+              ) and
+              .queryBinding == {
+                query: $targetUrn,
+                targetUrn: $targetUrn
+              } and
+              .ownedUrns == [$targetUrn, $domainUrn] and
+              .before.ownedUrnPresence[0].urn == $targetUrn and
+              .before.ownedUrnPresence[1].urn == $domainUrn and
+              (
+                .before.classification == "absent" or
+                .before.classification == "drift" or
+                .before.classification == "exact"
+              ) and
+              (.before.digest | test("^[0-9a-f]{64}$")) and
+              (.mutationRequired | type) == "boolean" and
+              (
+                if .action == "seed" then
+                  (
+                    (
+                      .operation == "seed" and
+                      .mutationRequired == true and
+                      .before.classification == "absent" and
+                      all(
+                        .before.ownedUrnPresence[];
+                        .present == false
+                      )
+                    ) or (
+                      .operation == "noop" and
+                      .mutationRequired == false and
+                      .before.classification == "exact" and
+                      .baselineBefore.complete == true and
+                      all(
+                        .before.ownedUrnPresence[];
+                        .present == true
+                      )
+                    )
+                  ) and
+                  .resetConfirmationSha256 == null
+                else
+                  .operation == "reset" and
+                  .mutationRequired == true and
+                  .resetConfirmationSha256 == $resetConfirmationSha256
+                end
+              )
+            ' plan.json >/dev/null
+          jq -e \
+            --arg releaseSha "${EXPECTED_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              (keys | sort) == ([
+                "defaultBranch",
+                "mutationEnvironment",
+                "officialBaseline",
+                "releaseSha",
+                "repository",
+                "schemaVersion",
+                "successfulRuns"
+              ] | sort) and
+              (.mutationEnvironment | keys | sort) == ([
+                "exactApprovalReceiptRequiredAtApply",
+                "individualUserReviewersOnly",
+                "name",
+                "onlyDefaultBranch",
+                "preventSelfReview",
+                "requiredReviewers"
+              ] | sort) and
+              (.officialBaseline | keys | sort) == ([
+                "commit",
+                "packTree",
+                "repository",
+                "signatureVerified",
+                "tree"
+              ] | sort) and
+              (.successfulRuns | type) == "array" and
+              (.successfulRuns | length) == 3 and
+              all(
+                .successfulRuns[];
+                (keys | sort) == ([
+                  "conclusion",
+                  "headSha",
+                  "path",
+                  "runAttempt",
+                  "runId",
+                  "workflowId"
+                ] | sort) and
+                .conclusion == "success" and
+                .headSha == $releaseSha and
+                (.workflowId | type) == "number" and
+                (.workflowId | floor) == .workflowId and
+                .workflowId > 0 and
+                (.runId | type) == "number" and
+                (.runId | floor) == .runId and
+                .runId > 0 and
+                (.runAttempt | type) == "number" and
+                (.runAttempt | floor) == .runAttempt and
+                .runAttempt > 0
+              ) and
+              .schemaVersion == "archon.datahub-demo-control-plane/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .defaultBranch == "master" and
+              .mutationEnvironment == {
+                exactApprovalReceiptRequiredAtApply: true,
+                individualUserReviewersOnly: true,
+                name: "datahub-demo-seed",
+                onlyDefaultBranch: true,
+                preventSelfReview: true,
+                requiredReviewers: true
+              } and
+              .officialBaseline.repository ==
+                "datahub-project/static-assets" and
+              (.officialBaseline.commit | test("^[0-9a-f]{40}$")) and
+              (.officialBaseline.packTree | test("^[0-9a-f]{40}$")) and
+              (.officialBaseline.tree | test("^[0-9a-f]{40}$")) and
+              .officialBaseline.signatureVerified == true and
+              (.successfulRuns | map(.path)) == [
+                ".github/workflows/ci.yml",
+                ".github/workflows/codeql.yml",
+                ".github/workflows/workflow-security.yml"
+              ]
+            ' control-plane.json >/dev/null
+          jq -e \
+            --arg baselineContentDigest "$(
+              jq -er '.baselineContentDigest' plan.json
+            )" \
+            --arg stateContractSha256 "$(
+              jq -er '.stateContractSha256' plan.json
+            )" \
+            --slurpfile control control-plane.json '
+              (keys | sort) == ([
+                "commit",
+                "commitSignatureVerified",
+                "contentDigest",
+                "files",
+                "indexVersion",
+                "mcpCount",
+                "name",
+                "repository",
+                "schemaVersion",
+                "stateContractSha256",
+                "tree",
+                "uniqueEntityUrnCount"
+              ] | sort) and
+              (.files | type) == "array" and
+              (.files | length) == 4 and
+              all(
+                .files[];
+                (keys | sort) == ["gitBlob", "path", "sha256", "size"] and
+                (.gitBlob | test("^[0-9a-f]{40}$")) and
+                (.sha256 | test("^[0-9a-f]{64}$")) and
+                (.size | type) == "number" and
+                (.size | floor) == .size and
+                .size > 0
+              ) and
+              (.files | map(.path)) == [
+                "index.json",
+                "01-definitions.json",
+                "02-data.json",
+                "03-context.json"
+              ] and
+              .schemaVersion == "archon.datahub-demo-baseline/v1" and
+              .stateContractSha256 == $stateContractSha256 and
+              .contentDigest == $baselineContentDigest and
+              .name == "showcase-ecommerce" and
+              .repository ==
+                "https://github.com/datahub-project/static-assets" and
+              .commit == $control[0].officialBaseline.commit and
+              .tree == $control[0].officialBaseline.tree and
+              .commitSignatureVerified == true and
+              .indexVersion == "4" and
+              .mcpCount == 3873 and
+              .uniqueEntityUrnCount == 1088
+            ' baseline-manifest.json >/dev/null
+          jq -e \
+            --arg action "${ACTION}" \
+            --arg approvalSha256 "${approval_sha256}" \
+            --arg baselineManifestSha256 "${baseline_manifest_sha256}" \
+            --arg danglingUpstreamUrn "urn:li:dataset:(urn:li:dataPlatform:external,archon_demo.intentionally_missing_orders_feed,PROD)" \
+            --arg domainUrn "urn:li:domain:archonShowcaseEcommerce" \
+            --arg emptyListSha256 "${empty_list_sha256}" \
+            --arg planSha256 "${EXPECTED_PLAN_SHA256}" \
+            --arg releaseSha "${EXPECTED_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg targetUrn "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.archon_demo.archon_orders_audit_target,PROD)" \
+            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --slurpfile approval approval-receipt.json \
+            --slurpfile baseline baseline-manifest.json \
+            --slurpfile control control-plane.json \
+            --slurpfile plan plan.json '
+              (keys | sort) == ([
+                "action",
+                "approval",
+                "approvalReceiptSha256",
+                "baselineAnchors",
+                "baselineAnchorsAfterLoad",
+                "baselineCommit",
+                "baselineContentDigest",
+                "baselineManifestSha256",
+                "baselineReloaded",
+                "danglingLineage",
+                "g6Gap",
+                "gmsEndpointFingerprint",
+                "observedAt",
+                "outcome",
+                "ownedUrns",
+                "planSha256",
+                "postStateSha256",
+                "queryBinding",
+                "releaseSha",
+                "repository",
+                "resetDeletes",
+                "retainedOwnershipHistory",
+                "schemaVersion",
+                "stateContractSha256",
+                "workflowRunAttempt",
+                "workflowRunId"
+              ] | sort) and
+              (.approval | keys | sort) ==
+                ["environment", "state", "user"] and
+              (.approval.environment | keys | sort) == ["id", "name"] and
+              (.approval.user | keys | sort) == ["id", "login"] and
+              (.baselineAnchors | keys | sort) ==
+                ["complete", "expected", "missingDigest", "present"] and
+              (.baselineAnchorsAfterLoad | keys | sort) ==
+                ["complete", "expected", "missingDigest", "present"] and
+              (.queryBinding | keys | sort) == ["query", "targetUrn"] and
+              (.danglingLineage | keys | sort) ==
+                ["upstreamAbsent", "upstreamUrn"] and
+              (.g6Gap | keys | sort) ==
+                ["classificationAbsent", "fieldPath"] and
+              (.resetDeletes | type) == "array" and
+              all(
+                .resetDeletes[];
+                (keys | sort) == ["outcome", "urn"] and
+                (
+                  .outcome == "deleted" or
+                  .outcome == "absence-proved-after-cli-error" or
+                  .outcome == "already-absent"
+                )
+              ) and
+              (.retainedOwnershipHistory | type) == "array" and
+              all(
+                .retainedOwnershipHistory[];
+                (keys | sort) == ([
+                  "lastObserved",
+                  "owner",
+                  "ownershipType",
+                  "pipelineName",
+                  "runId"
+                ] | sort)
+              ) and
+              .schemaVersion == "archon.datahub-demo-receipt/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .workflowRunId == $workflowRunId and
+              .workflowRunAttempt == $workflowRunAttempt and
+              .action == $action and
+              .planSha256 == $planSha256 and
+              .approvalReceiptSha256 == $approvalSha256 and
+              .baselineManifestSha256 == $baselineManifestSha256 and
+              .stateContractSha256 == $plan[0].stateContractSha256 and
+              .gmsEndpointFingerprint ==
+                $plan[0].gmsEndpointFingerprint and
+              .baselineContentDigest == $baseline[0].contentDigest and
+              .baselineCommit == $baseline[0].commit and
+              .baselineCommit == $control[0].officialBaseline.commit and
+              .approval == {
+                environment: $approval[0].environment,
+                state: "approved",
+                user: $approval[0].approval.user
+              } and
+              .baselineAnchors == {
+                complete: true,
+                expected: 11,
+                missingDigest: $emptyListSha256,
+                present: 11
+              } and
+              .baselineAnchorsAfterLoad == .baselineAnchors and
+              .queryBinding == $plan[0].queryBinding and
+              .queryBinding == {
+                query: $targetUrn,
+                targetUrn: $targetUrn
+              } and
+              .ownedUrns == $plan[0].ownedUrns and
+              .ownedUrns == [$targetUrn, $domainUrn] and
+              (.postStateSha256 | test("^[0-9a-f]{64}$")) and
+              .retainedOwnershipHistory == [
+                {
+                  lastObserved: 1780304400000,
+                  owner: "urn:li:corpGroup:b2fd91.BusinessIntelligence",
+                  ownershipType: "DATAOWNER",
+                  pipelineName: "snowflake-prod",
+                  runId: "snowflake-connector-2026-06-01"
+                },
+                {
+                  lastObserved: 1782896400000,
+                  owner: "urn:li:corpGroup:b2fd91.data-governance",
+                  ownershipType: "DATAOWNER",
+                  pipelineName: "dbt-prod",
+                  runId: "dbt-manifest-2026-07-01"
+                }
+              ] and
+              .g6Gap == {
+                classificationAbsent: true,
+                fieldPath: "email"
+              } and
+              .danglingLineage == {
+                upstreamAbsent: true,
+                upstreamUrn: $danglingUpstreamUrn
+              } and
+              .baselineReloaded == $plan[0].mutationRequired and
+              (
+                if $plan[0].operation == "noop" then
+                  .outcome == "unchanged"
+                elif $plan[0].operation == "seed" then
+                  .outcome == "seeded"
+                else
+                  $plan[0].operation == "reset" and .outcome == "reset"
+                end
+              ) and
+              (
+                if .action == "reset" then
+                  (.resetDeletes | length) == 2 and
+                  .resetDeletes[0].urn == $targetUrn and
+                  .resetDeletes[1].urn == $domainUrn
+                else
+                  .resetDeletes == []
+                end
+              ) and
+              (
+                .observedAt |
+                test(
+                  "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+                )
+              )
+            ' receipt.json >/dev/null
+
+      - name: Attest the verified redacted receipt
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/datahub-demo-attestation/SHA256SUMS
+            ${{ runner.temp }}/datahub-demo-attestation/approval-receipt.json
+            ${{ runner.temp }}/datahub-demo-attestation/baseline-manifest.json
+            ${{ runner.temp }}/datahub-demo-attestation/control-plane.json
+            ${{ runner.temp }}/datahub-demo-attestation/plan.json
+            ${{ runner.temp }}/datahub-demo-attestation/receipt.json
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1
+          predicate-path: ${{ runner.temp }}/datahub-demo-attestation/plan.json

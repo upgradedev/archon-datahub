@@ -15,8 +15,24 @@
 // LlmClient seam (real LLM vs. the deterministic FakeLlmClient), so the tool-call parse
 // path is exercised in CI.
 
-import { chatClient, hasLlmCreds, DEFAULT_MODEL, type ChatMessage, type LlmClient, type ToolDef } from "../llm/client.js";
-import { FakeLlmClient } from "../llm/fake.js";
+import { performance } from "node:perf_hooks";
+import {
+  chatClient,
+  hasLlmCreds,
+  resolveLlmProvider,
+  DEFAULT_MODEL,
+  type ChatMessage,
+  type LlmClient,
+  type ToolDef,
+} from "../llm/client.js";
+import {
+  DETERMINISTIC_FIXTURE_MODEL,
+  FakeLlmClient,
+} from "../llm/fake.js";
+import {
+  createModelRuntimeProvenance,
+  type ModelRuntimeProvenance,
+} from "../llm/provenance.js";
 import type { DataHubClient } from "../datahub/mcp-client.js";
 import { ClassifierAgent } from "../agents/classifier.js";
 import { LineageAnalyzerAgent } from "../agents/lineage-analyzer.js";
@@ -29,7 +45,6 @@ export interface AuditTraceStep {
   step: number;
   tool: string;
   observation: string;
-  reasoning: string;
 }
 
 export interface AuditRunResult {
@@ -37,6 +52,9 @@ export interface AuditRunResult {
   disposition: "pending";
   findings: Finding[];
   trace: AuditTraceStep[];
+  // One strict, privacy-safe receipt per model call. Prompts, provider payloads,
+  // model-authored reasoning, endpoints, errors, and credentials are never retained.
+  modelProvenance: ModelRuntimeProvenance[];
   stopReason: LoopStopReason;
 }
 
@@ -55,8 +73,7 @@ const SYSTEM_PROMPT =
   "You are Archon, a read-only metadata-governance agent for a DataHub catalog. You work " +
   "in STEPS: each step call exactly ONE tool. First harvest_catalog, then run_consistency_audit, " +
   "then run_governance_audit — all read-only. Once the evidence is gathered, call emit_findings. " +
-  "You NEVER mutate the catalog; you only recommend, and a human disposes. Put a short `reasoning` " +
-  "on every call.";
+  "You NEVER mutate the catalog; you only recommend, and a human disposes.";
 
 interface LoopState {
   harvested: boolean;
@@ -79,19 +96,26 @@ export class AuditLoop {
 
   constructor(
     private client: LlmClient = hasLlmCreds() ? chatClient() : new FakeLlmClient(),
-    private modelId: string = DEFAULT_MODEL,
-    opts: AuditLoopOptions = {}
+    private modelId: string =
+      client.runtime.source === "deterministic-fixture"
+        ? DETERMINISTIC_FIXTURE_MODEL
+        : resolveLlmProvider()?.model ?? DEFAULT_MODEL,
+    opts: AuditLoopOptions = {},
+    private now: () => number = () => performance.now()
   ) {
-    this.maxSteps = Math.max(3, opts.maxSteps ?? 6);
+    this.maxSteps = Math.min(12, Math.max(3, opts.maxSteps ?? 6));
     this.onStop = opts.onStop;
   }
 
   async run(datahub: DataHubClient, query?: string): Promise<AuditRunResult> {
     const state: LoopState = { harvested: false, consistencyDone: false, governanceDone: false, findings: [] };
     const trace: AuditTraceStep[] = [];
+    const modelProvenance: ModelRuntimeProvenance[] = [];
     let noProgress = 0;
 
     for (let step = 1; step <= this.maxSteps; step++) {
+      const startedAt =
+        this.client.runtime.source === "live-provider" ? this.now() : null;
       const res = await this.client.chat.completions.create({
         model: this.modelId,
         messages: this.messages(trace, state),
@@ -100,45 +124,84 @@ export class AuditLoop {
         tools: TOOL_DEFS,
         tool_choice: "auto",
       });
+      modelProvenance.push(
+        createModelRuntimeProvenance(
+          this.client.runtime,
+          this.modelId,
+          { id: res.id, model: res.model, usage: res.usage },
+          startedAt === null ? null : Math.round(this.now() - startedAt)
+        )
+      );
 
       const call = res.choices?.[0]?.message?.tool_calls?.[0];
       const name = call?.function?.name ?? "";
-      const args = call ? safeParse(call.function.arguments) : {};
-      const reasoning = typeof args["reasoning"] === "string" ? (args["reasoning"] as string) : "";
 
       if (name === "emit_findings") {
-        return { disposition: "pending", findings: state.findings, trace, stopReason: "emitted_findings" };
+        return {
+          disposition: "pending",
+          findings: state.findings,
+          trace,
+          modelProvenance,
+          stopReason: "emitted_findings",
+        };
       }
       if (name === "flag_for_review") {
-        return this.fallback(state, trace, "no_progress_fallback", reasoning || "model escalated to a human");
+        return this.fallback(
+          state,
+          trace,
+          modelProvenance,
+          "no_progress_fallback",
+          "the model escalated to a human"
+        );
       }
 
       if ((AUTONOMOUS as readonly string[]).includes(name)) {
         const before = signature(state);
         const observation = await this.execute(name, state, datahub, query);
-        trace.push({ step, tool: name, observation, reasoning });
+        trace.push({ step, tool: name, observation });
         if (signature(state) === before) {
           // re-ran an already-done read tool → no new evidence
           if (++noProgress >= 2) {
-            return this.fallback(state, trace, "no_progress_fallback", "the model repeated a completed read tool without progressing");
+            return this.fallback(
+              state,
+              trace,
+              modelProvenance,
+              "no_progress_fallback",
+              "the model repeated a completed read tool without progressing"
+            );
           }
         }
         continue;
       }
 
       if (++noProgress >= 2) {
-        return this.fallback(state, trace, "no_progress_fallback", "the model returned no usable tool call");
+        return this.fallback(
+          state,
+          trace,
+          modelProvenance,
+          "no_progress_fallback",
+          "the model returned no usable tool call"
+        );
       }
     }
-    return this.fallback(state, trace, "max_steps_fallback", `reached the ${this.maxSteps}-step cap`);
+    return this.fallback(
+      state,
+      trace,
+      modelProvenance,
+      "max_steps_fallback",
+      `reached the ${this.maxSteps}-step cap`
+    );
   }
 
   private async execute(name: string, state: LoopState, datahub: DataHubClient, query?: string): Promise<string> {
     switch (name) {
       case "harvest_catalog": {
-        const snapshot = await datahub.harvestSnapshot(query);
+        const harvest = await datahub.harvestAudit(query, {
+          profile: "synchronous-preview",
+        });
+        const snapshot = harvest.snapshot;
         (state as LoopState & { snapshot?: unknown }).snapshot = snapshot;
-        (state as LoopState & { facts?: unknown }).facts = await datahub.harvestFacts(query);
+        (state as LoopState & { facts?: unknown }).facts = harvest.facts;
         state.harvested = true;
         return `harvested ${snapshot.entities.length} entities (${this.classifier.classify(snapshot).withLineage} with lineage)`;
       }
@@ -163,14 +226,28 @@ export class AuditLoop {
     }
   }
 
-  private fallback(state: LoopState, trace: AuditTraceStep[], reason: LoopStopReason, detail: string): AuditRunResult {
+  private fallback(
+    state: LoopState,
+    trace: AuditTraceStep[],
+    modelProvenance: ModelRuntimeProvenance[],
+    reason: LoopStopReason,
+    detail: string
+  ): AuditRunResult {
     (this.onStop ?? ((r, d) => console.warn(`[AuditLoop] ${r}: ${d}`)))(reason, detail);
-    return { disposition: "pending", findings: state.findings, trace, stopReason: reason };
+    return {
+      disposition: "pending",
+      findings: state.findings,
+      trace,
+      modelProvenance,
+      stopReason: reason,
+    };
   }
 
   private messages(trace: AuditTraceStep[], state: LoopState): ChatMessage[] {
     const steps = trace.length
-      ? trace.map((t) => `  ${t.step}. ${t.tool}${t.reasoning ? ` — ${t.reasoning}` : ""}\n     → ${t.observation}`).join("\n")
+      ? trace
+          .map((t) => `  ${t.step}. ${t.tool}\n     → ${t.observation}`)
+          .join("\n")
       : "  (none yet — start with harvest_catalog)";
     const evidence =
       `EVIDENCE: harvested=${state.harvested} consistency_done=${state.consistencyDone} ` +
@@ -184,8 +261,9 @@ export class AuditLoop {
 }
 
 export function defaultAuditLoop(client?: LlmClient, opts: AuditLoopOptions = {}): AuditLoop {
-  if (client) return new AuditLoop(client, DEFAULT_MODEL, opts);
-  return new AuditLoop(hasLlmCreds() ? chatClient() : new FakeLlmClient(), DEFAULT_MODEL, opts);
+  const resolvedClient =
+    client ?? (hasLlmCreds() ? chatClient() : new FakeLlmClient());
+  return new AuditLoop(resolvedClient, undefined, opts);
 }
 
 export const ALL_LOOP_TOOLS = [...AUTONOMOUS, ...TERMINAL];
@@ -202,18 +280,9 @@ function fn(name: string, description: string): ToolDef {
       description,
       parameters: {
         type: "object",
-        additionalProperties: true,
-        properties: { reasoning: { type: "string" }, confidence: { type: "number" } },
+        additionalProperties: false,
+        properties: {},
       },
     },
   };
-}
-
-function safeParse(raw: string): Record<string, unknown> {
-  try {
-    const v = JSON.parse(raw);
-    return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
 }

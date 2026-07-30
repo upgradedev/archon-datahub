@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "archon.submission-content-input/v1",
+  "status": "draft",
+  "writtenFields": {
+    "projectName": "REPLACE WITH FINAL DEVPOST PROJECT NAME",
+    "tagline": "REPLACE WITH FINAL ENGLISH TAGLINE",
+    "description": "REPLACE WITH FINAL ENGLISH DEVPOST DESCRIPTION",
+    "builtWith": [
+      "AWS",
+      "DataHub",
+      "React",
+      "Tailwind CSS",
+      "TypeScript"
+    ],
+    "testingInstructions": "REPLACE WITH THE FINAL ENGLISH JUDGE PATH CONSISTENT WITH docs/JUDGE_TESTING.md",
+    "applicationUrl": "https://REPLACE-WITH-FINAL-PUBLIC-APPLICATION-ORIGIN",
+    "repositoryUrl": "https://github.com/upgradedev/archon-datahub"
+  },
+  "languages": {
+    "submission": "en",
+    "testingInstructions": "en"
+  },
+  "submissionClaims": [
+    {
+      "id": "governed-remediation",
+      "text": "REPLACE WITH ONE FINAL, EVIDENCE-BOUND CLAIM",
+      "proofIds": [
+        "SQ10",
+        "SQ3",
+        "SQ4",
+        "SQ5"
+      ]
+    },
+    {
+      "id": "metadata-consistency-audit",
+      "text": "REPLACE WITH ONE FINAL, EVIDENCE-BOUND CLAIM",
+      "proofIds": [
+        "D4",
+        "SQ10",
+        "SQ3",
+        "U3"
+      ]
+    }
+  ],
+  "videoReview": {
+    "spokenLanguage": "en",
+    "subtitlesLanguage": "en",
+    "completeEnglishTranslation": true,
+    "functioningProjectShown": true,
+    "thirdPartyMarksAndMusicAuthorized": true,
+    "allThirdPartyMaterialAuthorized": true,
+    "claims": [
+      "REPLACE WITH A FINAL CLAIM VISIBLY DEMONSTRATED IN THE VIDEO"
+    ],
+    "mediaInventory": [
+      {
+        "name": "Archon application footage",
+        "source": "Original project screen recording",
+        "authorization": "Owned by the submitting team"
+      },
+      {
+        "name": "REPLACE WITH EACH THIRD-PARTY MARK, FONT, IMAGE, OR MUSIC ITEM",
+        "source": "REPLACE WITH SOURCE",
+        "authorization": "REPLACE WITH LICENSE OR AUTHORIZATION"
+      }
+    ]
+  },
+  "disclosures": {
+    "preExistingWorkInventory": [
+      {
+        "name": "REPLACE WITH EACH NON-STANDARD PRE-EXISTING ITEM",
+        "source": "REPLACE WITH ORIGIN",
+        "relationship": "REPLACE WITH HOW IT IS USED",
+        "disclosure": "REPLACE WITH THE MATCHING NOTICE.md DISCLOSURE"
+      }
+    ],
+    "thirdPartyInventory": [
+      {
+        "name": "DataHub",
+        "purpose": "Metadata catalog and governance context graph",
+        "licenseOrTerms": "REPLACE WITH VERIFIED LICENSE OR TERMS",
+        "authorization": "REPLACE WITH VERIFIED USE BASIS"
+      }
+    ],
+    "allNonStandardPreExistingWorkDisclosed": true,
+    "workDescribedAndSubmittedBuiltDuringPeriod": true,
+    "standardToolsOnlyExcludedFromDisclosure": true,
+    "thirdPartyIntegrationsAuthorized": true,
+    "originalWorkOwnershipReviewed": true,
+    "crossMediumConsistent": true
+  },
+  "rules": {
+    "officialRulesUrl": "https://datahub.devpost.com/rules",
+    "submissionStart": "2026-07-06T13:00:00Z",
+    "submissionEnd": "2026-08-10T21:00:00Z"
+  }
+}

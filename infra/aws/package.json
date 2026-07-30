@@ -1,0 +1,39 @@
+{
+  "name": "@archon/datahub-aws-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS CDK reference architecture for the Archon DataHub control plane",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "engines": {
+    "node": "^22.15.0",
+    "npm": "10.9.8"
+  },
+  "packageManager": "npm@10.9.8",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "jest --runInBand",
+    "cdk": "cdk",
+    "synth": "cdk synth --quiet"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.262.1",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "@types/jest": "30.0.0",
+    "@types/node": "^22.10.2",
+    "aws-cdk": "^2.1013.0",
+    "jest": "30.4.2",
+    "ts-jest": "29.4.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "babel-plugin-istanbul": "8.0.0",
+    "brace-expansion": "5.0.8",
+    "glob": "13.0.6",
+    "minimatch": "10.2.5",
+    "test-exclude": "8.0.0"
+  }
+}

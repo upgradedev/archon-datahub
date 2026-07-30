@@ -95,18 +95,22 @@ export function entityToFacts(report: SourceReport): AuditFact[] {
     });
   }
 
-  // upstreamLineage → one fact carrying the referenced upstream URNs. An upstream that
-  // no report catalogues (no fact has it as a record) surfaces as an absence — a
-  // dangling lineage edge / lineage gap.
+  // upstreamLineage → one fact carrying only references DataHub could not resolve.
+  // The official lineage search returns catalogued entities even when they are outside
+  // the audit query's root scope; treating that scope difference as absence fabricates
+  // lineage gaps. `upstreamResolved` is the harvester's provider-backed ground truth.
   const upstreams = entity.upstreams ?? [];
   if (upstreams.length > 0) {
+    const unresolved = upstreams
+      .filter((upstream) => !upstream.upstreamResolved)
+      .map((upstream) => upstream.upstream);
     facts.push({
       ...base,
       id: `${scanId}:${entity.urn}:lineage`,
       kind: "lineage",
       sourceRef: entity.urn,
       content: `${entity.name} reads from ${upstreams.map((u) => u.upstream).join(", ")}`,
-      metadata: { record: entity.urn, refs: upstreams.map((u) => u.upstream) },
+      metadata: { record: entity.urn, refs: unresolved },
     });
   }
 

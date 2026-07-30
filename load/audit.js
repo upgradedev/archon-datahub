@@ -52,7 +52,9 @@ async function iteration(i, pipeline, mcpDeps) {
       throw new Error(`pipeline produced no/incomplete report (findings=${report?.findings?.length})`);
     }
   } else {
-    const res = await callAuditTool(mcpDeps, "audit_catalog", {});
+    const res = await callAuditTool(mcpDeps, "audit_catalog", {
+      query: "sales",
+    });
     if (res.isError) throw new Error("audit_catalog returned isError");
     const payload = JSON.parse(res.content?.[0]?.text ?? "{}");
     if (!payload.findings || payload.findings.length === 0) {
@@ -82,7 +84,10 @@ async function runVu(vu, planned, pipeline, mcpDeps, latencies, errors) {
 
 async function main() {
   const pipeline = new AuditPipeline();
-  const { deps: mcpDeps } = await buildMcpServer({ datahub: new FakeDataHubMcpClient() });
+  const { deps: mcpDeps } = await buildMcpServer({
+    datahub: new FakeDataHubMcpClient(),
+    demoQuery: "sales",
+  });
 
   const perVu = Math.ceil(ITERATIONS / VUS);
   const planned = perVu * VUS;

@@ -1,0 +1,150 @@
+{
+  "schemaVersion": "archon.datahub-mcp-lock/v5",
+  "package": {
+    "name": "mcp-server-datahub",
+    "version": "0.6.0",
+    "wheel": {
+      "filename": "mcp_server_datahub-0.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/fb/5a/5573927ea69ff2a93b1957d6f128b9aacbee50df0b35e6410678d3b62d0b/mcp_server_datahub-0.6.0-py3-none-any.whl",
+      "sha256": "2679dcfafc0ae12724efbf0fc6a73014f9085a4e1303cba9b1e41776dab8f001",
+      "size": 119016
+    },
+    "pypiProvenance": {
+      "url": "https://pypi.org/integrity/mcp-server-datahub/0.6.0/mcp_server_datahub-0.6.0-py3-none-any.whl/provenance",
+      "publisher": {
+        "environment": "pypi",
+        "kind": "GitHub",
+        "repository": "acryldata/mcp-server-datahub",
+        "workflow": "wheels.yml"
+      },
+      "statementSha256": "bb73e64caa7b8fddcc01a42edd42cd4ad7d3c586fb31c386e6e3d502d2d5ff68",
+      "signatureSha256": "afca1b5a39995101a44c5ac088a8b7a4481c3dc2916365275586d6fb418205c9",
+      "certificateSha256": "789d1f72d1cfa20ef32a2c99e8573672830262f40b67bd64c63f22c44972a7a5",
+      "rekorLogIndex": "1568734253",
+      "integratedTime": "1779123580"
+    }
+  },
+  "runtime": {
+    "pythonVersion": "3.11.15",
+    "uvVersion": "0.11.31"
+  },
+  "resolution": {
+    "registry": "https://pypi.org/simple",
+    "strategy": "highest",
+    "upgrade": "all",
+    "excludeNewer": "2026-07-23T03:00:00Z",
+    "constraints": [
+      "acryl-datahub==1.6.0.15",
+      "setuptools==81.0.0"
+    ],
+    "sourceBuilds": "deny",
+    "projectMode": "virtual-static-metadata",
+    "virtualRootName": "archon-datahub-mcp-runtime",
+    "virtualRootVersion": "0.6.0",
+    "mcpDependency": "mcp-server-datahub==0.6.0",
+    "resolvedLockSha256": "8acb41db6f4afe3b6705ba3cb4863669231235f34bf8552026e4c47d9e068d6d"
+  },
+  "upstreamLockProvenance": {
+    "wheelLessDependency": {
+      "name": "pyperclip",
+      "version": "1.9.0",
+      "registry": "https://pypi.org/simple",
+      "sdist": {
+        "filename": "pyperclip-1.9.0.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz",
+        "sha256": "b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310",
+        "size": 20961
+      }
+    }
+  },
+  "runtimeCompatibility": {
+    "acrylDatahub": {
+      "name": "acryl-datahub",
+      "version": "1.6.0.15",
+      "metadataUrl": "https://pypi.org/pypi/acryl-datahub/1.6.0.15/json",
+      "setuptoolsRequirement": "setuptools<82.0.0",
+      "wheel": {
+        "filename": "acryl_datahub-1.6.0.15-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/c1/81/32a1e7a9b7bd75c4930ba27edad498cde2e4032464df8ad7577776038341/acryl_datahub-1.6.0.15-py3-none-any.whl",
+        "sha256": "18263b60c52c333dda3091578dead0a238e606c92c0561fe7b52c905e7b00cbf",
+        "size": 4725320
+      }
+    },
+    "setuptools": {
+      "name": "setuptools",
+      "version": "81.0.0",
+      "metadataUrl": "https://pypi.org/pypi/setuptools/81.0.0/json",
+      "wheel": {
+        "filename": "setuptools-81.0.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+        "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6",
+        "size": 1062021
+      }
+    }
+  },
+  "advisoryDisposition": {
+    "schemaVersion": "archon.openvex-policy/v1",
+    "vex": {
+      "path": ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json",
+      "sha256": "9432452a9fd4b602ec6509b059d7e45d5fd48cfa3ccb3fcbdfa561451d3b8dbc",
+      "issuedAt": "2026-07-23T11:30:00Z",
+      "expiresAt": "2026-08-22T11:30:00Z",
+      "maxValidityDays": 30
+    },
+    "canonicalId": "CVE-2026-59890",
+    "aliases": [
+      "BIT-setuptools-2026-59890",
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ],
+    "scannerRuleIds": [
+      "GHSA-h35f-9h28-mq5c",
+      "PYSEC-2026-3447"
+    ],
+    "product": {
+      "name": "mcp-server-datahub",
+      "version": "0.6.0",
+      "purl": "pkg:pypi/mcp-server-datahub@0.6.0"
+    },
+    "package": {
+      "name": "setuptools",
+      "version": "81.0.0",
+      "purl": "pkg:pypi/setuptools@81.0.0"
+    },
+    "status": "not_affected",
+    "justification": "vulnerable_code_not_in_execute_path",
+    "impactStatement": "DataHub requires setuptools below 82 at runtime. This sealed Linux graph installs only hash-bound wheels with source builds and source-distribution creation forbidden. The affected macOS APFS/HFS+ MANIFEST.in source-distribution path cannot execute in this Linux wheel-only runtime, regardless of DataHub authentication. CI separately imports the MCP runtime and completes an uncredentialed stdio initialize/ping/tools-list smoke exposing only the exact read-only tool set.",
+    "conditions": {
+      "runnerOs": "Linux",
+      "pythonPlatform": "linux",
+      "sourceBuilds": "deny",
+      "sourceDistributionCreation": "forbidden",
+      "installation": "hash-bound-wheels-only"
+    },
+    "references": [
+      "https://github.com/advisories/GHSA-h35f-9h28-mq5c",
+      "https://nvd.nist.gov/vuln/detail/CVE-2026-59890",
+      "https://support.datahub.com/hc/en-us/articles/46448188563227--NEW-IMPORTANT-Ingestion-Disruption-on-Feb-8-2026-No-Data-Loss-Action-May-Be-Required-related-to-setuptools-82-0-0-update",
+      "https://pypi.org/pypi/acryl-datahub/1.6.0.15/json"
+    ]
+  },
+  "source": {
+    "repository": "https://github.com/acryldata/mcp-server-datahub.git",
+    "commit": "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "tree": "37f04067731b7340020e711fb6075dfd8a1a0cfd",
+    "tag": "v0.6.0",
+    "githubCommitSignatureVerified": true
+  },
+  "files": {
+    "pyproject.toml": {
+      "gitBlob": "8eeb7df6d30f110b3a1fb5578c9687ffb23370a7",
+      "sha256": "18e8727d9ca0e0703d47d73d585ec530128bfbeb3d37a83754970d956e645ec2",
+      "size": 1743
+    },
+    "uv.lock": {
+      "gitBlob": "a693ad251efb6202a022588eb6d862e5b305680f",
+      "sha256": "54b2303ea3c3b11f1d23f60aac6c88084bba311d4c188c722c89e755d2b6c325",
+      "size": 418925
+    }
+  }
+}

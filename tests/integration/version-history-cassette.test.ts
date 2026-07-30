@@ -62,7 +62,7 @@ test("cassette parses and carries the real GMS systemMetadata envelope", () => {
   assert.equal(typeof wrapped.systemMetadata!.lastObserved, "number");
 });
 
-test("replaying the real-shape ownership history recovers the cross-run contradiction", () => {
+test("replaying current v0 + historical v1 recovers the cross-source contradiction", () => {
   const { entries } = loadCassette();
   const history = historyFromCassette(entries, SALES, "ownership");
   assert.equal(history.versions.length, 2, "two recorded ownership versions");
@@ -72,8 +72,8 @@ test("replaying the real-shape ownership history recovers the cross-run contradi
   const c = report.contradictions[0]!;
   assert.equal(c.subject, SALES);
   assert.equal(c.attribute, "owner");
-  // both conflicting runIds are named in the evidence (finance run vs ops run).
+  // Stable pipeline identities, not per-execution runIds, are the compared sources.
   const sources = c.values.map((v) => v.source).sort();
-  assert.deepEqual(sources, ["dbt-manifest-2026-07-01", "snowflake-connector-2026-06-01"]);
+  assert.deepEqual(sources, ["dbt-prod", "snowflake-prod"]);
   assert.equal(c.resolution.recommendedValue, "urn:li:corpGroup:team-ops");
 });

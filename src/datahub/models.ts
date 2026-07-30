@@ -31,6 +31,18 @@ export interface LineageEdge {
   type?: string; // e.g. "TRANSFORMED", "COPY"
 }
 
+// One entity proven reachable downstream from an audited root. This is reachability,
+// not a fabricated direct edge: `minHops` is the degree returned by DataHub (or derived
+// from the complete Fake graph). Keeping this context outside `CatalogSnapshot.entities`
+// preserves the exact audited search scope while still making G4 and blast radius honest.
+export interface LineageTopologyNode {
+  urn: Urn;
+  minHops: number;
+  entityType: string;
+  // DataHub entities without an affirmative deprecation aspect are conservatively active.
+  deprecated: boolean;
+}
+
 // A catalogued dataset entity with the governance aspects we audit. Every field is
 // OPTIONAL where the real aspect can be absent — an absent aspect is exactly what a
 // governance violation is made of (no owner, no domain, no description).
@@ -58,12 +70,16 @@ export interface CatalogSnapshot {
   scanId: string; // a timestamp label for this harvest run
   entities: CatalogEntity[];
   knownUrns: Set<Urn>; // every URN DataHub returned an entity for
+  // Required completeness boundary. A root key with [] proves that the bounded lineage
+  // read found no downstream. A missing root key means coverage is unavailable and must
+  // never be interpreted as an empty blast radius or a passing G4 result.
+  downstreamByRoot: Map<Urn, LineageTopologyNode[]>;
 }
 
 // Heuristic: does a field name look like PII / sensitive data that governance
 // policy would require a classification tag on? Deliberately conservative and
 // data-driven (name-based), overridable by callers that pass their own matcher.
-const SENSITIVE_HINTS = [
+export const DEFAULT_SENSITIVE_FIELD_HINTS: readonly string[] = Object.freeze([
   "email",
   "ssn",
   "phone",
@@ -76,9 +92,15 @@ const SENSITIVE_HINTS = [
   "address",
   "national_id",
   "tax_id",
-];
+]);
 
-export function looksSensitive(fieldPath: string): boolean {
+export function looksSensitive(
+  fieldPath: string,
+  hints: readonly string[] = DEFAULT_SENSITIVE_FIELD_HINTS
+): boolean {
   const p = fieldPath.toLowerCase();
-  return SENSITIVE_HINTS.some((h) => p.includes(h));
+  return hints.some((value) => {
+    const hint = value.trim().toLowerCase();
+    return hint.length > 0 && p.includes(hint);
+  });
 }

@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Declarative shape of the environment-bound GitHub OIDC role for the Archon
+  AWS foundation. The policy-first bootstrap creates or safely adopts this
+  exact role only after all four quota-safe managed policies are verified.
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Default: upgradedev
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubRepository:
+    Type: String
+    Default: archon-datahub
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  GitHubEnvironment:
+    Type: String
+    Default: aws-foundation
+    AllowedValues:
+      - aws-foundation
+
+Resources:
+  GitHubFoundationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-github-foundation
+      Description: >-
+        Short-lived GitHub OIDC role restricted to the Archon AWS foundation
+        control plane.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubEnvironmentOidcOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-control
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-assets
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-identity
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-attachments
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: aws-foundation
+        - Key: ManagedBy
+          Value: reviewed-bootstrap-bundle
+
+Outputs:
+  GitHubFoundationRoleArn:
+    Value: !GetAtt GitHubFoundationRole.Arn
+  FoundationControlPolicyArn:
+    Value: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-control
+  FoundationAssetsPolicyArn:
+    Value: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-assets
+  FoundationIdentityPolicyArn:
+    Value: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-identity
+  FoundationAttachmentsPolicyArn:
+    Value: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-aws-foundation-attachments
