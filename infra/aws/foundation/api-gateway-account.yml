@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Shared account-level API Gateway CloudWatch logging role for Archon in
+  eu-west-1. API Gateway exposes one CloudWatchRoleArn per account and region.
+
+Rules:
+  EuWestOneOnly:
+    Assertions:
+      - Assert: !Equals [!Ref AWS::Region, eu-west-1]
+        AssertDescription: This account-level control must exist only in eu-west-1.
+
+Resources:
+  ApiGatewayCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-apigateway-cloudwatch-logs
+      Description: >-
+        Shared least-privilege role used only by API Gateway to write Archon
+        execution logs.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ApiGatewayServiceOnly
+            Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: archon-apigateway-cloudwatch-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DiscoverLogGroups
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: CreateOnlyApiGatewayExecutionLogGroups
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:API-Gateway-Execution-Logs_*
+              - Sid: WriteOnlyArchonApiGatewayLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:API-Gateway-Execution-Logs_*:*
+                  - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/staging/api-gateway:*
+                  - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/production/api-gateway:*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Purpose
+          Value: shared-apigateway-logging
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchLogsRole.Arn
+
+Outputs:
+  ApiGatewayCloudWatchLogsRoleArn:
+    Value: !GetAtt ApiGatewayCloudWatchLogsRole.Arn
+  ApiGatewayCloudWatchLogsRoleName:
+    Value: !Ref ApiGatewayCloudWatchLogsRole
