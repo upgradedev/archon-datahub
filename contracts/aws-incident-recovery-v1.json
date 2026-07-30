@@ -72,7 +72,6 @@
         "attestationUrl": "https://github.com/upgradedev/archon-datahub/attestations/38026442"
       }
     },
-    "temporaryPolicyInstalled": false,
     "temporaryPolicyAbsent": "proven",
     "deleteStackExecuted": true,
     "successfulRecoveryRun": {
@@ -127,7 +126,9 @@
           "result": "success"
         }
       }
-    }
+    },
+    "temporaryPolicyInstalledDuringSuccessfulRun": true,
+    "temporaryPolicyPresentAfterRun": false
   },
   "controlPlane": {
     "entryWorkflow": ".github/workflows/aws-incident-recovery.yml",
