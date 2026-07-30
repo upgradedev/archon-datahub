@@ -8,12 +8,33 @@ function fail(message) {
   process.exit(1);
 }
 
-const args = Object.fromEntries(
-  Array.from({ length: process.argv.slice(2).length / 2 }, (_, index) => {
-    const offset = index * 2 + 2;
-    return [process.argv[offset]?.replace(/^--/, ""), process.argv[offset + 1]];
-  })
-);
+const rawArgs = process.argv.slice(2);
+if (rawArgs.length % 2 !== 0) {
+  fail("arguments must be supplied as --kebab-case value pairs");
+}
+const allowedArgs = new Set([
+  "input",
+  "account",
+  "stdoutGroup",
+  "controlOutput",
+  "assetsOutput",
+  "identityOutput",
+  "attachmentsOutput"
+]);
+const args = {};
+for (let index = 0; index < rawArgs.length; index += 2) {
+  const flag = rawArgs[index];
+  const value = rawArgs[index + 1];
+  if (!/^--[a-z]+(?:-[a-z]+)*$/.test(flag)) {
+    fail(`invalid argument name: ${flag ?? "<missing>"}`);
+  }
+  const name = flag
+    .slice(2)
+    .replace(/-([a-z])/g, (_, character) => character.toUpperCase());
+  if (!allowedArgs.has(name)) fail(`unsupported argument: ${flag}`);
+  if (Object.hasOwn(args, name)) fail(`duplicate argument: ${flag}`);
+  args[name] = value;
+}
 const policyGroups = ["control", "assets", "identity", "attachments"];
 const stdoutMode = policyGroups.includes(args.stdoutGroup);
 const fileMode =

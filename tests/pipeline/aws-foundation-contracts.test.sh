@@ -384,8 +384,57 @@ jq --exit-status '
 
 require_text "${foundation_renderer}" \
   'const policyGroups = ["control", "assets", "identity", "attachments"]' \
+  '.replace(/-([a-z])/g, (_, character) => character.toUpperCase())' \
   'if (Buffer.byteLength(compact, "utf8") > 6144)' \
   'source statement Sids must be unique, non-empty strings'
+
+renderer_runtime_dir="$(mktemp -d)"
+cleanup_renderer_runtime() {
+  rm -rf -- "${renderer_runtime_dir}"
+}
+trap cleanup_renderer_runtime EXIT
+declare -A renderer_stdout
+for group in control assets identity attachments; do
+  renderer_stdout["${group}"]="$(
+    node "${foundation_renderer}" \
+      --input "${foundation_policy}" \
+      --account 123456789012 \
+      --stdout-group "${group}"
+  )"
+  jq -e \
+    --arg account "123456789012" '
+      .Version == "2012-10-17" and
+      (.Statement | type == "array" and length > 0) and
+      (tostring | contains($account)) and
+      (tostring | contains("${aws:PrincipalAccount}") | not)
+    ' <<<"${renderer_stdout[${group}]}" >/dev/null
+done
+
+node "${foundation_renderer}" \
+  --input "${foundation_policy}" \
+  --account 123456789012 \
+  --control-output "${renderer_runtime_dir}/control.json" \
+  --assets-output "${renderer_runtime_dir}/assets.json" \
+  --identity-output "${renderer_runtime_dir}/identity.json" \
+  --attachments-output "${renderer_runtime_dir}/attachments.json"
+test "$(
+  find "${renderer_runtime_dir}" -mindepth 1 -maxdepth 1 -type f |
+    wc -l |
+    awk '{print $1}'
+)" = "4"
+for group in control assets identity attachments; do
+  rendered_path="${renderer_runtime_dir}/${group}.json"
+  test -f "${rendered_path}"
+  test ! -L "${rendered_path}"
+  test "$(
+    jq -cS . "${rendered_path}"
+  )" = "$(
+    jq -cS . <<<"${renderer_stdout[${group}]}"
+  )"
+done
+cleanup_renderer_runtime
+trap - EXIT
+
 require_text "${foundation_bootstrap}" \
   'test "${CONFIRMATION}" = "BOOTSTRAP_FOUNDATION_POLICIES"' \
   'readonly -a POLICY_GROUPS=(control assets identity attachments)' \
