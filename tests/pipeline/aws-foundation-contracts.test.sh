@@ -17,6 +17,7 @@ execution_policy="${repository_root}/infra/aws/foundation/cdk-execution-policy.y
 api_gateway_account="${repository_root}/infra/aws/foundation/api-gateway-account.yml"
 bootstrap_patcher="${repository_root}/scripts/patch-cdk-bootstrap-template.mjs"
 bootstrap_sealer="${repository_root}/scripts/seal-cdk-bootstrap-templates.sh"
+canonical_flow_renderer="${repository_root}/scripts/render-canonical-flow-yaml.mjs"
 inline_template_renderer="${repository_root}/scripts/render-inline-cloudformation-template.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
@@ -119,10 +120,9 @@ jq --exit-status '
   .aws.inlineTemplateRendering == {
     deployedOriginalMatchesSemanticSha256: true,
     flowEmitter: {
-      linuxAmd64Sha256:
-        "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
-      name: "mikefarah/yq",
-      version: "v4.47.2"
+      name: "scripts/render-canonical-flow-yaml.mjs",
+      runtime: "node-22.23.1",
+      scalarPolicy: "strict-ascii-plain-or-json-quoted"
     },
     format: "canonical-flow-yaml",
     maximumTemplateBodyBytes: 51200,
@@ -136,6 +136,12 @@ jq --exit-status '
         "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
       name: "aws-cloudformation/rain",
       version: "v1.24.4"
+    },
+    yamlParser: {
+      linuxAmd64Sha256:
+        "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+      name: "mikefarah/yq",
+      version: "v4.47.2"
     }
   } and
   .aws.governedCanaryRoles.stackName == "Archon-Governed-Canary-Roles" and
@@ -767,13 +773,19 @@ require_text "${inline_template_renderer}" \
   'sha256sum --check --strict' \
   '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
   '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
-  '--output-format=yaml' \
-  '--prettyPrint' \
-  'archon-inline-cfn.idiomatic.XXXXXX.yaml' \
+  'node "${workspace_root}/scripts/render-canonical-flow-yaml.mjs"' \
   'jq -cS' \
-  'select(kind == "map" or kind == "seq")) style="flow"' \
   'cmp -s "${canonical_json}" "${round_trip}"' \
   '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
+require_text "${canonical_flow_renderer}" \
+  'process.env.GITHUB_ACTIONS !== "true"' \
+  'process.env.RUNNER_TEMP' \
+  'requestedInputStat.isSymbolicLink()' \
+  'safePlainScalar' \
+  'implicitYamlScalar' \
+  'JSON.stringify(value)' \
+  'Object.entries(value)' \
+  'process.stdout.write(`${emit(document)}\n`)'
 test "$(
   grep -nF 'test ! -L "$1"' "${inline_template_renderer}" |
     cut -d: -f1
@@ -789,7 +801,7 @@ require_text "${reconciler}" \
   'IAM_FOUNDATION_SEMANTIC_SHA' \
   'IAM_FOUNDATION_YQ_BIN' \
   'IAM_FOUNDATION_YQ_SHA' \
-  '.aws.inlineTemplateRendering.flowEmitter.linuxAmd64Sha256' \
+  '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
   '--template-file "${IAM_FOUNDATION_TEMPLATE}"' \
   '--template-stage Original' \
   '.TemplateBody |' \
@@ -842,6 +854,7 @@ require_text "${ci_workflow}" \
   'scripts/bootstrap-aws-foundation-role.sh' \
   'scripts/reconcile-aws-foundation.sh' \
   'scripts/patch-cdk-bootstrap-template.mjs' \
+  'scripts/render-canonical-flow-yaml.mjs' \
   'scripts/render-inline-cloudformation-template.sh' \
   'scripts/seal-cdk-bootstrap-templates.sh' \
   'Seal the exact CDK bootstrap templates without AWS access' \
@@ -861,6 +874,7 @@ require_text "${deploy_workflow}" \
   'bash scripts/validate-cloudformation-role-bindings.sh'
 require_text "${foundation_workflow}" \
   'Render the inline-safe IAM foundation template' \
+  'scripts/render-canonical-flow-yaml.mjs' \
   'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
   'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
   'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \

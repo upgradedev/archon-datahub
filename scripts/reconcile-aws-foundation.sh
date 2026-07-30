@@ -183,7 +183,7 @@ revalidate_master() {
   test -x "${IAM_FOUNDATION_YQ_BIN}"
   test "${IAM_FOUNDATION_YQ_SHA}" = "$(
     jq -er \
-      '.aws.inlineTemplateRendering.flowEmitter.linuxAmd64Sha256' \
+      '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
       contracts/aws-foundation-v1.json
   )"
   test "$(sha256sum "${IAM_FOUNDATION_YQ_BIN}" | awk '{print $1}')" = \
@@ -1880,6 +1880,7 @@ source_hashes="$(
     infra/aws/foundation/governed-canary-roles.yml \
     scripts/bootstrap-aws-foundation-role.sh \
     scripts/patch-cdk-bootstrap-template.mjs \
+    scripts/render-canonical-flow-yaml.mjs \
     scripts/reconcile-aws-foundation.sh \
     scripts/render-inline-cloudformation-template.sh \
     scripts/render-aws-foundation-policy.mjs \

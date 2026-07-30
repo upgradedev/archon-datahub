@@ -90,6 +90,7 @@ jobs:
           done
           for script in \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-canonical-flow-yaml.mjs \
             scripts/render-aws-foundation-policy.mjs \
             scripts/verify-aws-runtime-boundary.mjs; do
             node --check "${script}"
