@@ -479,7 +479,10 @@ Workflows:
   exact-run governed write/rollback canary whose signed evidence is required before the
   protected same-artifact production promotion. Its checksum-sealed staging and production
   evidence use the `staging-deployment/v1` and `production-deployment/v1` predicates and
-  retain the exact sanitized demo-state source binding.
+  retain the exact sanitized demo-state source binding. `staging-bootstrap` accepts no
+  governed-canary fixture coordinates; `promote` requires one bounded canonical
+  `fixture_coordinates` JSON input containing the exact fixture run/attempt, artifact
+  ID/digest, and inner receipt digest.
 - [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
   flagship retained-history path plus a fresh deployed G6/dangling-blast-radius proof,
   with matching pre-secret, post-proof, and immediate pre-attestation exact control-plane
@@ -506,11 +509,17 @@ Workflows:
   reconstructs the ordered judge-account lifecycle and fresh production journey from
   exact run IDs, verifies their artifacts and attestations, and produces the protected
   `SQ3`–`SQ5` project-access evidence.
+- [DataHub governed-canary fixture](.github/workflows/datahub-canary-fixture.yml) —
+  plan-before-mutation lifecycle for the exact Snowflake `TEST` dataset and owned domain.
+  Protected seed/reset produces a canonical five-file receipt whose artifact metadata,
+  checksums, state contract, G1-G5/G6 semantics, endpoint/marker fingerprints, and complete
+  GitHub attestation subject set are reverified by the governed canary before AWS trust.
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
   digests, then `APPROVE → VERIFIED`, followed by an explicit solo-owner approval of the
-  exact rollback and read-after-rollback proof. Its isolation contract is in
-  [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
+  exact rollback and read-after-rollback proof. Its v3 recovery and final attestation bind
+  the complete verified fixture receipt coordinates and state fingerprint. Its isolation
+  contract is in [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
 - [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
   exact-parent `workflow_run` compensation for failed or cancelled canaries.
 - [Submission operations](.github/workflows/submission-operations.yml) —

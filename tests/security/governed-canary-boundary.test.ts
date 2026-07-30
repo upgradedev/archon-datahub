@@ -48,6 +48,110 @@ test("governed canary is dispatch-only, staging-only, and explicitly solo-owner 
   assert.doesNotMatch(workflow, /startsWith\(\$prefix\)|startswith\(\$prefix\)/u);
 });
 
+test("governed canary consumes one exact attested TEST fixture before privileged work", () => {
+  for (const input of [
+    "fixture_run_id",
+    "fixture_run_attempt",
+    "fixture_artifact_id",
+    "fixture_artifact_digest",
+    "fixture_receipt_sha256",
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`${input}:[\\s\\S]+required: true[\\s\\S]+type: string`, "u")
+    );
+  }
+  const fixtureVerification = workflow.indexOf(
+    "Verify exact attested governed-canary fixture binding"
+  );
+  const prepareControlPlane = workflow.indexOf(
+    "Revalidate exact control plane before prepare AWS trust"
+  );
+  const prepareOidc = workflow.indexOf(
+    "Assume the read-only canary evidence role"
+  );
+  assert.ok(fixtureVerification > 0);
+  assert.ok(prepareControlPlane > fixtureVerification);
+  assert.ok(prepareOidc > prepareControlPlane);
+  assert.match(
+    workflow,
+    /\.path == "\.github\/workflows\/datahub-canary-fixture\.yml"[\s\S]+\.head_repository\.full_name == \$repository[\s\S]+\.head_branch == "master"[\s\S]+\.head_sha == \$releaseSha/u
+  );
+  assert.match(workflow, /\.id == \$artifactId[\s\S]+\.digest == \$digest/u);
+  assert.match(workflow, /The fixture archive inventory is not exact/u);
+  assert.match(workflow, /fixture archive expands beyond its bound/u);
+  assert.match(workflow, /file_type not in \(0, stat\.S_IFREG\)/u);
+  assert.match(workflow, /The fixture checksum inventory is not exact/u);
+  assert.match(workflow, /sha256sum --check --strict SHA256SUMS/u);
+  assert.match(
+    workflow,
+    /contracts\/datahub-canary-fixture-v1\.json/u
+  );
+  assert.match(
+    workflow,
+    /urn:li:dataset:\(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST\)/u
+  );
+  assert.match(workflow, /\.exactQueryMatchCount == 1/u);
+  assert.match(workflow, /classificationState: "absent"/u);
+  assert.match(
+    workflow,
+    /test "\$\{read_gms\}" = "\$\{write_gms\}"/u
+  );
+  assert.match(
+    workflow,
+    /isolationMarkerSha256' "\$\{receipt_dir\}\/plan\.json"/u
+  );
+  assert.match(
+    workflow,
+    /--signer-workflow[\s\S]+datahub-canary-fixture\.yml/u
+  );
+  assert.match(workflow, /--predicate-type "\$\{predicate_type\}"/u);
+  assert.match(
+    workflow,
+    /\.verificationResult\.statement\.subject[\s\S]+sort_by\(\.name\)[\s\S]+== \$expectedSubjects/u
+  );
+  assert.match(
+    workflow,
+    /schemaVersion:\s+"archon\.governed-canary-fixture-binding\/v1"/u
+  );
+  assert.match(
+    workflow,
+    /CANARY_FIXTURE_BINDING_PATH: \$\{\{ steps\.fixture\.outputs\.binding \}\}/u
+  );
+  assert.match(
+    driver,
+    /const CANARY_DATASET_URN =\s+"urn:li:dataset:\(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST\)"/u
+  );
+});
+
+test("deployment requires fixture coordinates only for promotion and seals their digest", () => {
+  assert.match(
+    deploymentWorkflow,
+    /fixture_coordinates:[\s\S]+required: false[\s\S]+type: string/u
+  );
+  const dispatchInputs =
+    deploymentWorkflow
+      .split("\n# Selecting an older successful", 1)[0]
+      ?.match(/^      [a-z][a-z0-9_]+:$/gmu) ?? [];
+  assert.equal(dispatchInputs.length, 10);
+  assert.match(
+    deploymentWorkflow,
+    /if test "\$\{DEPLOYMENT_MODE\}" = "promote"; then[\s\S]+canonical_fixture_coordinates="\$\(jq -ceS[\s\S]+\(keys \| sort\) == \[[\s\S]+"fixture_artifact_digest"[\s\S]+"fixture_run_id"[\s\S]+test "\$\{CANARY_FIXTURE_COORDINATES\}" = \\\n\s+"\$\{canonical_fixture_coordinates\}"[\s\S]+else[\s\S]+test -z "\$\{CANARY_FIXTURE_COORDINATES\}"/u
+  );
+  assert.match(
+    deploymentWorkflow,
+    /fixture_run_id: \$fixtureRunId[\s\S]+fixture_run_attempt: \$fixtureRunAttempt[\s\S]+fixture_artifact_id: \$fixtureArtifactId[\s\S]+fixture_artifact_digest: \$fixtureArtifactDigest[\s\S]+fixture_receipt_sha256: \$fixtureReceiptSha256/u
+  );
+  assert.match(
+    deploymentWorkflow,
+    /\.fixtureBinding == \{[\s\S]+artifactDigest: \$fixtureArtifactDigest[\s\S]+receiptSha256: \$fixtureReceiptSha256[\s\S]+target: \{[\s\S]+TEST/u
+  );
+  assert.match(
+    deploymentWorkflow,
+    /fixtureBindingDigest:\s+\$governedCanaryFixtureBindingDigest/u
+  );
+});
+
 test("production requires a fail-closed exact-run governed canary gate", () => {
   const gateStart = deploymentWorkflow.indexOf("\n  preproduction_canary:");
   const productionStart = deploymentWorkflow.indexOf("\n  production:");
@@ -210,7 +314,7 @@ test("canary mutation and recovery require one exact green control plane", () =>
   );
   assert.match(
     driver,
-    /const RECOVERY_SCHEMA = "archon\.governed-canary-recovery\/v2"/u
+    /const RECOVERY_SCHEMA = "archon\.governed-canary-recovery\/v3"/u
   );
   assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/u);
   assert.match(workflow, /controlPlaneSha: \$controlPlaneSha/u);
@@ -249,7 +353,11 @@ test("canary mutation and recovery require one exact green control plane", () =>
   );
   assert.match(
     recoveryWorkflow,
-    /\.schemaVersion == "archon\.governed-canary-recovery\/v2"/u
+    /FIXTURE_BINDING_PATH: \$\{\{ runner\.temp \}\}\/parent-recovery\/fixture-binding\.json/u
+  );
+  assert.match(
+    recoveryWorkflow,
+    /\.schemaVersion == "archon\.governed-canary-recovery\/v3"/u
   );
   assert.match(
     recoveryWorkflow,
@@ -266,6 +374,10 @@ test("canary mutation and recovery require one exact green control plane", () =>
   assert.match(
     recoveryWorkflow,
     /test "\$\{actual_recovery_digest\}" = \\\n\s+"\$\(jq -er '\.recoveryDigest' "\$\{RECOVERY_PATH\}"\)"/u
+  );
+  assert.match(
+    recoveryWorkflow,
+    /\.fixtureBinding == \$fixtureBinding\[0\][\s\S]+fixture_binding_digest="sha256:/u
   );
   assert.match(
     recoveryWorkflow,
@@ -324,6 +436,10 @@ test("canary mutation and recovery require one exact green control plane", () =>
   assert.match(
     recoveryWorkflow,
     /recoveryDriverControlPlaneGatesSha256:\s+\$recoveryDriverControlPlaneGatesSha256/u
+  );
+  assert.match(
+    recoveryWorkflow,
+    /fixtureBinding: \$fixtureBinding[\s\S]+fixtureBindingDigest: \$fixtureBindingDigest/u
   );
 
   assert.match(workflow, /\.path == \$path/u);
