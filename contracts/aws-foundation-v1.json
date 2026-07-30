@@ -429,7 +429,8 @@
         "stackStatus"
       ],
       "managedCommandOutput": "suppressed",
-      "maxRecentEvents": 25,
+      "maxInputBytes": 1048576,
+      "maxRecentEvents": 100,
       "deprioritizedReasonCategories": [
         "dependency-failure"
       ],

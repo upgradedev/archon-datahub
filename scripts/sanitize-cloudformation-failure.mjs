@@ -3,8 +3,8 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-const MAX_INPUT_BYTES = 262_144;
-const MAX_EVENTS = 25;
+const MAX_INPUT_BYTES = 1_048_576;
+const MAX_EVENTS = 100;
 const MAX_OUTPUT_BYTES = 2_048;
 
 export const ALLOWLISTED_STACK_LABELS = Object.freeze([

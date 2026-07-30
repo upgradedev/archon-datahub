@@ -153,6 +153,29 @@ test("prefers the newest non-dependency root event over newer cancellation", () 
   }
 });
 
+test("finds an older root at the end of the 100-event bounded window", () => {
+  const newerCancellations = Array.from({ length: 99 }, (_, index) =>
+    eventDocument("Resource creation cancelled because a dependency failed to create", {
+      LogicalResourceId: `CancelledResource${index}`,
+    }).StackEvents[0],
+  );
+  const document = {
+    StackEvents: [
+      ...newerCancellations,
+      eventDocument(
+        "Caller is not authorized to perform: iam:DeepRootSecret token=DeepSecretToken",
+        { LogicalResourceId: "DeepRootAccessDenied" },
+      ).StackEvents[0],
+    ],
+  };
+  const diagnostic = sanitizeCloudFormationFailure(document, options);
+  const serialized = serializeCloudFormationFailure(diagnostic);
+  assert.equal(document.StackEvents.length, 100);
+  assert.equal(diagnostic.logicalResourceId, "DeepRootAccessDenied");
+  assert.equal(diagnostic.reasonCategory, "access-denied");
+  assert.equal(serialized.includes("DeepRootSecret"), false);
+  assert.equal(serialized.includes("DeepSecretToken"), false);
+});
 test("falls back to the newest failed event when every failure is a dependency symptom", () => {
   const document = {
     StackEvents: [
@@ -204,7 +227,7 @@ test("rejects unknown labels, unsafe identities, and oversized event sets", () =
   );
   assert.throws(() =>
     sanitizeCloudFormationFailure(
-      { StackEvents: Array.from({ length: 26 }, () => eventDocument("failed").StackEvents[0]) },
+      { StackEvents: Array.from({ length: 101 }, () => eventDocument("failed").StackEvents[0]) },
       options,
     ),
   );
@@ -219,7 +242,7 @@ test("CLI rejects MAX+1 bytes without stdout or raw stderr", () => {
     [sanitizerPath, "--stack-label", "staging-iam", "--stack-status", "ROLLBACK_COMPLETE"],
     {
       encoding: "utf8",
-      input: Buffer.alloc(262_145, 0x20),
+      input: Buffer.alloc(1_048_577, 0x20),
       maxBuffer: 1_048_576,
     },
   );
