@@ -417,6 +417,36 @@
     "artifactRetentionDays": 90,
     "containsRawAccountId": false,
     "containsRawRoleArn": false,
+    "driftVerification": {
+      "method": "detect-then-bounded-describe-poll",
+      "helper": "scripts/aws-cloudformation-drift.sh",
+      "coverage": "cloudformation-supported-resources",
+      "globalTimeoutSeconds": 900,
+      "maximumPollAttemptsPerStack": 120,
+      "pollDelaySeconds": 2,
+      "maximumConsecutiveApiFailuresPerStack": 3,
+      "cliConnectTimeoutSeconds": 5,
+      "cliReadTimeoutSeconds": 15,
+      "awsSdkMaxAttempts": 1,
+      "globalDeadline": "hard-wall-clock",
+      "exactStackIncarnation": true,
+      "staleResourceEvidence": "forbidden",
+      "responseBinding": [
+        "StackDriftDetectionId",
+        "StackId",
+        "Timestamp",
+        "DriftInformation.LastCheckTimestamp"
+      ],
+      "terminalSuccess": {
+        "detectionStatus": "DETECTION_COMPLETE",
+        "stackDriftStatus": "IN_SYNC",
+        "driftedStackResourceCount": 0,
+        "returnedResourceStatuses": ["IN_SYNC"]
+      },
+      "failureMode": "fail-closed",
+      "rawAwsStderr": "suppressed",
+      "unsupportedCliWaiter": "forbidden"
+    },
     "failureDiagnostics": {
       "schemaVersion": "archon.aws-foundation-cfn-failure/v1",
       "artifactFiles": [

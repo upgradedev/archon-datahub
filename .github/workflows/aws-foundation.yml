@@ -200,6 +200,7 @@ jobs:
             infra/aws/foundation/github-actions-foundation-role.yml \
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/aws-cloudformation-drift.sh \
             scripts/patch-cdk-brace-expansion.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
             scripts/render-canonical-flow-yaml.mjs \
@@ -446,6 +447,36 @@ jobs:
               migrationRequiredState:
                 "foundation-complete-deploy-migration-required",
               readyState: "ready-for-deploy"
+            } and
+            .evidence.driftVerification == {
+              cliConnectTimeoutSeconds: 5,
+              cliReadTimeoutSeconds: 15,
+              awsSdkMaxAttempts: 1,
+              coverage: "cloudformation-supported-resources",
+              exactStackIncarnation: true,
+              failureMode: "fail-closed",
+              globalDeadline: "hard-wall-clock",
+              globalTimeoutSeconds: 900,
+              helper: "scripts/aws-cloudformation-drift.sh",
+              maximumConsecutiveApiFailuresPerStack: 3,
+              maximumPollAttemptsPerStack: 120,
+              method: "detect-then-bounded-describe-poll",
+              pollDelaySeconds: 2,
+              rawAwsStderr: "suppressed",
+              responseBinding: [
+                "StackDriftDetectionId",
+                "StackId",
+                "Timestamp",
+                "DriftInformation.LastCheckTimestamp"
+              ],
+              staleResourceEvidence: "forbidden",
+              terminalSuccess: {
+                detectionStatus: "DETECTION_COMPLETE",
+                driftedStackResourceCount: 0,
+                returnedResourceStatuses: ["IN_SYNC"],
+                stackDriftStatus: "IN_SYNC"
+              },
+              unsupportedCliWaiter: "forbidden"
             } and
             .evidence.failureDiagnostics == {
               allowlistedStackLabels: [
@@ -1199,7 +1230,7 @@ jobs:
             echo
             echo "- Regions: \`eu-west-1\`, \`us-east-1\`"
             echo "- Bootstraps: \`CDKToolkit-archonstg\`, \`CDKToolkit-archonprd\` (version 32)"
-            echo "- Stage execution policies and runtime boundaries: exact and drift-free"
+            echo "- Stage execution policies and runtime boundaries: exact; CloudFormation-supported resources IN_SYNC"
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
             echo "- Operational roles: stage judge access plus production posture, runtime, and paging"
