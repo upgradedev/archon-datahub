@@ -20,6 +20,7 @@ common="${repository_root}/scripts/aws-foundation-policy-migration-common.sh"
 authorization="${repository_root}/scripts/aws-foundation-policy-migration-authorization.sh"
 state="${repository_root}/scripts/aws-foundation-policy-migration-state.sh"
 environment_verifier="${repository_root}/scripts/verify-github-environment-protection.sh"
+environment_behavior="${repository_root}/tests/pipeline/github-environment-protection.test.sh"
 behavior="${repository_root}/tests/pipeline/aws-foundation-policy-migration-driver.test.sh"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 
@@ -65,6 +66,7 @@ for path in \
   "${authorization}" \
   "${state}" \
   "${environment_verifier}" \
+  "${environment_behavior}" \
   "${behavior}" \
   "${ci_workflow}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
@@ -616,6 +618,7 @@ require_text "${repository_root}/docs/AWS_FOUNDATION.md" \
 require_text "${ci_workflow}" \
   'tests/pipeline/aws-foundation-policy-migration-contracts.test.sh' \
   'tests/pipeline/aws-foundation-policy-migration-driver.test.sh' \
+  'tests/pipeline/github-environment-protection.test.sh' \
   'scripts/run-aws-foundation-policy-migration.sh' \
   'scripts/aws-foundation-policy-migration-common.sh' \
   'scripts/aws-foundation-policy-migration-authorization.sh' \
