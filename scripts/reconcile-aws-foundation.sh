@@ -1576,7 +1576,7 @@ check_drift() (
         pollElapsedSeconds: $pollElapsedSeconds,
         region: $region,
         stackDriftStatus: "IN_SYNC",
-        stackIncarnationBinding: "exact-stack-id-and-detection-timestamp",
+        stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound",
         stackName: $stackName,
         stage: $stage,
         validation: "passed"
@@ -1615,7 +1615,7 @@ jq -e '
     .coverage == "cloudformation-supported-resources" and
     .detectionStatus == "DETECTION_COMPLETE" and .driftedResourceCount == 0 and
     .stackDriftStatus == "IN_SYNC" and
-    .stackIncarnationBinding == "exact-stack-id-and-detection-timestamp" and
+    .stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound" and
     .validation == "passed" and
     (.checkedResourceCount | (type == "number" and floor == . and . >= 0)) and
     (.pollAttempts | (type == "number" and floor == . and . >= 1 and . <= 120)) and
@@ -2466,7 +2466,7 @@ jq -cnS \
         maximumPollAttemptsPerStack: $driftMaximumPollAttempts,
         method: "detect-then-bounded-describe-poll",
         pollDelaySeconds: $driftPollDelaySeconds,
-        stackIncarnationBinding: "exact-stack-id-and-detection-timestamp",
+        stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound",
         sha256: $driftSha256,
         status: "IN_SYNC"
       },
@@ -2543,7 +2543,7 @@ jq -e '
   .drift.maximumPollAttemptsPerStack == 120 and
   .drift.pollDelaySeconds == 2 and
   .drift.maximumConsecutiveApiFailuresPerStack == 3 and
-  .drift.stackIncarnationBinding == "exact-stack-id-and-detection-timestamp" and
+  .drift.stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound" and
   (
     if .aws.sharedApiGateway.mode == "foundation-managed" then
       .drift.managedStackCount == 10 and

@@ -506,17 +506,21 @@ timestamp. The follow-up resource query targets that exact ARN, requires a real
 `StackResourceDrifts` array, rejects older timestamps and accepts only exact
 stack-ID entries whose status is `IN_SYNC`; `NOT_CHECKED` is not converted into
 a pass. A bounded final `DescribeStacks` poll must still report the same stack ID,
-`IN_SYNC`, and a `LastCheckTimestamp` equal to the exact detection timestamp.
+`IN_SYNC`, and a valid `LastCheckTimestamp` that is not older than the exact
+detection timestamp. AWS defines that field as the most recent drift operation
+initiated on the stack or any supported individual resource, so a newer value is
+valid fresher evidence and exact equality would overstate the provider contract.
 Equivalent UTC spellings (`Z` versus `+00:00` and fractional trailing zeroes)
-are compared as one exact instant without discarding non-zero subsecond
-precision. Shape alone is insufficient: year, leap day, month/day, hour, minute,
-and second are validated with locale-independent Gregorian arithmetic. An absent
-optional `DriftInformation`, a valid status without `LastCheckTimestamp`, or a
-valid older projection is retried. Once the timestamp is current, only `IN_SYNC`
-passes; a newer/different operation, unsafe current status, wrong incarnation,
-malformed response, or exhausted retry fails closed. The final projection shares
-the 900-second global wall-clock deadline, enforces a hard maximum of five reads
-with at most two-second pauses, and never reruns drift detection. All raw status,
+are compared without discarding non-zero subsecond precision. Shape alone is
+insufficient: year, leap day, month/day, hour, minute, and second are validated
+with locale-independent Gregorian arithmetic. An absent optional
+`DriftInformation`, a valid status without `LastCheckTimestamp`, or a valid older
+projection is retried. A current or newer `IN_SYNC` projection passes; `DRIFTED`
+fails immediately, `UNKNOWN` or `NOT_CHECKED` receives only the same bounded
+retry budget, and wrong selection, malformed response, or exhausted retry fails
+closed. The final projection shares the 900-second global wall-clock deadline,
+enforces a hard maximum of five reads with at most two-second pauses, and never
+reruns drift detection. All raw status,
 resource, and final-stack JSON is mode 0600 and deleted on every
 success or failure exit. The sealed `drift.json` records poll attempts, elapsed
 seconds, returned resource count, stack-incarnation binding, and
@@ -543,6 +547,21 @@ not distinguish equivalent AWS CLI UTC serialization from a short-lived stale
 projection. No success artifact was authored. The shared deadline-bound,
 precision-preserving final projection poll above is the reviewed remediation;
 only a later successful protected run may supersede this recorded failure.
+Exact-master foundation run
+[`30613749992`](https://github.com/upgradedev/archon-datahub/actions/runs/30613749992)
+reproduced `final-stack-binding-mismatch` after all reconciliation groups and
+each selected stack's resource-level `IN_SYNC` proof. The retained sanitized
+evidence does not include the failed final projection or its attempt count.
+Similar timing to run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+strongly indicates that no stale-projection retry was consumed, but this remains
+an inference rather than retained proof. Independently, the AWS API definitions
+show why exact timestamp equality is unsupported: stack-level `Timestamp` is the
+stack operation start, while `LastCheckTimestamp` may reflect a later supported
+resource check. No success or drift artifact was authored. The monotonic
+lower-bound contract is the reviewed remediation; only a later successful
+protected run may supersede this recorded failure.
+
 ## Sanitized managed-stack failure evidence
 
 A managed foundation stack rejected in a failed preflight state, or a managed

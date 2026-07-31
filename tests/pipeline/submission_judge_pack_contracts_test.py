@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -141,6 +142,97 @@ def named_step(job: str, name: str) -> str:
     )
     require(len(matches) == 1, f"step is missing or duplicated: {name}")
     return matches[0]
+
+
+def validate_artifact_selector_runtime(workflow: str) -> None:
+    """Execute the exact attester selector against representative API pages."""
+    attest = job_sections(workflow)["attest"]
+    resolver = named_step(
+        attest,
+        "Independently resolve producer and upstream artifact identities",
+    )
+    start_marker = (
+        "              --argjson runId \"${GITHUB_RUN_ID}\" '\n"
+    )
+    end_marker = "              ' <<<\"${producer_artifacts}\"\n"
+    require(
+        resolver.count(start_marker) == 1
+        and resolver.count(end_marker) == 1,
+        "attester artifact selector boundaries changed",
+    )
+    start = resolver.index(start_marker) + len(start_marker)
+    end = resolver.index(end_marker, start)
+    jq_filter = resolver[start:end]
+    release = "a" * 40
+    run_id = 424242
+
+    def artifact(
+        attempt: int,
+        artifact_id: int,
+        *,
+        owner_run_id: int = run_id,
+        head_sha: str = release,
+    ) -> dict[str, object]:
+        return {
+            "id": artifact_id,
+            "name": f"submission-judge-pack-{release}-{attempt}",
+            "digest": "sha256:" + ("b" * 64),
+            "size_in_bytes": 1024,
+            "expired": False,
+            "workflow_run": {
+                "id": owner_run_id,
+                "head_sha": head_sha,
+            },
+        }
+
+    pages = [
+        {
+            "artifacts": [
+                artifact(1, 101),
+                artifact(2, 102),
+                artifact(3, 103),
+                artifact(2, 104, owner_run_id=run_id + 1),
+                artifact(2, 105, head_sha="c" * 40),
+            ]
+        }
+    ]
+    completed = subprocess.run(
+        (
+            "jq",
+            "-cer",
+            "--arg",
+            "release",
+            release,
+            "--argjson",
+            "currentAttempt",
+            "2",
+            "--argjson",
+            "runId",
+            str(run_id),
+            jq_filter,
+        ),
+        input=json.dumps(pages),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    require(
+        completed.returncode == 0,
+        "attester artifact selector failed representative jq execution",
+    )
+    try:
+        selected = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ContractError(
+            "attester artifact selector returned non-JSON output"
+        ) from error
+    require(
+        selected.get("id") == 102
+        and selected.get("name")
+        == f"submission-judge-pack-{release}-2"
+        and selected.get("producerAttempt") == 2,
+        "attester artifact selector did not choose the latest exact eligible attempt",
+    )
 
 
 def step_names(job: str) -> tuple[str, ...]:
@@ -528,6 +620,16 @@ def validate_workflow(workflow: str) -> None:
     require(
         "select(.producerAttempt == $currentAttempt)" not in attester_resolver,
         "attester retry must be able to consume the latest retained producer attempt",
+    )
+    grouped_pattern_binding = (
+        "                (\n"
+        '                  "^submission-judge-pack-" + $release +\n'
+        '                    "-(?<attempt>[1-9][0-9]*)$"\n'
+        "                ) as $pattern |"
+    )
+    require(
+        attester_resolver.count(grouped_pattern_binding) == 1,
+        "artifact-name regex must be grouped before jq variable binding",
     )
 
     producer_extract = named_step(
@@ -934,6 +1036,7 @@ def expect_ci_rejected(label: str, workflow: str) -> None:
 
 workflow_text = WORKFLOW_PATH.read_text(encoding="utf-8")
 validate_workflow(workflow_text)
+validate_artifact_selector_runtime(workflow_text)
 ci_workflow_text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
 validate_ci_retry_contract(ci_workflow_text)
 
@@ -1134,6 +1237,16 @@ tamper_cases = {
         "Independently resolve producer and upstream artifact identities",
         "map(.producerAttempt) | max",
         "map(.producerAttempt) | min",
+    ),
+    "ungrouped artifact-name regex": replace_in_step(
+        workflow_text,
+        "attest",
+        "Independently resolve producer and upstream artifact identities",
+        (
+            "                (\n"
+            '                  "^submission-judge-pack-" + $release +\n'
+        ),
+        '                "^submission-judge-pack-" + $release +\n',
     ),
     "floating attestation action": replace_exact(
         workflow_text,

@@ -394,10 +394,14 @@ jq --exit-status '
     finalStackBinding: {
       method: "bounded-describe-stacks-poll",
       maximumAttempts: 5,
-      newerOrDifferentProjection: "fail-closed",
       pollDelaySeconds: 2,
-      staleOrUnpublishedProjection: "retry",
-      timestampComparison: "exact-normalized-utc-instant"
+      timestampComparison: "normalized-utc-monotonic-lower-bound",
+      currentOrNewerInSyncProjection: "accept",
+      currentDriftedProjection: "fail-closed",
+      currentOrNewerIndeterminateProjection: "bounded-retry",
+      staleOrUnpublishedProjection: "bounded-retry",
+      selectionMismatch: "fail-closed",
+      malformedProjection: "fail-closed"
     },
     staleResourceEvidence: "forbidden",
     terminalSuccess: {
@@ -1457,8 +1461,13 @@ require_text "${reconciler}" \
   'detection_timestamp="$(jq -er' \
   'verify_cloudformation_stack_resource_drifts \' \
   'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
-  'stackIncarnationBinding: "exact-stack-id-and-detection-timestamp"' \
+  'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' \
   'scripts/aws-cloudformation-drift.sh \'
+test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt producers must have two exact monotonic bindings'
+test "$(grep -Fc '.stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt validators must have two exact monotonic bindings'
+
 require_text "${drift_poller}" \
   'cloudformation_drift_remaining_seconds() {' \
   'run_bounded_cloudformation_drift_aws() {' \
@@ -1484,7 +1493,12 @@ require_text "${drift_poller}" \
   'if $drift == null then "stale"' \
   'if $actualKey < $detectionKey then "stale"' \
   'elif $drift.StackDriftStatus == "IN_SYNC" then "match"' \
+  'elif $drift.StackDriftStatus == "DRIFTED" then "current-drifted"' \
+  'else "current-indeterminate" end' \
   'final-stack-binding-stale' \
+  'final-stack-current-drifted' \
+  'final-stack-current-indeterminate' \
+  'final-stack-selection-mismatch' \
   '.StackResourceDriftStatus == "IN_SYNC"' \
   'trap cleanup EXIT' \
   'max_api_failures > 3' \
@@ -1500,17 +1514,26 @@ require_text "${drift_poller_test}" \
   'final-absent-drift-info-then-current' 'final-not-checked-missing-then-current' \
   'final-drifted-stale-then-current' 'final-stale-default' 'final-stale-persistent' \
   'invalid-final-max' 'invalid-final-delay' 'final-api-transient' 'final-api-persistent' \
-  'final-subsecond-mismatch' 'final-timestamp-mismatch' 'final-different-incarnation' \
+  'final-newer-in-sync' 'final-newer-subsecond-in-sync' \
+  'final-newer-drifted' 'final-newer-unknown' 'final-newer-not-checked' \
+  'final-indeterminate-default' \
+  'final-unknown-current-then-current' 'final-not-checked-current-then-current' \
+  'final-different-incarnation' \
   'final-invalid-calendar' 'final-invalid-second' 'final-invalid-fraction' \
+  'final-invalid-drift-status' \
   'final-malformed' 'final-oversize' 'deadline-resource' 'deadline-final' \
-  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files'
+  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files' \
+  'leaked exact stack id' 'leaked detection timestamp'
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \
   '(.DriftedStackResourceCount // 0) == 0' \
-  '.StackResourceDrifts[]?'
+  '.StackResourceDrifts[]?' \
+  'exact-stack-id-and-detection-timestamp'
 forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason' \
   'final_max_attempts > 10' 'final_delay_seconds > 30' \
-  'fromdateiso8601' 'strptime(' 'mktime'
+  'fromdateiso8601' 'strptime(' 'mktime' \
+  'elif $actualKey > $detectionKey then "mismatch"' \
+  'final-stack-binding-mismatch'
 helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
 helper_status_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
 helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${drift_poller}" | tail -n 1 | cut -d: -f1)"
