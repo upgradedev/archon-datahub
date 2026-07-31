@@ -91,6 +91,7 @@ run_poll_case(){
   detect_calls="$(awk '/cloudformation detect-stack-drift/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals 1 "${detect_calls}" "${name} detect calls";assert_equals "${expected_status}" "$(<"${STATUS_COUNTER}")" "${name} status calls";assert_equals "${expected_sleep}" "$(<"${SLEEP_COUNTER}")" "${name} sleeps"
   grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
   find "${dir}" -maxdepth 1 -name 'cloudformation-drift-status.*' -print -quit|grep -q .&&fail "${name} left raw candidate"
+  return 0
 }
 run_poll_case progress-success success 2 1
 run_poll_case immediate-success success 1 0
@@ -117,6 +118,7 @@ run_resource_case(){
   resources="$(awk '/describe-stack-resource-drifts/{n++}END{print n+0}' "${AWS_CALL_LOG}")";finals="$(awk '/cloudformation describe-stacks/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals "${expected_resource}" "${resources}" "${name} resource calls";assert_equals "${expected_final}" "${finals}" "${name} final calls"
   grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
   find "${dir}" -maxdepth 1 \( -name 'cloudformation-resource-drifts.*' -o -name 'cloudformation-final-stack.*' \) -print -quit|grep -q .&&fail "${name} left raw files"
+  return 0
 }
 run_resource_case resource-success success 1 1
 run_resource_case different-incarnation failure 1 0

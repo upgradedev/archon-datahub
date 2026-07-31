@@ -1466,7 +1466,8 @@ require_text "${runbook}" \
   'LastCheckTimestamp' \
   'deleted on every' \
   '30596290772' \
-  'cloudformation-supported-resources'require_text "${reconciler}" \
+  'cloudformation-supported-resources'
+require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
   "foundation_phase='startup'" \
