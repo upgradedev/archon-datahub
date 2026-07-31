@@ -1,0 +1,264 @@
+name: Recover AWS foundation policy migration
+
+on:
+  workflow_run:
+    workflows:
+      - Migrate AWS foundation assets policy
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: Exact trusted migration source SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-aws-control-plane
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    name: Bind cleanup to a trusted incomplete migration
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      github.actor == github.repository_owner &&
+      (
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion != 'success') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.triggering_actor == github.repository_owner &&
+         inputs.confirmation ==
+           'RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      cleanup_operation: ${{ steps.source.outputs.cleanup_operation }}
+      cleanup_required: ${{ steps.source.outputs.cleanup_required }}
+      target_sha: ${{ steps.source.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate cleanup and classify exact source attempt
+        id: source
+        env:
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CURRENT_CONTROL_PLANE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.expected_head_sha }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_REF_VALUE: ${{ github.workflow_ref }}
+          WORKFLOW_SHA_VALUE: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${WORKFLOW_SHA_VALUE}" =~ ^[0-9a-f]{40}$ ]]
+          test "${WORKFLOW_REF_VALUE}" = \
+            "${GITHUB_REPOSITORY}/.github/workflows/aws-foundation-policy-migration-cleanup.yml@refs/heads/master"
+          cleanup_operation=""
+          cleanup_required="false"
+          if [[ "${TRIGGER_EVENT}" == "workflow_run" ]]; then
+            [[ "${TRIGGER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+            [[ "${TRIGGER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+            parent="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${TRIGGER_RUN_ID}/attempts/${TRIGGER_RUN_ATTEMPT}")"
+            jq -e \
+              --arg actor "${GITHUB_REPOSITORY_OWNER}" \
+              --arg conclusion "${TRIGGER_CONCLUSION}" \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg sha "${TARGET_SHA}" \
+              --argjson attempt "${TRIGGER_RUN_ATTEMPT}" \
+              --argjson runId "${TRIGGER_RUN_ID}" '
+                .id == $runId and
+                .run_attempt == $attempt and
+                .name == "Migrate AWS foundation assets policy" and
+                .path ==
+                  ".github/workflows/aws-foundation-policy-migration.yml" and
+                .head_repository.full_name == $repository and
+                .head_branch == "master" and
+                .head_sha == $sha and
+                .event == "workflow_dispatch" and
+                .status == "completed" and
+                .conclusion == $conclusion and
+                (.conclusion == "action_required" or
+                 .conclusion == "cancelled" or
+                 .conclusion == "failure" or
+                 .conclusion == "neutral" or
+                 .conclusion == "skipped" or
+                 .conclusion == "stale" or
+                 .conclusion == "startup_failure" or
+                 .conclusion == "timed_out") and
+                .actor.login == $actor and
+                .triggering_actor.login == $actor
+              ' <<<"${parent}" >/dev/null
+            parent_jobs="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${TRIGGER_RUN_ID}/attempts/${TRIGGER_RUN_ATTEMPT}/jobs?per_page=100")"
+            jq -e \
+              --argjson attempt "${TRIGGER_RUN_ATTEMPT}" \
+              --argjson runId "${TRIGGER_RUN_ID}" '
+                .total_count == (.jobs | length) and
+                .total_count <= 5 and
+                all(.jobs[];
+                  .run_id == $runId and
+                  .run_attempt == $attempt and
+                  .status == "completed")
+              ' <<<"${parent_jobs}" >/dev/null
+            job_conclusion() {
+              local expected_name="$1"
+              jq -er --arg name "${expected_name}" '
+                [.jobs[] | select(.name == $name)] as $matched |
+                if ($matched | length) == 0 then
+                  "absent"
+                elif
+                  ($matched | length) == 1 and
+                  ($matched[0].conclusion | type) == "string"
+                then
+                  $matched[0].conclusion
+                else
+                  error("duplicate or incomplete exact parent job")
+                end
+              ' <<<"${parent_jobs}"
+            }
+            prefix="Hold outer lock through reviewed migration transaction / "
+            validate_result="$(job_conclusion \
+              "Bind migration to protected exact master")"
+            prepare_result="$(job_conclusion \
+              "${prefix}Install exact expiring authorization")"
+            migrate_result="$(job_conclusion \
+              "${prefix}Create, read back, and switch exactly once")"
+            rollback_result="$(job_conclusion \
+              "${prefix}Roll back only a known incomplete migration")"
+            revoke_result="$(job_conclusion \
+              "${prefix}Always revoke authorization and seal terminal state")"
+            for result in \
+              "${validate_result}" "${prepare_result}" \
+              "${migrate_result}" "${rollback_result}" "${revoke_result}"; do
+              case "${result}" in
+                absent|action_required|cancelled|failure|neutral|skipped|stale|startup_failure|success|timed_out)
+                  ;;
+                *)
+                  echo "::error::Unexpected exact parent-job conclusion" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            if [[ "${prepare_result}" == "success" ||
+                  "${migrate_result}" == "success" ||
+                  "${rollback_result}" == "success" ||
+                  "${revoke_result}" == "success" ]]; then
+              test "${validate_result}" = "success"
+            fi
+            if [[ "${migrate_result}" == "success" ]]; then
+              test "${prepare_result}" = "success"
+            fi
+            if [[ "${rollback_result}" == "success" ]]; then
+              test "${prepare_result}" = "success"
+            fi
+            test ! "${migrate_result}" = "success" || \
+              test ! "${rollback_result}" = "success"
+            if [[ "${validate_result}" != "success" ]]; then
+              cleanup_operation="no-aws"
+            elif [[ "${migrate_result}" == "success" ]]; then
+              cleanup_operation="cleanup-migrated"
+            elif [[ "${rollback_result}" == "success" ]]; then
+              cleanup_operation="cleanup-revoke"
+            elif [[ "${prepare_result}" == "success" ]]; then
+              cleanup_operation="cleanup-rollback"
+            else
+              cleanup_operation="cleanup-revoke"
+            fi
+          else
+            test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+            test "${CONFIRMATION_INPUT}" = \
+              "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION"
+            [[ "${CURRENT_CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+            current_master="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha')"
+            test "${current_master}" = "${CURRENT_CONTROL_PLANE_SHA}"
+            test "${TARGET_SHA}" = "${current_master}"
+            gate="${RUNNER_TEMP}/control-plane-security-gates.json"
+            CONTROL_PLANE_SHA="${CURRENT_CONTROL_PLANE_SHA}" \
+            OUTPUT_PATH="${gate}" \
+            ATTEMPTS=1 \
+              bash scripts/verify-github-control-plane.sh
+            test -f "${gate}"
+            test ! -L "${gate}"
+            cleanup_operation="cleanup-rollback"
+          fi
+          target_commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${TARGET_SHA}")"
+          workflow_commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${WORKFLOW_SHA_VALUE}")"
+          for commit in "${target_commit}" "${workflow_commit}"; do
+            jq -e '
+              .commit.verification.verified == true and
+              .commit.verification.reason == "valid"
+            ' <<<"${commit}" >/dev/null
+          done
+          test "$(git rev-parse HEAD)" = "${TARGET_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          case "${cleanup_operation}" in
+            cleanup-revoke|cleanup-rollback|cleanup-migrated)
+              cleanup_required="true"
+              ;;
+            no-aws)
+              test "${TRIGGER_EVENT}" = "workflow_run"
+              cleanup_required="false"
+              ;;
+            *)
+              echo "::error::Invalid classified cleanup operation" >&2
+              exit 1
+              ;;
+          esac
+          {
+            printf 'cleanup_operation=%s\n' "${cleanup_operation}"
+            printf 'cleanup_required=%s\n' "${cleanup_required}"
+            printf 'target_sha=%s\n' "${TARGET_SHA}"
+          } >>"${GITHUB_OUTPUT}"
+
+  cleanup:
+    name: Hold outer lock through classified recovery
+    needs: validate
+    if: needs.validate.outputs.cleanup_required == 'true'
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      deployments: read
+      id-token: write
+    uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml
+    with:
+      operation: ${{ needs.validate.outputs.cleanup_operation }}
+      expected_head_sha: ${{ needs.validate.outputs.target_sha }}
+      confirmation: RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION

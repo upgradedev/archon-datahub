@@ -122,11 +122,13 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
                   - cloudformation:DescribeStackResourceDrifts
                 Resource: !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/${IamFoundationStackName}/*
               - Sid: ReadStageIamDriftDetection
                 Effect: Allow
                 Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
                   - cloudformation:DescribeStackDriftDetectionStatus
                 Resource: "*"
               - Sid: ReadBootstrapVersions
@@ -449,6 +451,7 @@ Resources:
                 Action:
                   - cloudformation:DescribeStacks
                   - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-production/*
@@ -462,6 +465,7 @@ Resources:
               - Sid: ReadStackDriftDetectionStatus
                 Effect: Allow
                 Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
                   - cloudformation:DescribeStackDriftDetectionStatus
                 Resource: "*"
               - Sid: ReadExactProductionOperationalAlarms

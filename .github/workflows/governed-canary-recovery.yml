@@ -28,6 +28,7 @@ permissions:
 concurrency:
   group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
+  queue: max
 
 env:
   NODE_VERSION: "22.23.1"
@@ -74,6 +75,7 @@ jobs:
       deployment_run_id: ${{ steps.manifest.outputs.deployment_run_id }}
       release_sha: ${{ steps.manifest.outputs.release_sha }}
       recovery_digest: ${{ steps.manifest.outputs.recovery_digest }}
+      fixture_binding_digest: ${{ steps.manifest.outputs.fixture_binding_digest }}
       recovery_driver_sha: ${{ steps.recovery_driver.outputs.sha }}
       recovery_driver_gate_sha256: ${{ steps.recovery_driver.outputs.gate_sha256 }}
       recovery_driver_gate_base64: ${{ steps.recovery_driver.outputs.gate_base64 }}
@@ -204,6 +206,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RECOVERY_PATH: ${{ runner.temp }}/parent-recovery/recovery.json
           CONTROL_PLANE_GATES_PATH: ${{ runner.temp }}/parent-recovery/control-plane-security-gates.json
+          FIXTURE_BINDING_PATH: ${{ runner.temp }}/parent-recovery/fixture-binding.json
           PARENT_HEAD_SHA: ${{ steps.source.outputs.control_plane_sha }}
         run: |
           set -euo pipefail
@@ -211,17 +214,72 @@ jobs:
           test ! -L "${RECOVERY_PATH}"
           test -f "${CONTROL_PLANE_GATES_PATH}"
           test ! -L "${CONTROL_PLANE_GATES_PATH}"
+          test -f "${FIXTURE_BINDING_PATH}"
+          test ! -L "${FIXTURE_BINDING_PATH}"
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg run "${CANARY_SOURCE_WORKFLOW_RUN_ID}" \
             --arg attempt "${CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT}" '
-              .schemaVersion == "archon.governed-canary-recovery/v2" and
+              .schemaVersion == "archon.governed-canary-recovery/v3" and
               .repository == $repository and
               .workflowRunId == $run and
               .workflowRunAttempt == $attempt and
               (.deploymentRunId | test("^[1-9][0-9]{0,19}$")) and
               (.controlPlaneGatesSha256 | test("^[a-f0-9]{64}$")) and
               (.releaseSha | test("^[a-f0-9]{40}$")) and
+              (.fixtureBindingDigest |
+                test("^sha256:[a-f0-9]{64}$")) and
+              (.fixtureBinding | keys | sort) == [
+                "artifactDigest",
+                "artifactId",
+                "artifactName",
+                "attestationPredicateSha256",
+                "gmsEndpointFingerprint",
+                "isolationMarkerSha256",
+                "postStateSha256",
+                "receiptSha256",
+                "releaseSha",
+                "repository",
+                "schemaVersion",
+                "stateContractSha256",
+                "target",
+                "workflowRunAttempt",
+                "workflowRunId"
+              ] and
+              .fixtureBinding.schemaVersion ==
+                "archon.governed-canary-fixture-binding/v1" and
+              .fixtureBinding.repository == $repository and
+              .fixtureBinding.releaseSha == .releaseSha and
+              (.fixtureBinding.workflowRunId |
+                test("^[1-9][0-9]{0,19}$")) and
+              (.fixtureBinding.workflowRunAttempt |
+                test("^[1-9][0-9]{0,9}$")) and
+              (.fixtureBinding.artifactId |
+                test("^[1-9][0-9]{0,19}$")) and
+              .fixtureBinding.artifactName ==
+                (
+                  "datahub-canary-fixture-receipt-" +
+                  .fixtureBinding.workflowRunId + "-" +
+                  .fixtureBinding.workflowRunAttempt
+                ) and
+              (.fixtureBinding.artifactDigest |
+                test("^sha256:[a-f0-9]{64}$")) and
+              (
+                [
+                  .fixtureBinding.receiptSha256,
+                  .fixtureBinding.stateContractSha256,
+                  .fixtureBinding.postStateSha256,
+                  .fixtureBinding.gmsEndpointFingerprint,
+                  .fixtureBinding.isolationMarkerSha256,
+                  .fixtureBinding.attestationPredicateSha256
+                ] |
+                all(.[]; test("^[a-f0-9]{64}$"))
+              ) and
+              .fixtureBinding.target == {
+                query: "archon_governed_canary_fixture",
+                targetUrn:
+                  "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)"
+              } and
               (.recoveryDigest | test("^sha256:[a-f0-9]{64}$"))
             ' "${RECOVERY_PATH}" >/dev/null
           canonical_recovery="${RUNNER_TEMP}/parent-recovery-manifest.json"
@@ -237,6 +295,29 @@ jobs:
           test "${actual_recovery_digest}" = \
             "$(jq -er '.recoveryDigest' "${RECOVERY_PATH}")" || {
             echo "::error::The sealed recovery manifest digest is invalid"
+            exit 1
+          }
+          canonical_fixture="${RUNNER_TEMP}/parent-fixture-binding.json"
+          jq -cS . "${FIXTURE_BINDING_PATH}" >"${canonical_fixture}"
+          cmp --silent "${FIXTURE_BINDING_PATH}" "${canonical_fixture}" || {
+            echo "::error::The sealed fixture binding is not canonical"
+            exit 1
+          }
+          jq -e \
+            --slurpfile fixtureBinding "${FIXTURE_BINDING_PATH}" '
+              .fixtureBinding == $fixtureBinding[0]
+            ' "${RECOVERY_PATH}" >/dev/null || {
+            echo "::error::The sealed fixture file differs from the recovery manifest"
+            exit 1
+          }
+          fixture_binding="$(jq -cS . "${FIXTURE_BINDING_PATH}")"
+          fixture_binding_digest="sha256:$(
+            printf '%s' "${fixture_binding}" | sha256sum | awk '{print $1}'
+          )"
+          test "${fixture_binding_digest}" = "$(
+            jq -er '.fixtureBindingDigest' "${RECOVERY_PATH}"
+          )" || {
+            echo "::error::The sealed fixture binding digest is invalid"
             exit 1
           }
           expected_gate_sha256="$(
@@ -330,6 +411,7 @@ jobs:
             echo "control_plane_gate_sha256=${expected_gate_sha256}"
             echo "release_sha=$(jq -er '.releaseSha' "${RECOVERY_PATH}")"
             echo "recovery_digest=$(jq -er '.recoveryDigest' "${RECOVERY_PATH}")"
+            echo "fixture_binding_digest=${fixture_binding_digest}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Seal trusted recovery driver before protected approval
@@ -779,12 +861,20 @@ jobs:
           EVIDENCE_PATH: ${{ steps.restore.outputs.path }}
           EVIDENCE_DIGEST: ${{ steps.restore.outputs.digest }}
           RECOVERY_DIGEST: ${{ needs.resolve-parent.outputs.recovery_digest }}
+          FIXTURE_BINDING_DIGEST: ${{ needs.resolve-parent.outputs.fixture_binding_digest }}
+          FIXTURE_BINDING_PATH: ${{ runner.temp }}/governed-canary/recovery/fixture-binding.json
           PARENT_CONTROL_PLANE_GATES_SHA256: ${{ needs.resolve-parent.outputs.control_plane_gate_sha256 }}
           RECOVERY_DRIVER_SHA: ${{ needs.resolve-parent.outputs.recovery_driver_sha }}
           RECOVERY_DRIVER_GATES_SHA256: ${{ steps.recovery_driver_gates.outputs.gate_sha256 }}
         run: |
           set -euo pipefail
           evidence_dir="$(dirname "${EVIDENCE_PATH}")"
+          test -f "${FIXTURE_BINDING_PATH}"
+          test ! -L "${FIXTURE_BINDING_PATH}"
+          fixture_binding="$(jq -cS . "${FIXTURE_BINDING_PATH}")"
+          test "sha256:$(printf '%s' "${fixture_binding}" |
+            sha256sum | awk '{print $1}')" = \
+            "${FIXTURE_BINDING_DIGEST}"
           (
             cd "${evidence_dir}"
             sha256sum rollback-evidence.json >rollback-subject.sha256
@@ -802,6 +892,8 @@ jobs:
             --arg releaseSha "${CANARY_RELEASE_SHA}" \
             --arg recoveryDigest "${RECOVERY_DIGEST}" \
             --arg evidenceDigest "${EVIDENCE_DIGEST}" \
+            --arg fixtureBindingDigest "${FIXTURE_BINDING_DIGEST}" \
+            --argjson fixtureBinding "${fixture_binding}" \
             '{
               schemaVersion: "archon.governed-canary-recovery-attestation/v1",
               parentRunId: $parentRunId,
@@ -815,6 +907,8 @@ jobs:
               deploymentRunId: $deploymentRunId,
               releaseSha: $releaseSha,
               recoveryDigest: $recoveryDigest,
+              fixtureBinding: $fixtureBinding,
+              fixtureBindingDigest: $fixtureBindingDigest,
               rollbackEvidenceDigest: $evidenceDigest,
               result: "exact-state-restored"
             }' >"${evidence_dir}/attestation-predicate.json"

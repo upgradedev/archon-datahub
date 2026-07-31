@@ -8,8 +8,10 @@ import {
   parseRuntimeConfig,
   rollbackDispositionForObservedDigest,
   verifyCanaryApprovalBindings,
+  verifyFixtureBinding,
   verifyRecoveryManifest,
   type CanaryIdentity,
+  type FixtureBinding,
   type RecoveryManifest,
 } from "../../scripts/governed-canary.js";
 import { digest } from "../../src/remediation/integrity.js";
@@ -47,6 +49,29 @@ function environment(): Record<string, string> {
   };
 }
 
+function fixtureBinding(identity: CanaryIdentity): FixtureBinding {
+  return {
+    schemaVersion: "archon.governed-canary-fixture-binding/v1",
+    repository: identity.repository,
+    releaseSha: identity.releaseSha,
+    workflowRunId: "54321",
+    workflowRunAttempt: "2",
+    artifactId: "24680",
+    artifactName: "datahub-canary-fixture-receipt-54321-2",
+    artifactDigest: `sha256:${"1".repeat(64)}`,
+    receiptSha256: "2".repeat(64),
+    stateContractSha256: "3".repeat(64),
+    postStateSha256: "4".repeat(64),
+    gmsEndpointFingerprint: "5".repeat(64),
+    isolationMarkerSha256: "6".repeat(64),
+    attestationPredicateSha256: "7".repeat(64),
+    target: {
+      query: "archon_governed_canary_fixture",
+      targetUrn: DATASET,
+    },
+  };
+}
+
 function recovery(identity: CanaryIdentity): RecoveryManifest {
   const before = createTagProjection({
     entityUrn: identity.datasetUrn,
@@ -58,8 +83,9 @@ function recovery(identity: CanaryIdentity): RecoveryManifest {
     columnPath: "email",
     tags: ["urn:li:tag:PII"],
   });
+  const binding = fixtureBinding(identity);
   const unsigned = {
-    schemaVersion: "archon.governed-canary-recovery/v2" as const,
+    schemaVersion: "archon.governed-canary-recovery/v3" as const,
     repository: identity.repository,
     workflowRunId: identity.workflowRunId,
     workflowRunAttempt: identity.workflowRunAttempt,
@@ -70,6 +96,8 @@ function recovery(identity: CanaryIdentity): RecoveryManifest {
     evidenceBucket: identity.evidenceBucket,
     authBindingsDigest: canaryAuthBindingsDigest(identity),
     endpointBindingsDigest: canaryEndpointBindingsDigest(identity),
+    fixtureBinding: binding,
+    fixtureBindingDigest: digest(binding),
     auditId: "b".repeat(64),
     executionId:
       "arn:aws:states:eu-west-1:111111111111:execution:archon-staging-control-loop:b".concat(
@@ -99,7 +127,7 @@ function recovery(identity: CanaryIdentity): RecoveryManifest {
   return { ...unsigned, recoveryDigest: digest(unsigned) };
 }
 
-test("governed canary accepts only a fixed isolated TEST/DEV fixture", () => {
+test("governed canary accepts only the exact reviewed snowflake TEST fixture", () => {
   const identity = parseCanaryIdentity(environment());
   assert.equal(identity.datasetUrn, DATASET);
   assert.equal(identity.columnPath, "email");
@@ -110,12 +138,48 @@ test("governed canary rejects production and arbitrary dataset targets", () => {
   const production = environment();
   production["CANARY_DATASET_URN"] =
     "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,PROD)";
-  assert.throws(() => parseCanaryIdentity(production), /DEV or TEST/u);
+  assert.throws(
+    () => parseCanaryIdentity(production),
+    /reviewed snowflake TEST fixture/u
+  );
 
   const arbitrary = environment();
   arbitrary["CANARY_DATASET_URN"] =
     "urn:li:dataset:(urn:li:dataPlatform:snowflake,customers,TEST)";
-  assert.throws(() => parseCanaryIdentity(arbitrary), /DEV or TEST/u);
+  assert.throws(
+    () => parseCanaryIdentity(arbitrary),
+    /reviewed snowflake TEST fixture/u
+  );
+});
+
+test("fixture binding is exact, content-addressed, and release-bound", () => {
+  const identity = parseCanaryIdentity(environment());
+  const binding = fixtureBinding(identity);
+  assert.deepEqual(verifyFixtureBinding(binding, identity), binding);
+
+  assert.throws(
+    () =>
+      verifyFixtureBinding(
+        { ...binding, receiptSha256: "8".repeat(64), extra: true },
+        identity
+      ),
+    /fixture binding is invalid/u
+  );
+  assert.throws(
+    () =>
+      verifyFixtureBinding(
+        {
+          ...binding,
+          target: {
+            ...binding.target,
+            targetUrn:
+              "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,DEV)",
+          },
+        },
+        identity
+      ),
+    /fixture binding is invalid/u
+  );
 });
 
 test("governed canary rejects endpoints outside its dedicated tenant marker", () => {
@@ -186,6 +250,18 @@ test("rollback recovery is content-addressed and rejects target tampering", () =
     "urn:li:dataset:(urn:li:dataPlatform:snowflake,customers,TEST)";
   assert.throws(
     () => verifyRecoveryManifest(tampered, identity),
+    /invalid or does not match/u
+  );
+
+  const fixtureTampered = structuredClone(manifest);
+  fixtureTampered.fixtureBinding.receiptSha256 = "8".repeat(64);
+  const {
+    recoveryDigest: _discardedRecoveryDigest,
+    ...fixtureTamperedUnsigned
+  } = fixtureTampered;
+  fixtureTampered.recoveryDigest = digest(fixtureTamperedUnsigned);
+  assert.throws(
+    () => verifyRecoveryManifest(fixtureTampered, identity),
     /invalid or does not match/u
   );
 

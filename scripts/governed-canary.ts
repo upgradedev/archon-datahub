@@ -30,7 +30,9 @@ import { verifyAuditEvidence } from "../src/worker/service.js";
 const APPLICATION_TAG = "urn:li:tag:PII";
 const CANARY_QUERY = "archon_governed_canary_fixture";
 const CANARY_COLUMN = "email";
-const RECOVERY_SCHEMA = "archon.governed-canary-recovery/v2";
+const CANARY_DATASET_URN =
+  "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)";
+const RECOVERY_SCHEMA = "archon.governed-canary-recovery/v3";
 const ROLLBACK_SCHEMA = "archon.governed-canary-rollback/v1";
 const ROLLBACK_EVIDENCE_SCHEMA =
   "archon.governed-canary-rollback-evidence/v1";
@@ -42,8 +44,6 @@ const AUDIT_ID = /^[a-f0-9]{64}$/u;
 const APPROVAL_ID = /^[A-Za-z0-9._:-]{8,160}$/u;
 const STAGING_EXECUTION_ARN =
   /^arn:aws:states:[a-z0-9-]+:[0-9]{12}:execution:archon-staging-control-loop:[a-f0-9]{64}$/u;
-const DATASET_URN =
-  /^urn:li:dataset:\(urn:li:dataPlatform:[A-Za-z0-9._-]+,archon_governed_canary_fixture(?:_[A-Za-z0-9_-]+)?,(?:DEV|TEST)\)$/u;
 const MAX_JSON_BYTES = 6 * 1024 * 1024;
 const POLL_INTERVAL_MS = 3_000;
 const PREPARE_TIMEOUT_MS = 15 * 60 * 1_000;
@@ -86,6 +86,27 @@ export interface CanaryApprovalBindings {
   recoveryDigest: Sha256Digest;
 }
 
+export interface FixtureBinding {
+  schemaVersion: "archon.governed-canary-fixture-binding/v1";
+  repository: string;
+  releaseSha: string;
+  workflowRunId: string;
+  workflowRunAttempt: string;
+  artifactId: string;
+  artifactName: string;
+  artifactDigest: string;
+  receiptSha256: string;
+  stateContractSha256: string;
+  postStateSha256: string;
+  gmsEndpointFingerprint: string;
+  isolationMarkerSha256: string;
+  attestationPredicateSha256: string;
+  target: {
+    query: typeof CANARY_QUERY;
+    targetUrn: typeof CANARY_DATASET_URN;
+  };
+}
+
 export interface RecoveryManifest {
   schemaVersion: typeof RECOVERY_SCHEMA;
   repository: string;
@@ -98,6 +119,8 @@ export interface RecoveryManifest {
   evidenceBucket: string;
   authBindingsDigest: Sha256Digest;
   endpointBindingsDigest: Sha256Digest;
+  fixtureBinding: FixtureBinding;
+  fixtureBindingDigest: Sha256Digest;
   auditId: string;
   executionId: string;
   approvalId: string;
@@ -210,6 +233,75 @@ function record(value: unknown, label: string): JsonRecord {
     fail(`${label} must be an object.`);
   }
   return value as JsonRecord;
+}
+
+function exactKeys(value: JsonRecord, expected: readonly string[]): boolean {
+  return (
+    canonicalize(Object.keys(value).sort()) ===
+    canonicalize([...expected].sort())
+  );
+}
+
+export function verifyFixtureBinding(
+  value: unknown,
+  identity: Pick<CanaryIdentity, "repository" | "releaseSha">
+): FixtureBinding {
+  const binding = record(value, "fixture binding");
+  const target = record(binding["target"], "fixture target");
+  const rawHexFields = [
+    "receiptSha256",
+    "stateContractSha256",
+    "postStateSha256",
+    "gmsEndpointFingerprint",
+    "isolationMarkerSha256",
+    "attestationPredicateSha256",
+  ] as const;
+  if (
+    !exactKeys(binding, [
+      "schemaVersion",
+      "repository",
+      "releaseSha",
+      "workflowRunId",
+      "workflowRunAttempt",
+      "artifactId",
+      "artifactName",
+      "artifactDigest",
+      "receiptSha256",
+      "stateContractSha256",
+      "postStateSha256",
+      "gmsEndpointFingerprint",
+      "isolationMarkerSha256",
+      "attestationPredicateSha256",
+      "target",
+    ]) ||
+    binding["schemaVersion"] !==
+      "archon.governed-canary-fixture-binding/v1" ||
+    binding["repository"] !== identity.repository ||
+    binding["releaseSha"] !== identity.releaseSha ||
+    typeof binding["workflowRunId"] !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(binding["workflowRunId"]) ||
+    typeof binding["workflowRunAttempt"] !== "string" ||
+    !/^[1-9][0-9]{0,9}$/u.test(binding["workflowRunAttempt"]) ||
+    typeof binding["artifactId"] !== "string" ||
+    !/^[1-9][0-9]{0,19}$/u.test(binding["artifactId"]) ||
+    binding["artifactName"] !==
+      `datahub-canary-fixture-receipt-${binding["workflowRunId"]}-${binding["workflowRunAttempt"]}` ||
+    typeof binding["artifactDigest"] !== "string" ||
+    !SHA256.test(binding["artifactDigest"]) ||
+    rawHexFields.some((field) => {
+      const candidate = binding[field];
+      return (
+        typeof candidate !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(candidate)
+      );
+    }) ||
+    !exactKeys(target, ["query", "targetUrn"]) ||
+    target["query"] !== CANARY_QUERY ||
+    target["targetUrn"] !== CANARY_DATASET_URN
+  ) {
+    fail("the fixture binding is invalid or does not match this release.");
+  }
+  return binding as unknown as FixtureBinding;
 }
 
 function required(
@@ -378,9 +470,9 @@ export function parseCanaryIdentity(
     true
   );
   const datasetUrn = required(source, "CANARY_DATASET_URN", 512);
-  if (!DATASET_URN.test(datasetUrn) || datasetUrn.includes(",PROD)")) {
+  if (datasetUrn !== CANARY_DATASET_URN) {
     fail(
-      "CANARY_DATASET_URN must name the dedicated archon_governed_canary_fixture in DEV or TEST."
+      "CANARY_DATASET_URN must equal the reviewed snowflake TEST fixture URN."
     );
   }
   const columnPath = required(source, "CANARY_COLUMN_PATH", 32);
@@ -686,11 +778,13 @@ function actionableEvidence(value: AuditEvidenceV1): {
 
 export function createRecoveryManifest(input: {
   identity: CanaryIdentity;
+  fixtureBinding: FixtureBinding;
   status: ControlStatus;
   evidence: AuditEvidenceV1;
   preparedAt: string;
 }): RecoveryManifest {
   const { identity, status, evidence, preparedAt } = input;
+  const fixtureBinding = verifyFixtureBinding(input.fixtureBinding, identity);
   const approval = status.approval;
   if (
     status.status !== "AWAITING_APPROVAL" ||
@@ -763,6 +857,8 @@ export function createRecoveryManifest(input: {
     evidenceBucket: identity.evidenceBucket,
     authBindingsDigest: canaryAuthBindingsDigest(identity),
     endpointBindingsDigest: canaryEndpointBindingsDigest(identity),
+    fixtureBinding,
+    fixtureBindingDigest: digest(fixtureBinding),
     auditId: status.auditId,
     executionId,
     approvalId: approval.approvalId,
@@ -807,6 +903,9 @@ export function verifyRecoveryManifest(
     manifest.evidenceBucket !== identity.evidenceBucket ||
     manifest.authBindingsDigest !== canaryAuthBindingsDigest(identity) ||
     manifest.endpointBindingsDigest !== canaryEndpointBindingsDigest(identity) ||
+    canonicalize(verifyFixtureBinding(manifest.fixtureBinding, identity)) !==
+      canonicalize(manifest.fixtureBinding) ||
+    manifest.fixtureBindingDigest !== digest(manifest.fixtureBinding) ||
     !AUDIT_ID.test(manifest.auditId) ||
     !STAGING_EXECUTION_ARN.test(manifest.executionId) ||
     !manifest.executionId.endsWith(`:${manifest.auditId}`) ||
@@ -1433,6 +1532,28 @@ export function rollbackDispositionForObservedDigest(
 async function prepare(): Promise<void> {
   const identity = parseCanaryIdentity(process.env);
   const outputPath = required(process.env, "CANARY_RECOVERY_PATH", 4_096);
+  const fixtureBindingPath = required(
+    process.env,
+    "CANARY_FIXTURE_BINDING_PATH",
+    4_096
+  );
+  const fixtureBindingRaw = await readFile(fixtureBindingPath, "utf8");
+  if (
+    Buffer.byteLength(fixtureBindingRaw, "utf8") > 16 * 1024 ||
+    !fixtureBindingRaw.endsWith("\n")
+  ) {
+    fail("the fixture binding file is missing its bounded canonical envelope.");
+  }
+  let fixtureBindingValue: unknown;
+  try {
+    fixtureBindingValue = JSON.parse(fixtureBindingRaw);
+  } catch {
+    fail("the fixture binding file is not valid JSON.");
+  }
+  if (`${canonicalize(fixtureBindingValue)}\n` !== fixtureBindingRaw) {
+    fail("the fixture binding file is not canonical JSON.");
+  }
+  const fixtureBinding = verifyFixtureBinding(fixtureBindingValue, identity);
   const auditId = await startControlLoop(identity);
   const status = await waitForStatus(
     identity,
@@ -1448,6 +1569,7 @@ async function prepare(): Promise<void> {
   )) as AuditEvidenceV1;
   const manifest = createRecoveryManifest({
     identity,
+    fixtureBinding,
     status,
     evidence,
     preparedAt: new Date().toISOString(),

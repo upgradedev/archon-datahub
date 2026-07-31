@@ -20,6 +20,7 @@ permissions:
 concurrency:
   group: archon-aws-control-plane
   cancel-in-progress: false
+  queue: max
 
 env:
   NODE_VERSION: "22.23.1"
@@ -38,6 +39,10 @@ defaults:
 jobs:
   foundation:
     name: Reconcile and attest AWS foundation
+    concurrency:
+      group: archon-governed-canary-mutation-recovery
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     environment:
@@ -61,6 +66,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}
           STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}
           STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}
           PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}
@@ -92,6 +98,9 @@ jobs:
           test "${AWS_REGION}" = "eu-west-1"
           test "${AWS_FOUNDATION_ROLE_ARN}" = \
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${FOUNDATION_ROLE_NAME}"
+          if [[ -n "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" ]]; then
+            [[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          fi
           dns_name_pattern='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
           hosted_zone_id_pattern='^Z[A-Z0-9]{1,31}$'
           [[ "${STAGING_CLOUDFRONT_DOMAIN_NAME}" =~ ${dns_name_pattern} ]]
@@ -181,6 +190,9 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
           for path in \
             contracts/aws-foundation-v1.json \
+            contracts/aws-foundation-policy-migration-v1.json \
+            infra/aws/package.json \
+            infra/aws/package-lock.json \
             infra/aws/foundation/api-gateway-account.yml \
             infra/aws/foundation/cdk-execution-policy.yml \
             infra/aws/foundation/github-actions-deploy-role.yml \
@@ -188,10 +200,19 @@ jobs:
             infra/aws/foundation/github-actions-foundation-role.yml \
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/aws-cloudformation-drift.sh \
+            scripts/patch-cdk-brace-expansion.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-canonical-flow-yaml.mjs \
+            scripts/render-inline-cloudformation-template.sh \
+            scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/sanitize-cloudformation-failure.mjs \
             scripts/render-aws-foundation-policy.mjs \
-            scripts/verify-aws-runtime-boundary.mjs; do
+            scripts/validate-aws-foundation-policy.jq \
+            scripts/verify-aws-runtime-boundary.mjs \
+            scripts/verify-cdk-npm-audit-compensation.sh \
+            scripts/verify-exact-npm-overrides.mjs; do
             test -f "${path}"
             test ! -L "${path}"
           done
@@ -204,6 +225,13 @@ jobs:
             .workflow.confirmation == "BOOTSTRAP_CDK_FOUNDATION" and
             .aws.primaryRegion == "eu-west-1" and
             .aws.regions == ["eu-west-1", "us-east-1"] and
+            .aws.toolchain == {
+              awsCdkCliVersionSource:
+                "infra/aws/package-lock.json#packages/node_modules/aws-cdk/version",
+              installedAwsCdkCliMatchesLock: true,
+              nodeVersion: "22.23.1",
+              npmVersion: "10.9.8"
+            } and
             .aws.foundationRoleName == "archon-datahub-github-foundation" and
             .aws.foundationRoleAdoption == {
               allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
@@ -219,6 +247,8 @@ jobs:
               requiresZeroAttachedManagedPolicies: true,
               requiresZeroInlinePolicies: true
             } and
+            .aws.foundationPolicies.migrationContract ==
+              "contracts/aws-foundation-policy-migration-v1.json" and
             .aws.foundationPolicies.sourceBundleAttachable == false and
             .aws.foundationPolicies.roleInlinePolicyCount == 0 and
             .aws.foundationPolicies.roleAttachedPolicyCount == 4 and
@@ -231,11 +261,58 @@ jobs:
               "archon-aws-foundation-identity",
               "archon-aws-foundation-attachments"
             ] and
+            .aws.inlineTemplateRendering == {
+              deployedOriginalMatchesSemanticSha256: true,
+              flowEmitter: {
+                name: "scripts/render-canonical-flow-yaml.mjs",
+                runtime: "node-22.23.1",
+                scalarPolicy: "strict-ascii-plain-or-json-quoted"
+              },
+              format: "canonical-flow-yaml",
+              iamPolicyResourceArnValidation: {
+                directStrings: true,
+                intrinsicSubStrings: true,
+                malformedOrIncompleteArns: "forbidden",
+                partitionResolution: "literal-aws-or-exact-AWS::Partition-ref",
+                serviceSegment: "literal-lowercase-token",
+                verifier: "scripts/verify-iam-policy-resource-arns.mjs",
+                wildcardServiceSegments: "forbidden"
+              },
+              maximumTemplateBodyBytes: 51200,
+              outputRoot: "RUNNER_TEMP",
+              renderer: "scripts/render-inline-cloudformation-template.sh",
+              sameBytesForValidationAndDeploy: true,
+              semanticRoundTrip: "rain-json-canonical-equality",
+              source: "infra/aws/foundation/cdk-execution-policy.yml",
+              tool: {
+                linuxAmd64ArchiveSha256:
+                  "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
+                name: "aws-cloudformation/rain",
+                version: "v1.24.4"
+              },
+              yamlParser: {
+                linuxAmd64Sha256:
+                  "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+                name: "mikefarah/yq",
+                version: "v4.47.2"
+              }
+            } and
             .aws.sharedApiGatewayLogging == {
-              inlinePolicyName: "archon-apigateway-cloudwatch-logs",
-              region: "eu-west-1",
-              roleName: "archon-datahub-apigateway-cloudwatch-logs",
-              stackName: "Archon-Shared-ApiGateway-Logging"
+              external: {
+                bindingSha256Variable:
+                  "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+                managedStackMustBeAbsent: true,
+                mutation: "none",
+                sameAccountRoleArnRequired: true,
+                takeover: "forbidden"
+              },
+              managed: {
+                inlinePolicyName: "archon-apigateway-cloudwatch-logs",
+                roleName: "archon-datahub-apigateway-cloudwatch-logs",
+                stackName: "Archon-Shared-ApiGateway-Logging"
+              },
+              ownershipModes: ["foundation-managed", "external-pinned"],
+              region: "eu-west-1"
             } and
             .aws.deployRoles.staging.roleName ==
               "archon-datahub-github-staging-deploy" and
@@ -359,8 +436,7 @@ jobs:
               keys |
               sort
             ) == [
-              "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-              "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+              "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
             ] and
             .evidence.applicationStackRolePreflight == {
               allowedEntryValidations: [
@@ -372,22 +448,128 @@ jobs:
               migrationRequiredState:
                 "foundation-complete-deploy-migration-required",
               readyState: "ready-for-deploy"
+            } and
+            .evidence.driftVerification == {
+              cliConnectTimeoutSeconds: 5,
+              cliReadTimeoutSeconds: 15,
+              awsSdkMaxAttempts: 1,
+              coverage: "cloudformation-supported-resources",
+              exactStackIncarnation: true,
+              failureMode: "fail-closed",
+              globalDeadline: "hard-wall-clock",
+              globalTimeoutSeconds: 900,
+              helper: "scripts/aws-cloudformation-drift.sh",
+              maximumConsecutiveApiFailuresPerStack: 3,
+              maximumPollAttemptsPerStack: 120,
+              method: "detect-then-bounded-describe-poll",
+              pollDelaySeconds: 2,
+              rawAwsStderr: "suppressed",
+              responseBinding: [
+                "StackDriftDetectionId",
+                "StackId",
+                "Timestamp",
+                "DriftInformation.LastCheckTimestamp"
+              ],
+              finalStackBinding: {
+                method: "bounded-describe-stacks-poll",
+                maximumAttempts: 5,
+                pollDelaySeconds: 2,
+                timestampComparison: "normalized-utc-monotonic-lower-bound",
+                currentOrNewerInSyncProjection: "accept",
+                currentDriftedProjection: "fail-closed",
+                currentOrNewerIndeterminateProjection: "bounded-retry",
+                staleOrUnpublishedProjection: "bounded-retry",
+                selectionMismatch: "fail-closed",
+                malformedProjection: "fail-closed"
+              },
+              staleResourceEvidence: "forbidden",
+              terminalSuccess: {
+                detectionStatus: "DETECTION_COMPLETE",
+                driftedStackResourceCount: 0,
+                returnedResourceStatuses: ["IN_SYNC"],
+                stackDriftStatus: "IN_SYNC"
+              },
+              unsupportedCliWaiter: "forbidden"
+            } and
+            .evidence.failureDiagnostics == {
+              allowlistedStackLabels: [
+                "governed-canary-roles",
+                "production-bootstrap-edge",
+                "production-bootstrap-primary",
+                "production-deploy",
+                "production-iam",
+                "shared-api-gateway",
+                "staging-bootstrap-edge",
+                "staging-bootstrap-primary",
+                "staging-deploy",
+                "staging-iam"
+              ],
+              artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
+              artifactRetentionDays: 90,
+              artifactUpload: "explicit-files-only",
+              autoRecovery: "forbidden",
+              explicitIncidentRecoveryContract:
+                "contracts/aws-incident-recovery-v1.json",
+              explicitIncidentRecoveryStatus:
+                "recovered-delete-complete-cleanup-proven",
+              canonicalJson: true,
+              credentialClearProofRequired: true,
+              diagnosticCount: 1,
+              digestFields: [
+                "logicalResourceId",
+                "reasonCategory",
+                "resourceStatus",
+                "resourceType",
+                "schemaVersion",
+                "stackLabel",
+                "stackStatus"
+              ],
+              fields: [
+
+                "diagnosticSha256",
+                "logicalResourceId",
+                "reasonCategory",
+                "resourceStatus",
+                "resourceType",
+                "schemaVersion",
+                "stackLabel",
+                "stackStatus"
+              ],
+              managedCommandOutput: "suppressed",
+              maxInputBytes: 1048576,
+              maxRecentEvents: 100,
+              deprioritizedReasonCategories: ["dependency-failure"],
+              eventOrder: "cloudformation-newest-first",
+              eventSelection: "newest-non-dependency-failed-else-newest-failed",
+              postCredentialDigestRecomputed: true,
+              rawReasonHashing: false,
+              rawReasonRetention: false,
+              recursiveInventory: "exact-two-root-regular-files",
+              schemaVersion: "archon.aws-foundation-cfn-failure/v1",
+              stackIdentity: "allowlisted-label-only",
+              unknownReasonCategoryEligible: true
             }
           ' contracts/aws-foundation-v1.json >/dev/null
-          jq -e '
-            .Version == "2012-10-17" and
-            ([.Statement[].Action] | flatten | index("*") | not) and
-            (
-              [.Statement[] |
-                select(.Sid == "RejectLegacySharedDeployRole")] |
-              length
-            ) == 1 and
-            (
-              [.Statement[] |
-                select(.Sid == "ConfigureSharedApiGatewayLogging")] |
-              length
-            ) == 1
-          ' infra/aws/foundation/github-actions-foundation-policy.json >/dev/null
+          jq -e \
+            --slurpfile migration \
+              contracts/aws-foundation-policy-migration-v1.json \
+            --from-file scripts/validate-aws-foundation-policy.jq \
+            infra/aws/foundation/github-actions-foundation-policy.json \
+            >/dev/null
+          test "$(grep -cF \
+            '                  - cloudformation:DetectStackResourceDrift' \
+            infra/aws/foundation/github-actions-deploy-role.yml)" = "2"
+          test "$(grep -cF \
+            '                  - cloudformation:BatchDescribeTypeConfigurations' \
+            infra/aws/foundation/github-actions-deploy-role.yml)" = "2"
+          for sid in \
+            DetectExactStageIamFoundationDrift \
+            ReadStageIamDriftDetection \
+            ReadAndDetectExactProductionStacks \
+            ReadStackDriftDetectionStatus; do
+            grep -Fq -- "- Sid: ${sid}" \
+              infra/aws/foundation/github-actions-deploy-role.yml
+          done
 
       - name: Use the locked Node toolchain
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -399,83 +581,66 @@ jobs:
       - name: Install and verify locked AWS CDK dependencies
         run: |
           set -euo pipefail
-          test "$(npm --version)" = "${NPM_VERSION}"
+          contract_node_version="$(
+            jq -er '.aws.toolchain.nodeVersion' \
+              contracts/aws-foundation-v1.json
+          )"
+          contract_npm_version="$(
+            jq -er '.aws.toolchain.npmVersion' \
+              contracts/aws-foundation-v1.json
+          )"
+          test "${NODE_VERSION}" = "${contract_node_version}"
+          test "${NPM_VERSION}" = "${contract_npm_version}"
+          test "$(node --version)" = "v${contract_node_version}"
+          test "$(npm --version)" = "${contract_npm_version}"
           npm ci --prefix infra/aws --ignore-scripts
+          locked_cdk_version="$(
+            jq -er '
+              .packages["node_modules/aws-cdk"].version |
+              select(
+                type == "string" and
+                test("^[0-9]+\\.[0-9]+\\.[0-9]+$")
+              )
+            ' infra/aws/package-lock.json
+          )"
+          installed_cdk_version="$(
+            node -p \
+              "require('./infra/aws/node_modules/aws-cdk/package.json').version"
+          )"
+          test "${installed_cdk_version}" = "${locked_cdk_version}"
+          printf 'Verified locked AWS CDK CLI %s\n' "${locked_cdk_version}"
           node scripts/verify-exact-npm-overrides.mjs infra/aws
           bash scripts/patch-cdk-brace-expansion.sh infra/aws
           bash scripts/verify-cdk-npm-audit-compensation.sh infra/aws
-          test "$(
-            node -p \
-              "require('./infra/aws/node_modules/aws-cdk/package.json').version"
-          )" = "2.1133.0"
 
       - name: Seal the pinned modern bootstrap template
         id: bootstrap_template
+        run: bash scripts/seal-cdk-bootstrap-templates.sh
+
+      - name: Render the inline-safe IAM foundation template
+        id: iam_foundation_template
         run: |
           set -euo pipefail
-          template="${RUNNER_TEMP}/cdk-bootstrap-template.yml"
-          infra/aws/node_modules/.bin/cdk bootstrap \
-            --show-template \
-            --no-notices >"${template}"
-          test -s "${template}"
-          test -f "${template}"
-          test ! -L "${template}"
-          template_version="$(
-            awk '
-              $1 == "CdkBootstrapVersion:" { in_version = 1; next }
-              in_version && $1 == "Value:" {
-                gsub(/\047/, "", $2)
-                print $2
-                exit
-              }
-            ' "${template}"
-          )"
-          test "${template_version}" = "${EXPECTED_BOOTSTRAP_VERSION}"
-          for logical_id in \
-            StagingBucket \
-            StagingBucketPolicy \
-            ContainerAssetsRepository \
-            FilePublishingRole \
-            ImagePublishingRole \
-            LookupRole \
-            DeploymentActionRole \
-            CloudFormationExecutionRole \
-            CdkBootstrapVersion; do
-            grep -Eq "^[[:space:]]{2}${logical_id}:" "${template}"
-          done
-          template_sha="$(sha256sum "${template}" | awk '{print $1}')"
-          for stage in staging production; do
-            for region_slot in primary edge; do
-              if [[ "${region_slot}" == "primary" ]]; then
-                region="eu-west-1"
-              else
-                region="us-east-1"
-              fi
-              stage_template="$(
-                printf '%s/cdk-bootstrap-%s-%s.yml' \
-                  "${RUNNER_TEMP}" "${stage}" "${region}"
-              )"
-              node scripts/patch-cdk-bootstrap-template.mjs \
-                --input "${template}" \
-                --output "${stage_template}" \
-                --stage "${stage}" \
-                --region "${region}"
-              test -s "${stage_template}"
-              test ! -L "${stage_template}"
-              grep -Fq \
-                "Archon DataHub ${stage} ${region} isolated bootstrap v1" \
-                "${stage_template}"
-              stage_sha="$(sha256sum "${stage_template}" | awk '{print $1}')"
-              {
-                echo "${stage}_${region_slot}_path=${stage_template}"
-                echo "${stage}_${region_slot}_sha=${stage_sha}"
-              } >>"${GITHUB_OUTPUT}"
-            done
-          done
+          output="${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"
+          canonical="${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            "${output}" \
+            "${canonical}"
+          yq_bin="${RUNNER_TEMP}/archon-inline-cfn-yq"
+          test -f "${yq_bin}"
+          test ! -L "${yq_bin}"
+          test -x "${yq_bin}"
+          output_sha="$(sha256sum "${output}" | awk '{print $1}')"
+          canonical_sha="$(sha256sum "${canonical}" | awk '{print $1}')"
+          yq_sha="$(sha256sum "${yq_bin}" | awk '{print $1}')"
           {
-            echo "path=${template}"
-            echo "sha=${template_sha}"
-            echo "version=${template_version}"
+            echo "path=${output}"
+            echo "sha=${output_sha}"
+            echo "canonical_path=${canonical}"
+            echo "canonical_sha=${canonical_sha}"
+            echo "yq_path=${yq_bin}"
+            echo "yq_sha=${yq_sha}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Prove exact synthesized runtime action equality for both stages
@@ -503,6 +668,12 @@ jobs:
           CONTROL_PLANE_SHA: ${{ github.sha }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
@@ -523,6 +694,26 @@ jobs:
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
           test "$(sha256sum "${BOOTSTRAP_TEMPLATE}" | awk '{print $1}')" = \
             "${BOOTSTRAP_TEMPLATE_SHA}"
+          test "$(sha256sum "${IAM_FOUNDATION_TEMPLATE}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_TEMPLATE_SHA}"
+          test "$(wc -c <"${IAM_FOUNDATION_TEMPLATE}" | tr -d '[:space:]')" \
+            -le 51200
+          test "$(sha256sum "${IAM_FOUNDATION_CANONICAL_JSON}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_SEMANTIC_SHA}"
+          jq -e '
+            type == "object" and
+            (.Resources | type == "object" and length > 0)
+          ' "${IAM_FOUNDATION_CANONICAL_JSON}" >/dev/null
+          test -f "${IAM_FOUNDATION_YQ_BIN}"
+          test ! -L "${IAM_FOUNDATION_YQ_BIN}"
+          test -x "${IAM_FOUNDATION_YQ_BIN}"
+          test "${IAM_FOUNDATION_YQ_SHA}" = "$(
+            jq -er \
+              '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
+              contracts/aws-foundation-v1.json
+          )"
+          test "$(sha256sum "${IAM_FOUNDATION_YQ_BIN}" | awk '{print $1}')" = \
+            "${IAM_FOUNDATION_YQ_SHA}"
           for tuple in \
             "STAGING_PRIMARY_BOOTSTRAP_TEMPLATE STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA" \
             "STAGING_EDGE_BOOTSTRAP_TEMPLATE STAGING_EDGE_BOOTSTRAP_TEMPLATE_SHA" \
@@ -720,11 +911,18 @@ jobs:
         id: reconcile
         env:
           EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
           GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
           BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.path }}
           BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.sha }}
+          IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}
+          IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}
+          IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}
+          IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}
+          IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}
+          IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_primary_path }}
           STAGING_PRIMARY_BOOTSTRAP_TEMPLATE_SHA: ${{ steps.bootstrap_template.outputs.staging_primary_sha }}
           STAGING_EDGE_BOOTSTRAP_TEMPLATE: ${{ steps.bootstrap_template.outputs.staging_edge_path }}
@@ -758,6 +956,8 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Clear AWS credentials before artifact handling
+        id: clear_aws_credentials
+        if: ${{ always() }}
         run: |
           set -euo pipefail
           {
@@ -766,6 +966,189 @@ jobs:
             echo "AWS_SESSION_TOKEN="
             echo "AWS_SECURITY_TOKEN="
           } >>"${GITHUB_ENV}"
+          echo "cleared=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate checksum-sealed sanitized failure evidence
+        id: failure_evidence
+        if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == 'true' }}
+        env:
+          FAILURE_EVIDENCE_DIR: ${{ runner.temp }}/aws-foundation-failure
+        run: |
+          set -euo pipefail
+          if [[ -n "${AWS_ACCESS_KEY_ID:-}" || \
+            -n "${AWS_SECRET_ACCESS_KEY:-}" || \
+            -n "${AWS_SESSION_TOKEN:-}" || \
+            -n "${AWS_SECURITY_TOKEN:-}" ]]; then
+            echo "::error::AWS credentials remained available during failure evidence validation" >&2
+            exit 1
+          fi
+          if [[ ! -e "${FAILURE_EVIDENCE_DIR}" && ! -L "${FAILURE_EVIDENCE_DIR}" ]]; then
+            echo "available=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          test -d "${FAILURE_EVIDENCE_DIR}"
+          test ! -L "${FAILURE_EVIDENCE_DIR}"
+          if ! actual_inventory_sha="$(
+            find -P "${FAILURE_EVIDENCE_DIR}" \
+              -mindepth 1 -printf '%P\t%y\0' |
+              LC_ALL=C sort -z |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to inventory sanitized failure evidence" >&2
+            exit 1
+          fi
+          if ! expected_inventory_sha="$(
+            printf 'SHA256SUMS\tf\0cfn-failure.json\tf\0' |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to derive the expected failure evidence inventory" >&2
+            exit 1
+          fi
+          if [[ ! "${actual_inventory_sha}" =~ ^[0-9a-f]{64}$ || \
+            "${actual_inventory_sha}" != "${expected_inventory_sha}" ]]; then
+            echo "::error::Sanitized failure evidence inventory mismatch" >&2
+            exit 1
+          fi
+          for evidence_path in cfn-failure.json SHA256SUMS; do
+            test -f "${FAILURE_EVIDENCE_DIR}/${evidence_path}"
+            test ! -L "${FAILURE_EVIDENCE_DIR}/${evidence_path}"
+          done
+          if ! (
+            cd "${FAILURE_EVIDENCE_DIR}" &&
+              test "$(wc -l <SHA256SUMS)" -eq 1 &&
+              grep -Eq '^[0-9a-f]{64}  cfn-failure.json$' SHA256SUMS &&
+              sha256sum --check --strict SHA256SUMS >/dev/null 2>&1
+          ); then
+            echo "::error::Sanitized failure evidence checksum mismatch" >&2
+            exit 1
+          fi
+          if ! test "$(wc -c <"${FAILURE_EVIDENCE_DIR}/cfn-failure.json")" -le 2048; then
+            echo "::error::Sanitized failure evidence exceeded its size limit" >&2
+            exit 1
+          fi
+          if ! canonical_diagnostic="$(
+            mktemp "${RUNNER_TEMP}/aws-foundation-failure-canonical.XXXXXX"
+          )"; then
+            echo "::error::Unable to stage canonical failure evidence validation" >&2
+            exit 1
+          fi
+          trap 'rm -f -- "${canonical_diagnostic}"' EXIT
+          if ! jq -cS . \
+            "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+            >"${canonical_diagnostic}" 2>/dev/null; then
+            echo "::error::Sanitized failure evidence was not valid JSON" >&2
+            exit 1
+          fi
+          if ! cmp -s \
+            "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+            "${canonical_diagnostic}"; then
+            echo "::error::Sanitized failure evidence was not canonical JSON" >&2
+            exit 1
+          fi
+          if ! jq -e '
+            (keys | sort) == [
+              "diagnosticSha256",
+              "logicalResourceId",
+              "reasonCategory",
+              "resourceStatus",
+              "resourceType",
+              "schemaVersion",
+              "stackLabel",
+              "stackStatus"
+            ] and
+            .schemaVersion == "archon.aws-foundation-cfn-failure/v1" and
+            (.stackLabel | IN(
+              "governed-canary-roles",
+              "production-bootstrap-edge",
+              "production-bootstrap-primary",
+              "production-deploy",
+              "production-iam",
+              "shared-api-gateway",
+              "staging-bootstrap-edge",
+              "staging-bootstrap-primary",
+              "staging-deploy",
+              "staging-iam"
+            )) and
+            (.stackStatus | IN(
+              "CREATE_COMPLETE", "CREATE_FAILED", "CREATE_IN_PROGRESS",
+              "DELETE_COMPLETE", "DELETE_FAILED", "DELETE_IN_PROGRESS",
+              "IMPORT_COMPLETE", "IMPORT_IN_PROGRESS",
+              "IMPORT_ROLLBACK_COMPLETE", "IMPORT_ROLLBACK_FAILED",
+              "IMPORT_ROLLBACK_IN_PROGRESS", "REVIEW_IN_PROGRESS",
+              "ROLLBACK_COMPLETE", "ROLLBACK_FAILED", "ROLLBACK_IN_PROGRESS",
+              "UNKNOWN", "UPDATE_COMPLETE",
+              "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_FAILED",
+              "UPDATE_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE",
+              "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+              "UPDATE_ROLLBACK_FAILED", "UPDATE_ROLLBACK_IN_PROGRESS"
+            )) and
+            (.logicalResourceId | test("^[A-Za-z][A-Za-z0-9]{0,254}$")) and
+            (.resourceType | test("^(AWS::[A-Za-z0-9]+::[A-Za-z0-9]+|Custom::[A-Za-z0-9._-]+)$")) and
+            (.resourceStatus | IN(
+              "CREATE_FAILED", "DELETE_FAILED", "IMPORT_ROLLBACK_FAILED",
+              "ROLLBACK_FAILED", "UPDATE_FAILED", "UPDATE_ROLLBACK_FAILED"
+            )) and
+            (.reasonCategory | IN(
+              "access-denied", "already-exists", "dependency-failure",
+              "invalid-request", "quota-exceeded", "resource-conflict",
+              "service-failure", "timeout", "unknown"
+            )) and
+            (.diagnosticSha256 | test("^[0-9a-f]{64}$"))
+          ' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" >/dev/null 2>&1; then
+            echo "::error::Sanitized failure evidence failed schema validation" >&2
+            exit 1
+          fi
+          if ! canonical_safe_json="$(
+            jq -cS '{
+              logicalResourceId,
+              reasonCategory,
+              resourceStatus,
+              resourceType,
+              schemaVersion,
+              stackLabel,
+              stackStatus
+            }' "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" 2>/dev/null
+          )"; then
+            echo "::error::Unable to canonicalize sanitized diagnostic fields" >&2
+            exit 1
+          fi
+          if ! computed_digest="$(
+            printf '%s' "${canonical_safe_json}" |
+              sha256sum |
+              awk '{print $1}'
+          )"; then
+            echo "::error::Unable to recompute sanitized diagnostic digest" >&2
+            exit 1
+          fi
+          if [[ ! "${computed_digest}" =~ ^[0-9a-f]{64}$ ]] || \
+            ! jq -e --arg computedDigest "${computed_digest}" \
+              '.diagnosticSha256 == $computedDigest' \
+              "${FAILURE_EVIDENCE_DIR}/cfn-failure.json" \
+              >/dev/null 2>&1; then
+            echo "::error::Sanitized diagnostic digest mismatch" >&2
+            exit 1
+          fi
+          if ! rm -f -- "${canonical_diagnostic}"; then
+            echo "::error::Unable to remove canonical validation staging" >&2
+            exit 1
+          fi
+          trap - EXIT
+          echo "available=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Retain checksum-sealed sanitized foundation failure evidence
+        if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared == 'true' && steps.failure_evidence.outputs.available == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-foundation-failure-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/aws-foundation-failure/SHA256SUMS
+            ${{ runner.temp }}/aws-foundation-failure/cfn-failure.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: false
 
       - name: Reverify sanitized foundation evidence
         env:
@@ -825,6 +1208,8 @@ jobs:
           CANARY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.canary_role_binding_sha }}
           OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
+          SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}
+          DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}
         run: |
           set -euo pipefail
           {
@@ -832,13 +1217,28 @@ jobs:
             echo
             echo "- Regions: \`eu-west-1\`, \`us-east-1\`"
             echo "- Bootstraps: \`CDKToolkit-archonstg\`, \`CDKToolkit-archonprd\` (version 32)"
-            echo "- Stage execution policies and runtime boundaries: exact and drift-free"
+            echo "- Stage execution policies and runtime boundaries: exact; CloudFormation-supported resources IN_SYNC"
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
             echo "- Operational roles: stage judge access plus production posture, runtime, and paging"
-            echo "- Shared API Gateway logging account: exact foundation-owned role"
+            case "${SHARED_API_GATEWAY_MODE}" in
+              foundation-managed)
+                test "${DRIFT_STACK_COUNT}" = "10"
+                echo "- Shared API Gateway logging account: exact foundation-managed role"
+                echo "- Managed stack inventory: \`10\`"
+                ;;
+              external-pinned)
+                test "${DRIFT_STACK_COUNT}" = "9"
+                echo "- Shared API Gateway logging account: pinned external binding, unchanged, no takeover"
+                echo "- Managed stack inventory: \`9\` plus one external account binding"
+                ;;
+              *)
+                echo "::error::invalid shared API Gateway evidence mode"
+                exit 1
+                ;;
+            esac
             echo "- Application stack RoleARN transition: \`${APPLICATION_STACK_ROLE_TRANSITION}\`"
-            echo "- Ten-stack drift digest: \`${DRIFT_SHA}\`"
+            echo "- Managed-stack drift digest: \`${DRIFT_SHA}\`"
             echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
             echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"

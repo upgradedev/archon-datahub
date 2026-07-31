@@ -307,6 +307,11 @@ def validate_workflow(source: str) -> None:
         '"okActionsBoundToTopic": True',
         '"insufficientDataActionsEmpty": True',
         'embedded_canary["attestationVerificationSha256"]',
+        'embedded_canary["fixtureBindingDigest"]',
+        'canary_predicate["fixtureBinding"]',
+        '"archon.governed-canary-fixture-binding/v1"',
+        '"canary fixture binding content digest"',
+        '"archon_governed_canary_fixture,TEST)"',
         "positive_decimal(rollback[\"workflowRunId\"]",
         '"17 */6 * * *"',
         '"2026-08-31T21:00:00Z"',
@@ -418,6 +423,11 @@ mutations = {
         workflow,
         '#|     embedded_canary["attestationVerificationSha256"],\n',
         '#|     file_sha(canary_dir / "attestation-predicate.json"),\n',
+    ),
+    "canary fixture binding detached from deployment": replace_once(
+        workflow,
+        '#|         embedded_canary["fixtureBindingDigest"],\n',
+        '#|         fixture_binding_digest,\n',
     ),
     "canary run identifier coercion accepted": replace_once(
         workflow,

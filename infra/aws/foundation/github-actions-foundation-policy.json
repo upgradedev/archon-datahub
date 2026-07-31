@@ -15,6 +15,7 @@
         "cloudformation:CreateStack",
         "cloudformation:DeleteChangeSet",
         "cloudformation:DetectStackDrift",
+        "cloudformation:DetectStackResourceDrift",
         "cloudformation:DescribeChangeSet",
         "cloudformation:DescribeStackEvents",
         "cloudformation:DescribeStackResource",
@@ -47,12 +48,51 @@
       "Sid": "InspectFoundationTemplates",
       "Effect": "Allow",
       "Action": [
+        "cloudformation:BatchDescribeTypeConfigurations",
         "cloudformation:GetTemplateSummary",
         "cloudformation:ListStacks",
         "cloudformation:DescribeStackDriftDetectionStatus",
         "cloudformation:ValidateTemplate"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadExactBootstrapBucketsForDrift",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetAccelerateConfiguration",
+        "s3:GetAnalyticsConfiguration",
+        "s3:GetBucketAbac",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:GetBucketNotification",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketWebsite",
+        "s3:GetIntelligentTieringConfiguration",
+        "s3:GetInventoryConfiguration",
+        "s3:GetMetricsConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:s3:::cdk-archonstg-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:s3:::cdk-archonstg-assets-${aws:PrincipalAccount}-us-east-1",
+        "arn:aws:s3:::cdk-archonprd-assets-${aws:PrincipalAccount}-eu-west-1",
+        "arn:aws:s3:::cdk-archonprd-assets-${aws:PrincipalAccount}-us-east-1"
+      ]
+    },
+    {
+      "Sid": "ReadExactStagePoliciesForDrift",
+      "Effect": "Allow",
+      "Action": "iam:ListEntitiesForPolicy",
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-staging",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-production",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-staging",
+        "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-production"
+      ]
     },
     {
       "Sid": "InspectExistingApplicationStackRoles",

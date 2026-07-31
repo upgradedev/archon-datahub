@@ -1,0 +1,140 @@
+{
+  "schemaVersion": "archon.aws-foundation-policy-migration/v1",
+  "status": "ready-for-migration",
+  "sourceFailure": {
+    "runId": 30600085506,
+    "runAttempt": 1,
+    "headSha": "b1aed8dfe66848557b7670da5ce280084a128457",
+    "phase": "drift-verification",
+    "diagnostic": "incomplete-resource-handler-read-permissions",
+    "awsMutationsBeforeFailure": "reconciliation-completed-postchecks-passed",
+    "failureArtifact": "not-authored-sanitized-detection-failure"
+  },
+  "workflow": {
+    "entry": ".github/workflows/aws-foundation-policy-migration.yml",
+    "driver": ".github/workflows/aws-foundation-policy-migration-driver.yml",
+    "cleanup": ".github/workflows/aws-foundation-policy-migration-cleanup.yml",
+    "branch": "master",
+    "outerConcurrencyGroup": "archon-aws-control-plane",
+    "innerConcurrencyGroup": "archon-governed-canary-mutation-recovery",
+    "queue": "max",
+    "confirmation": "MIGRATE EXACT FOUNDATION ASSETS POLICY",
+    "cleanupConfirmation": "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION",
+    "ownerActorOnly": true,
+    "exactHeadRequired": true,
+    "exactParentAttemptJobsRequired": true,
+    "automaticCleanupCurrentHeadIndependent": true
+  },
+  "implementation": {
+    "driver": "scripts/run-aws-foundation-policy-migration.sh",
+    "environmentVerifier": "scripts/verify-github-environment-protection.sh",
+    "libraries": [
+      "scripts/aws-foundation-policy-migration-authorization.sh",
+      "scripts/aws-foundation-policy-migration-common.sh",
+      "scripts/aws-foundation-policy-migration-state.sh"
+    ]
+  },
+  "policy": {
+    "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+    "renderer": "scripts/render-aws-foundation-policy.mjs",
+    "group": "assets",
+    "name": "archon-aws-foundation-assets",
+    "initialVersionCount": 1,
+    "successfulVersionCount": 2,
+    "retainPreviousDefaultForRollback": true,
+    "exactDelta": {
+      "statements": [
+        {
+          "sid": "ReadExactBootstrapBucketsForDrift",
+          "resourcesMatchStatement": "ReconcileExactBootstrapBuckets",
+          "actions": [
+            "s3:GetAccelerateConfiguration",
+            "s3:GetAnalyticsConfiguration",
+            "s3:GetBucketAbac",
+            "s3:GetBucketCORS",
+            "s3:GetBucketLogging",
+            "s3:GetBucketMetadataTableConfiguration",
+            "s3:GetBucketNotification",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketWebsite",
+            "s3:GetIntelligentTieringConfiguration",
+            "s3:GetInventoryConfiguration",
+            "s3:GetMetricsConfiguration",
+            "s3:GetReplicationConfiguration",
+            "s3:ListTagsForResource"
+          ]
+        },
+        {
+          "sid": "ReadExactStagePoliciesForDrift",
+          "resourcesMatchStatement": "ReconcileExactStagePolicies",
+          "actions": [
+            "iam:ListEntitiesForPolicy"
+          ]
+        }
+      ]
+    }
+  },
+  "authorization": {
+    "installerEnvironment": "aws-foundation",
+    "executorEnvironment": "governed-canary-recovery",
+    "executorRoleName": "archon-datahub-github-governed-canary-recovery",
+    "temporaryPolicyName": "archon-foundation-assets-policy-migration",
+    "ttlSeconds": 1200,
+    "managedPolicyActions": [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "rollbackManagedPolicyActions": [
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "temporaryPolicyReadAction": "iam:GetRolePolicy",
+    "selfPersistenceActionsAllowed": false,
+    "canonicalReadbackRequired": true,
+    "mandatoryRevocation": true,
+    "absenceReadCount": 3
+  },
+  "phases": [
+    "prepare-and-authorize",
+    "create-and-verify-nondefault-version",
+    "single-default-switch",
+    "postverify-and-revoke"
+  ],
+  "recovery": {
+    "automaticFollowerOnNonSuccess": true,
+    "manualDispatch": true,
+    "manualDispatchMode": "cleanup-rollback",
+    "freshRollbackOnlyAuthorization": true,
+    "rollbackToPreviousDefault": true,
+    "deleteOnlyNewNondefaultVersion": true,
+    "mandatoryAuthorizationRevocation": true,
+    "revokeOnlyPreservesExactTerminalState": true,
+    "parentOutcomeClassification": {
+      "migrateSucceeded": "cleanup-migrated",
+      "prepareSucceededWithoutSuccessfulMigrationOrRollback": "cleanup-rollback",
+      "rollbackSucceeded": "cleanup-revoke",
+      "validatedPrepareNotSucceeded": "cleanup-revoke",
+      "validationNotSucceeded": "no-aws"
+    }
+  },
+  "evidence": {
+    "schemaVersion": "archon.aws-foundation-policy-migration-receipt/v1",
+    "artifactFiles": [
+      "SHA256SUMS",
+      "migration.json"
+    ],
+    "artifactRetentionDays": 90,
+    "canonicalJson": true,
+    "checksumSealed": true,
+    "attestationRequired": true,
+    "sensitiveIdentifiersAllowed": false
+  }
+}

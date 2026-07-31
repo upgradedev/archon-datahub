@@ -9,6 +9,9 @@ foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
 deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
+migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
+infra_package_manifest="${repository_root}/infra/aws/package.json"
+infra_package_lock="${repository_root}/infra/aws/package-lock.json"
 foundation_policy="${repository_root}/infra/aws/foundation/github-actions-foundation-policy.json"
 foundation_role="${repository_root}/infra/aws/foundation/github-actions-foundation-role.yml"
 deploy_role="${repository_root}/infra/aws/foundation/github-actions-deploy-role.yml"
@@ -16,9 +19,22 @@ canary_roles="${repository_root}/infra/aws/foundation/governed-canary-roles.yml"
 execution_policy="${repository_root}/infra/aws/foundation/cdk-execution-policy.yml"
 api_gateway_account="${repository_root}/infra/aws/foundation/api-gateway-account.yml"
 bootstrap_patcher="${repository_root}/scripts/patch-cdk-bootstrap-template.mjs"
+bootstrap_sealer="${repository_root}/scripts/seal-cdk-bootstrap-templates.sh"
+canonical_flow_renderer="${repository_root}/scripts/render-canonical-flow-yaml.mjs"
+inline_template_renderer="${repository_root}/scripts/render-inline-cloudformation-template.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
+foundation_policy_validator="${repository_root}/scripts/validate-aws-foundation-policy.jq"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
+dependency_patcher="${repository_root}/scripts/patch-cdk-brace-expansion.sh"
+dependency_audit_verifier="${repository_root}/scripts/verify-cdk-npm-audit-compensation.sh"
+dependency_override_verifier="${repository_root}/scripts/verify-exact-npm-overrides.mjs"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
+drift_poller="${repository_root}/scripts/aws-cloudformation-drift.sh"
+drift_poller_test="${repository_root}/tests/pipeline/aws-cloudformation-drift-poll.test.sh"
+failure_sanitizer="${repository_root}/scripts/sanitize-cloudformation-failure.mjs"
+failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure-sanitizer.test.mjs"
+iam_resource_arn_verifier="${repository_root}/scripts/verify-iam-policy-resource-arns.mjs"
+iam_resource_arn_verifier_test="${repository_root}/tests/pipeline/iam-policy-resource-arn-verifier.test.mjs"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
@@ -53,6 +69,9 @@ for path in \
   "${deploy_workflow}" \
   "${ci_workflow}" \
   "${contract}" \
+  "${migration_contract}" \
+  "${infra_package_manifest}" \
+  "${infra_package_lock}" \
   "${foundation_policy}" \
   "${foundation_role}" \
   "${deploy_role}" \
@@ -60,14 +79,30 @@ for path in \
   "${execution_policy}" \
   "${api_gateway_account}" \
   "${bootstrap_patcher}" \
+  "${bootstrap_sealer}" \
+  "${inline_template_renderer}" \
   "${foundation_renderer}" \
+  "${foundation_policy_validator}" \
   "${foundation_bootstrap}" \
+  "${dependency_patcher}" \
+  "${dependency_audit_verifier}" \
+  "${dependency_override_verifier}" \
   "${reconciler}" \
+  "${drift_poller}" \
+  "${drift_poller_test}" \
+  "${failure_sanitizer}" \
+  "${failure_sanitizer_test}" \
+  "${iam_resource_arn_verifier}" \
+  "${iam_resource_arn_verifier_test}" \
   "${runtime_verifier}" \
   "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
+
+node --test \
+  "${failure_sanitizer_test}" \
+  "${iam_resource_arn_verifier_test}"
 
 jq --exit-status '
   .schemaVersion == "archon.aws-foundation/v1" and
@@ -81,6 +116,13 @@ jq --exit-status '
   .aws.partition == "aws" and
   .aws.primaryRegion == "eu-west-1" and
   .aws.regions == ["eu-west-1", "us-east-1"] and
+  .aws.toolchain == {
+    awsCdkCliVersionSource:
+      "infra/aws/package-lock.json#packages/node_modules/aws-cdk/version",
+    installedAwsCdkCliMatchesLock: true,
+    nodeVersion: "22.23.1",
+    npmVersion: "10.9.8"
+  } and
   .aws.foundationRoleName == "archon-datahub-github-foundation" and
   .aws.foundationRoleAdoption == {
     allowsOnlyLegacyOrCanonicalComponentsForInterruptedRetry: true,
@@ -104,6 +146,8 @@ jq --exit-status '
       "archon-aws-foundation-attachments"
     ],
     maximumDocumentBytes: 6144,
+    migrationContract:
+      "contracts/aws-foundation-policy-migration-v1.json",
     renderer: "scripts/render-aws-foundation-policy.mjs",
     roleAttachedPolicyCount: 4,
     roleInlinePolicyCount: 0,
@@ -111,6 +155,58 @@ jq --exit-status '
     roleManagedPolicyQuota: 10,
     sourceBundle: "infra/aws/foundation/github-actions-foundation-policy.json",
     sourceBundleAttachable: false
+  } and
+  .aws.inlineTemplateRendering == {
+    deployedOriginalMatchesSemanticSha256: true,
+    flowEmitter: {
+      name: "scripts/render-canonical-flow-yaml.mjs",
+      runtime: "node-22.23.1",
+      scalarPolicy: "strict-ascii-plain-or-json-quoted"
+    },
+    format: "canonical-flow-yaml",
+    iamPolicyResourceArnValidation: {
+      directStrings: true,
+      intrinsicSubStrings: true,
+      malformedOrIncompleteArns: "forbidden",
+      partitionResolution: "literal-aws-or-exact-AWS::Partition-ref",
+      serviceSegment: "literal-lowercase-token",
+      verifier: "scripts/verify-iam-policy-resource-arns.mjs",
+      wildcardServiceSegments: "forbidden"
+    },
+    maximumTemplateBodyBytes: 51200,
+    outputRoot: "RUNNER_TEMP",
+    renderer: "scripts/render-inline-cloudformation-template.sh",
+    sameBytesForValidationAndDeploy: true,
+    semanticRoundTrip: "rain-json-canonical-equality",
+    source: "infra/aws/foundation/cdk-execution-policy.yml",
+    tool: {
+      linuxAmd64ArchiveSha256:
+        "5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a",
+      name: "aws-cloudformation/rain",
+      version: "v1.24.4"
+    },
+    yamlParser: {
+      linuxAmd64Sha256:
+        "1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0",
+      name: "mikefarah/yq",
+      version: "v4.47.2"
+    }
+  } and
+  .aws.sharedApiGatewayLogging == {
+    external: {
+      bindingSha256Variable: "AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256",
+      managedStackMustBeAbsent: true,
+      mutation: "none",
+      sameAccountRoleArnRequired: true,
+      takeover: "forbidden"
+    },
+    managed: {
+      inlinePolicyName: "archon-apigateway-cloudwatch-logs",
+      roleName: "archon-datahub-apigateway-cloudwatch-logs",
+      stackName: "Archon-Shared-ApiGateway-Logging"
+    },
+    ownershipModes: ["foundation-managed", "external-pinned"],
+    region: "eu-west-1"
   } and
   .aws.governedCanaryRoles.stackName == "Archon-Governed-Canary-Roles" and
   .aws.governedCanaryRoles.region == "eu-west-1" and
@@ -278,6 +374,98 @@ jq --exit-status '
     migrationRequiredState:
       "foundation-complete-deploy-migration-required",
     readyState: "ready-for-deploy"
+  } and
+  .evidence.driftVerification == {
+    awsSdkMaxAttempts: 1,
+    cliConnectTimeoutSeconds: 5,
+    cliReadTimeoutSeconds: 15,
+    coverage: "cloudformation-supported-resources",
+    exactStackIncarnation: true,
+    failureMode: "fail-closed",
+    globalDeadline: "hard-wall-clock",
+    globalTimeoutSeconds: 900,
+    helper: "scripts/aws-cloudformation-drift.sh",
+    maximumConsecutiveApiFailuresPerStack: 3,
+    maximumPollAttemptsPerStack: 120,
+    method: "detect-then-bounded-describe-poll",
+    pollDelaySeconds: 2,
+    rawAwsStderr: "suppressed",
+    responseBinding: ["StackDriftDetectionId", "StackId", "Timestamp", "DriftInformation.LastCheckTimestamp"],
+    finalStackBinding: {
+      method: "bounded-describe-stacks-poll",
+      maximumAttempts: 5,
+      pollDelaySeconds: 2,
+      timestampComparison: "normalized-utc-monotonic-lower-bound",
+      currentOrNewerInSyncProjection: "accept",
+      currentDriftedProjection: "fail-closed",
+      currentOrNewerIndeterminateProjection: "bounded-retry",
+      staleOrUnpublishedProjection: "bounded-retry",
+      selectionMismatch: "fail-closed",
+      malformedProjection: "fail-closed"
+    },
+    staleResourceEvidence: "forbidden",
+    terminalSuccess: {
+      detectionStatus: "DETECTION_COMPLETE",
+      driftedStackResourceCount: 0,
+      returnedResourceStatuses: ["IN_SYNC"],
+      stackDriftStatus: "IN_SYNC"
+    },
+    unsupportedCliWaiter: "forbidden"
+  } and  .evidence.failureDiagnostics == {
+    allowlistedStackLabels: [
+      "governed-canary-roles",
+      "production-bootstrap-edge",
+      "production-bootstrap-primary",
+      "production-deploy",
+      "production-iam",
+      "shared-api-gateway",
+      "staging-bootstrap-edge",
+      "staging-bootstrap-primary",
+      "staging-deploy",
+      "staging-iam"
+    ],
+    artifactFiles: ["SHA256SUMS", "cfn-failure.json"],
+    artifactRetentionDays: 90,
+    artifactUpload: "explicit-files-only",
+    autoRecovery: "forbidden",
+    explicitIncidentRecoveryContract: "contracts/aws-incident-recovery-v1.json",
+    explicitIncidentRecoveryStatus: "recovered-delete-complete-cleanup-proven",
+    canonicalJson: true,
+    credentialClearProofRequired: true,
+    diagnosticCount: 1,
+    digestFields: [
+      "logicalResourceId",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ],
+    fields: [
+
+      "diagnosticSha256",
+      "logicalResourceId",
+      "reasonCategory",
+      "resourceStatus",
+      "resourceType",
+      "schemaVersion",
+      "stackLabel",
+      "stackStatus"
+    ],
+    managedCommandOutput: "suppressed",
+    maxInputBytes: 1048576,
+    maxRecentEvents: 100,
+    deprioritizedReasonCategories: ["dependency-failure"],
+    eventOrder: "cloudformation-newest-first",
+    eventSelection: "newest-non-dependency-failed-else-newest-failed",
+    postCredentialDigestRecomputed: true,
+    rawReasonHashing: false,
+    rawReasonRetention: false,
+    recursiveInventory: "exact-two-root-regular-files",
+    schemaVersion: "archon.aws-foundation-cfn-failure/v1",
+    stackIdentity: "allowlisted-label-only",
+    unknownReasonCategoryEligible: true
   }
 ' "${contract}" >/dev/null
 
@@ -317,6 +505,7 @@ done
 require_text "${foundation_workflow}" \
   'name: Bootstrap AWS foundation' \
   'group: archon-aws-control-plane' \
+  'group: archon-governed-canary-mutation-recovery' \
   'cancel-in-progress: false' \
   'name: aws-foundation' \
   'id-token: write' \
@@ -325,6 +514,12 @@ require_text "${foundation_workflow}" \
   'test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"' \
   'test "${CONFIRMATION_INPUT}" = "BOOTSTRAP_CDK_FOUNDATION"' \
   '$rule.prevent_self_review == false' \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256: ${{ vars.AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256 }}' \
+  '[[ "${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256}" =~ ^[0-9a-f]{64}$ ]]' \
+  'SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}' \
+  'DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}' \
+  'Shared API Gateway logging account: pinned external binding, unchanged, no takeover' \
+  'Managed stack inventory: \`9\` plus one external account binding' \
   'role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}' \
   'scripts/render-aws-foundation-policy.mjs' \
   'archon-aws-foundation-control' \
@@ -333,12 +528,102 @@ require_text "${foundation_workflow}" \
   'archon-aws-foundation-attachments' \
   "jq -e '.PolicyNames == []'" \
   'infra/aws/foundation/governed-canary-roles.yml' \
-  'node scripts/patch-cdk-bootstrap-template.mjs' \
-  '--region "${region}"' \
+  'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
   'run: bash scripts/reconcile-aws-foundation.sh' \
   'Clear AWS credentials before artifact handling' \
+  'id: clear_aws_credentials' \
+  'echo "cleared=true" >>"${GITHUB_OUTPUT}"' \
   'subject-checksums: ${{ steps.reconcile.outputs.subject }}' \
-  'retention-days: 90'
+  'retention-days: 90' \
+  'if: ${{ always() }}' \
+  'Validate checksum-sealed sanitized failure evidence' \
+  'if: ${{ failure() && steps.clear_aws_credentials.outputs.cleared' \
+  'Retain checksum-sealed sanitized foundation failure evidence' \
+  '-n "${AWS_ACCESS_KEY_ID:-}"' \
+  '-n "${AWS_SECRET_ACCESS_KEY:-}"' \
+  '-n "${AWS_SESSION_TOKEN:-}"' \
+  '-n "${AWS_SECURITY_TOKEN:-}"' \
+  'find -P "${FAILURE_EVIDENCE_DIR}"' \
+  'LC_ALL=C sort -z' \
+  'jq -cS .' \
+  'cmp -s' \
+  '.diagnosticSha256 == $computedDigest' \
+  'path: |' \
+  '${{ runner.temp }}/aws-foundation-failure/SHA256SUMS' \
+  '${{ runner.temp }}/aws-foundation-failure/cfn-failure.json'
+require_text "${foundation_workflow}" \
+  'explicitIncidentRecoveryContract:' \
+  '"contracts/aws-incident-recovery-v1.json"' \
+  'explicitIncidentRecoveryStatus:' \
+  '"recovered-delete-complete-cleanup-proven"' \
+  '"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"'
+require_text "${foundation_workflow}" \
+  'test "${NODE_VERSION}" = "${contract_node_version}"' \
+  'test "${NPM_VERSION}" = "${contract_npm_version}"' \
+  'test "$(node --version)" = "v${contract_node_version}"' \
+  'test "$(npm --version)" = "${contract_npm_version}"' \
+  '.packages["node_modules/aws-cdk"].version' \
+  'test("^[0-9]+\\.[0-9]+\\.[0-9]+$")' \
+  'test "${installed_cdk_version}" = "${locked_cdk_version}"' \
+  "printf 'Verified locked AWS CDK CLI %s\\n'"
+require_text "${reconciler}" \
+  'infra/aws/package.json' \
+  'infra/aws/package-lock.json' \
+  'scripts/patch-cdk-brace-expansion.sh' \
+  'scripts/seal-cdk-bootstrap-templates.sh' \
+  'scripts/verify-cdk-npm-audit-compensation.sh' \
+  'scripts/verify-exact-npm-overrides.mjs'
+failure_validation_line="$(
+  grep -nF 'Validate checksum-sealed sanitized failure evidence' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
+failure_upload_line="$(
+  grep -nF 'Retain checksum-sealed sanitized foundation failure evidence' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
+credential_clear_line="$(
+  grep -nF 'Clear AWS credentials before artifact handling' \
+    "${foundation_workflow}" | cut -d: -f1
+)"
+test "${credential_clear_line}" -lt "${failure_validation_line}" &&
+  test "${failure_validation_line}" -lt "${failure_upload_line}" ||
+  fail "failure evidence must be validated after credentials clear and before upload"
+if grep -Fq 'path: ${{ runner.temp }}/aws-foundation-failure/' \
+  "${foundation_workflow}"; then
+  fail "failure evidence upload must name only the two sealed files"
+fi
+grep -Fq "steps.clear_aws_credentials.outputs.cleared == 'true'" \
+  "${foundation_workflow}" ||
+  fail "failure evidence handling must require credential-clear proof"
+grep -Fq "steps.failure_evidence.outputs.available == 'true'" \
+  "${foundation_workflow}" ||
+  fail "failure evidence upload must require a validated diagnostic"
+forbid_text "${foundation_workflow}" \
+  '2.1133.0'
+forbid_text "${foundation_workflow}" \
+  '"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"'
+require_text "${execution_policy}" \
+  'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+forbid_text "${execution_policy}" \
+  'AmazonECSTaskExecutionRolePolicy'
+require_text "${bootstrap_sealer}" \
+  'CDK bootstrap seal failed:' \
+  'EXPECTED_BOOTSTRAP_VERSION is required' \
+  'expected one CdkBootstrapVersion resource' \
+  'gsub(/["\047]/, "", $2)' \
+  'required logical ID is missing:' \
+  'node "${patcher}"' \
+  'template is missing its isolation marker' \
+  'echo "${stage}_${region_slot}_path=${stage_template}"' \
+  'echo "${stage}_${region_slot}_sha=${stage_sha}"' \
+  'echo "path=${template}"' \
+  'echo "sha=${template_sha}"' \
+  'echo "version=${template_version}"' \
+  'Sealed CDK bootstrap v${template_version}'
+require_text "${bootstrap_patcher}" \
+  "Default: 'AWS CDK: Default Resources'" \
+  'Default: "AWS CDK: Default Resources"' \
+  'defaultVariantCount !== 1'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi
@@ -384,8 +669,96 @@ jq --exit-status '
 
 require_text "${foundation_renderer}" \
   'const policyGroups = ["control", "assets", "identity", "attachments"]' \
+  '.replace(/-([a-z])/g, (_, character) => character.toUpperCase())' \
   'if (Buffer.byteLength(compact, "utf8") > 6144)' \
   'source statement Sids must be unique, non-empty strings'
+
+renderer_runtime_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+test -d "${renderer_runtime_root}"
+test ! -L "${renderer_runtime_root}"
+renderer_runtime_dir="$(
+  mktemp -d \
+    "${renderer_runtime_root%/}/archon-foundation-renderer.XXXXXX"
+)"
+cleanup_renderer_runtime() {
+  rm -rf -- "${renderer_runtime_dir}"
+}
+trap cleanup_renderer_runtime EXIT
+declare -A renderer_stdout
+for group in control assets identity attachments; do
+  renderer_stdout["${group}"]="$(
+    node "${foundation_renderer}" \
+      --input "${foundation_policy}" \
+      --account 123456789012 \
+      --stdout-group "${group}"
+  )"
+  jq -e \
+    --arg account "123456789012" '
+      .Version == "2012-10-17" and
+      (.Statement | type == "array" and length > 0) and
+      (tostring | contains($account)) and
+      (tostring | contains("${aws:PrincipalAccount}") | not)
+    ' <<<"${renderer_stdout[${group}]}" >/dev/null
+done
+
+node "${foundation_renderer}" \
+  --input "${foundation_policy}" \
+  --account 123456789012 \
+  --control-output "${renderer_runtime_dir}/control.json" \
+  --assets-output "${renderer_runtime_dir}/assets.json" \
+  --identity-output "${renderer_runtime_dir}/identity.json" \
+  --attachments-output "${renderer_runtime_dir}/attachments.json"
+test "$(
+  find "${renderer_runtime_dir}" -mindepth 1 -maxdepth 1 -type f |
+    wc -l |
+    awk '{print $1}'
+)" = "4"
+for group in control assets identity attachments; do
+  rendered_path="${renderer_runtime_dir}/${group}.json"
+  test -f "${rendered_path}"
+  test ! -L "${rendered_path}"
+  test "$(
+    jq -cS . "${rendered_path}"
+  )" = "$(
+    jq -cS . <<<"${renderer_stdout[${group}]}"
+  )"
+done
+
+jq --exit-status \
+  --slurpfile migration "${migration_contract}" \
+  --from-file "${foundation_policy_validator}" \
+  "${foundation_policy}" >/dev/null
+
+wrong_source_policy="${renderer_runtime_dir}/wrong-source-policy.json"
+jq '
+  . as $policy |
+  (.Statement[] |
+    select(.Sid == "ReadExactStagePoliciesForDrift") |
+    .Resource) =
+  ($policy.Statement[] |
+    select(.Sid == "ReconcileExactBootstrapBuckets") |
+    .Resource)
+' "${foundation_policy}" >"${wrong_source_policy}"
+missing_source_sid_policy="${renderer_runtime_dir}/missing-source-sid-policy.json"
+jq '
+  .Statement |= map(
+    select(.Sid != "ReadExactStagePoliciesForDrift")
+  )
+' "${foundation_policy}" >"${missing_source_sid_policy}"
+for invalid_policy in \
+  "${wrong_source_policy}" \
+  "${missing_source_sid_policy}"; do
+  if jq --exit-status \
+    --slurpfile migration "${migration_contract}" \
+    --from-file "${foundation_policy_validator}" \
+    "${invalid_policy}" >/dev/null 2>&1; then
+    fail "shared foundation policy validator accepted $(basename "${invalid_policy}")"
+  fi
+done
+
+cleanup_renderer_runtime
+trap - EXIT
+
 require_text "${foundation_bootstrap}" \
   'test "${CONFIRMATION}" = "BOOTSTRAP_FOUNDATION_POLICIES"' \
   'readonly -a POLICY_GROUPS=(control assets identity attachments)' \
@@ -499,6 +872,12 @@ require_text "${execution_policy}" \
   'DenySharedApiGatewayAccountMutation' \
   'DenyRuntimeBoundaryRemoval' \
   'DenyFoundationControlPlaneMutation' \
+  'DenyProductionNamedBuckets' \
+  'DenyStagingNamedBuckets' \
+  'arn:${AWS::Partition}:s3:::archon-production-*' \
+  'arn:${AWS::Partition}:s3:::archon-production-*/*' \
+  'arn:${AWS::Partition}:s3:::archon-staging-*' \
+  'arn:${AWS::Partition}:s3:::archon-staging-*/*' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
@@ -525,7 +904,10 @@ forbid_text "${execution_policy}" \
   'route53:DisassociateVPCFromHostedZone' \
   'route53:VPCs: arn:' \
   'route53:*' \
-  'acm:*'
+  'acm:*' \
+  'DenyProductionNamedResources' \
+  'DenyStagingNamedResources' \
+  'arn:${AWS::Partition}:*:*:${AWS::AccountId}:'
 actual_route53_actions="$(
   grep -E \
     '^[[:space:]]*(Action:[[:space:]]+|-[[:space:]]+)route53:[A-Za-z0-9]+' \
@@ -624,6 +1006,18 @@ if ! awk '
 ' "${execution_policy}"; then
   fail "viewer certificate create-time tagging policy is not exact"
 fi
+require_text "${iam_resource_arn_verifier}" \
+  'Object.hasOwn(value, "Fn::Sub")' \
+  'isExactAwsPartitionReference' \
+  'serviceSegment.includes("*")' \
+  'serviceSegment.includes("?")' \
+  'literalPartition' \
+  'No IAM PolicyDocument Resource ARNs were available for validation'
+require_text "${iam_resource_arn_verifier_test}" \
+  'accepts exact AWS partitions, exact services, and resource-name wildcards' \
+  'rejects wildcard and nonliteral service segments without substitution-map bypass' \
+  'fails closed for malformed, incomplete, empty, and unresolved ARN shapes'
+
 if awk '
   /^[[:space:]]*-[[:space:]]+Sid:/ {
     effect = ""
@@ -650,7 +1044,59 @@ require_text "${bootstrap_patcher}" \
   'UseOnlyCdkDeployChangeSets' \
   'cloudformation:ChangeSetName' \
   'cloudformation:RoleArn'
+require_text "${inline_template_renderer}" \
+  'if [[ "${GITHUB_ACTIONS:-}" != "true" ]]' \
+  'RAIN_VERSION="v1.24.4"' \
+  'RAIN_LINUX_AMD64_ARCHIVE_SHA256="5358d6daf35322101566376a38e37d1f89c6588479af2e20240579fc2d4c660a"' \
+  'YQ_VERSION="v4.47.2"' \
+  'YQ_LINUX_AMD64_SHA256="1bb99e1019e23de33c7e6afc23e93dad72aad6cf2cb03c797f068ea79814ddb0"' \
+  'CLOUDFORMATION_TEMPLATE_BODY_MAX_BYTES=51200' \
+  'test ! -L "$1"' \
+  'sha256sum --check --strict' \
+  '"${rain_bin}" fmt --json --unsorted "${source_path}"' \
+  '"https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"' \
+  'node "${workspace_root}/scripts/render-canonical-flow-yaml.mjs"' \
+  'jq -cS' \
+  'scripts/verify-iam-policy-resource-arns.mjs' \
+  'cmp -s "${canonical_json}" "${round_trip}"' \
+  '[[ "${output_path}" == "${runner_temp_root}/"* ]]'
+require_text "${canonical_flow_renderer}" \
+  'process.env.GITHUB_ACTIONS !== "true"' \
+  'process.env.RUNNER_TEMP' \
+  'requestedInputStat.isSymbolicLink()' \
+  'safePlainScalar' \
+  'implicitYamlScalar' \
+  'JSON.stringify(value)' \
+  'Object.entries(value)' \
+  'process.stdout.write(`${emit(document)}\n`)'
+test "$(
+  grep -nF 'test ! -L "$1"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" -lt "$(
+  grep -nF 'source_path="$(realpath "$1")"' "${inline_template_renderer}" |
+    cut -d: -f1
+)" ||
+  fail "renderer must reject a source symlink before realpath resolution"
 require_text "${reconciler}" \
+  'IAM_FOUNDATION_TEMPLATE' \
+  'IAM_FOUNDATION_TEMPLATE_SHA' \
+  'IAM_FOUNDATION_CANONICAL_JSON' \
+  'IAM_FOUNDATION_SEMANTIC_SHA' \
+  'IAM_FOUNDATION_YQ_BIN' \
+  'IAM_FOUNDATION_YQ_SHA' \
+  '.aws.inlineTemplateRendering.yamlParser.linuxAmd64Sha256' \
+  '--template-file "${IAM_FOUNDATION_TEMPLATE}"' \
+  '--template-stage Original' \
+  '.TemplateBody |' \
+  'if type == "string" then . else tojson end' \
+  '--output-format=json' \
+  'mktemp "${RUNNER_TEMP}/archon-deployed-template.XXXXXX' \
+  'iamFoundationTemplateSha256: $iamFoundationTemplateSha256' \
+  'iamFoundationSemanticSha256: $iamFoundationSemanticSha256' \
+  'IAM_TEMPLATE_SHA["${stage}"]' \
+  '"${IAM_FOUNDATION_SEMANTIC_SHA}"' \
+  'deployed Original template does not match the pre-OIDC canonical template' \
+  '.iamDeployedTemplateSha256 == $expected' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME' \
@@ -662,11 +1108,26 @@ require_text "${reconciler}" \
   'PRODUCTION_EDGE_BOOTSTRAP_TEMPLATE' \
   'readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"' \
   'Reconcile the three governed-canary read roles' \
-  'Require all ten foundation stacks to be IN_SYNC' \
-  "jq -e 'length == 10 and all(.[]; .stackDriftStatus == \"IN_SYNC\")'" \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256="${AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256:-}"' \
+  'inspect_api_gateway_binding() {' \
+  'assert_stack_absent() {' \
+  '^arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/([A-Za-z0-9+=,.@_-]+/)*[A-Za-z0-9+=,.@_-]{1,64}$' \
+  'AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256=${observed_sha}' \
+  'clear the stale external API Gateway binding pin before managed reconciliation' \
+  'test "${shared_api_gateway_mode}" = "${shared_api_gateway_preflight_mode}"' \
+  'bindingState: "UNCHANGED"' \
+  'managedStackAbsent: true' \
+  'mutation: "none"' \
+  'takeover: "forbidden"' \
+  'validation: "pinned-and-unchanged"' \
+  'validation: "managed-and-verified"' \
+  'Require every managed foundation stack to be IN_SYNC' \
+  'test "${drift_stack_count}" -eq 10' \
+  'test "${drift_stack_count}" -eq 9' \
+  'managedStackCount: $driftStackCount' \
+  'externalBindingCount:' \
   'test "${compact_policy_size}" -le 6144' \
   'test "${boundary_compact_size}" -le 6144' \
-  'stackCount: 10' \
   'sourceTemplateSha256: $sourceTemplateSha256' \
   'canary_role_binding_sha=${combined_canary_binding_sha}' \
   'operational_role_binding_sha=${combined_operational_binding_sha}' \
@@ -675,8 +1136,96 @@ require_text "${reconciler}" \
   'requires-explicit-deploy-migration' \
   'deployRequirement: "explicit-role-migration"' \
   'applicationStackRoleTransition: $applicationStackRoleTransition' \
-  'application_stack_role_transition=${application_stack_role_transition_state}'
+  'application_stack_role_transition=${application_stack_role_transition_state}' \
+  'readonly FAILURE_EVIDENCE_DIR="${RUNNER_TEMP}/aws-foundation-failure"' \
+  'assert_diagnostic_stack_allowlisted() {' \
+  'capture_managed_stack_failure() {' \
+  'cleanup_failure_evidence_staging() {' \
+  'run_managed_stack_command() {' \
+  'if "$@" >/dev/null 2>&1; then' \
+  'aws cloudformation describe-stack-events' \
+  '--max-items 100' \
+  '--output json 2>/dev/null |' \
+  'node scripts/sanitize-cloudformation-failure.mjs' \
+  'find -P "${staging_dir}" -mindepth 1 -printf' \
+  'LC_ALL=C sort -z' \
+  'cmp -s "${diagnostic_tmp}" "${canonical_tmp}"' \
+  '.diagnosticSha256 == $computedDigest' \
+  'mv -T -- "${staging_dir}" "${FAILURE_EVIDENCE_DIR}"' \
+  'stackLabel=%s; stackStatus=%s' \
+  'ROLLBACK_COMPLETE | *_FAILED)' \
+  'sha256sum cfn-failure.json >SHA256SUMS'
+test "$(grep -Ec '^[[:space:]]*run_managed_stack_command \\$' "${reconciler}")" -eq 9 ||
+  fail "all nine managed stack mutator sites must use the sanitized wrapper"
+test "$(grep -Fc 'aws cloudformation update-termination-protection' "${reconciler}")" -eq 4 ||
+  fail "expected exactly four managed termination-protection call sites"
+while IFS=: read -r update_line _; do
+  wrapper_line="$((update_line - 2))"
+  sed -n "${wrapper_line},${update_line}p" "${reconciler}" |
+    grep -Fq 'run_managed_stack_command \' ||
+    fail "termination-protection call at line ${update_line} bypasses the wrapper"
+done < <(grep -nF 'aws cloudformation update-termination-protection' "${reconciler}")
+forbid_text "${reconciler}" \
+  'Purpose=stage-iam-foundation >/dev/null' \
+  'Purpose=shared-apigateway-logging >/dev/null' \
+  'GitHubRepository=archon-datahub >/dev/null' \
+  'Purpose=github-deployment-role >/dev/null'
+shared_api_gateway_block="$(
+  sed -n \
+    "/foundation_phase='shared-api-gateway'/,/foundation_phase='governed-canary-roles'/p" \
+    "${reconciler}"
+)"
+external_shared_branch="$(
+  sed -n \
+    '/if \[\[ "${shared_api_gateway_mode}" == "external-pinned" \]\]/,/^else$/p' \
+    <<<"${shared_api_gateway_block}" |
+    sed '$d'
+)"
+test -n "${external_shared_branch}" ||
+  fail "missing external-pinned reconciliation branch"
+for forbidden_external_action in \
+  'aws cloudformation deploy' \
+  'aws cloudformation update-termination-protection' \
+  'aws iam ' \
+  'aws apigateway update-account' \
+  'aws apigateway patch'; do
+  if grep -Fq "${forbidden_external_action}" <<<"${external_shared_branch}"; then
+    fail "external API Gateway mode must remain mutation- and IAM-inspection-free"
+  fi
+done
+for forbidden_recovery_action in \
+  'aws cloudformation delete-stack' \
+  'aws cloudformation continue-update-rollback'; do
+  if grep -Fq "${forbidden_recovery_action}" "${reconciler}"; then
+    fail "foundation diagnostics must never mutate or recover a failed stack"
+  fi
+done
+forbid_text "${reconciler}" \
+  'Require all ten foundation stacks to be IN_SYNC' \
+  'stackCount: 10'
+test "$(
+  grep -Fc 'infra/aws/foundation/cdk-execution-policy.yml' "${reconciler}"
+)" -eq 1 ||
+  fail "reconciler may reference the oversized source template only as evidence"
 
+require_text "${failure_sanitizer}" \
+  'const MAX_INPUT_BYTES = 1_048_576;' \
+  'const MAX_EVENTS = 100;' \
+  'const MAX_OUTPUT_BYTES = 2_048;' \
+  'ALLOWLISTED_STACK_LABELS' \
+  'const failedEvents = document.StackEvents.filter(' \
+  'classifyReason(reason) !== "dependency-failure"' \
+  '?? failedEvents[0]' \
+  'const canonicalSafeFields = Object.freeze({' \
+  'diagnosticSha256: sha256(JSON.stringify(canonicalSafeFields))' \
+  'schemaVersion: "archon.aws-foundation-cfn-failure/v1"' \
+  'process.stderr.write("CloudFormation failure sanitization failed\n")'
+forbid_text "${failure_sanitizer}" \
+  'console.log' \
+  'console.error' \
+  'process.stderr.write(error' \
+  'physicalResourceId' \
+  'StackId'
 require_text "${runtime_verifier}" \
   'const uncovered' \
   'const unusedAllowed' \
@@ -687,6 +1236,15 @@ require_text "${ci_workflow}" \
   'scripts/bootstrap-aws-foundation-role.sh' \
   'scripts/reconcile-aws-foundation.sh' \
   'scripts/patch-cdk-bootstrap-template.mjs' \
+  'scripts/render-canonical-flow-yaml.mjs' \
+  'scripts/render-inline-cloudformation-template.sh' \
+  'scripts/seal-cdk-bootstrap-templates.sh' \
+  'Seal the exact CDK bootstrap templates without AWS access' \
+  'EXPECTED_BOOTSTRAP_VERSION: "32"' \
+  'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
+  'Render the exact inline-safe IAM foundation template' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
+  '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
   'node scripts/verify-aws-runtime-boundary.mjs'
 require_text "${deploy_workflow}" \
@@ -697,6 +1255,14 @@ require_text "${deploy_workflow}" \
   'ALLOW_ROLE_MIGRATION=false' \
   'bash scripts/validate-cloudformation-role-bindings.sh'
 require_text "${foundation_workflow}" \
+  'Render the inline-safe IAM foundation template' \
+  'scripts/render-canonical-flow-yaml.mjs' \
+  'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
+  'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
+  'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \
+  'IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}' \
+  'IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}' \
+  'IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}' \
   'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
   'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
   'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \
@@ -736,11 +1302,66 @@ if grep -Eq \
   fail "deploy and operational roles contain a wildcard action"
 fi
 require_text "${foundation_policy}" \
+  'cloudformation:DescribeStackEvents' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
   'role/archon-production-runtime-read' \
   'role/archon-production-paging-test'
+
+jq --exit-status \
+  --slurpfile migration "${migration_contract}" '
+    $migration[0] as $m |
+    . as $policy |
+
+    $m.policy.group == "assets" and
+    $m.policy.name == "archon-aws-foundation-assets" and
+    ($m.policy.exactDelta.statements | length) == 2 and
+    all($m.policy.exactDelta.statements[];
+      . as $spec |
+      ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+      ([$policy.Statement[] |
+        select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+      ($added | length) == 1 and
+      ($source | length) == 1 and
+      $added[0].Effect == "Allow" and
+      (($added[0].Action |
+        if type == "array" then sort else [.] end) ==
+        ($spec.actions | sort)) and
+      ($added[0].Resource | type) == "array" and
+      (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+      all($added[0].Resource[]; . != "*")) and
+    all($m.policy.exactDelta.statements[].actions[];
+      . as $action |
+      (([$policy.Statement[].Action] | flatten |
+        map(select(. == $action))) | length) == 1)
+  ' "${foundation_policy}" >/dev/null
+
+test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
+test "$(grep -Fc 'cloudformation:BatchDescribeTypeConfigurations' "${deploy_role}")" -eq 2
+for sid in \
+  DetectExactStageIamFoundationDrift \
+  ReadStageIamDriftDetection \
+  ReadAndDetectExactProductionStacks \
+  ReadStackDriftDetectionStatus; do
+  require_text "${deploy_role}" "- Sid: ${sid}"
+done
+require_text "${foundation_workflow}" \
+  'contracts/aws-foundation-policy-migration-v1.json' \
+  '--from-file scripts/validate-aws-foundation-policy.jq' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
+  'queue: max'
+forbid_text "${foundation_workflow}" \
+  '.policy.exactDelta.stackScopedStatement' \
+  '.policy.exactDelta.wildcardStatement'
+require_text "${foundation_policy_validator}" \
+  '($m.policy.exactDelta.statements) as $delta' \
+  '$spec.resourcesMatchStatement' \
+  'all($delta[];' \
+  'all($delta[].actions[];'
 
 require_text "${api_gateway_account}" \
   'AWS::ApiGateway::Account' \
@@ -767,9 +1388,18 @@ if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
 fi
 
 require_text "${runbook}" \
-  'pinned CDK CLI `2.1133.0`' \
+  'exact committed `infra/aws/package-lock.json` entry' \
+  'installed CLI version must exactly match that decoded lock entry' \
   'version `32`' \
-  'ten CloudFormation stack instances' \
+  'Nine CloudFormation stack instances are always managed by Archon' \
+  'ten managed stacks' \
+  'nine managed stacks plus one pinned external account binding' \
+  '`AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`' \
+  '`foundation-managed`' \
+  '`external-pinned`' \
+  '`pinned-and-unchanged`' \
+  'no API Gateway account mutation' \
+  'managed stack must be absent' \
   '`Archon-Governed-Canary-Roles`' \
   '`archon-aws-foundation-control`' \
   '`archon-aws-foundation-assets`' \
@@ -793,4 +1423,193 @@ require_text "${runbook}" \
   'Every other mismatch fails closed' \
   '`foundation-complete-deploy-migration-required`' \
   '`requires-explicit-deploy-migration`' \
-  '`ready-for-deploy`'
+  '`ready-for-deploy`' \
+  'Sanitized managed-stack failure evidence' \
+  'stdout and stderr are suppressed before capture' \
+  'selects the newest failed event whose safe reason category is not' \
+  '`unknown` remains eligible' \
+  'fall back to the newest failed event' \
+  'exact recursive inventory of two root regular non-symlink files' \
+  'recomputes the diagnostic digest from the seven safe fields' \
+  'never stores, prints, or hashes the raw CloudFormation' \
+  'does not delete, recreate, or' \
+  '`cfn-failure.json`' \
+  'retained for 90 days'
+forbid_text "${runbook}" \
+  'ten CloudFormation stack instances' \
+  'reconciles all ten stacks' \
+  'ten-stack drift evidence'
+require_text "${ci_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
+  'bash tests/pipeline/aws-cloudformation-drift-poll.test.sh'
+require_text "${foundation_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'globalDeadline: "hard-wall-clock"' \
+  'exactStackIncarnation: true'
+require_text "${reconciler}" \
+  "readonly CFN_DRIFT_HELPER='scripts/aws-cloudformation-drift.sh'" \
+  'source "${CFN_DRIFT_HELPER}"' \
+  'readonly CFN_DRIFT_MAX_ATTEMPTS=120' \
+  'readonly CFN_DRIFT_DELAY_SECONDS=2' \
+  'readonly CFN_DRIFT_MAX_API_FAILURES=3' \
+  'readonly CFN_DRIFT_PHASE_TIMEOUT_SECONDS=900' \
+  'check_drift() (' \
+  'trap cleanup_drift_raw EXIT' \
+  'detect_and_wait_for_cloudformation_stack_in_sync \' \
+  'exact_stack_id="$(jq -er' \
+  'detection_timestamp="$(jq -er' \
+  'verify_cloudformation_stack_resource_drifts \' \
+  'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
+  'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' \
+  'scripts/aws-cloudformation-drift.sh \'
+test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt producers must have two exact monotonic bindings'
+test "$(grep -Fc '.stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt validators must have two exact monotonic bindings'
+
+require_text "${drift_poller}" \
+  'cloudformation_drift_remaining_seconds() {' \
+  'run_bounded_cloudformation_drift_aws() {' \
+  'cloudformation_drift_utc_key() {' \
+  'verify_cloudformation_stack_resource_drifts() (' \
+  'timeout --foreground --signal=TERM --kill-after=2s' \
+  'AWS_MAX_ATTEMPTS=1' \
+  '--cli-connect-timeout 5' \
+  '--cli-read-timeout 15' \
+  'cloudformation detect-stack-drift' \
+  'cloudformation describe-stack-drift-detection-status' \
+  'cloudformation describe-stack-resource-drifts' \
+  'cloudformation describe-stacks' \
+  '.StackDriftDetectionId == $detectionId' \
+  'ltrimstr($stackPrefix)' \
+  '.StackId == $exactStackId' \
+  'CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS:-5' \
+  'CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS:-2' \
+  'def leap_year($year):' \
+  'month_days($year; $month)' \
+  'final_max_attempts > 5' \
+  'final_delay_seconds > 2' \
+  'if $drift == null then "stale"' \
+  'if $actualKey < $detectionKey then "stale"' \
+  'elif $drift.StackDriftStatus == "IN_SYNC" then "match"' \
+  'elif $drift.StackDriftStatus == "DRIFTED" then "current-drifted"' \
+  'else "current-indeterminate" end' \
+  'final-stack-binding-stale' \
+  'final-stack-current-drifted' \
+  'final-stack-current-indeterminate' \
+  'final-stack-selection-mismatch' \
+  '.StackResourceDriftStatus == "IN_SYNC"' \
+  'trap cleanup EXIT' \
+  'max_api_failures > 3' \
+  'response_bytes > 65536'
+require_text "${drift_poller_test}" \
+  'progress-success' 'transient-success' 'persistent-error' \
+  'perpetual-progress' 'detection-failed' 'drifted' 'missing-count' \
+  'missing-timestamp' 'wrong-detection-id' 'wrong-stack-id' \
+  'deadline-during-status' 'different-incarnation' 'stale-resource' \
+  'subsecond-stale-resource' 'not-checked-resource' \
+  'leap-day-success' 'invalid-detection-calendar' 'invalid-resource-calendar' \
+  'final-equivalent-utc' 'final-nonzero-equivalent' 'final-stale-then-current' \
+  'final-absent-drift-info-then-current' 'final-not-checked-missing-then-current' \
+  'final-drifted-stale-then-current' 'final-stale-default' 'final-stale-persistent' \
+  'invalid-final-max' 'invalid-final-delay' 'final-api-transient' 'final-api-persistent' \
+  'final-newer-in-sync' 'final-newer-subsecond-in-sync' \
+  'final-newer-drifted' 'final-newer-unknown' 'final-newer-not-checked' \
+  'final-indeterminate-default' \
+  'final-unknown-current-then-current' 'final-not-checked-current-then-current' \
+  'final-different-incarnation' \
+  'final-invalid-calendar' 'final-invalid-second' 'final-invalid-fraction' \
+  'final-invalid-drift-status' \
+  'final-malformed' 'final-oversize' 'deadline-resource' 'deadline-final' \
+  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files' \
+  'leaked exact stack id' 'leaked detection timestamp'
+forbid_text "${reconciler}" \
+  'stack-drift-detection-complete' \
+  '(.DriftedStackResourceCount // 0) == 0' \
+  '.StackResourceDrifts[]?' \
+  'exact-stack-id-and-detection-timestamp'
+forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason' \
+  'final_max_attempts > 10' 'final_delay_seconds > 30' \
+  'fromdateiso8601' 'strptime(' 'mktime' \
+  'elif $actualKey > $detectionKey then "mismatch"' \
+  'final-stack-binding-mismatch'
+helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
+helper_status_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
+helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${drift_poller}" | tail -n 1 | cut -d: -f1)"
+helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
+helper_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${drift_poller}" | cut -d: -f1)"
+helper_final_line="$(grep -nF 'cloudformation describe-stacks' "${drift_poller}" | cut -d: -f1)"
+helper_binding_line="$(grep -nF 'if $actualKey < $detectionKey then "stale"' "${drift_poller}" | cut -d: -f1)"
+test "${helper_detect_line}" -lt "${helper_status_line}" || fail 'drift helper must detect before polling'
+test "${helper_status_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
+test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'
+test "${helper_publish_line}" -lt "${helper_resource_line}" || fail 'terminal binding must precede resource proof'
+test "${helper_resource_line}" -lt "${helper_final_line}" || fail 'resource proof must precede final stack read'
+test "${helper_final_line}" -lt "${helper_binding_line}" || fail 'final read must precede timestamp binding'
+reconciler_poll_line="$(grep -nF 'detect_and_wait_for_cloudformation_stack_in_sync \' "${reconciler}" | cut -d: -f1)"
+reconciler_exact_line="$(grep -nF 'exact_stack_id="$(jq -er' "${reconciler}" | cut -d: -f1)"
+reconciler_verify_line="$(grep -nF 'verify_cloudformation_stack_resource_drifts \' "${reconciler}" | cut -d: -f1)"
+reconciler_evidence_line="$(grep -nF 'checkedResourceCount: $checkedResourceCount' "${reconciler}" | cut -d: -f1)"
+test "${reconciler_poll_line}" -lt "${reconciler_exact_line}" || fail 'poll result must precede exact binding extraction'
+test "${reconciler_exact_line}" -lt "${reconciler_verify_line}" || fail 'exact binding must precede resource proof'
+test "${reconciler_verify_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
+require_text "${runbook}" \
+  'Bounded CloudFormation drift polling' \
+  'hard 900-second wall-clock deadline' \
+  'SDK retries are fixed' \
+  'LastCheckTimestamp' \
+  'deleted on every' \
+  '30596290772' \
+  'cloudformation-supported-resources'
+require_text "${reconciler}" \
+  'set -Eeuo pipefail' \
+  "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
+  "foundation_phase='startup'" \
+  'report_foundation_error() {' \
+  "trap 'report_foundation_error \"\$?\" \"\$LINENO\"' ERR" \
+  'shopt -s inherit_errexit' \
+  "printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\\n'" \
+  "foundation_phase='preflight:revalidate-master'" \
+  "foundation_phase='preflight:validate-template:api-gateway-account'" \
+  "foundation_phase='preflight:validate-template:iam-foundation'" \
+  "foundation_phase='preflight:validate-template:github-actions-deploy-role'" \
+  "foundation_phase='preflight:validate-template:github-actions-foundation-role'" \
+  "foundation_phase='preflight:validate-template:governed-canary-roles'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:us-east-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:us-east-1'" \
+  "foundation_phase='preflight:legacy-role'" \
+  "foundation_phase='preflight:legacy-stacks'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:shared-api'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:governed-canary'" \
+  "foundation_phase='preflight:shared-api-gateway'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:registry'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:edge'" \
+  "foundation_phase='preflight:application-stack-role-transition'" \
+  "foundation_phase='stage-iam'" \
+  "foundation_phase='shared-api-gateway'" \
+  "foundation_phase='governed-canary-roles'" \
+  "foundation_phase='bootstrap'" \
+  "foundation_phase='deploy-roles'" \
+  "foundation_phase='drift-verification'" \
+  "foundation_phase='evidence'"
+forbid_text "${reconciler}" \
+  'BASH_COMMAND' \
+  'set -x' \
+  'printenv' \
+  'declare -p'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 37 ||
+  fail 'reconciler diagnostic phases must be the 37 reviewed public labels'

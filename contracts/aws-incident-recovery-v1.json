@@ -1,0 +1,418 @@
+{
+  "schemaVersion": "archon.aws-incident-recovery/v1",
+  "repository": "upgradedev/archon-datahub",
+  "defaultBranch": "master",
+  "status": "recovered-delete-complete-cleanup-proven",
+  "execution": {
+    "recoveryRun": {
+      "runId": "30571830902",
+      "runAttempt": "1",
+      "headSha": "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
+      "result": "prepare-incident-record-mismatch",
+      "diagnosticCode": "AWS_RECOVERY_INCIDENT_RECORD_MISMATCH",
+      "putRolePolicy": "not-reached",
+      "deleteStack": "skipped",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "artifact": {
+        "id": "8771158101",
+        "name": "aws-incident-recovery-30571830902-1",
+        "zipDigest": "sha256:f21cb3207f1ea91320ce732aa0592bfb014b5fd649bf907fd54f51cfb4003878"
+      }
+    },
+    "classifiedRecoveryRun": {
+      "runId": "30576390064",
+      "runAttempt": "1",
+      "headSha": "9b9ed35e4c5a5bf0bfed4aa0b049ff654ad2d0b9",
+      "result": "prepare-classified-delete-complete-no-physical-id",
+      "diagnosticCode": "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_NO_PHYSICAL_ID",
+      "putRolePolicy": "not-reached",
+      "deleteStack": "skipped",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "artifact": {
+        "id": "8773039467",
+        "name": "aws-incident-recovery-30576390064-1",
+        "zipDigest": "sha256:5fea23ffcd4e0d4d323b129644320cc8569746dd417c56fe472e5ef3d580f20e"
+      }
+    },
+    "authorizationReadbackRun": {
+      "runId": "30579644527",
+      "runAttempt": "1",
+      "headSha": "bce219b0a03a5d3a7e162edf81866d00848aaac9",
+      "result": "prepare-policy-readback-framing-mismatch",
+      "validator": "success",
+      "putRolePolicy": "request-succeeded",
+      "canonicalPolicyReadback": "not-proven",
+      "deleteStack": "skipped",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "githubAttestation": "not-created",
+      "artifact": {
+        "id": "8774187155",
+        "name": "aws-incident-recovery-30579644527-1",
+        "sizeBytes": 930,
+        "zipDigest": "sha256:f2ab1912324c75a2e1e04ea2ce4c8726905521eef38825cb656631667a2884a8",
+        "expiresAt": "2026-10-28T20:32:58Z",
+        "uploadedFileCount": 3,
+        "evidenceScope": "cleanup-only"
+      }
+    },
+    "cleanupRun": {
+      "runId": "30571619440",
+      "runAttempt": "1",
+      "headSha": "dd9b6f8c4c23bed290871c89a505ec12422d8caa",
+      "result": "success",
+      "canonicalAbsenceProof": "proven",
+      "artifact": {
+        "id": "8771042311",
+        "name": "aws-incident-recovery-cleanup-30571619440-1",
+        "zipDigest": "sha256:df4a796511f3afd850b5c7819b4562735fdec33e5f1fa1c2a286a5556a4739e0",
+        "cleanupPayloadSha256": "8cb752c3418f8587b5fb2a48fc19048babdb45db1570df5b9022831d774495d2",
+        "attestationUrl": "https://github.com/upgradedev/archon-datahub/attestations/38026442"
+      }
+    },
+    "temporaryPolicyAbsent": "proven",
+    "deleteStackExecuted": true,
+    "successfulRecoveryRun": {
+      "runId": "30582684638",
+      "runAttempt": "1",
+      "headSha": "8b7451da65d1bf1ed14b17e0c1f0cc5d43d6cf40",
+      "completedAt": "2026-07-30T21:19:41Z",
+      "result": "success",
+      "validator": "success",
+      "putRolePolicy": "request-succeeded",
+      "canonicalPolicyReadback": "proven",
+      "deleteStack": "executed-once",
+      "deletionMode": "STANDARD",
+      "stackDeletionProof": "original-id-delete-complete-and-no-active-name",
+      "mandatoryRevocation": "success",
+      "canonicalAbsenceProof": "proven",
+      "githubAttestation": {
+        "id": "38051531",
+        "url": "https://github.com/upgradedev/archon-datahub/attestations/38051531",
+        "subject": "recovery.json",
+        "subjectDigest": "sha256:44f15d0c362cd16f7fa11a111956bceffa0afc7c6fd2cd5c0aca8747a0dc97ef"
+      },
+      "artifact": {
+        "id": "8775321544",
+        "name": "aws-incident-recovery-30582684638-1",
+        "createdAt": "2026-07-30T21:19:37Z",
+        "expiresAt": "2026-10-28T21:15:52Z",
+        "sizeBytes": 2085,
+        "uploadedFileCount": 6,
+        "zipDigest": "sha256:dddf3d887781c18d2b1578c8083e450c41ba120753206b5f2f80b50031eee155",
+        "evidenceScope": "recovery-and-cleanup"
+      },
+      "cleanupFollower": {
+        "runId": "30582939537",
+        "result": "skipped-on-success"
+      },
+      "preflightGates": {
+        "ci": {
+          "runId": "30582157198",
+          "result": "success"
+        },
+        "codeql": {
+          "runId": "30582157151",
+          "result": "success"
+        },
+        "workflowSecurity": {
+          "runId": "30582157207",
+          "result": "success"
+        },
+        "productionSupplyChain": {
+          "runId": "30582494521",
+          "result": "success"
+        }
+      }
+    },
+    "temporaryPolicyInstalledDuringSuccessfulRun": true,
+    "temporaryPolicyPresentAfterRun": false
+  },
+  "controlPlane": {
+    "entryWorkflow": ".github/workflows/aws-incident-recovery.yml",
+    "driverWorkflow": ".github/workflows/aws-incident-recovery-driver.yml",
+    "cleanupWorkflow": ".github/workflows/aws-incident-recovery-cleanup.yml",
+    "runbook": "docs/AWS_INCIDENT_RECOVERY.md",
+    "driver": "scripts/run-aws-incident-recovery.sh",
+    "validator": "scripts/aws-incident-recovery.mjs",
+    "secretForwarding": "none",
+    "inputs": [
+      "expected_head_sha",
+      "confirmation"
+    ],
+    "forbiddenInputs": [
+      "account",
+      "artifact",
+      "region",
+      "role",
+      "stack_id",
+      "stack_name",
+      "target"
+    ],
+    "confirmation": "DELETE SEALED STAGING IAM INCIDENT",
+    "cleanupConfirmation": "REVOKE SEALED INCIDENT POLICY",
+    "approvalEnvironments": {
+      "prepareAndRevoke": "aws-foundation",
+      "deleteOnce": "governed-canary-recovery"
+    },
+    "concurrency": {
+      "entryAndCleanup": "archon-aws-control-plane",
+      "reusableDriver": "archon-governed-canary-mutation-recovery",
+      "foundationJob": "archon-governed-canary-mutation-recovery",
+      "lockOrder": [
+        "archon-aws-control-plane",
+        "archon-governed-canary-mutation-recovery"
+      ],
+      "cancelInProgress": false,
+      "holdsBothLocksDuringTemporaryGrant": true,
+      "foundationAcquiresBothLocks": true,
+      "deployDispatchesInnerCanaryWhileHoldingOuter": true
+    }
+  },
+  "incident": {
+    "workflow": ".github/workflows/aws-foundation.yml",
+    "workflowId": 323358060,
+    "runId": "30546241677",
+    "runAttempt": "1",
+    "headSha": "aea65845e3a9456403a7fb6e9f338e4c14c0b781",
+    "conclusion": "failure",
+    "artifact": {
+      "id": "8760846578",
+      "name": "aws-foundation-failure-aea65845e3a9456403a7fb6e9f338e4c14c0b781-30546241677-1",
+      "digest": "sha256:7aa20586b970ac938fba9299e0c3c2538482b92086db811ea583f84bd3b02e24",
+      "sizeBytes": 697,
+      "inventory": [
+        "SHA256SUMS",
+        "cfn-failure.json"
+      ],
+      "checksumManifestSha256": "9ecfdff27c6de11ab7403ad75780a7fae3339efe05684c6b3ec3185be6a52703",
+      "failurePayloadSha256": "187d4cf683a61a778feec2051f1ef5c99b60cc58344edbf1a7d0189f28c67442",
+      "canonicalPayload": {
+        "diagnosticSha256": "5929dcc16e72a6bee58b6146b1f10d1948caf1f225552922d61177f518c78625",
+        "logicalResourceId": "ArchonCdkGuardPolicy",
+        "reasonCategory": "invalid-request",
+        "resourceStatus": "CREATE_FAILED",
+        "resourceType": "AWS::IAM::ManagedPolicy",
+        "schemaVersion": "archon.aws-foundation-cfn-failure/v1",
+        "stackLabel": "staging-iam",
+        "stackStatus": "ROLLBACK_COMPLETE"
+      }
+    }
+  },
+  "target": {
+    "label": "staging-iam",
+    "region": "eu-west-1",
+    "stackName": "Archon-Staging-IAM-Foundation",
+    "sourceTemplateSemanticSha256": "80a2b02326bbaa3ae145d0fff52cc1c20f3a330d4ef5c7fa2d816182f7c2b825",
+    "preconditions": {
+      "status": "ROLLBACK_COMPLETE",
+      "rootStack": true,
+      "roleArn": null,
+      "terminationProtection": false,
+      "exactTags": {
+        "Application": "archon-datahub",
+        "Environment": "staging",
+        "ManagedBy": "github-actions",
+        "Purpose": "stage-iam-foundation"
+      },
+      "resourceStatuses": {
+        "allowed": [
+          "CREATE_FAILED-without-PhysicalResourceId",
+          "DELETE_COMPLETE"
+        ],
+        "allOtherStatuses": "forbidden",
+        "survivingPhysicalResources": "forbidden",
+        "paginationToken": "forbidden"
+      },
+      "incidentResourceCurrentState": {
+        "acceptedClasses": [
+          "CREATE_FAILED-without-PhysicalResourceId",
+          "exact-logical-id-and-type-DELETE_COMPLETE-without-PhysicalResourceId"
+        ],
+        "diagnosticOnlyRejectedClasses": [
+          "DELETE_COMPLETE-with-PhysicalResourceId"
+        ],
+        "rejectionPoint": "before-PutRolePolicy",
+        "acceptanceChange": "narrow-reviewed-after-classified-run-30576390064"
+      }
+    }
+  },
+  "recoveryRole": {
+    "stackName": "Archon-Governed-Canary-Roles",
+    "stackTemplate": "infra/aws/foundation/governed-canary-roles.yml",
+    "stackTemplateSourceSha256": "0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4",
+    "roleName": "archon-datahub-github-governed-canary-recovery",
+    "baselinePolicyName": "archon-staging-stack-read",
+    "baselinePolicyUnchanged": true,
+    "foundationRolePolicyBroadening": "forbidden",
+    "attachedManagedPolicies": "forbidden",
+    "temporaryPolicy": {
+      "name": "archon-incident-30546241677-delete",
+      "maximumTtlSeconds": 1800,
+      "configuredTtlSeconds": 1200,
+      "resource": "sealed-full-stack-id-arn",
+      "statements": [
+        {
+          "action": "cloudformation:DescribeStacks",
+          "purpose": "rederive-exact-plan-before-delete",
+          "conditions": [
+            "aws:CurrentTime-DateLessThan",
+            "aws:RequestedRegion-exact",
+            "aws:ResourceTag/Application-exact",
+            "aws:ResourceTag/Environment-exact",
+            "aws:ResourceTag/ManagedBy-exact",
+            "aws:ResourceTag/Purpose-exact"
+          ]
+        },
+        {
+          "action": "cloudformation:DeleteStack",
+          "purpose": "single-sealed-mutating-action",
+          "conditions": [
+            "aws:CurrentTime-DateLessThan",
+            "aws:RequestedRegion-exact",
+            "aws:ResourceTag/Application-exact",
+            "aws:ResourceTag/Environment-exact",
+            "aws:ResourceTag/ManagedBy-exact",
+            "aws:ResourceTag/Purpose-exact",
+            "cloudformation:RoleArn-Null"
+          ]
+        }
+      ],
+      "onlyMutatingAction": "cloudformation:DeleteStack",
+      "iamLimitations": {
+        "putRolePolicyCannotConstrainPolicyNameOrDocument": true,
+        "deleteStackCannotConstrainDeletionModeRetainResourcesOrClientToken": true,
+        "compensatingControls": [
+          "protected-environment",
+          "exact-role-resource",
+          "canonical-policy-equality",
+          "zero-attached-managed-policies",
+          "bounded-eventual-consistency-readback",
+          "repeated-canonical-absence",
+          "short-DateLessThan-TTL",
+          "list-first-conditional-exact-policy-revocation",
+          "trusted-exact-CLI"
+        ]
+      }
+    }
+  },
+  "plan": {
+    "schemaVersion": "archon.aws-incident-recovery-plan/v1",
+    "canonicalPolicyDigestBytes": "sorted-compact-json-utf8-without-trailing-newline",
+    "fullStackIdStorage": "runner-private-only",
+    "crossJobTransfer": "digests-and-nonsensitive-coordinates-only",
+    "checksumSealed": true,
+    "deleteJobRederivesExactPlan": true,
+    "resourceStateSealedBeforeAuthorization": true,
+    "sourceTemplateIdentitySealedBeforeAuthorization": true
+  },
+  "validator": {
+    "cliFailureCodes": [
+      "AWS_RECOVERY_ARTIFACT_VALIDATION_FAILED",
+      "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
+      "AWS_RECOVERY_INCIDENT_RECORD_NOT_UNIQUE",
+      "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
+      "AWS_RECOVERY_INVALID_INVOCATION",
+      "AWS_RECOVERY_PLAN_VALIDATION_FAILED",
+      "AWS_RECOVERY_RESOURCE_CREATE_FAILED_PHYSICAL_ID",
+      "AWS_RECOVERY_RESOURCE_STATE_EMPTY",
+      "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
+      "AWS_RECOVERY_RESOURCE_STATE_UNAVAILABLE",
+      "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID",
+      "AWS_RECOVERY_RESOURCE_UNSUPPORTED_STATUS",
+      "AWS_RECOVERY_STACK_AUTHORITY_INVALID",
+      "AWS_RECOVERY_STACK_ID_INVALID",
+      "AWS_RECOVERY_STACK_NESTING_INVALID",
+      "AWS_RECOVERY_STACK_STATUS_INVALID",
+      "AWS_RECOVERY_STACK_TAGS_INVALID",
+      "AWS_RECOVERY_STACK_TERMINATION_PROTECTION_INVALID",
+      "AWS_RECOVERY_TEMPLATE_IDENTITY_INVALID",
+      "AWS_RECOVERY_TTL_INVALID",
+      "AWS_RECOVERY_VALIDATOR_FAILED"
+    ],
+    "fallbackCliFailureCode": "AWS_RECOVERY_VALIDATOR_FAILED",
+    "rawErrorMessages": false,
+    "rawPaths": false,
+    "rawValues": false,
+    "diagnosticOnlyCodes": [
+      "AWS_RECOVERY_INCIDENT_DELETE_COMPLETE_WITH_PHYSICAL_ID",
+      "AWS_RECOVERY_INCIDENT_RESOURCE_TYPE_MISMATCH",
+      "AWS_RECOVERY_RESOURCE_STATE_PAGINATED",
+      "AWS_RECOVERY_RESOURCE_SUMMARY_SHAPE_INVALID"
+    ],
+    "diagnosticOnlySemantics": "remaining-nonaccepted-classes-fail-closed-before-authorization"
+  },
+  "delete": {
+    "callCount": 1,
+    "stackArgument": "sealed-full-stack-id",
+    "clientRequestToken": "deterministic-from-incident-attempt-and-control-plane-sha",
+    "deletionMode": "STANDARD",
+    "retainResources": false,
+    "roleOverride": false,
+    "deploymentConfigOverride": false,
+    "forceDelete": false,
+    "targetInput": false
+  },
+  "revocation": {
+    "jobCondition": "always",
+    "decisionSource": "pre-delete-inventory-and-canonical-postcondition-proof",
+    "preDeleteInventoryRequired": true,
+    "deleteOnlyWhenTemporaryPolicyPresent": true,
+    "baseOnlyDeleteCallCount": 0,
+    "temporaryPolicyPresentDeleteCallCount": 1,
+    "deleteResponseAuthoritative": false,
+    "canonicalPostcondition": "three-consecutive-exact-baseline-only-inventories",
+    "postDeleteRelistRequired": true,
+    "unexpectedInventoryWithoutTemporaryPolicy": "fail-without-delete",
+    "temporaryPolicyWithUnexpectedInventory": "delete-temporary-then-fail-if-drift-persists",
+    "absenceConfirmations": 3,
+    "independentRetryTriggers": {
+      "workflowRunConclusions": [
+        "action_required",
+        "cancelled",
+        "failure",
+        "stale",
+        "timed_out"
+      ],
+      "workflowDispatch": true,
+      "schedule": "forbidden",
+      "successfulRun": "forbidden"
+    },
+    "cleanupNeverCallsDeleteStack": true,
+    "cleanupIndependentOfLaterMasterAdvance": true,
+    "ttlMakesDelayedCleanupEffectivelyNonprivileged": true
+  },
+  "postverification": {
+    "originalStackIdDigestMatches": true,
+    "originalStackStatus": "DELETE_COMPLETE",
+    "stackNameHasNoActiveStack": true,
+    "temporaryPolicyAbsent": true
+  },
+  "evidence": {
+    "schemaVersion": "archon.aws-incident-recovery-evidence/v1",
+    "canonicalJson": true,
+    "checksumManifest": true,
+    "attested": true,
+    "retentionDays": 90,
+    "uploadRequiresEvidenceProducerSuccess": true,
+    "failedCleanupWithoutEvidenceUpload": true,
+    "rawAwsErrors": false,
+    "rawAccountId": false,
+    "rawRoleArn": false,
+    "rawStackArnOrId": false,
+    "rawPlan": false
+  },
+  "normalFoundation": {
+    "autoRecovery": "forbidden",
+    "reconcilerDeleteStack": "forbidden",
+    "reconcilerContinueUpdateRollback": "forbidden",
+    "exceptionScope": "only-this-explicit-sealed-incident-workflow"
+  },
+  "tests": {
+    "contract": "tests/pipeline/aws-incident-recovery-contracts.test.sh",
+    "driver": "tests/pipeline/aws-incident-recovery-driver.test.sh",
+    "validator": "tests/pipeline/aws-incident-recovery-validator.test.mjs"
+  }
+}

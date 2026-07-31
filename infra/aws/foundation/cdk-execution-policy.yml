@@ -302,7 +302,6 @@ Resources:
               ArnEquals:
                 iam:PolicyARN:
                   - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-                  - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
           - Sid: PassOnlyStageRolesToRequiredServices
             Effect: Allow
             Action: iam:PassRole
@@ -397,20 +396,16 @@ Resources:
                   kms:ResourceAliases: alias/archon/ecr
           - !If
             - IsStaging
-            - Sid: DenyProductionNamedResources
+            - Sid: DenyProductionNamedBuckets
               Effect: Deny
               Action: "*"
               Resource:
-                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*Archon-production*
-                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-production*
                 - !Sub arn:${AWS::Partition}:s3:::archon-production-*
                 - !Sub arn:${AWS::Partition}:s3:::archon-production-*/*
-            - Sid: DenyStagingNamedResources
+            - Sid: DenyStagingNamedBuckets
               Effect: Deny
               Action: "*"
               Resource:
-                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*Archon-staging*
-                - !Sub arn:${AWS::Partition}:*:*:${AWS::AccountId}:*archon-staging*
                 - !Sub arn:${AWS::Partition}:s3:::archon-staging-*
                 - !Sub arn:${AWS::Partition}:s3:::archon-staging-*/*
           - !If

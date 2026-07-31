@@ -13,6 +13,26 @@ on:
         description: Exact deployed 40-character release SHA
         required: true
         type: string
+      fixture_run_id:
+        description: Exact successful governed-canary fixture workflow run ID
+        required: true
+        type: string
+      fixture_run_attempt:
+        description: Exact successful governed-canary fixture workflow run attempt
+        required: true
+        type: string
+      fixture_artifact_id:
+        description: Exact governed-canary fixture receipt artifact ID
+        required: true
+        type: string
+      fixture_artifact_digest:
+        description: Exact GitHub sha256 digest of the fixture receipt artifact
+        required: true
+        type: string
+      fixture_receipt_sha256:
+        description: Exact inner fixture receipt.json SHA-256
+        required: true
+        type: string
       confirmation:
         description: Type RUN ISOLATED GOVERNED CANARY
         required: true
@@ -23,7 +43,7 @@ on:
 # successful deployment. It never targets the production stack.
 # A read-only preparation job seals the exact plan before either protected gate.
 # The first protected environment approves that content-addressed GOVERNED write
-# on a disposable TEST/DEV fixture. The second protected environment separately
+# on the exact contract-owned snowflake TEST fixture. The second protected environment separately
 # approves the content-addressed inverse action and owns the rollback credential.
 permissions:
   actions: read
@@ -32,6 +52,7 @@ permissions:
 concurrency:
   group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
+  queue: max
 
 env:
   NODE_VERSION: "22.23.1"
@@ -57,6 +78,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       actions: read
+      attestations: read
       contents: read
       deployments: write
       id-token: write
@@ -73,6 +95,7 @@ jobs:
       evidence_bucket: ${{ steps.stack.outputs.evidence_bucket }}
       cognito_client_id: ${{ steps.stack.outputs.cognito_client_id }}
       cognito_hosted_ui_origin: ${{ steps.stack.outputs.cognito_hosted_ui_origin }}
+      fixture_binding_digest: ${{ steps.fixture.outputs.binding_digest }}
     env:
       CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
       CANARY_RELEASE_SHA: ${{ inputs.release_sha }}
@@ -83,6 +106,11 @@ jobs:
       CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
       CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
       CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
+      CANARY_FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
+      CANARY_FIXTURE_RUN_ATTEMPT: ${{ inputs.fixture_run_attempt }}
+      CANARY_FIXTURE_ARTIFACT_ID: ${{ inputs.fixture_artifact_id }}
+      CANARY_FIXTURE_ARTIFACT_DIGEST: ${{ inputs.fixture_artifact_digest }}
+      CANARY_FIXTURE_RECEIPT_SHA256: ${{ inputs.fixture_receipt_sha256 }}
     steps:
       - name: Validate protected environments and immutable deployment source
         id: source
@@ -445,6 +473,480 @@ jobs:
       - name: Assert exact reviewed canary control plane
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
+      - name: Verify exact attested governed-canary fixture binding
+        id: fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "${CANARY_FIXTURE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_FIXTURE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
+          [[ "${CANARY_FIXTURE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_FIXTURE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${CANARY_FIXTURE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+
+          fixture_run="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_FIXTURE_RUN_ID}/attempts/${CANARY_FIXTURE_RUN_ATTEMPT}")"
+          jq -e \
+            --argjson runId "${CANARY_FIXTURE_RUN_ID}" \
+            --argjson runAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" '
+              .id == $runId and
+              .run_attempt == $runAttempt and
+              .name == "DataHub governed-canary fixture" and
+              .path == ".github/workflows/datahub-canary-fixture.yml" and
+              .head_repository.full_name == $repository and
+              .head_branch == "master" and
+              .head_sha == $releaseSha and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "success"
+            ' <<<"${fixture_run}" >/dev/null || {
+            echo "::error::The fixture run is not the exact successful current-release producer"
+            exit 1
+          }
+
+          expected_artifact_name="datahub-canary-fixture-receipt-${CANARY_FIXTURE_RUN_ID}-${CANARY_FIXTURE_RUN_ATTEMPT}"
+          artifact="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANARY_FIXTURE_ARTIFACT_ID}")"
+          jq -e \
+            --arg digest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
+            --arg name "${expected_artifact_name}" \
+            --argjson artifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
+            --argjson runId "${CANARY_FIXTURE_RUN_ID}" '
+              .id == $artifactId and
+              .name == $name and
+              .digest == $digest and
+              .expired == false and
+              .workflow_run.id == $runId and
+              (.size_in_bytes | type) == "number" and
+              .size_in_bytes > 0 and
+              .size_in_bytes <= 1048576
+            ' <<<"${artifact}" >/dev/null || {
+            echo "::error::The fixture artifact metadata differs from the supplied coordinates"
+            exit 1
+          }
+
+          fixture_root="${RUNNER_TEMP}/governed-canary/fixture"
+          archive="${fixture_root}/receipt.zip"
+          receipt_dir="${fixture_root}/receipt"
+          binding="${fixture_root}/fixture-binding.json"
+          mkdir -p "${receipt_dir}"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANARY_FIXTURE_ARTIFACT_ID}/zip" \
+            >"${archive}"
+          test "$(stat --format=%s "${archive}")" -le 1048576
+          test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = \
+            "${CANARY_FIXTURE_ARTIFACT_DIGEST}"
+
+          mapfile -t archive_entries < <(unzip -Z1 "${archive}")
+          expected_checksum_inventory="$(
+            printf '%s\n' \
+              approval-receipt.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          expected_inventory="$(
+            printf '%s\n' \
+              SHA256SUMS \
+              approval-receipt.json \
+              control-plane.json \
+              plan.json \
+              receipt.json |
+              LC_ALL=C sort
+          )"
+          actual_archive_inventory="$(
+            printf '%s\n' "${archive_entries[@]}" |
+              LC_ALL=C sort
+          )"
+          test "${actual_archive_inventory}" = "${expected_inventory}" || {
+            echo "::error::The fixture archive inventory is not exact"
+            exit 1
+          }
+          FIXTURE_ARCHIVE="${archive}" python3 - <<'PY'
+          import os
+          import stat
+          import zipfile
+
+          archive = os.environ["FIXTURE_ARCHIVE"]
+          with zipfile.ZipFile(archive) as handle:
+              entries = handle.infolist()
+              if len(entries) != 5:
+                  raise SystemExit("fixture archive entry count is not exact")
+              total = 0
+              for entry in entries:
+                  mode = entry.external_attr >> 16
+                  file_type = stat.S_IFMT(mode)
+                  if (
+                      entry.is_dir()
+                      or stat.S_ISLNK(mode)
+                      or file_type not in (0, stat.S_IFREG)
+                      or entry.file_size <= 0
+                      or entry.file_size > 524_288
+                      or entry.compress_size > 1_048_576
+                  ):
+                      raise SystemExit("fixture archive has an unsafe entry")
+                  total += entry.file_size
+              if total > 1_048_576:
+                  raise SystemExit("fixture archive expands beyond its bound")
+          PY
+          if zipinfo -l "${archive}" |
+            awk '$1 ~ /^l[rwxStTs-]{9}$/ { found = 1 } END { exit found ? 0 : 1 }'; then
+            echo "::error::Symlinks are forbidden in fixture evidence"
+            exit 1
+          fi
+          unzip -q "${archive}" -d "${receipt_dir}"
+          actual_inventory="$(
+            find "${receipt_dir}" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )"
+          test "${actual_inventory}" = "${expected_inventory}"
+          for path in \
+            SHA256SUMS \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            test -f "${receipt_dir}/${path}"
+            test ! -L "${receipt_dir}/${path}"
+            test "$(stat --format=%s "${receipt_dir}/${path}")" -le 524288
+          done
+          (
+            cd "${receipt_dir}"
+            test "$(wc -l <SHA256SUMS)" = "4"
+            actual_checksum_inventory="$(
+              sed -nE \
+                's/^[0-9a-f]{64}  ([A-Za-z0-9.-]+)$/\1/p' \
+                SHA256SUMS |
+                LC_ALL=C sort
+            )"
+            test "${actual_checksum_inventory}" = \
+              "${expected_checksum_inventory}" || {
+              echo "::error::The fixture checksum inventory is not exact"
+              exit 1
+            }
+            sha256sum --check --strict SHA256SUMS
+          )
+          for path in \
+            approval-receipt.json \
+            control-plane.json \
+            plan.json \
+            receipt.json; do
+            canonical="${fixture_root}/canonical-${path}"
+            jq -cS . "${receipt_dir}/${path}" >"${canonical}"
+            cmp --silent "${receipt_dir}/${path}" "${canonical}"
+          done
+          test "$(sha256sum "${receipt_dir}/receipt.json" | awk '{print $1}')" = \
+            "${CANARY_FIXTURE_RECEIPT_SHA256}"
+
+          contract_sha256="$(
+            jq -cS . contracts/datahub-canary-fixture-v1.json |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          target_urn="urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)"
+          domain_urn="urn:li:domain:archonGovernedCanaryFixture"
+          jq -e \
+            --arg contractSha256 "${contract_sha256}" \
+            --arg query "${CANARY_QUERY}" \
+            --arg targetUrn "${target_urn}" \
+            --arg domainUrn "${domain_urn}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-plan/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .stateContractSha256 == $contractSha256 and
+              .queryBinding == {
+                query: $query,
+                targetUrn: $targetUrn
+              } and
+              .ownedUrns == [$targetUrn, $domainUrn] and
+              (.action == "seed" or .action == "reset") and
+              (.operation == "noop" or .operation == "seed" or
+                .operation == "reset") and
+              (.gmsEndpointFingerprint | test("^[0-9a-f]{64}$")) and
+              (.isolationMarkerSha256 | test("^[0-9a-f]{64}$")) and
+              (.before.rawAspectSnapshotSha256 |
+                test("^[0-9a-f]{64}$"))
+            ' "${receipt_dir}/plan.json" >/dev/null
+          plan_sha256="$(sha256sum "${receipt_dir}/plan.json" | awk '{print $1}')"
+          jq -e \
+            --arg contractSha256 "${contract_sha256}" \
+            --arg planSha256 "${plan_sha256}" \
+            --arg query "${CANARY_QUERY}" \
+            --arg targetUrn "${target_urn}" \
+            --arg domainUrn "${domain_urn}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg runId "${CANARY_FIXTURE_RUN_ID}" \
+            --arg runAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --slurpfile plan "${receipt_dir}/plan.json" '
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-receipt/v1" and
+              .repository == $repository and
+              .releaseSha == $releaseSha and
+              .workflowRunId == $runId and
+              .workflowRunAttempt == $runAttempt and
+              .stateContractSha256 == $contractSha256 and
+              .planSha256 == $planSha256 and
+              .gmsEndpointFingerprint ==
+                $plan[0].gmsEndpointFingerprint and
+              .queryBinding == {
+                query: $query,
+                targetUrn: $targetUrn
+              } and
+              .ownedUrns == [$targetUrn, $domainUrn] and
+              .action == $plan[0].action and
+              .exactQueryMatchCount == 1 and
+              (.g1ToG5 | keys | sort) ==
+                ["G1", "G2", "G3", "G4", "G5"] and
+              all(.g1ToG5[]; . == true) and
+              .g6Gap == {
+                classificationState: "absent",
+                fieldPath: "email",
+                piiClassificationAbsent: true
+              } and
+              (.postStateSha256 | test("^[0-9a-f]{64}$")) and
+              (
+                if $plan[0].operation == "noop" then
+                  .outcome == "unchanged"
+                elif $plan[0].operation == "seed" then
+                  .outcome == "seeded"
+                else
+                  .outcome == "reset"
+                end
+              )
+            ' "${receipt_dir}/receipt.json" >/dev/null || {
+            echo "::error::The fixture receipt does not prove the exact TEST G1-G5/G6 state"
+            exit 1
+          }
+
+          normalize_gms() {
+            GMS_VALUE="$1" python3 - <<'PY'
+          import os
+          import re
+          import sys
+          import urllib.parse
+
+          raw = os.environ["GMS_VALUE"]
+          parsed = urllib.parse.urlsplit(raw)
+          decoded = urllib.parse.unquote(parsed.path)
+          if (
+              parsed.scheme != "https"
+              or not parsed.hostname
+              or parsed.username is not None
+              or parsed.password is not None
+              or parsed.query
+              or parsed.fragment
+              or "\\" in raw
+              or re.search(r"[\x00-\x20\x7f\\]", decoded)
+              or any(part in {".", ".."} for part in decoded.split("/"))
+          ):
+              raise SystemExit(1)
+          host = parsed.hostname.lower().rstrip(".")
+          port = parsed.port
+          authority = f"[{host}]" if ":" in host else host
+          if port is not None and port != 443:
+              authority = f"{authority}:{port}"
+          sys.stdout.write(
+              urllib.parse.urlunsplit(
+                  ("https", authority, parsed.path.rstrip("/"), "", "")
+              )
+          )
+          PY
+          }
+          read_gms="$(normalize_gms "${CANARY_DATAHUB_READ_GMS_URL}")"
+          write_gms="$(normalize_gms "${CANARY_DATAHUB_WRITE_GMS_URL}")"
+          test "${read_gms}" = "${write_gms}" || {
+            echo "::error::The governed canary GMS endpoints do not equal one fixture endpoint"
+            exit 1
+          }
+          endpoint_fingerprint="$(
+            printf '%s' "${read_gms}" | sha256sum | awk '{print $1}'
+          )"
+          isolation_marker_sha256="$(
+            printf '%s' "${CANARY_ISOLATION_MARKER,,}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          test "${endpoint_fingerprint}" = "$(
+            jq -er '.gmsEndpointFingerprint' "${receipt_dir}/receipt.json"
+          )"
+          test "${endpoint_fingerprint}" = "$(
+            jq -er '.gmsEndpointFingerprint' "${receipt_dir}/plan.json"
+          )"
+          test "${isolation_marker_sha256}" = "$(
+            jq -er '.isolationMarkerSha256' "${receipt_dir}/plan.json"
+          )"
+
+          approval_sha256="$(
+            sha256sum "${receipt_dir}/approval-receipt.json" | awk '{print $1}'
+          )"
+          control_plane_sha256="$(
+            sha256sum "${receipt_dir}/control-plane.json" | awk '{print $1}'
+          )"
+          sums_sha256="$(
+            sha256sum "${receipt_dir}/SHA256SUMS" | awk '{print $1}'
+          )"
+          post_state_sha256="$(
+            jq -er '.postStateSha256' "${receipt_dir}/receipt.json"
+          )"
+          fixture_action="$(jq -er '.action' "${receipt_dir}/receipt.json")"
+          expected_predicate="${fixture_root}/expected-attestation-predicate.json"
+          jq -cnS \
+            --arg action "${fixture_action}" \
+            --arg approvalReceiptSha256 "${approval_sha256}" \
+            --arg artifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
+            --arg controlPlaneSha256 "${control_plane_sha256}" \
+            --arg planSha256 "${plan_sha256}" \
+            --arg postStateSha256 "${post_state_sha256}" \
+            --arg receiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha256sumsSha256 "${sums_sha256}" \
+            --arg stateContractSha256 "${contract_sha256}" \
+            --arg workflowRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --arg workflowRunId "${CANARY_FIXTURE_RUN_ID}" '
+              {
+                schemaVersion:
+                  "archon.datahub-canary-fixture-attestation/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflowRunId: $workflowRunId,
+                workflowRunAttempt: $workflowRunAttempt,
+                action: $action,
+                result: "exact-fixture-ready",
+                artifactDigest: $artifactDigest,
+                stateContractSha256: $stateContractSha256,
+                controlPlaneSha256: $controlPlaneSha256,
+                approvalReceiptSha256: $approvalReceiptSha256,
+                planSha256: $planSha256,
+                receiptSha256: $receiptSha256,
+                sha256sumsSha256: $sha256sumsSha256,
+                postStateSha256: $postStateSha256
+              }
+            ' >"${expected_predicate}"
+          predicate_type="https://github.com/upgradedev/archon-datahub/attestations/datahub-canary-fixture/v1"
+          attestation_verification="${fixture_root}/attestation-verification.json"
+          gh attestation verify \
+            "${receipt_dir}/receipt.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow \
+              "github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-canary-fixture.yml" \
+            --signer-digest "${CANARY_RELEASE_SHA}" \
+            --source-digest "${CANARY_RELEASE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "${predicate_type}" \
+            --deny-self-hosted-runners \
+            --format json >"${attestation_verification}"
+          test -s "${attestation_verification}"
+          expected_subjects="$(
+            jq -cn \
+              --arg sums "$(sha256sum "${receipt_dir}/SHA256SUMS" | awk '{print $1}')" \
+              --arg approval "${approval_sha256}" \
+              --arg controlPlane "${control_plane_sha256}" \
+              --arg plan "${plan_sha256}" \
+              --arg receipt "${CANARY_FIXTURE_RECEIPT_SHA256}" '
+                [
+                  {name: "SHA256SUMS", sha256: $sums},
+                  {name: "approval-receipt.json", sha256: $approval},
+                  {name: "control-plane.json", sha256: $controlPlane},
+                  {name: "plan.json", sha256: $plan},
+                  {name: "receipt.json", sha256: $receipt}
+                ] | sort_by(.name)
+              '
+          )"
+          expected_predicate_json="$(jq -cS . "${expected_predicate}")"
+          jq -e \
+            --arg predicateType "${predicate_type}" \
+            --argjson expectedPredicate "${expected_predicate_json}" \
+            --argjson expectedSubjects "${expected_subjects}" '
+              length >= 1 and
+              any(
+                .[];
+                .verificationResult.statement.predicateType ==
+                  $predicateType and
+                .verificationResult.statement.predicate ==
+                  $expectedPredicate and
+                (
+                  .verificationResult.statement.subject |
+                  map({
+                    name: (.name | split("/") | last),
+                    sha256: .digest.sha256
+                  }) |
+                  sort_by(.name)
+                ) == $expectedSubjects
+              )
+            ' "${attestation_verification}" >/dev/null || {
+            echo "::error::The fixture attestation does not bind the exact predicate and full subject set"
+            exit 1
+          }
+
+          attestation_predicate_sha256="$(
+            sha256sum "${expected_predicate}" | awk '{print $1}'
+          )"
+          jq -cnS \
+            --arg artifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
+            --arg artifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
+            --arg artifactName "${expected_artifact_name}" \
+            --arg attestationPredicateSha256 \
+              "${attestation_predicate_sha256}" \
+            --arg gmsEndpointFingerprint "${endpoint_fingerprint}" \
+            --arg isolationMarkerSha256 "${isolation_marker_sha256}" \
+            --arg postStateSha256 "${post_state_sha256}" \
+            --arg query "${CANARY_QUERY}" \
+            --arg receiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
+            --arg releaseSha "${CANARY_RELEASE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg stateContractSha256 "${contract_sha256}" \
+            --arg targetUrn "${target_urn}" \
+            --arg workflowRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
+            --arg workflowRunId "${CANARY_FIXTURE_RUN_ID}" '
+              {
+                schemaVersion:
+                  "archon.governed-canary-fixture-binding/v1",
+                repository: $repository,
+                releaseSha: $releaseSha,
+                workflowRunId: $workflowRunId,
+                workflowRunAttempt: $workflowRunAttempt,
+                artifactId: $artifactId,
+                artifactName: $artifactName,
+                artifactDigest: $artifactDigest,
+                receiptSha256: $receiptSha256,
+                stateContractSha256: $stateContractSha256,
+                postStateSha256: $postStateSha256,
+                gmsEndpointFingerprint: $gmsEndpointFingerprint,
+                isolationMarkerSha256: $isolationMarkerSha256,
+                attestationPredicateSha256:
+                  $attestationPredicateSha256,
+                target: {
+                  query: $query,
+                  targetUrn: $targetUrn
+                }
+              }
+            ' >"${binding}"
+          chmod 0600 "${binding}"
+          canonical_binding="$(jq -cS . "${binding}")"
+          binding_digest="sha256:$(
+            printf '%s' "${canonical_binding}" | sha256sum | awk '{print $1}'
+          )"
+          {
+            echo "binding=${binding}"
+            echo "binding_digest=${binding_digest}"
+          } >>"${GITHUB_OUTPUT}"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -548,6 +1050,7 @@ jobs:
           CANARY_COGNITO_HOSTED_UI_ORIGIN: ${{ steps.stack.outputs.cognito_hosted_ui_origin }}
           CANARY_CONTROL_PLANE_GATES_PATH: ${{ steps.source.outputs.control_plane_evidence }}
           CANARY_CONTROL_PLANE_GATES_SHA256: ${{ steps.source.outputs.control_plane_gate_sha256 }}
+          CANARY_FIXTURE_BINDING_PATH: ${{ steps.fixture.outputs.binding }}
           CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
         run: |
           set -euo pipefail
@@ -557,8 +1060,32 @@ jobs:
           test ! -L "${CANARY_CONTROL_PLANE_GATES_PATH}"
           test "$(sha256sum "${CANARY_CONTROL_PLANE_GATES_PATH}" | awk '{print $1}')" = \
             "${CANARY_CONTROL_PLANE_GATES_SHA256}"
+          test -f "${CANARY_FIXTURE_BINDING_PATH}"
+          test ! -L "${CANARY_FIXTURE_BINDING_PATH}"
+          fixture_binding_canonical="${RUNNER_TEMP}/fixture-binding-canonical.json"
+          jq -cS . "${CANARY_FIXTURE_BINDING_PATH}" \
+            >"${fixture_binding_canonical}"
+          cmp --silent \
+            "${CANARY_FIXTURE_BINDING_PATH}" \
+            "${fixture_binding_canonical}"
+          fixture_binding="$(jq -cS . "${CANARY_FIXTURE_BINDING_PATH}")"
+          test "sha256:$(printf '%s' "${fixture_binding}" |
+            sha256sum | awk '{print $1}')" = \
+            "${{ steps.fixture.outputs.binding_digest }}"
           node --import tsx scripts/governed-canary.ts prepare
           chmod 0600 "${CANARY_RECOVERY_PATH}"
+          jq -e \
+            --arg fixtureBindingDigest \
+              "${{ steps.fixture.outputs.binding_digest }}" \
+            --slurpfile fixtureBinding "${CANARY_FIXTURE_BINDING_PATH}" '
+              .schemaVersion ==
+                "archon.governed-canary-recovery/v3" and
+              .fixtureBinding == $fixtureBinding[0] and
+              .fixtureBindingDigest == $fixtureBindingDigest
+            ' "${CANARY_RECOVERY_PATH}" >/dev/null || {
+            echo "::error::The recovery manifest does not seal the verified fixture binding"
+            exit 1
+          }
           test "$(jq -er '.controlPlaneGatesSha256' "${CANARY_RECOVERY_PATH}")" = \
             "${CANARY_CONTROL_PLANE_GATES_SHA256}"
           control_plane_output="${recovery_dir}/control-plane-security-gates.json"
@@ -566,6 +1093,11 @@ jobs:
           chmod 0600 "${control_plane_output}"
           test "$(sha256sum "${control_plane_output}" | awk '{print $1}')" = \
             "${CANARY_CONTROL_PLANE_GATES_SHA256}"
+          fixture_binding_output="${recovery_dir}/fixture-binding.json"
+          cp -- "${CANARY_FIXTURE_BINDING_PATH}" "${fixture_binding_output}"
+          chmod 0600 "${fixture_binding_output}"
+          cmp --silent "${fixture_binding_output}" \
+            "${CANARY_FIXTURE_BINDING_PATH}"
           recovery_digest="$(jq -er \
             '.recoveryDigest | select(test("^sha256:[a-f0-9]{64}$"))' \
             "${CANARY_RECOVERY_PATH}")"
@@ -597,6 +1129,7 @@ jobs:
             echo "- Plan: \`${plan_digest}\`"
             echo "- Staging Cognito binding: \`${auth_binding_digest}\`"
             echo "- Recovery binding: \`${recovery_digest}\`"
+            echo "- Attested fixture binding: \`${{ steps.fixture.outputs.binding_digest }}\`"
             echo "- Target: \`${target_urn}#${CANARY_COLUMN_PATH}\`"
             echo "- Transition: \`${before_digest}\` → \`${after_digest}\`"
             echo "- Exact write/inverse: \`add_tags(urn:li:tag:PII)\` / \`remove_tags(urn:li:tag:PII)\`"
@@ -1071,6 +1604,7 @@ jobs:
           needs.approval.outputs.rollback_proposal_digest != ''
         env:
           CANARY_ROLLBACK_EVIDENCE_PATH: ${{ steps.restore.outputs.path }}
+          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
           RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
           ROLLBACK_PROPOSAL_DIGEST: ${{ needs.approval.outputs.rollback_proposal_digest }}
           ROLLBACK_EVIDENCE_DIGEST: ${{ steps.restore.outputs.evidence_digest }}
@@ -1078,6 +1612,14 @@ jobs:
         run: |
           set -euo pipefail
           evidence_dir="$(dirname "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
+          fixture_binding="$(jq -cS '.fixtureBinding' "${CANARY_RECOVERY_PATH}")"
+          fixture_binding_digest="$(jq -er \
+            '.fixtureBindingDigest |
+              select(test("^sha256:[a-f0-9]{64}$"))' \
+            "${CANARY_RECOVERY_PATH}")"
+          test "sha256:$(printf '%s' "${fixture_binding}" |
+            sha256sum | awk '{print $1}')" = \
+            "${fixture_binding_digest}"
           (
             cd "${evidence_dir}"
             sha256sum rollback-evidence.json >rollback-subject.sha256
@@ -1092,6 +1634,8 @@ jobs:
             --arg recoveryDigest "${RECOVERY_DIGEST}" \
             --arg rollbackProposalDigest "${ROLLBACK_PROPOSAL_DIGEST}" \
             --arg rollbackEvidenceDigest "${ROLLBACK_EVIDENCE_DIGEST}" \
+            --arg fixtureBindingDigest "${fixture_binding_digest}" \
+            --argjson fixtureBinding "${fixture_binding}" \
             '{
               schemaVersion: "archon.governed-canary-attestation/v1",
               repository: $repository,
@@ -1103,6 +1647,8 @@ jobs:
               recoveryDigest: $recoveryDigest,
               rollbackProposalDigest: $rollbackProposalDigest,
               rollbackEvidenceDigest: $rollbackEvidenceDigest,
+              fixtureBinding: $fixtureBinding,
+              fixtureBindingDigest: $fixtureBindingDigest,
               result: "write-verified-and-rollback-proven"
             }' >"${evidence_dir}/attestation-predicate.json"
           {

@@ -292,6 +292,10 @@ test("scheduled rescans bind exact live deployment, CI run, and subjects", () =>
     /The deployment control-plane receipt differs from deployment evidence/u
   );
   assert.match(resolver, /write-verified-and-rollback-proven/u);
+  assert.match(
+    resolver,
+    /preProductionGovernedCanary\.fixtureBindingDigest[\s\S]+test\("\^sha256:\[a-f0-9\]\{64\}\$"\)/u
+  );
   assert.match(resolver, /bash scripts\/observe-aws-live-runtime\.sh/u);
   assert.ok(
     resolver.indexOf("bash scripts/observe-aws-live-runtime.sh") >

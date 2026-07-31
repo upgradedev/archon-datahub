@@ -3,8 +3,8 @@
 Archon's AWS foundation is a manual, idempotent GitHub Actions control plane.
 It creates the stage-isolated CDK bootstrap, least-privilege CloudFormation
 execution policies, runtime permissions boundaries, environment-bound GitHub
-OIDC roles, governed-canary read roles, and the single regional API Gateway
-logging account.
+OIDC roles, governed-canary read roles, and either manages or explicitly pins
+the single regional API Gateway logging account without taking it over.
 
 All executable verification, synthesis, deployment, drift detection, and
 evidence generation runs in GitHub Actions. A workstation build or temporary
@@ -12,7 +12,8 @@ artifact is neither required nor accepted as release evidence.
 
 ## Final topology
 
-The account contains these ten CloudFormation stack instances:
+Nine CloudFormation stack instances are always managed by Archon. A tenth
+stack exists only in `foundation-managed` API Gateway mode:
 
 | Purpose | Region | Stack |
 | --- | --- | --- |
@@ -21,11 +22,17 @@ The account contains these ten CloudFormation stack instances:
 | Staging GitHub deploy role | `eu-west-1` | `Archon-GitHub-Staging-Deploy-Role` |
 | Production GitHub deploy role | `eu-west-1` | `Archon-GitHub-Production-Deploy-Role` |
 | Governed-canary GitHub roles | `eu-west-1` | `Archon-Governed-Canary-Roles` |
-| Shared API Gateway logging | `eu-west-1` | `Archon-Shared-ApiGateway-Logging` |
+| Shared API Gateway logging (`foundation-managed` only) | `eu-west-1` | `Archon-Shared-ApiGateway-Logging` |
 | Staging CDK bootstrap | `eu-west-1` | `CDKToolkit-archonstg` |
 | Staging CDK bootstrap | `us-east-1` | `CDKToolkit-archonstg` |
 | Production CDK bootstrap | `eu-west-1` | `CDKToolkit-archonprd` |
 | Production CDK bootstrap | `us-east-1` | `CDKToolkit-archonprd` |
+
+`foundation-managed` therefore produces ten managed stacks. `external-pinned`
+produces nine managed stacks plus one pinned external account binding; the
+`Archon-Shared-ApiGateway-Logging` managed stack must be absent in that mode.
+The evidence and workflow summary report the exact managed-stack count instead
+of describing the external binding as a CloudFormation stack.
 
 The stage mapping is fixed:
 
@@ -34,10 +41,13 @@ The stage mapping is fixed:
 | Staging | `archonstg` | `archon-datahub-runtime-boundary-staging` | `archon-datahub-github-staging-deploy` |
 | Production | `archonprd` | `archon-datahub-runtime-boundary-production` | `archon-datahub-github-production-deploy` |
 
-The foundation uses the pinned CDK CLI `2.1133.0` and bootstrap template
-version `32`. Each qualifier owns an independent toolkit stack, asset bucket,
-container-assets repository, SSM version parameter, and bootstrap role family
-in both regions. Every toolkit stack is termination protected.
+The foundation resolves the AWS CDK CLI version from the
+exact committed `infra/aws/package-lock.json` entry for `node_modules/aws-cdk`;
+the installed CLI version must exactly match that decoded lock entry. The
+bootstrap template is pinned to version `32`. Each qualifier owns an independent
+toolkit stack, asset bucket, container-assets repository, SSM version parameter,
+and bootstrap role family in both regions. Every toolkit stack is termination
+protected.
 
 The canonical bootstrap template is patched four times. Each stage-and-region
 variant permits its deploy role to create or update only the exact application
@@ -51,6 +61,28 @@ delete application stacks.
 is a parameterized CloudFormation template and must never be submitted to IAM
 as an unresolved policy document. CloudFormation deploys it once for staging
 and once for production.
+
+The readable source is larger than CloudFormation's 51,200-byte inline
+`TemplateBody` limit. Both ordinary CI and the protected foundation workflow
+therefore use checksum-pinned AWS CloudFormation Rain `v1.24.4` plus the
+dependency-free
+[`render-canonical-flow-yaml.mjs`](../scripts/render-canonical-flow-yaml.mjs)
+emitter to render the unchanged template as canonical flow-style YAML below
+`RUNNER_TEMP`. The emitter removes quotes only from a strict ASCII-safe scalar
+subset and leaves every other scalar JSON-quoted. Flow-style YAML removes
+transport overhead without removing resources, policy statements,
+descriptions, outputs, or other template semantics. The renderer rejects
+non-runner use, symlinks, output outside `RUNNER_TEMP`, malformed or empty
+templates, Rain JSON semantic round-trip drift, and output above 51,200 bytes.
+
+The protected workflow hashes the rendered bytes before OIDC and uses those
+exact bytes for both `ValidateTemplate` and deployment. After each stage
+deploys, CloudFormation's `GetTemplate --template-stage Original` body is
+canonicalized to JSON with checksum-pinned `mikefarah/yq` `v4.47.2` and its
+semantic SHA-256 must equal the pre-OIDC canonical JSON SHA-256 before the
+attested foundation evidence can be sealed.
+The evidence records both the exact flow-YAML transport hash and the canonical
+semantic hash.
 
 Each stage receives ten customer-managed execution policies:
 
@@ -73,10 +105,27 @@ Every policy is independently checked against IAM's 6,144-byte managed-policy
 quota. No policy permits `Action: "*"`, a service-wide `service:*` allow, or
 `AdministratorAccess`.
 
-The guard policy denies cross-stage resource names and ownership tags, shared
-API Gateway account mutation, runtime-boundary removal, foundation mutation,
-and identity/account administration. The production guard also denies mutation
-of the staging-owned shared registry KMS key.
+The ordinary pull-request CI also generates and seals the exact locked CDK
+bootstrap template for both stages and both regions, without AWS credentials.
+This rejects template drift before merge and dispatch. After the manual
+environment gate, the protected foundation workflow reuses that same verifier
+before requesting OIDC credentials or making any AWS call.
+
+The guard policy denies opposite-stage S3 bucket and object names and
+opposite-stage ownership tags, plus shared API Gateway account mutation,
+runtime-boundary removal, foundation mutation, and identity/account
+administration. The production guard also denies mutation of the staging-owned
+shared registry KMS key.
+
+The inline-template renderer parses every direct or `Fn::Sub` resource ARN under
+an IAM policy document without splitting colons inside substitution tokens. It
+accepts only a literal AWS partition or an exact `AWS::Partition` reference and
+a literal lowercase service token; wildcard, substituted, malformed, or
+incomplete service ARNs fail closed under
+[AWS IAM Resource ARN rules](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_resource.html).
+Deterministic negative fixtures cover direct and intrinsic substitutions,
+including variable-map evasions, before the foundation workflow requests AWS
+credentials.
 
 ## Runtime permissions boundary
 
@@ -150,10 +199,28 @@ CIDR prefix lists.
 ## Shared regional resources
 
 API Gateway has one CloudWatch logging role setting per AWS account and
-region. The `Archon-Shared-ApiGateway-Logging` stack therefore owns the only
-`AWS::ApiGateway::Account` binding in `eu-west-1`, the role
-`archon-datahub-apigateway-cloudwatch-logs`, and its exact inline log policy.
-Both stage execution policies explicitly deny `/account` mutation.
+region. The foundation resolves that singleton in exactly one of two modes:
+
+- In `foundation-managed`, the protected digest pin is empty and the account
+  binding is either empty or already names
+  `archon-datahub-apigateway-cloudwatch-logs`. The
+  `Archon-Shared-ApiGateway-Logging` stack creates or reconciles the
+  `AWS::ApiGateway::Account` resource, role, and exact inline log policy.
+- In `external-pinned`, an existing non-Archon binding must be a strict
+  same-account IAM role ARN and its exact SHA-256 must match the protected
+  `aws-foundation` variable `AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`. The
+  managed stack must be absent. This path performs no API Gateway account mutation,
+  no IAM role inspection, and no takeover.
+
+A foreign binding without an exact pin fails before mutation and exposes only
+its SHA-256 for deliberate operator pinning. A malformed or cross-account ARN,
+a stale or mismatched pin, a changed binding during the run, or coexistence
+with the managed stack also fails closed. The raw external ARN is masked,
+revalidated unchanged at the shared and drift gates, and never enters retained
+evidence; the receipt records only `pinned-and-unchanged` plus its binding
+hash. Archon does not claim that the external role's trust or permissions were
+verified, so the shared-account owner remains responsible for CloudWatch log
+delivery. Both stage execution policies explicitly deny `/account` mutation.
 
 Staging owns creation and reconciliation of the shared immutable
 `archon-datahub` ECR repository and `alias/archon/ecr` key. Production may
@@ -217,6 +284,38 @@ OIDC provider, then renders and verifies all four managed policies in memory
 before it inspects or creates the role. A missing policy is created; a
 mismatched existing policy is never overwritten.
 
+### Protected foundation-policy version migrations
+
+Foundation run `30586169834` established the first two CloudFormation control-plane
+dependencies, `cloudformation:DetectStackResourceDrift` and
+`cloudformation:BatchDescribeTypeConfigurations`. Those actions were migrated to
+`archon-aws-foundation-control` by successful protected run `30596065876` and remain
+unchanged.
+
+Exact-master foundation run `30600085506` then completed reconciliation and failed closed
+at the first drift check with `DETECTION_FAILED`. The public CloudFormation resource-provider
+schemas identify the missing read surface: `iam:ListEntitiesForPolicy` for
+`AWS::IAM::ManagedPolicy`, plus 15 bucket-configuration reads for `AWS::S3::Bucket`.
+The source adds those 16 read-only actions in two isolated statements. Both statements use
+the same exact four stage-policy or bootstrap-bucket resources as their existing reconciliation
+statements; neither grants object reads nor a wildcard resource.
+
+The two statements are deliberately placed together in the previously untouched
+`archon-aws-foundation-assets` shard. IAM evaluates the union of all four policies attached to
+the foundation role, so this preserves the exact effective authorization while keeping the
+migration an atomic, proven one-policy 1→2 transaction. The protected workflow requires the
+signed exact current `master`, green CI, CodeQL, and workflow-security gates, the literal
+`MIGRATE EXACT FOUNDATION ASSETS POLICY` confirmation, and separate `aws-foundation` and
+`governed-canary-recovery` approvals. It derives the live previous document by removing only
+the two reviewed statements, creates and canonically reads a non-default version, changes the
+default exactly once, and retains the previous version as the rollback point.
+
+A temporary 20-minute inline grant targets only the exact assets-policy ARN and is removed
+after three consecutive baseline reads. The cleanup follower binds itself to the exact parent
+attempt. An incomplete mutation gets a fresh rollback-only grant; a completed migration whose
+evidence step failed remains migrated while authorization is revoked. Both privileged locks use
+`queue: max`. Retained evidence contains only canonical document digests, version IDs, state,
+and revocation proof; it excludes account identifiers, ARNs, and raw IAM documents.
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
 On an existing account, a canonical role may already have any subset of the
@@ -348,8 +447,10 @@ to the regional platform stack.
 4. The workflow verifies the protected GitHub control plane, synthesizes and
    proves both runtime boundaries, assumes the foundation role through OIDC,
    validates the four attached foundation policies by exact canonical
-   equality, reconciles all ten stacks, and requires every stack to be
-   `IN_SYNC`.
+   equality, then resolves the API Gateway ownership mode. It either
+   reconciles ten managed stacks or verifies nine managed stacks plus one
+   pinned external account binding, and requires every managed stack to be
+   `IN_SYNC` and the external binding, when selected, to remain unchanged.
 5. Configure the deploy-role and governed-canary role variables from the
    resulting exact role names.
 6. Dispatch the immutable deployment workflow. It shares concurrency group
@@ -370,6 +471,151 @@ binding, the receipt instead surfaces `ready-for-deploy`.
 
 The final foundation artifact contains sanitized digests, four bootstrap
 variant hashes, execution-policy bundle hashes, role-binding hashes, the
-application-stack role preflight and explicit transition state, and ten-stack
-drift evidence. It contains no raw account ID, role ARN, secret, token,
-password, credential, or API key and is attested before retention.
+application-stack role preflight and explicit transition state, and drift
+evidence for the exact nine or ten managed stacks. External mode additionally
+records one takeover-forbidden, no-mutation binding as pinned and unchanged.
+It contains no raw account ID, role ARN, secret, token, password, credential,
+or API key and is attested before retention.
+
+## Bounded CloudFormation drift polling
+
+The AWS CLI has no `stack-drift-detection-complete` waiter. The protected
+workflow therefore follows the documented CloudFormation API sequence: it
+starts `DetectStackDrift`, retains the opaque detection ID only in a mode-0600
+file below `RUNNER_TEMP`, and polls
+[`DescribeStackDriftDetectionStatus`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DescribeStackDriftDetectionStatus.html).
+The published
+[AWS CLI CloudFormation waiter list](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/wait/)
+is also a negative contract: the nonexistent drift waiter is forbidden by CI.
+
+Polling is fail-closed under one hard 900-second wall-clock deadline. Every AWS
+call is clamped to the exact remaining time by `timeout`, SDK retries are fixed
+to one attempt, and success is rechecked against the deadline before any raw or
+sealed result is published. Each stack permits at most 120 status reads with a
+two-second delay and at most three consecutive API failures. Every CLI call
+also uses a five-second connection timeout and a 15-second read timeout.
+Provider stderr is discarded. Each successful response
+must bind both the exact in-memory detection ID and expected
+partition/region/account/stack ARN prefix, use one of the three documented
+detection statuses, and finish as `DETECTION_COMPLETE`, `IN_SYNC`, with an
+integer drifted-resource count of zero. A failed, unknown, malformed, mismatched,
+drifted, or timed-out result cannot create success evidence.
+
+The terminal response contributes its exact stack ARN/UUID and detection
+timestamp. The follow-up resource query targets that exact ARN, requires a real
+`StackResourceDrifts` array, rejects older timestamps and accepts only exact
+stack-ID entries whose status is `IN_SYNC`; `NOT_CHECKED` is not converted into
+a pass. A bounded final `DescribeStacks` poll must still report the same stack ID,
+`IN_SYNC`, and a valid `LastCheckTimestamp` that is not older than the exact
+detection timestamp. AWS defines that field as the most recent drift operation
+initiated on the stack or any supported individual resource, so a newer value is
+valid fresher evidence and exact equality would overstate the provider contract.
+Equivalent UTC spellings (`Z` versus `+00:00` and fractional trailing zeroes)
+are compared without discarding non-zero subsecond precision. Shape alone is
+insufficient: year, leap day, month/day, hour, minute, and second are validated
+with locale-independent Gregorian arithmetic. An absent optional
+`DriftInformation`, a valid status without `LastCheckTimestamp`, or a valid older
+projection is retried. A current or newer `IN_SYNC` projection passes; `DRIFTED`
+fails immediately, `UNKNOWN` or `NOT_CHECKED` receives only the same bounded
+retry budget, and wrong selection, malformed response, or exhausted retry fails
+closed. The final projection shares the 900-second global wall-clock deadline,
+enforces a hard maximum of five reads with at most two-second pauses, and never
+reruns drift detection. All raw status,
+resource, and final-stack JSON is mode 0600 and deleted on every
+success or failure exit. The sealed `drift.json` records poll attempts, elapsed
+seconds, returned resource count, stack-incarnation binding, and
+`coverage: cloudformation-supported-resources`. Resources that CloudFormation
+does not support remain outside this claim and are never described as globally
+drift-free.
+
+Exact-master foundation run
+[`30596290772`](https://github.com/upgradedev/archon-datahub/actions/runs/30596290772)
+completed every reconciliation group and failed at the first drift gate because
+the prior implementation invoked the unsupported waiter. It produced no
+sanitized failure artifact because that command was outside the managed-stack
+diagnostic wrapper; this limitation is recorded rather than fabricating a
+CloudFormation failure event. The run remains durable failure evidence for the
+portability fix, and the next exact-master run must provide the sealed positive
+drift receipt.
+
+Exact-master foundation run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+then completed every reconciliation group and reached resource drift validation,
+but rejected the first final stack projection with the sanitized category
+`final-stack-binding-mismatch`. The prior raw-string timestamp equality could
+not distinguish equivalent AWS CLI UTC serialization from a short-lived stale
+projection. No success artifact was authored. The shared deadline-bound,
+precision-preserving final projection poll above is the reviewed remediation;
+only a later successful protected run may supersede this recorded failure.
+Exact-master foundation run
+[`30613749992`](https://github.com/upgradedev/archon-datahub/actions/runs/30613749992)
+reproduced `final-stack-binding-mismatch` after all reconciliation groups and
+each selected stack's resource-level `IN_SYNC` proof. The retained sanitized
+evidence does not include the failed final projection or its attempt count.
+Similar timing to run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+strongly indicates that no stale-projection retry was consumed, but this remains
+an inference rather than retained proof. Independently, the AWS API definitions
+show why exact timestamp equality is unsupported: stack-level `Timestamp` is the
+stack operation start, while `LastCheckTimestamp` may reflect a later supported
+resource check. No success or drift artifact was authored. The monotonic
+lower-bound contract is the reviewed remediation; only a later successful
+protected run may supersede this recorded failure.
+
+## Sanitized managed-stack failure evidence
+
+A managed foundation stack rejected in a failed preflight state, or a managed
+stack command that fails, triggers a bounded diagnostic query for that exact
+allowlisted stack only. Original managed CloudFormation and CDK command
+stdout and stderr are suppressed before capture. The reconciler reads at most 100
+recent CloudFormation events in their API-provided newest-first order, while
+sanitizer input remains hard-capped at 1,048,576 bytes. It
+selects the newest failed event whose safe reason category is not
+`dependency-failure`; `unknown` remains eligible because it may be the true
+root cause. Only when every failed event is `dependency-failure` does it
+fall back to the newest failed event. The chosen event then passes the existing
+fail-closed identity and reason validation before one canonical
+`cfn-failure.json` record is written containing only an allowlisted stack label, stack
+status, logical resource ID, resource type and status, a safe reason category,
+and a SHA-256 over exactly those canonical allowlisted diagnostic fields.
+
+The diagnostic path never stores, prints, or hashes the raw CloudFormation
+reason, stack name or ARN, account identifier, URL, request token, physical
+resource ID, or denied action. It seals inside a private staging directory,
+requires the exact recursive inventory of two root regular non-symlink files,
+and only then atomically publishes the final directory.
+
+After the credential-clear step succeeds, the validator first proves that all
+four AWS credential environment variables are empty. It then repeats the exact
+recursive inventory and checksum checks and requires canonical JSON bytes. It
+recomputes the diagnostic digest from the seven safe fields. Only `cfn-failure.json` and
+`SHA256SUMS` are passed as explicit upload paths and retained for 90 days. A
+missing, malformed, oversized, non-canonical, non-allowlisted, or digest-mismatched
+diagnostic fails closed and is not uploaded.
+This evidence is observational only. The workflow does not delete, recreate, or
+continue rollback for a failed stack. Recovery remains a separate, explicit
+operator decision after the exact state and sanitized evidence are reviewed.
+## Explicit sealed-incident recovery
+
+Foundation failure diagnostics remain observational: this workflow never
+automatically deletes, recreates, or continues rollback. The one reviewed
+historical `staging-iam` exception is a separate CI-only, two-environment
+control plane with immutable incident coordinates, short-lived exact-stack
+authorization, mandatory revocation, and sanitized attested evidence. Its
+status is `recovered-delete-complete-cleanup-proven`. Cleanup run `30571619440`
+and three fail-closed recovery attempts established the historical evidence and
+revocation controls. Exact-master run `30582684638` then passed canonical policy
+readback, issued exactly one `STANDARD` `DeleteStack`, proved the original stack
+ID reached `DELETE_COMPLETE` with no active sealed stack name, revoked the
+temporary policy, and proved canonical absence. Artifact `8775321544` and GitHub
+attestation `38051531` retain the sanitized receipt; cleanup follower
+`30582939537` skipped on success. The deleted staging IAM foundation can now be
+recreated only through the ordinary idempotent foundation workflow. See
+[`AWS_INCIDENT_RECOVERY.md`](AWS_INCIDENT_RECOVERY.md) and
+`contracts/aws-incident-recovery-v1.json`.
+
+Foundation holds the outer `archon-aws-control-plane` lock and its reconciliation
+job also holds `archon-governed-canary-mutation-recovery`. This outer-to-inner
+order prevents its governed-canary role-stack reconciliation from racing
+fixture, canary, compensation, or explicit incident recovery mutations without
+the parent-child deadlock an inner child would create by taking the outer lock.

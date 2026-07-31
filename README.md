@@ -433,15 +433,19 @@ Workflows:
   validation of the workflows themselves.
 - [GitHub repository posture](.github/workflows/github-repository-posture.yml) —
   scheduled/manual, secretless observation using only the automatic `GITHUB_TOKEN`.
-  This public tier verifies repository identity and merge/lifecycle settings, the public
-  `master` protection signal, Apache-2.0 detection, private vulnerability reporting, the
-  exact 17-environment inventory, administrator-bypass state, and exact `master`-only
-  deployment policies. Detailed branch-protection rules, the Actions allowlist/SHA-pinning
-  policy, and environment secret-name inventories remain explicitly
-  `unverified-requires-administration-and-environments-read`: the elevated tier is
-  deliberately unconfigured. Its future least-privilege boundary is
-  `Actions:read`, `Administration:read`, `Environments:read`, and `Metadata:read`.
-  A workstation `gh` token is never copied into CI.
+  This public tier verifies only token-visible repository identity and public-state fields,
+  the public `master` protection signal, Apache-2.0 detection, private vulnerability
+  reporting, the exact 17-environment inventory, administrator-bypass state, reviewer
+  posture, and exact `master`-only deployment policies. Repository merge/lifecycle
+  expectations (`allow_*` and `delete_branch_on_merge`), detailed branch-protection rules,
+  the Actions allowlist/SHA-pinning policy, and environment secret-name inventories remain
+  explicitly `unverified-requires-administration-and-environments-read`. The receipt binds
+  the lifecycle expectation only by digest with `verification: not-performed`; it never
+  emits lifecycle values. Protected runtime environments intentionally require live
+  DataHub, Cognito, and deployment secrets, so this tier makes no secret-emptiness claim.
+  Its future least-privilege boundary is `Actions:read`, `Administration:read`,
+  `Environments:read`, and `Metadata:read`. A workstation `gh` token is never copied into
+  CI.
 - [AWS foundation](.github/workflows/aws-foundation.yml) — protected, manual-only
   reconciliation of the pinned modern `CDKToolkit` stacks in `eu-west-1` and `us-east-1`,
   a non-administrator CloudFormation execution policy, and the environment-bound
@@ -475,7 +479,10 @@ Workflows:
   exact-run governed write/rollback canary whose signed evidence is required before the
   protected same-artifact production promotion. Its checksum-sealed staging and production
   evidence use the `staging-deployment/v1` and `production-deployment/v1` predicates and
-  retain the exact sanitized demo-state source binding.
+  retain the exact sanitized demo-state source binding. `staging-bootstrap` accepts no
+  governed-canary fixture coordinates; `promote` requires one bounded canonical
+  `fixture_coordinates` JSON input containing the exact fixture run/attempt, artifact
+  ID/digest, and inner receipt digest.
 - [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
   flagship retained-history path plus a fresh deployed G6/dangling-blast-radius proof,
   with matching pre-secret, post-proof, and immediate pre-attestation exact control-plane
@@ -502,11 +509,17 @@ Workflows:
   reconstructs the ordered judge-account lifecycle and fresh production journey from
   exact run IDs, verifies their artifacts and attestations, and produces the protected
   `SQ3`–`SQ5` project-access evidence.
+- [DataHub governed-canary fixture](.github/workflows/datahub-canary-fixture.yml) —
+  plan-before-mutation lifecycle for the exact Snowflake `TEST` dataset and owned domain.
+  Protected seed/reset produces a canonical five-file receipt whose artifact metadata,
+  checksums, state contract, G1-G5/G6 semantics, endpoint/marker fingerprints, and complete
+  GitHub attestation subject set are reverified by the governed canary before AWS trust.
 - [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
   `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
   digests, then `APPROVE → VERIFIED`, followed by an explicit solo-owner approval of the
-  exact rollback and read-after-rollback proof. Its isolation contract is in
-  [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
+  exact rollback and read-after-rollback proof. Its v3 recovery and final attestation bind
+  the complete verified fixture receipt coordinates and state fingerprint. Its isolation
+  contract is in [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
 - [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
   exact-parent `workflow_run` compensation for failed or cancelled canaries.
 - [Submission operations](.github/workflows/submission-operations.yml) —
@@ -582,14 +595,16 @@ is [docs/READINESS.md](docs/READINESS.md). In particular:
 - the two-mode deployment bootstrap is source CI-validated, but its actual
   `staging-bootstrap` and `promote` dispatches remain user-gated;
 - the secretless GitHub-posture workflow and contracts are source CI-validated, but a live
-  scheduled/manual `master` receipt is still pending and must label administration-only
-  controls as unverified unless a separately reviewed least-privilege elevated tier is
+  successful scheduled/manual `master` receipt is still pending; the corrected public tier
+  must label repository lifecycle, Actions policy, detailed branch protection, and secret
+  inventories as unverified unless a separately reviewed least-privilege elevated tier is
   configured;
-- all 17 named GitHub environments now exist with one exact `master` deployment
-  policy, administrator bypass disabled, no environment secrets, and `master`
-  protection enabled; all 12 mutation/approval environments have `upgradedev` as
-  their sole User reviewer with self-review enabled, while the five read-only or
-  automated environments are reviewerless by design;
+- all 17 named GitHub environments now exist with one exact `master` deployment policy,
+  administrator bypass disabled, and `master` protection enabled; all 12 mutation/approval
+  environments have `upgradedev` as their sole User reviewer with self-review enabled,
+  while the five read-only or automated environments are reviewerless by design. Secret
+  names are deliberately not inventoried by this tier, and protected runtime environments
+  are expected to receive their required live credentials through their dedicated setup;
 - the AWS OIDC provider, protected `aws-foundation` environment, and narrowly scoped
   foundation role are configured; the protected foundation/bootstrap run, DataHub
   credentials/endpoints, and hosted deployment are the remaining live operations;

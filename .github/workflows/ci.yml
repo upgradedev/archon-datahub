@@ -63,9 +63,18 @@ jobs:
             scripts/materialize-datahub-mcp-lock.sh \
             scripts/npm-audit-retry.sh \
             scripts/patch-cdk-brace-expansion.sh \
+            scripts/render-inline-cloudformation-template.sh \
+            scripts/seal-cdk-bootstrap-templates.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/aws-cloudformation-drift.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/run-aws-incident-recovery.sh \
+            scripts/aws-foundation-policy-migration-authorization.sh \
+            scripts/aws-foundation-policy-migration-common.sh \
+            scripts/aws-foundation-policy-migration-state.sh \
+            scripts/run-aws-foundation-policy-migration.sh \
+            scripts/verify-github-environment-protection.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
             scripts/verify-github-repository-posture.sh \
@@ -83,19 +92,34 @@ jobs:
             tests/pipeline/judge-user-contracts.test.sh \
             tests/pipeline/openvex-maintenance-contracts.test.sh \
             tests/pipeline/aws-foundation-contracts.test.sh \
+            tests/pipeline/aws-cloudformation-drift-poll.test.sh \
+            tests/pipeline/aws-incident-recovery-contracts.test.sh \
+            tests/pipeline/aws-incident-recovery-driver.test.sh \
             tests/pipeline/aws-security-contracts.test.sh; do
             bash -n "${script}"
           done
           for script in \
             scripts/patch-cdk-bootstrap-template.mjs \
+            scripts/render-canonical-flow-yaml.mjs \
             scripts/render-aws-foundation-policy.mjs \
+            scripts/aws-incident-recovery.mjs \
             scripts/verify-aws-runtime-boundary.mjs; do
             node --check "${script}"
           done
           bash tests/pipeline/aws-security-contracts.test.sh
+          bash tests/pipeline/aws-cloudformation-drift-poll.test.sh
           bash tests/pipeline/aws-foundation-contracts.test.sh
+          bash tests/pipeline/aws-foundation-policy-migration-contracts.test.sh
+          bash tests/pipeline/aws-foundation-policy-migration-driver.test.sh
+          bash tests/pipeline/github-environment-protection.test.sh
+          bash tests/pipeline/aws-incident-recovery-contracts.test.sh
+          bash tests/pipeline/aws-incident-recovery-driver.test.sh
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/datahub_demo_state_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/datahub_canary_fixture_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/datahub_canary_fixture_workflow_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/github_repository_posture_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
@@ -123,6 +147,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+      - name: Unit-test sealed AWS incident recovery validator
+        run: node --test tests/pipeline/aws-incident-recovery-validator.test.mjs
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
       - name: Verify every exact npm override
@@ -679,6 +705,16 @@ jobs:
         run: node scripts/verify-exact-npm-overrides.mjs infra/aws
       - name: Repair the exact vulnerable CDK bundled dependency
         run: bash scripts/patch-cdk-brace-expansion.sh infra/aws
+      - name: Seal the exact CDK bootstrap templates without AWS access
+        env:
+          EXPECTED_BOOTSTRAP_VERSION: "32"
+        run: bash scripts/seal-cdk-bootstrap-templates.sh
+      - name: Render the exact inline-safe IAM foundation template
+        run: |
+          bash scripts/render-inline-cloudformation-template.sh \
+            infra/aws/foundation/cdk-execution-policy.yml \
+            "${RUNNER_TEMP}/archon-cdk-execution-policy.yaml" \
+            "${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"
       - name: Package locked approval Lambda dependencies
         working-directory: infra/aws/lambda/approval
         run: npm ci --omit=dev --ignore-scripts
@@ -1445,6 +1481,51 @@ jobs:
             echo "- Observed resolved lock SHA-256: \`${observed}\`"
             echo "- Contract resolved lock SHA-256: \`${expected}\`"
           } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Validate governed-canary fixture proposals in the locked SDK
+        env:
+          FIXTURE_RUNTIME: ${{ steps.lock.outputs.project }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation="${RUNNER_TEMP}/fixture-runtime-validation-ci.json"
+          canonical="${RUNNER_TEMP}/fixture-runtime-validation-ci.canonical.json"
+          test ! -e "${validation}"
+          test ! -e "${canonical}"
+          trap 'rm -f -- "${validation}" "${canonical}"' EXIT
+          if ! env -i \
+              PYTHONDONTWRITEBYTECODE=1 \
+              "${FIXTURE_RUNTIME}/.venv/bin/python" \
+              scripts/datahub-canary-fixture.py validate-runtime \
+              --contract contracts/datahub-canary-fixture-v1.json \
+              >"${validation}" 2>/dev/null; then
+            echo "::error::credentialless fixture runtime validation failed"
+            exit 1
+          fi
+          test -f "${validation}"
+          test ! -L "${validation}"
+          test "$(stat --format=%s "${validation}")" -le 1024
+          expected_contract_sha256="$(
+            jq -cS . contracts/datahub-canary-fixture-v1.json |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          jq -e \
+            --arg contractSha256 "${expected_contract_sha256}" '
+              (keys | sort) == [
+                "proposalCount",
+                "proposalSetSha256",
+                "schemaVersion",
+                "stateContractSha256"
+              ] and
+              .schemaVersion ==
+                "archon.datahub-canary-fixture-runtime-validation/v1" and
+              .proposalCount == 6 and
+              .stateContractSha256 == $contractSha256 and
+              (.stateContractSha256 | test("^[0-9a-f]{64}$")) and
+              (.proposalSetSha256 | test("^[0-9a-f]{64}$"))
+            ' "${validation}" >/dev/null
+          jq -cS . "${validation}" >"${canonical}"
+          cmp --silent "${validation}" "${canonical}"
       - name: Exercise the credentialless read-only MCP protocol
         shell: bash
         env:
