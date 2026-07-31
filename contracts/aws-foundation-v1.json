@@ -444,7 +444,7 @@
         "timestampComparison": "normalized-utc-monotonic-lower-bound",
         "currentOrNewerInSyncProjection": "accept",
         "currentDriftedProjection": "fail-closed",
-        "currentIndeterminateProjection": "bounded-retry",
+        "currentOrNewerIndeterminateProjection": "bounded-retry",
         "staleOrUnpublishedProjection": "bounded-retry",
         "selectionMismatch": "fail-closed",
         "malformedProjection": "fail-closed"

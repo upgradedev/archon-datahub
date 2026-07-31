@@ -398,7 +398,7 @@ jq --exit-status '
       timestampComparison: "normalized-utc-monotonic-lower-bound",
       currentOrNewerInSyncProjection: "accept",
       currentDriftedProjection: "fail-closed",
-      currentIndeterminateProjection: "bounded-retry",
+      currentOrNewerIndeterminateProjection: "bounded-retry",
       staleOrUnpublishedProjection: "bounded-retry",
       selectionMismatch: "fail-closed",
       malformedProjection: "fail-closed"
@@ -1463,8 +1463,10 @@ require_text "${reconciler}" \
   'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
   'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' \
   'scripts/aws-cloudformation-drift.sh \'
-test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 4 ||
-  fail 'drift receipt producer and validator bindings must have four exact monotonic occurrences'
+test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt producers must have two exact monotonic bindings'
+test "$(grep -Fc '.stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt validators must have two exact monotonic bindings'
 
 require_text "${drift_poller}" \
   'cloudformation_drift_remaining_seconds() {' \
@@ -1514,11 +1516,14 @@ require_text "${drift_poller_test}" \
   'invalid-final-max' 'invalid-final-delay' 'final-api-transient' 'final-api-persistent' \
   'final-newer-in-sync' 'final-newer-subsecond-in-sync' \
   'final-newer-drifted' 'final-newer-unknown' 'final-newer-not-checked' \
+  'final-indeterminate-default' \
   'final-unknown-current-then-current' 'final-not-checked-current-then-current' \
   'final-different-incarnation' \
   'final-invalid-calendar' 'final-invalid-second' 'final-invalid-fraction' \
+  'final-invalid-drift-status' \
   'final-malformed' 'final-oversize' 'deadline-resource' 'deadline-final' \
-  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files'
+  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files' \
+  'leaked exact stack id' 'leaked detection timestamp'
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \
   '(.DriftedStackResourceCount // 0) == 0' \

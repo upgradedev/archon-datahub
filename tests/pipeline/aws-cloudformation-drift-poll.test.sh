@@ -100,6 +100,8 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
     final-newer-drifted) last_check="${NEWER_TIMESTAMP}"; final_status='DRIFTED' ;;
     final-newer-unknown) last_check="${NEWER_TIMESTAMP}"; final_status='UNKNOWN' ;;
     final-newer-not-checked) last_check="${NEWER_TIMESTAMP}"; final_status='NOT_CHECKED' ;;
+    final-indeterminate-default) final_status='NOT_CHECKED' ;;
+    final-invalid-drift-status) final_status='SURPRISE' ;;
     final-invalid-calendar) last_check="${INVALID_FINAL_TIMESTAMP}" ;;
     final-invalid-second) last_check="${INVALID_SECOND_TIMESTAMP}" ;;
     final-invalid-fraction) last_check="${INVALID_FRACTION_TIMESTAMP}" ;;
@@ -200,7 +202,7 @@ run_resource_case(){
   export ACTIVE_DETECTION_TIMESTAMP="${active_detection_timestamp}"
   export CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS=3 CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS=0 CFN_DRIFT_MAX_API_FAILURES=3
   case "${name}" in
-    final-stale-default) unset CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS;sleep_argument=2 ;;
+    final-stale-default|final-indeterminate-default) unset CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS;sleep_argument=2 ;;
     invalid-final-max) export CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS=6 ;;
     invalid-final-delay) export CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS=3 ;;
   esac
@@ -224,6 +226,8 @@ run_resource_case(){
   assert_equals 0 "${detect_calls}" "${name} detect calls";assert_equals 0 "${status_calls}" "${name} status calls"
   assert_equals "${expected_resource}" "${resources}" "${name} resource calls";assert_equals "${expected_final}" "${finals}" "${name} final calls";assert_equals "${expected_sleep}" "${sleeps}" "${name} sleeps";assert_sleep_arguments "${sleep_argument}" "${SLEEP_ARGUMENT_LOG}" "${expected_sleep}"
   grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
+  grep -Fq "${STACK_ID}" "${stdout}" "${stderr}"&&fail "${name} leaked exact stack id"
+  grep -Fq "${ACTIVE_DETECTION_TIMESTAMP}" "${stdout}" "${stderr}"&&fail "${name} leaked detection timestamp"
   find "${dir}" -maxdepth 1 \( -name 'cloudformation-resource-drifts.*' -o -name 'cloudformation-final-stack.*' \) -print -quit|grep -q .&&fail "${name} left raw files"
   return 0
 }
@@ -250,6 +254,7 @@ run_resource_case invalid-detection-calendar failure 0 0 0 invalid-resource-inpu
 run_resource_case invalid-final-max failure 0 0 0 invalid-final-binding-bounds 60 64
 run_resource_case invalid-final-delay failure 0 0 0 invalid-final-binding-bounds 60 64
 run_resource_case final-stale-default failure 1 5 4 final-stack-binding-stale
+run_resource_case final-indeterminate-default failure 1 5 4 final-stack-current-indeterminate
 run_resource_case final-stale-persistent failure 1 3 2 final-stack-binding-stale
 run_resource_case final-api-persistent failure 1 3 2 final-stack-api-error-or-timeout
 run_resource_case final-different-incarnation failure 1 1 0 final-stack-selection-mismatch
@@ -261,6 +266,7 @@ run_resource_case final-multiple-stacks failure 1 1 0 final-stack-selection-mism
 run_resource_case final-invalid-calendar failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-second failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-fraction failure 1 1 0 final-stack-malformed-response
+run_resource_case final-invalid-drift-status failure 1 1 0 final-stack-malformed-response
 run_resource_case final-malformed failure 1 1 0 final-stack-malformed-response
 run_resource_case final-oversize failure 1 1 0 final-stack-malformed-response
 run_resource_case deadline-resource failure 1 0 0 timeout

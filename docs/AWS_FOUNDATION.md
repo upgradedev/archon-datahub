@@ -549,15 +549,19 @@ precision-preserving final projection poll above is the reviewed remediation;
 only a later successful protected run may supersede this recorded failure.
 Exact-master foundation run
 [`30613749992`](https://github.com/upgradedev/archon-datahub/actions/runs/30613749992)
-reproduced the same immediate `final-stack-binding-mismatch` after every
-reconciliation group and exact resource-level `IN_SYNC` proof succeeded. It did
-not consume a stale-projection retry, which ruled out the original serialization
-and older-read hypothesis. The provider contract review above identified the
-unsupported equality assumption: stack-level `Timestamp` is the stack operation
-start, while `LastCheckTimestamp` may reflect a later supported-resource check.
-No success or drift artifact was authored. The monotonic lower-bound contract is
-the reviewed remediation; only a later successful protected run may supersede
-this recorded failure.
+reproduced `final-stack-binding-mismatch` after all reconciliation groups and
+each selected stack's resource-level `IN_SYNC` proof. The retained sanitized
+evidence does not include the failed final projection or its attempt count.
+Similar timing to run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+strongly indicates that no stale-projection retry was consumed, but this remains
+an inference rather than retained proof. Independently, the AWS API definitions
+show why exact timestamp equality is unsupported: stack-level `Timestamp` is the
+stack operation start, while `LastCheckTimestamp` may reflect a later supported
+resource check. No success or drift artifact was authored. The monotonic
+lower-bound contract is the reviewed remediation; only a later successful
+protected run may supersede this recorded failure.
+
 ## Sanitized managed-stack failure evidence
 
 A managed foundation stack rejected in a failed preflight state, or a managed
