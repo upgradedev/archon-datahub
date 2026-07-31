@@ -236,6 +236,7 @@ run_resource_case final-invalid-fraction failure 1 1 0 final-stack-malformed-res
 run_resource_case final-malformed failure 1 1 0 final-stack-malformed-response
 run_resource_case final-oversize failure 1 1 0 final-stack-malformed-response
 run_resource_case deadline-resource failure 1 0 0 resource-api-error-or-timeout 1
-run_resource_case deadline-final failure 1 1 0 timeout 1if bash "${helper}" >/dev/null 2>&1;then fail 'source-only helper allowed execution';fi
+run_resource_case deadline-final failure 1 1 0 timeout 1
+if bash "${helper}" >/dev/null 2>&1;then fail 'source-only helper allowed execution';fi
 grep -Fq 'stack-drift-detection-complete' "${helper}"&&fail 'unsupported waiter remains'
 echo 'CloudFormation drift polling and stack-incarnation tests passed'
