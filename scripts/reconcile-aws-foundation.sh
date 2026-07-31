@@ -1576,7 +1576,7 @@ check_drift() (
         pollElapsedSeconds: $pollElapsedSeconds,
         region: $region,
         stackDriftStatus: "IN_SYNC",
-        stackIncarnationBinding: "exact-stack-id-and-detection-timestamp",
+        stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound",
         stackName: $stackName,
         stage: $stage,
         validation: "passed"
@@ -2466,7 +2466,7 @@ jq -cnS \
         maximumPollAttemptsPerStack: $driftMaximumPollAttempts,
         method: "detect-then-bounded-describe-poll",
         pollDelaySeconds: $driftPollDelaySeconds,
-        stackIncarnationBinding: "exact-stack-id-and-detection-timestamp",
+        stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound",
         sha256: $driftSha256,
         status: "IN_SYNC"
       },
