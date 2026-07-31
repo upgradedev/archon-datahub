@@ -34,6 +34,7 @@ assert_equal() {
 policy_a="${test_root}/policy-a.json"
 policy_b="${test_root}/policy-b.json"
 policy_changed="${test_root}/policy-changed.json"
+policy_unknown="${test_root}/policy-unknown.json"
 policy_wrapped="${test_root}/policy-wrapped.json"
 cat >"${policy_a}" <<'JSON'
 {"Version":"2012-10-17","Statement":[{"Sid":"ZReadRole","Effect":"Allow","Action":"iam:GetRole","Resource":"arn:aws:iam::123456789012:role/example"},{"Sid":"AReadObjects","Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":["arn:aws:s3:::example/*","arn:aws:s3:::example"]}]}
@@ -43,6 +44,9 @@ cat >"${policy_b}" <<'JSON'
 JSON
 cat >"${policy_changed}" <<'JSON'
 {"Version":"2012-10-17","Statement":[{"Sid":"AReadObjects","Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":["arn:aws:s3:::example","arn:aws:s3:::example/*"]},{"Sid":"ZReadRole","Effect":"Allow","Action":["iam:GetRole"],"Resource":["arn:aws:iam::123456789012:role/example"]}]}
+JSON
+cat >"${policy_unknown}" <<'JSON'
+{"Version":"2012-10-17","Statement":[{"Sid":"UnknownMutation","Effect":"Allow","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::example/*"}]}
 JSON
 jq -cn --slurpfile policy "${policy_b}" \
   '{PolicyVersion: {Document: $policy[0]}}' >"${policy_wrapped}"
@@ -54,47 +58,195 @@ assert_equal "${direct_sha}" "${permuted_sha}" "statement/action/resource permut
 assert_equal "${direct_sha}" "${wrapped_sha}" "wrapped IAM policy canonicalization"
 test "${direct_sha}" != "${changed_sha}"
 
-(
-  poll_calls=0
+run_real_state_case() (
+  local scenario="$1"
+  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  OLD_POLICY_SHA="${direct_sha}"
+  NEW_POLICY_SHA="${changed_sha}"
+  local state_file="${test_root}/real-${scenario}-state"
+  local get_policy_calls="${test_root}/real-${scenario}-get-policy"
+  local get_version_calls="${test_root}/real-${scenario}-get-version"
+  local mutation_calls="${test_root}/real-${scenario}-mutations"
+  printf '0\n' >"${get_policy_calls}"
+  printf '0\n' >"${get_version_calls}"
+  printf '0\n' >"${mutation_calls}"
+  printf 'unknown\n' >"${state_file}"
   sleep() { :; }
-  require_migrated_state() {
-    poll_calls=$((poll_calls + 1))
-    if ((poll_calls < 2)); then
-      return 1
-    fi
-    printf 'v1\nv2\n'
-  }
-  wait_for_state migrated
-  assert_equal "${poll_calls}" "2" "stale-to-migrated polling"
-)
 
-(
-  api_calls=0
-  sleep() { :; }
-  require_migrated_state() {
-    api_calls=$((api_calls + 1))
-    if ((api_calls == 1)); then
-      return 1
-    fi
-    printf 'v1\nv2\n'
+  next_counter() {
+    local path="$1"
+    local value
+    value="$(<"${path}")"
+    value=$((value + 1))
+    printf '%s\n' "${value}" >"${path}"
+    printf '%s\n' "${value}"
   }
-  wait_for_state migrated
-  assert_equal "${api_calls}" "2" "API-failure-to-migrated polling"
-)
 
-(
-  failed_calls=0
-  sleep() { :; }
-  require_migrated_state() {
-    failed_calls=$((failed_calls + 1))
-    return 1
+  aws() {
+    local service="${1:-}"
+    local operation="${2:-}"
+    if [[ "${service}" != "iam" ]]; then
+      next_counter "${mutation_calls}" >/dev/null
+      return 97
+    fi
+    case "${operation}" in
+      get-policy)
+        local snapshot state default_version
+        snapshot="$(next_counter "${get_policy_calls}")"
+        if [[ "${scenario}" == "persistent-api-failure" ||
+              ("${scenario}" == "api-failure-then-migrated" &&
+               "${snapshot}" -eq 1) ]]; then
+          echo 'PRIVATE_AWS_MARKER' >&2
+          return 254
+        fi
+        if [[ "${scenario}" == "stale-then-migrated" &&
+              "${snapshot}" -eq 1 ]]; then
+          state="old-only"
+          default_version="v1"
+        else
+          state="migrated"
+          default_version="v2"
+        fi
+        printf '%s\n' "${state}" >"${state_file}"
+        jq -cn \
+          --arg arn "${CONTROL_POLICY_ARN}" \
+          --arg default_version "${default_version}" '
+            {Policy: {
+              Arn: $arn,
+              PolicyName: "archon-aws-foundation-control",
+              Path: "/",
+              IsAttachable: true,
+              AttachmentCount: 1,
+              PermissionsBoundaryUsageCount: 0,
+              DefaultVersionId: $default_version
+            }}
+          '
+        ;;
+      list-policy-versions)
+        local state
+        state="$(<"${state_file}")"
+        if [[ "${scenario}" == "duplicate-inventory" ]]; then
+          jq -cn '{Versions: [
+            {VersionId: "v1", IsDefaultVersion: true,
+             CreateDate: "2026-01-01T00:00:00Z"},
+            {VersionId: "v1", IsDefaultVersion: false,
+             CreateDate: "2026-01-02T00:00:00Z"}
+          ]}'
+        elif [[ "${state}" == "old-only" ]]; then
+          jq -cn '{Versions: [
+            {VersionId: "v1", IsDefaultVersion: true,
+             CreateDate: "2026-01-01T00:00:00Z"}
+          ]}'
+        else
+          jq -cn '{Versions: [
+            {VersionId: "v1", IsDefaultVersion: false,
+             CreateDate: "2026-01-01T00:00:00Z"},
+            {VersionId: "v2", IsDefaultVersion: true,
+             CreateDate: "2026-01-02T00:00:00Z"}
+          ]}'
+        fi
+        ;;
+      get-policy-version)
+        next_counter "${get_version_calls}" >/dev/null
+        local version_id=""
+        shift 2
+        while (($#)); do
+          if [[ "$1" == "--version-id" ]]; then
+            version_id="${2:-}"
+            shift 2
+          else
+            shift
+          fi
+        done
+        local state is_default document
+        state="$(<"${state_file}")"
+        case "${version_id}" in
+          v1)
+            document="${policy_a}"
+            [[ "${state}" == "old-only" ]] && is_default=true || is_default=false
+            ;;
+          v2)
+            [[ "${state}" == "migrated" ]] || return 98
+            if [[ "${scenario}" == "unknown-document" ]]; then
+              document="${policy_unknown}"
+            else
+              document="${policy_changed}"
+            fi
+            is_default=true
+            ;;
+          *) return 99 ;;
+        esac
+        jq -cn \
+          --arg version_id "${version_id}" \
+          --argjson is_default "${is_default}" \
+          --slurpfile document "${document}" '
+            {PolicyVersion: {
+              VersionId: $version_id,
+              IsDefaultVersion: $is_default,
+              Document: $document[0]
+            }}
+          '
+        ;;
+      *)
+        next_counter "${mutation_calls}" >/dev/null
+        return 97
+        ;;
+    esac
   }
-  if wait_for_state migrated 2>/dev/null; then
-    echo '::error::persistent API failure was accepted' >&2
+
+  local stdout_path="${test_root}/real-${scenario}.stdout"
+  local stderr_path="${test_root}/real-${scenario}.stderr"
+  case "${scenario}" in
+    stale-then-migrated|api-failure-then-migrated)
+      wait_for_state migrated >"${stdout_path}" 2>"${stderr_path}"
+      assert_equal "$(<"${get_policy_calls}")" "2" \
+        "${scenario} real get-policy attempts"
+      ;;
+    persistent-api-failure)
+      if wait_for_state migrated >"${stdout_path}" 2>"${stderr_path}"; then
+        echo '::error::persistent real AWS API failure was accepted' >&2
+        exit 1
+      fi
+      assert_equal "$(<"${get_policy_calls}")" "12" \
+        "bounded persistent real API failure"
+      ;;
+    duplicate-inventory)
+      if require_migrated_state real-duplicate \
+        >"${stdout_path}" 2>"${stderr_path}"; then
+        echo '::error::duplicate real policy inventory was accepted' >&2
+        exit 1
+      fi
+      assert_equal "$(<"${get_version_calls}")" "0" \
+        "duplicate inventory rejected before version reads"
+      ;;
+    unknown-document)
+      if require_migrated_state real-unknown \
+        >"${stdout_path}" 2>"${stderr_path}"; then
+        echo '::error::unknown real policy document was accepted' >&2
+        exit 1
+      fi
+      assert_equal "$(<"${get_version_calls}")" "2" \
+        "unknown document inspected canonically"
+      ;;
+    *)
+      echo '::error::unknown real state scenario' >&2
+      exit 1
+      ;;
+  esac
+  assert_equal "$(<"${mutation_calls}")" "0" \
+    "${scenario} read path performed no mutations"
+  if grep -Fq 'PRIVATE_AWS_MARKER' "${stderr_path}"; then
+    echo '::error::raw AWS stderr escaped safe_aws' >&2
     exit 1
   fi
-  assert_equal "${failed_calls}" "12" "bounded persistent failure polling"
 )
+
+run_real_state_case stale-then-migrated
+run_real_state_case api-failure-then-migrated
+run_real_state_case persistent-api-failure
+run_real_state_case duplicate-inventory
+run_real_state_case unknown-document
+
 
 (
   pending_counter="${test_root}/pending-counter"
@@ -308,21 +460,61 @@ run_install_ttl_case 1140 success
 run_install_ttl_case 1200 success
 run_install_ttl_case 1139 failure
 run_install_ttl_case 1201 failure
-
 (
   CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
+  now_calls="${test_root}/ttl-second-check.calls"
+  printf '0\n' >"${now_calls}"
+  put_calls=0
+  date() {
+    if [[ " $* " == *' --date='* ]]; then
+      printf '2200\n'
+    else
+      local count
+      count="$(<"${now_calls}")"
+      count=$((count + 1))
+      printf '%s\n' "${count}" >"${now_calls}"
+      if ((count == 1)); then
+        printf '1000\n'
+      else
+        printf '1061\n'
+      fi
+    fi
+  }
+  aws() {
+    [[ "$*" == *'put-role-policy'* ]] || return 1
+    put_calls=$((put_calls + 1))
+    return 1
+  }
+  wait_for_temp_digest() { return 0; }
+  if install_temp_policy migrate 2099-01-01T00:00:00Z 2>/dev/null; then
+    echo '::error::second TTL recheck accepted 1139 seconds' >&2
+    exit 1
+  fi
+  assert_equal "${put_calls}" "0" "no put after TTL changed before mutation"
+  assert_equal "$(<"${now_calls}")" "2" "TTL checked twice before put"
+)
+(
+  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
+  put_calls=0
   date() {
     if [[ " $* " == *' --date='* ]]; then
       return 1
     fi
     printf '1000\n'
   }
-  aws() { echo '::error::PutRolePolicy reached after malformed date' >&2; return 1; }
+  aws() {
+    if [[ "$*" == *'put-role-policy'* ]]; then
+      put_calls=$((put_calls + 1))
+    fi
+    return 1
+  }
   if install_temp_policy migrate not-a-date 2>/dev/null; then
     echo '::error::malformed authorization date was accepted' >&2
     exit 1
   fi
+  assert_equal "${put_calls}" "0" "no put after malformed authorization date"
 )
 
 run_live_ttl_case() (
