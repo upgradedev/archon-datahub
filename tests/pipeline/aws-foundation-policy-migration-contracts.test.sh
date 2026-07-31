@@ -281,6 +281,7 @@ done
 require_text "${main_driver}" \
   'set -Eeuo pipefail' \
   'prepare|migrate|rollback|revoke' \
+  'test "${count}" -eq 2 || {' \
   'create-policy-version' \
   '--no-set-as-default' \
   'set-default-policy-version' \

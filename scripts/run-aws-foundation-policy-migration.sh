@@ -29,7 +29,10 @@ classify_rollback_source_state() {
     printf 'old-only\n'
     return 0
   fi
-  test \
+  test "${count}" -eq 2 || {
+    fail "Rollback authorization found an unexpected version count"
+    return 1
+  }
   new_version="$(version_for_sha "${NEW_POLICY_SHA}")" || {
     fail "Rollback authorization found an unknown policy version"
     return 1
