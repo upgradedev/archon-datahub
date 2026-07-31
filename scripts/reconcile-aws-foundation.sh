@@ -2395,6 +2395,7 @@ source_hashes="$(
     scripts/patch-cdk-brace-expansion.sh \
     scripts/patch-cdk-bootstrap-template.mjs \
     scripts/render-canonical-flow-yaml.mjs \
+    scripts/aws-cloudformation-drift.sh \
     scripts/reconcile-aws-foundation.sh \
     scripts/render-inline-cloudformation-template.sh \
     scripts/render-aws-foundation-policy.mjs \
@@ -2429,6 +2430,10 @@ jq -cnS \
   --argjson pinnedBootstrapVersion "${PINNED_BOOTSTRAP_VERSION}" \
   --arg driftSha256 "${drift_sha}" \
   --argjson driftStackCount "${drift_stack_count}" \
+  --argjson driftGlobalTimeoutSeconds "${CFN_DRIFT_PHASE_TIMEOUT_SECONDS}" \
+  --argjson driftMaximumPollAttempts "${CFN_DRIFT_MAX_ATTEMPTS}" \
+  --argjson driftMaximumApiFailures "${CFN_DRIFT_MAX_API_FAILURES}" \
+  --argjson driftPollDelaySeconds "${CFN_DRIFT_DELAY_SECONDS}" \
   --arg runtimeInventorySha256 "${runtime_inventory_sha}" \
   --argjson sharedApiGateway "${shared_api_gateway_json}" \
   --arg governedCanaryDeployedTemplateSha256 "${canary_template_sha}" \
@@ -2466,9 +2471,15 @@ jq -cnS \
       },
       completedAt: $completedAt,
       drift: {
+        coverage: "cloudformation-supported-resources",
         externalBindingCount:
           (if $sharedApiGateway.mode == "external-pinned" then 1 else 0 end),
+        globalTimeoutSeconds: $driftGlobalTimeoutSeconds,
         managedStackCount: $driftStackCount,
+        maximumConsecutiveApiFailuresPerStack: $driftMaximumApiFailures,
+        maximumPollAttemptsPerStack: $driftMaximumPollAttempts,
+        method: "detect-then-bounded-describe-poll",
+        pollDelaySeconds: $driftPollDelaySeconds,
         sha256: $driftSha256,
         status: "IN_SYNC"
       },
@@ -2539,6 +2550,12 @@ jq -e '
   ) and
   (.drift.sha256 | test("^[0-9a-f]{64}$")) and
   .drift.status == "IN_SYNC" and
+  .drift.coverage == "cloudformation-supported-resources" and
+  .drift.method == "detect-then-bounded-describe-poll" and
+  .drift.globalTimeoutSeconds == 900 and
+  .drift.maximumPollAttemptsPerStack == 120 and
+  .drift.pollDelaySeconds == 2 and
+  .drift.maximumConsecutiveApiFailuresPerStack == 3 and
   (
     if .aws.sharedApiGateway.mode == "foundation-managed" then
       .drift.managedStackCount == 10 and
