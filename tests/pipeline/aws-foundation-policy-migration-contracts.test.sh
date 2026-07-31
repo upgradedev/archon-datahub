@@ -561,15 +561,13 @@ jq --exit-status \
   --slurpfile migration "${contract}" '
     $migration[0] as $m |
     . as $policy |
-    def statements($sid):
-      [$policy.Statement[] | select(.Sid == $sid)];
-    def actions:
-      [.Statement[].Action] | flatten;
+
     ($m.policy.exactDelta.statements | length) == 2 and
     all($m.policy.exactDelta.statements[];
       . as $spec |
-      (statements($spec.sid)) as $added |
-      (statements($spec.resourcesMatchStatement)) as $source |
+      ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+      ([$policy.Statement[] |
+        select(.Sid == $spec.resourcesMatchStatement)]) as $source |
       ($added | length) == 1 and
       ($source | length) == 1 and
       $added[0].Effect == "Allow" and
@@ -581,7 +579,8 @@ jq --exit-status \
       all($added[0].Resource[]; . != "*")) and
     all($m.policy.exactDelta.statements[].actions[];
       . as $action |
-      ([actions[] | select(. == $action)] | length) == 1)
+      (([$policy.Statement[].Action] | flatten |
+        map(select(. == $action))) | length) == 1)
   ' "${foundation_policy}" >/dev/null
 
 test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
@@ -685,7 +684,7 @@ for group in control identity attachments; do
 done
 
 require_text "${repository_root}/docs/AWS_FOUNDATION.md" \
-  'Existing foundation-policy version migration' \
+  'Protected foundation-policy version migrations' \
   '`cloudformation:DetectStackResourceDrift`' \
   '`cloudformation:BatchDescribeTypeConfigurations`' \
   '`MIGRATE EXACT FOUNDATION ASSETS POLICY`' \

@@ -247,6 +247,7 @@ render_policy_documents() {
   chmod 0600 "${raw}" "${NEW_POLICY}"
   jq -e \
     --slurpfile contract "${CONTRACT}" \
+    --slurpfile sourceBundle "${SOURCE_POLICY}" \
     --arg account "${AWS_ACCOUNT_ID}" '
       . as $policy |
       ($contract[0].policy.exactDelta.statements) as $delta |
@@ -256,17 +257,21 @@ render_policy_documents() {
       all($delta[];
         . as $spec |
         ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
-        ([$policy.Statement[] |
-          select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+        ([$sourceBundle[0].Statement[] |
+          select(.Sid == $spec.resourcesMatchStatement)]) as $resourceSource |
         ($added | length) == 1 and
-        ($source | length) == 1 and
+        ($resourceSource | length) == 1 and
         ($added[0] | keys | sort) == ["Action", "Effect", "Resource", "Sid"] and
         $added[0].Effect == "Allow" and
         (($added[0].Action |
           if type == "array" then sort else [.] end) ==
           ($spec.actions | sort)) and
         ($added[0].Resource | type) == "array" and
-        (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+        ($resourceSource[0].Resource | type) == "array" and
+        (($added[0].Resource | sort) ==
+          ($resourceSource[0].Resource |
+            map(gsub("\\$\\{aws:PrincipalAccount\\}"; $account)) |
+            sort)) and
         all($added[0].Resource[]; . != "*" and contains($account))) and
       (tostring | contains($account)) and
       (tostring | contains("${AWS::AccountId}") | not) and

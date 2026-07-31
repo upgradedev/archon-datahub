@@ -1,4 +1,4 @@
-name: AWS foundation control policy migration driver
+name: AWS foundation assets policy migration driver
 
 on:
   workflow_call:
