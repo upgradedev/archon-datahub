@@ -106,6 +106,7 @@ jobs:
           bash tests/pipeline/aws-security-contracts.test.sh
           bash tests/pipeline/aws-foundation-contracts.test.sh
           bash tests/pipeline/aws-foundation-policy-migration-contracts.test.sh
+          bash tests/pipeline/aws-foundation-policy-migration-driver.test.sh
           bash tests/pipeline/aws-incident-recovery-contracts.test.sh
           bash tests/pipeline/aws-incident-recovery-driver.test.sh
           PYTHONDONTWRITEBYTECODE=1 \

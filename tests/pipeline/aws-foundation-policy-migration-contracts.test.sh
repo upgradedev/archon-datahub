@@ -225,6 +225,12 @@ require_text "${driver_workflow}" \
   'cancel-in-progress: false' \
   'name: aws-foundation' \
   'name: governed-canary-recovery' \
+  'deployments: read' \
+  '.can_admins_bypass == false' \
+  '.prevent_self_review == false' \
+  'custom_branch_policies: true' \
+  'verify_environment aws-foundation' \
+  'verify_environment governed-canary-recovery' \
   'unset-current-credentials: true' \
   'if: always()' \
   'AUTHORIZATION_MODE:' \
@@ -247,6 +253,8 @@ require_text "${cleanup}" \
   'cleanup-revoke' \
   'cleanup-rollback' \
   'needs.validate.outputs.cleanup_operation' \
+  'exact parent-job conclusion' \
+  'actions/runs/${TRIGGER_RUN_ID}/attempts/${TRIGGER_RUN_ATTEMPT}/jobs' \
   'uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml'
 
 for workflow in "${entry}" "${driver_workflow}" "${cleanup}"; do
@@ -316,7 +324,7 @@ for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
     'aws iam create-role ' \
     'aws iam delete-role '
 done
-forbid_text "${main_driver}" '--set-as-default'
+forbid_text "${main_driver}" '--set-as-default' '< <(require_'
 forbid_text "${authorization}" \
   '"Resource": "*"'
 forbid_text "${canary_roles}" \
@@ -348,6 +356,64 @@ jq --exit-status \
 
 test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
 test "$(grep -Fc 'cloudformation:BatchDescribeTypeConfigurations' "${deploy_role}")" -eq 2
+
+extract_sid_block() {
+  local sid="$1"
+  awk -v sid="${sid}" '
+    $0 ~ "^[[:space:]]+- Sid: " sid "[[:space:]]*$" {
+      inside=1
+    }
+    inside &&
+      $0 ~ "^[[:space:]]+- Sid: " &&
+      $0 !~ "^[[:space:]]+- Sid: " sid "[[:space:]]*$" {
+      exit
+    }
+    inside { print }
+  ' "${deploy_role}"
+}
+
+assert_sid_block() {
+  local sid="$1"
+  local expected_block="$2"
+  local actual
+  actual="$(extract_sid_block "${sid}")"
+  test "${actual}" = "${expected_block}" ||
+    fail "deploy role statement ${sid} differs from its exact action/resource scope"
+}
+
+assert_sid_block DetectExactStageIamFoundationDrift \
+'              - Sid: DetectExactStageIamFoundationDrift
+                Effect: Allow
+                Action:
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
+                  - cloudformation:DescribeStackResourceDrifts
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/${IamFoundationStackName}/*'
+assert_sid_block ReadStageIamDriftDetection \
+'              - Sid: ReadStageIamDriftDetection
+                Effect: Allow
+                Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"'
+assert_sid_block ReadAndDetectExactProductionStacks \
+'              - Sid: ReadAndDetectExactProductionStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DetectStackDrift
+                  - cloudformation:DetectStackResourceDrift
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-production/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/Archon-production-Edge/*'
+assert_sid_block ReadStackDriftDetectionStatus \
+'              - Sid: ReadStackDriftDetectionStatus
+                Effect: Allow
+                Action:
+                  - cloudformation:BatchDescribeTypeConfigurations
+                  - cloudformation:DescribeStackDriftDetectionStatus
+                Resource: "*"'
 
 control_rendered="$(node "${renderer}" \
   --input "${foundation_policy}" \
@@ -384,6 +450,7 @@ require_text "${repository_root}/docs/AWS_FOUNDATION.md" \
 
 require_text "${ci_workflow}" \
   'tests/pipeline/aws-foundation-policy-migration-contracts.test.sh' \
+  'tests/pipeline/aws-foundation-policy-migration-driver.test.sh' \
   'scripts/run-aws-foundation-policy-migration.sh' \
   'scripts/aws-foundation-policy-migration-common.sh' \
   'scripts/aws-foundation-policy-migration-authorization.sh' \
