@@ -1401,7 +1401,9 @@ jobs:
           gzip --decompress --stdout "$CANDIDATE_DIR/archon-image.tar.gz" | docker load
           image_id="$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Id}}')"
           test "$image_id" != ""
-          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Config.User}}')" = "node"
+          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{.Config.User}}')" = "65532"
+          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{json .Config.Entrypoint}}')" = '["/nodejs/bin/node"]'
+          test "$(docker image inspect "$IMAGE_NAME:$SOURCE_SHA" --format '{{json .Config.Cmd}}')" = '["dist/http/server.js"]'
           test "$(
             docker image inspect "$IMAGE_NAME:$SOURCE_SHA" \
               --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'

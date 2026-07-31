@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-ARG NODE_IMAGE=node:22.23.2-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
+ARG BUILD_NODE_IMAGE=node:22.23.1-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
+ARG RUNTIME_NODE_IMAGE=gcr.io/distroless/nodejs22-debian13:nonroot@sha256:a2723a2817c5b01b8e7b98d567bc8b5a6b0e713e25bfb0a82b6ade4b9db06f50
 
-FROM ${NODE_IMAGE} AS dependencies
+FROM ${BUILD_NODE_IMAGE} AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
@@ -11,13 +12,13 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
 
-FROM ${NODE_IMAGE} AS production-dependencies
+FROM ${BUILD_NODE_IMAGE} AS production-dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
-FROM ${NODE_IMAGE} AS runtime
+FROM ${RUNTIME_NODE_IMAGE} AS runtime
 ARG ARCHON_RELEASE_SHA=dev
 ENV NODE_ENV=production
 ENV PORT=8080
@@ -25,22 +26,11 @@ ENV ARCHON_RELEASE_SHA=${ARCHON_RELEASE_SHA}
 LABEL org.opencontainers.image.source="https://github.com/upgradedev/archon-datahub"
 LABEL org.opencontainers.image.revision="${ARCHON_RELEASE_SHA}"
 WORKDIR /app
-RUN rm -rf \
-      /usr/local/lib/node_modules/npm \
-      /usr/local/lib/node_modules/corepack \
-      /opt/yarn-v* \
-    && rm -f \
-      /usr/local/bin/npm \
-      /usr/local/bin/npx \
-      /usr/local/bin/corepack \
-      /usr/local/bin/yarn \
-      /usr/local/bin/yarnpkg \
-    && test ! -e /usr/local/lib/node_modules/npm
-COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/dist ./dist
-COPY --chown=node:node package.json LICENSE NOTICE.md ./
-USER node
+COPY --from=production-dependencies --chown=65532:65532 /app/node_modules ./node_modules
+COPY --from=build --chown=65532:65532 /app/dist ./dist
+COPY --chown=65532:65532 package.json LICENSE NOTICE.md ./
+USER 65532
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
-CMD ["node", "dist/http/server.js"]
+  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+CMD ["dist/http/server.js"]

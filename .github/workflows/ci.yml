@@ -2044,16 +2044,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Assert non-root image configuration
-        run: test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{.Config.User}}')" = "node"
+        run: |
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{.Config.User}}')" = "65532"
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{json .Config.Entrypoint}}')" = '["/nodejs/bin/node"]'
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{json .Config.Cmd}}')" = '["dist/http/server.js"]'
       - name: Assert isolated worker entrypoints in the exact candidate
         run: |
           docker run --rm \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
             --cap-drop ALL --security-opt no-new-privileges \
             --network none \
-            --entrypoint node \
+            --entrypoint /nodejs/bin/node \
             "archon-datahub:${GITHUB_SHA}" \
-            -e 'const fs=require("node:fs"); for (const file of ["/app/dist/audit-worker.js","/app/dist/remediation-worker.js"]) { if (!fs.statSync(file).isFile()) process.exit(1); }'
+            -e 'const fs=require("node:fs"); if (process.version !== "v22.23.1") process.exit(1); for (const file of ["/app/dist/audit-worker.js","/app/dist/remediation-worker.js"]) { if (!fs.statSync(file).isFile()) process.exit(1); } for (const shell of ["/bin/sh","/usr/bin/sh","/busybox/sh"]) { if (fs.existsSync(shell)) process.exit(1); }'
       - name: Boot hardened candidate
         run: |
           docker run --detach --name archon-candidate \

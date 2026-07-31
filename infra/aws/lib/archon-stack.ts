@@ -814,7 +814,7 @@ export class ArchonPlatformStack extends Stack {
     const apiContainer = apiTaskDefinition.addContainer("Api", {
       image,
       readonlyRootFilesystem: true,
-      user: "1000",
+      user: "65532",
       logging: ecs.LogDrivers.awsLogs({
         logGroup: apiLogGroup,
         streamPrefix: "api",
@@ -839,8 +839,10 @@ export class ArchonPlatformStack extends Stack {
       },
       healthCheck: {
         command: [
-          "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+          "CMD",
+          "/nodejs/bin/node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
         ],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
@@ -936,9 +938,9 @@ export class ArchonPlatformStack extends Stack {
     );
     auditWorkerTaskDefinition.addContainer("AuditWorker", {
       image,
-      command: ["node", "dist/audit-worker.js"],
+      command: ["dist/audit-worker.js"],
       readonlyRootFilesystem: true,
-      user: "1000",
+      user: "65532",
       logging: ecs.LogDrivers.awsLogs({
         logGroup: auditWorkerLogGroup,
         streamPrefix: "audit-worker",
@@ -964,7 +966,12 @@ export class ArchonPlatformStack extends Stack {
         DATAHUB_GMS_TOKEN: ecs.Secret.fromSecretsManager(readSecret, "token")
       },
       healthCheck: {
-        command: ["CMD-SHELL", "kill -0 1"],
+        command: [
+          "CMD",
+          "/nodejs/bin/node",
+          "-e",
+          "try{process.kill(1,0)}catch{process.exit(1)}"
+        ],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
         retries: 3,
@@ -1082,9 +1089,9 @@ export class ArchonPlatformStack extends Stack {
     );
     remediationWorkerTaskDefinition.addContainer("RemediationWorker", {
       image,
-      command: ["node", "dist/remediation-worker.js"],
+      command: ["dist/remediation-worker.js"],
       readonlyRootFilesystem: true,
-      user: "1000",
+      user: "65532",
       logging: ecs.LogDrivers.awsLogs({
         logGroup: remediationWorkerLogGroup,
         streamPrefix: "remediation-worker",
@@ -1105,7 +1112,12 @@ export class ArchonPlatformStack extends Stack {
         DATAHUB_WRITE_GMS_TOKEN: ecs.Secret.fromSecretsManager(writeSecret, "token")
       },
       healthCheck: {
-        command: ["CMD-SHELL", "kill -0 1"],
+        command: [
+          "CMD",
+          "/nodejs/bin/node",
+          "-e",
+          "try{process.kill(1,0)}catch{process.exit(1)}"
+        ],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
         retries: 3,
