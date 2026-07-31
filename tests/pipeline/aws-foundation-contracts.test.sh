@@ -1475,7 +1475,7 @@ require_text "${drift_poller}" \
   'ltrimstr($stackPrefix)' \
   '.StackId == $exactStackId' \
   'CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS' \
-  'exact-normalized-utc-instant' \
+  'if $actualKey == $expectedKey then "match"' \
   'final-stack-binding-stale' \
   '.StackResourceDriftStatus == "IN_SYNC"' \
   'trap cleanup EXIT' \
@@ -1502,7 +1502,7 @@ helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${d
 helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
 helper_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${drift_poller}" | cut -d: -f1)"
 helper_final_line="$(grep -nF 'cloudformation describe-stacks' "${drift_poller}" | cut -d: -f1)"
-helper_binding_line="$(grep -nF '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' "${drift_poller}" | cut -d: -f1)"
+helper_binding_line="$(grep -nF 'if $actualKey == $expectedKey then "match"' "${drift_poller}" | cut -d: -f1)"
 test "${helper_detect_line}" -lt "${helper_status_line}" || fail 'drift helper must detect before polling'
 test "${helper_status_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
 test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'
