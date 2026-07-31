@@ -38,7 +38,7 @@
     "@aws-sdk/client-sfn": "3.1090.0",
     "@aws-sdk/client-sqs": "3.1090.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "openai": "^4.77.0"
+    "openai": "^6.45.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",
