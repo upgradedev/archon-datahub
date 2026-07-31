@@ -241,11 +241,11 @@ jobs:
               exit 1
               ;;
           esac
-          printf 'cleanup_operation=%s\n' \
-            "${cleanup_operation}" >>"${GITHUB_OUTPUT}"
-          printf 'cleanup_required=%s\n' \
-            "${cleanup_required}" >>"${GITHUB_OUTPUT}"
-          printf 'target_sha=%s\n' "${TARGET_SHA}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'cleanup_operation=%s\n' "${cleanup_operation}"
+            printf 'cleanup_required=%s\n' "${cleanup_required}"
+            printf 'target_sha=%s\n' "${TARGET_SHA}"
+          } >>"${GITHUB_OUTPUT}"
 
   cleanup:
     name: Hold outer lock through classified recovery
