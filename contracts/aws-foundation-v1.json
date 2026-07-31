@@ -427,7 +427,16 @@
       "maximumConsecutiveApiFailuresPerStack": 3,
       "cliConnectTimeoutSeconds": 5,
       "cliReadTimeoutSeconds": 15,
-      "responseBinding": ["StackDriftDetectionId", "StackId"],
+      "awsSdkMaxAttempts": 1,
+      "globalDeadline": "hard-wall-clock",
+      "exactStackIncarnation": true,
+      "staleResourceEvidence": "forbidden",
+      "responseBinding": [
+        "StackDriftDetectionId",
+        "StackId",
+        "Timestamp",
+        "DriftInformation.LastCheckTimestamp"
+      ],
       "terminalSuccess": {
         "detectionStatus": "DETECTION_COMPLETE",
         "stackDriftStatus": "IN_SYNC",

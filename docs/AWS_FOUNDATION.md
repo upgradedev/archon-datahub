@@ -491,20 +491,28 @@ The published
 [AWS CLI CloudFormation waiter list](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/wait/)
 is also a negative contract: the nonexistent drift waiter is forbidden by CI.
 
-Polling is fail-closed and globally bounded to 900 seconds. Each stack permits
-at most 120 status reads with a two-second delay and at most three consecutive
-API failures. Every CLI call uses a five-second connection timeout and a
-15-second read timeout. Provider stderr is discarded. Each successful response
+Polling is fail-closed under one hard 900-second wall-clock deadline. Every AWS
+call is clamped to the exact remaining time by `timeout`, SDK retries are fixed
+to one attempt, and success is rechecked against the deadline before any raw or
+sealed result is published. Each stack permits at most 120 status reads with a
+two-second delay and at most three consecutive API failures. Every CLI call
+also uses a five-second connection timeout and a 15-second read timeout.
+Provider stderr is discarded. Each successful response
 must bind both the exact in-memory detection ID and expected
 partition/region/account/stack ARN prefix, use one of the three documented
 detection statuses, and finish as `DETECTION_COMPLETE`, `IN_SYNC`, with an
 integer drifted-resource count of zero. A failed, unknown, malformed, mismatched,
 drifted, or timed-out result cannot create success evidence.
 
-The follow-up resource query requires a real `StackResourceDrifts` array and
-accepts only returned entries whose stack binding is exact and whose status is
-`IN_SYNC`; `NOT_CHECKED` is not converted into a pass. The sealed `drift.json`
-records poll attempts, elapsed seconds, returned resource count, and
+The terminal response contributes its exact stack ARN/UUID and detection
+timestamp. The follow-up resource query targets that exact ARN, requires a real
+`StackResourceDrifts` array, rejects older timestamps and accepts only exact
+stack-ID entries whose status is `IN_SYNC`; `NOT_CHECKED` is not converted into
+a pass. A final `DescribeStacks` read must still report the same stack ID,
+`IN_SYNC`, and a `LastCheckTimestamp` equal to the exact detection timestamp.
+All raw status, resource, and final-stack JSON is mode 0600 and deleted on every
+success or failure exit. The sealed `drift.json` records poll attempts, elapsed
+seconds, returned resource count, stack-incarnation binding, and
 `coverage: cloudformation-supported-resources`. Resources that CloudFormation
 does not support remain outside this claim and are never described as globally
 drift-free.
