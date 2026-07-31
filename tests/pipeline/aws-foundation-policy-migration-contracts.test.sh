@@ -465,19 +465,19 @@ for job_environment in \
     fail "driver job ${job} has a noncanonical protected environment gate"
   case "${job}" in
     prepare)
-      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          aws-foundation governed-canary-recovery'
+      expected_verifier_call=$'          bash scripts/verify-github-environment-protection.sh\n          aws-foundation governed-canary-recovery'
       expected_oidc_step='      - name: Assume separately approved foundation role'
       ;;
     migrate)
-      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
+      expected_verifier_call=$'          bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
       expected_oidc_step='      - name: Assume separately approved recovery role'
       ;;
     rollback)
-      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
+      expected_verifier_call=$'          bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
       expected_oidc_step='      - name: Assume separately approved recovery role for rollback only'
       ;;
     revoke)
-      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          aws-foundation'
+      expected_verifier_call=$'          bash scripts/verify-github-environment-protection.sh\n          aws-foundation'
       expected_oidc_step='      - name: Assume separately approved foundation role for revocation'
       ;;
     *) fail "unexpected driver job ${job}" ;;
