@@ -28,14 +28,14 @@ build_temp_policy() {
   fi
   jq -cnS \
     --arg expires "${expires_at}" \
-    --arg policyArn "${CONTROL_POLICY_ARN}" \
+    --arg policyArn "${TARGET_POLICY_ARN}" \
     --arg roleArn "${RECOVERY_ROLE_ARN}" \
     --argjson actions "${actions}" '
       {
         Version: "2012-10-17",
         Statement: [
           {
-            Sid: "OperateExactFoundationControlPolicy",
+            Sid: "OperateExactFoundationAssetsPolicy",
             Effect: "Allow",
             Action: $actions,
             Resource: $policyArn,
@@ -86,7 +86,7 @@ wait_for_temp_digest() {
       chmod 0600 "${output}"
       if jq -e '
         .RoleName == "archon-datahub-github-governed-canary-recovery" and
-        .PolicyName == "archon-foundation-control-policy-migration" and
+        .PolicyName == "archon-foundation-assets-policy-migration" and
         (.PolicyDocument | type) == "object"
       ' "${output}" >/dev/null; then
         observed_sha="$(iam_policy_sha "${output}" '.PolicyDocument')" || {
@@ -157,7 +157,7 @@ verify_live_temp_policy() {
     --output json
   jq -e '
     .RoleName == "archon-datahub-github-governed-canary-recovery" and
-    .PolicyName == "archon-foundation-control-policy-migration" and
+    .PolicyName == "archon-foundation-assets-policy-migration" and
     (.PolicyDocument | type) == "object"
   ' "${observed}" >/dev/null || {
     fail "Temporary authorization response differs"
@@ -166,7 +166,7 @@ verify_live_temp_policy() {
   local first_expiry second_expiry expires
   first_expiry="$(
     jq -er '.PolicyDocument.Statement[] |
-      select(.Sid == "OperateExactFoundationControlPolicy") |
+      select(.Sid == "OperateExactFoundationAssetsPolicy") |
       .Condition.DateLessThan["aws:CurrentTime"]' "${observed}"
   )"
   second_expiry="$(

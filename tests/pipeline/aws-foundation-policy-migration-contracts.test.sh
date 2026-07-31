@@ -99,18 +99,18 @@ jq --exit-status '
   .status == "ready-for-migration" and
   .sourceFailure == {
     awsMutationsBeforeFailure: "reconciliation-completed-postchecks-passed",
-    diagnostic: "missing-drift-dependency-permissions",
-    failureArtifact: "not-authored-command-outside-sanitized-wrapper",
-    headSha: "06680d074c4d2a4bc18a64b9c217c137c3bdcf5a",
+    diagnostic: "incomplete-resource-handler-read-permissions",
+    failureArtifact: "not-authored-sanitized-detection-failure",
+    headSha: "b1aed8dfe66848557b7670da5ce280084a128457",
     phase: "drift-verification",
     runAttempt: 1,
-    runId: 30586169834
+    runId: 30600085506
   } and
   .workflow == {
     branch: "master",
     cleanup: ".github/workflows/aws-foundation-policy-migration-cleanup.yml",
-    cleanupConfirmation: "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION",
-    confirmation: "MIGRATE EXACT FOUNDATION CONTROL POLICY",
+    cleanupConfirmation: "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION",
+    confirmation: "MIGRATE EXACT FOUNDATION ASSETS POLICY",
     driver: ".github/workflows/aws-foundation-policy-migration-driver.yml",
     entry: ".github/workflows/aws-foundation-policy-migration.yml",
     exactHeadRequired: true,
@@ -130,14 +130,40 @@ jq --exit-status '
       "scripts/aws-foundation-policy-migration-state.sh"
     ]
   } and
+  .policy.group == "assets" and
+  .policy.name == "archon-aws-foundation-assets" and
   .policy.initialVersionCount == 1 and
   .policy.successfulVersionCount == 2 and
   .policy.retainPreviousDefaultForRollback == true and
   .policy.exactDelta == {
-    stackScopedActions: ["cloudformation:DetectStackResourceDrift"],
-    stackScopedStatement: "ReconcileExactFoundationStacks",
-    wildcardActions: ["cloudformation:BatchDescribeTypeConfigurations"],
-    wildcardStatement: "InspectFoundationTemplates"
+    statements: [
+      {
+        actions: [
+        "s3:GetAccelerateConfiguration",
+        "s3:GetAnalyticsConfiguration",
+        "s3:GetBucketAbac",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:GetBucketNotification",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketWebsite",
+        "s3:GetIntelligentTieringConfiguration",
+        "s3:GetInventoryConfiguration",
+        "s3:GetMetricsConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:ListTagsForResource"
+        ],
+        resourcesMatchStatement: "ReconcileExactBootstrapBuckets",
+        sid: "ReadExactBootstrapBucketsForDrift"
+      },
+      {
+        actions: ["iam:ListEntitiesForPolicy"],
+        resourcesMatchStatement: "ReconcileExactStagePolicies",
+        sid: "ReadExactStagePoliciesForDrift"
+      }
+    ]
   } and
   .authorization.ttlSeconds == 1200 and
   .authorization.absenceReadCount == 3 and
@@ -237,7 +263,7 @@ require_text "${entry}" \
   'cancel-in-progress: false' \
   "github.actor == github.repository_owner" \
   "github.triggering_actor == github.repository_owner" \
-  'MIGRATE EXACT FOUNDATION CONTROL POLICY' \
+  'MIGRATE EXACT FOUNDATION ASSETS POLICY' \
   'scripts/verify-github-control-plane.sh' \
   'uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml'
 require_text "${driver_workflow}" \
@@ -289,7 +315,7 @@ require_text "${cleanup}" \
   'queue: max' \
   'github.event.workflow_run.conclusion !=' \
   '.github/workflows/aws-foundation-policy-migration.yml' \
-  'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION' \
+  'RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION' \
   'cleanup-migrated' \
   'cleanup-revoke' \
   'cleanup-rollback' \
@@ -345,9 +371,10 @@ require_text "${main_driver}" \
 require_text "${common}" \
   'AWS foundation policy migration is CI-only' \
   'jq -cS' \
-  'cloudformation:DetectStackResourceDrift' \
-  'cloudformation:BatchDescribeTypeConfigurations' \
-  'archon-aws-foundation-control' \
+  'ReadExactBootstrapBucketsForDrift' \
+  's3:GetBucketMetadataTableConfiguration' \
+  'iam:ListEntitiesForPolicy' \
+  'archon-aws-foundation-assets' \
   'archon-datahub-github-governed-canary-recovery'
 require_text "${authorization}" \
   'DateLessThan' \
@@ -525,7 +552,7 @@ forbid_text "${main_driver}" '--set-as-default' '< <(require_'
 forbid_text "${authorization}" \
   '"Resource": "*"'
 forbid_text "${canary_roles}" \
-  'archon-foundation-control-policy-migration' \
+  'archon-foundation-assets-policy-migration' \
   'iam:CreatePolicyVersion' \
   'iam:DeletePolicyVersion' \
   'iam:SetDefaultPolicyVersion'
@@ -533,22 +560,27 @@ forbid_text "${canary_roles}" \
 jq --exit-status \
   --slurpfile migration "${contract}" '
     $migration[0] as $m |
-    def statements($sid):
-      [.Statement[] | select(.Sid == $sid)];
-    def actions:
-      [.Statement[].Action] | flatten;
-    ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
-    ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
-    (statements($stackSid) | length) == 1 and
-    (statements($wildcardSid) | length) == 1 and
-    all(statements($stackSid)[0].Resource[]; . != "*") and
-    statements($wildcardSid)[0].Resource == "*" and
-    ([actions[] |
-      select(. == "cloudformation:DetectStackResourceDrift")] |
-      length) == 1 and
-    ([actions[] |
-      select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
-      length) == 1
+    . as $policy |
+
+    ($m.policy.exactDelta.statements | length) == 2 and
+    all($m.policy.exactDelta.statements[];
+      . as $spec |
+      ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+      ([$policy.Statement[] |
+        select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+      ($added | length) == 1 and
+      ($source | length) == 1 and
+      $added[0].Effect == "Allow" and
+      (($added[0].Action |
+        if type == "array" then sort else [.] end) ==
+        ($spec.actions | sort)) and
+      ($added[0].Resource | type) == "array" and
+      (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+      all($added[0].Resource[]; . != "*")) and
+    all($m.policy.exactDelta.statements[].actions[];
+      . as $action |
+      (([$policy.Statement[].Action] | flatten |
+        map(select(. == $action))) | length) == 1)
   ' "${foundation_policy}" >/dev/null
 
 test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
@@ -626,24 +658,36 @@ jq -e '
   ([.Statement[].Action] | flatten |
     index("cloudformation:BatchDescribeTypeConfigurations")) != null
 ' <<<"${control_rendered}" >/dev/null
-for group in assets identity attachments; do
+assets_rendered="$(node "${renderer}" \
+  --input "${foundation_policy}" \
+  --account 123456789012 \
+  --stdout-group assets)"
+jq -e --slurpfile migration "${contract}" '
+  . as $policy |
+  all($migration[0].policy.exactDelta.statements[];
+    . as $spec |
+    ([$policy.Statement[] | select(.Sid == $spec.sid)] | length) == 1 and
+    (($policy.Statement[] | select(.Sid == $spec.sid) | .Action |
+      if type == "array" then sort else [.] end) == ($spec.actions | sort)))
+' <<<"${assets_rendered}" >/dev/null
+for group in control identity attachments; do
   rendered="$(node "${renderer}" \
     --input "${foundation_policy}" \
     --account 123456789012 \
     --stdout-group "${group}")"
-  jq -e '
-    ([.Statement[].Action] | flatten |
-      index("cloudformation:DetectStackResourceDrift") | not) and
-    ([.Statement[].Action] | flatten |
-      index("cloudformation:BatchDescribeTypeConfigurations") | not)
+  jq -e --slurpfile migration "${contract}" '
+    . as $policy |
+    all($migration[0].policy.exactDelta.statements[].actions[];
+      . as $action |
+      ([ $policy.Statement[].Action ] | flatten | index($action) | not))
   ' <<<"${rendered}" >/dev/null
 done
 
 require_text "${repository_root}/docs/AWS_FOUNDATION.md" \
-  'Existing foundation-policy version migration' \
+  'Protected foundation-policy version migrations' \
   '`cloudformation:DetectStackResourceDrift`' \
   '`cloudformation:BatchDescribeTypeConfigurations`' \
-  '`MIGRATE EXACT FOUNDATION CONTROL POLICY`' \
+  '`MIGRATE EXACT FOUNDATION ASSETS POLICY`' \
   'fresh rollback-only grant' \
   '`queue: max`' \
   'excludes account' \

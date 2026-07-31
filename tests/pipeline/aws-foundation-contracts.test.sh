@@ -1267,29 +1267,29 @@ require_text "${foundation_policy}" \
 jq --exit-status \
   --slurpfile migration "${migration_contract}" '
     $migration[0] as $m |
-    def statements($sid):
-      [.Statement[] | select(.Sid == $sid)];
-    def actions:
-      [.Statement[].Action] | flatten;
-    ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
-    ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
-    (statements($stackSid) | length) == 1 and
-    (statements($wildcardSid) | length) == 1 and
-    statements($stackSid)[0].Effect == "Allow" and
-    (statements($stackSid)[0].Resource | type) == "array" and
-    all(statements($stackSid)[0].Resource[]; . != "*") and
-    (statements($stackSid)[0].Action |
-      index("cloudformation:DetectStackResourceDrift")) != null and
-    statements($wildcardSid)[0].Effect == "Allow" and
-    statements($wildcardSid)[0].Resource == "*" and
-    (statements($wildcardSid)[0].Action |
-      index("cloudformation:BatchDescribeTypeConfigurations")) != null and
-    ([actions[] |
-      select(. == "cloudformation:DetectStackResourceDrift")] |
-      length) == 1 and
-    ([actions[] |
-      select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
-      length) == 1
+    . as $policy |
+
+    $m.policy.group == "assets" and
+    $m.policy.name == "archon-aws-foundation-assets" and
+    ($m.policy.exactDelta.statements | length) == 2 and
+    all($m.policy.exactDelta.statements[];
+      . as $spec |
+      ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+      ([$policy.Statement[] |
+        select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+      ($added | length) == 1 and
+      ($source | length) == 1 and
+      $added[0].Effect == "Allow" and
+      (($added[0].Action |
+        if type == "array" then sort else [.] end) ==
+        ($spec.actions | sort)) and
+      ($added[0].Resource | type) == "array" and
+      (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+      all($added[0].Resource[]; . != "*")) and
+    all($m.policy.exactDelta.statements[].actions[];
+      . as $action |
+      (([$policy.Statement[].Action] | flatten |
+        map(select(. == $action))) | length) == 1)
   ' "${foundation_policy}" >/dev/null
 
 test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
