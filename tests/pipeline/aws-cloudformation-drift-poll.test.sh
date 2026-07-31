@@ -10,7 +10,9 @@ fake_bin="${test_root}/bin";mkdir -p "${fake_bin}"
 cat >"${fake_bin}/sleep" <<'SLEEP'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "$#" -eq 1 ]] || exit 97
 n="$(<"${SLEEP_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${SLEEP_COUNTER}"
+printf '%s\n' "$1" >>"${SLEEP_ARGUMENT_LOG}"
 SLEEP
 cat >"${fake_bin}/aws" <<'AWS'
 #!/usr/bin/env bash
@@ -104,8 +106,24 @@ export EQUIVALENT_TIMESTAMP='2026-07-31T00:00:00.000000+00:00'
 export SUBSECOND_DETECTION_TIMESTAMP='2026-07-31T00:00:00.500Z'
 export SUBSECOND_STALE_TIMESTAMP='2026-07-31T00:00:00.499999+00:00'
 export SUBSECOND_NEWER_TIMESTAMP='2026-07-31T00:00:00.001Z'
+export NONZERO_DETECTION_TIMESTAMP='2026-07-31T00:00:00.5Z' NONZERO_EQUIVALENT_TIMESTAMP='2026-07-31T00:00:00.500000000+00:00'
+export LEAP_TIMESTAMP='2024-02-29T12:34:56.123456789Z' INVALID_DETECTION_TIMESTAMP='2026-02-29T00:00:00Z'
+export INVALID_RESOURCE_TIMESTAMP='2026-04-31T00:00:00Z' INVALID_FINAL_TIMESTAMP='2026-07-31T24:00:00Z'
+export INVALID_SECOND_TIMESTAMP='2026-07-31T00:00:60Z' INVALID_FRACTION_TIMESTAMP='2026-07-31T00:00:00.1234567890Z'
 fail(){ echo "::error::$*" >&2;exit 1; }
 assert_equals(){ [[ "$2" == "$1" ]]||fail "$3: expected $1, got $2"; }
+assert_category(){
+  local expected="$1" file="$2" exact total
+  exact="$(awk -v line="::error title=CloudFormation drift verification failed::category=${expected}" '$0 == line {n++} END {print n+0}' "${file}")"
+  total="$(awk 'index($0,"::error title=CloudFormation drift verification failed::category=") == 1 {n++} END {print n+0}' "${file}")"
+  assert_equals 1 "${exact}" "${expected} exact category";assert_equals 1 "${total}" "${expected} category count"
+}
+assert_no_category(){ local file="$1" total;total="$(awk 'index($0,"::error title=CloudFormation drift verification failed::category=") == 1 {n++} END {print n+0}' "${file}")";assert_equals 0 "${total}" 'unexpected category count'; }
+assert_sleep_arguments(){
+  local expected="$1" log="$2" expected_count="$3" actual_count
+  actual_count="$(awk 'END {print NR+0}' "${log}")";assert_equals "${expected_count}" "${actual_count}" 'sleep argument count'
+  awk -v expected="${expected}" 'NF != 1 || $1 != expected {bad=1} END {exit bad}' "${log}" || fail "unexpected sleep argument; expected ${expected}"
+}
 run_poll_case(){
   local name="$1" expected="$2" expected_status="$3" expected_sleep="$4" deadline_offset="${5:-60}"
   local dir="${test_root}/poll-${name}" output stdout stderr rc=0 detect_calls
