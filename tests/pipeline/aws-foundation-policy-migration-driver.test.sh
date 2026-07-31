@@ -344,7 +344,7 @@ run_live_ttl_case() (
   ' >"${live_policy}"
   date() {
     if [[ " $* " == *' --date='* ]]; then
-      printf '%s\n' "$((1000 + remaining))"
+      printf '%s\n' "$((1000 + test_remaining))"
     else
       printf '1000\n'
     fi
