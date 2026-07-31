@@ -238,6 +238,9 @@ require_text "${driver_workflow}" \
   'bash scripts/verify-github-environment-protection.sh' \
   'Revalidate recovery environment immediately before OIDC' \
   'Revalidate foundation environment immediately before OIDC' \
+  'Revalidate trusted revocation source after approval' \
+  '.commit.verification.verified == true' \
+  '.commit.verification.reason == "valid"' \
   'unset-current-credentials: true' \
   'if: always()' \
   'AUTHORIZATION_MODE:' \

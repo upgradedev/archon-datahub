@@ -313,10 +313,18 @@ jobs:
       - name: Revalidate trusted revocation source after approval
         env:
           CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${CONTROL_PLANE_SHA}")"
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${commit}" >/dev/null
           git diff --quiet
           git diff --cached --quiet
           test -z "$(git ls-files --others --exclude-standard)"
