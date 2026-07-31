@@ -97,9 +97,10 @@
     "revokeOnlyPreservesExactTerminalState": true,
     "parentOutcomeClassification": {
       "migrateSucceeded": "cleanup-migrated",
-      "rollbackSucceeded": "cleanup-revoke",
       "prepareSucceededWithoutSuccessfulMigrationOrRollback": "cleanup-rollback",
-      "prepareNotSucceeded": "cleanup-revoke"
+      "rollbackSucceeded": "cleanup-revoke",
+      "validatedPrepareNotSucceeded": "cleanup-revoke",
+      "validationNotSucceeded": "no-aws"
     }
   },
   "evidence": {

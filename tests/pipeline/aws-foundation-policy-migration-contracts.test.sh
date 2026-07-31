@@ -172,10 +172,11 @@ jq --exit-status '
     manualDispatchMode: "cleanup-rollback",
     parentOutcomeClassification: {
       migrateSucceeded: "cleanup-migrated",
-      prepareNotSucceeded: "cleanup-revoke",
       prepareSucceededWithoutSuccessfulMigrationOrRollback:
         "cleanup-rollback",
-      rollbackSucceeded: "cleanup-revoke"
+      rollbackSucceeded: "cleanup-revoke",
+      validatedPrepareNotSucceeded: "cleanup-revoke",
+      validationNotSucceeded: "no-aws"
     },
     revokeOnlyPreservesExactTerminalState: true,
     rollbackToPreviousDefault: true
@@ -280,6 +281,9 @@ require_text "${cleanup}" \
   'cleanup-migrated' \
   'cleanup-revoke' \
   'cleanup-rollback' \
+  'cleanup_operation="no-aws"' \
+  'cleanup_required="false"' \
+  "if: needs.validate.outputs.cleanup_required == 'true'" \
   'needs.validate.outputs.cleanup_operation' \
   'exact parent-job conclusion' \
   'actions/runs/${TRIGGER_RUN_ID}/attempts/${TRIGGER_RUN_ATTEMPT}/jobs' \

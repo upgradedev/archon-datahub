@@ -47,6 +47,7 @@ jobs:
       contents: read
     outputs:
       cleanup_operation: ${{ steps.source.outputs.cleanup_operation }}
+      cleanup_required: ${{ steps.source.outputs.cleanup_required }}
       target_sha: ${{ steps.source.outputs.target_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,6 +79,7 @@ jobs:
           test "${WORKFLOW_REF_VALUE}" = \
             "${GITHUB_REPOSITORY}/.github/workflows/aws-foundation-policy-migration-cleanup.yml@refs/heads/master"
           cleanup_operation=""
+          cleanup_required="false"
           if [[ "${TRIGGER_EVENT}" == "workflow_run" ]]; then
             [[ "${TRIGGER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
             [[ "${TRIGGER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
@@ -179,7 +181,9 @@ jobs:
             fi
             test ! "${migrate_result}" = "success" || \
               test ! "${rollback_result}" = "success"
-            if [[ "${migrate_result}" == "success" ]]; then
+            if [[ "${validate_result}" != "success" ]]; then
+              cleanup_operation="no-aws"
+            elif [[ "${migrate_result}" == "success" ]]; then
               cleanup_operation="cleanup-migrated"
             elif [[ "${rollback_result}" == "success" ]]; then
               cleanup_operation="cleanup-revoke"
@@ -226,6 +230,11 @@ jobs:
           test -z "$(git ls-files --others --exclude-standard)"
           case "${cleanup_operation}" in
             cleanup-revoke|cleanup-rollback|cleanup-migrated)
+              cleanup_required="true"
+              ;;
+            no-aws)
+              test "${TRIGGER_EVENT}" = "workflow_run"
+              cleanup_required="false"
               ;;
             *)
               echo "::error::Invalid classified cleanup operation" >&2
@@ -234,11 +243,14 @@ jobs:
           esac
           printf 'cleanup_operation=%s\n' \
             "${cleanup_operation}" >>"${GITHUB_OUTPUT}"
+          printf 'cleanup_required=%s\n' \
+            "${cleanup_required}" >>"${GITHUB_OUTPUT}"
           printf 'target_sha=%s\n' "${TARGET_SHA}" >>"${GITHUB_OUTPUT}"
 
   cleanup:
     name: Hold outer lock through classified recovery
     needs: validate
+    if: needs.validate.outputs.cleanup_required == 'true'
     permissions:
       actions: read
       attestations: write

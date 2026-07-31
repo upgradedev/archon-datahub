@@ -169,10 +169,11 @@ validate_common() {
     .recovery.revokeOnlyPreservesExactTerminalState == true and
     .recovery.parentOutcomeClassification == {
       migrateSucceeded: "cleanup-migrated",
-      rollbackSucceeded: "cleanup-revoke",
       prepareSucceededWithoutSuccessfulMigrationOrRollback:
         "cleanup-rollback",
-      prepareNotSucceeded: "cleanup-revoke"
+      rollbackSucceeded: "cleanup-revoke",
+      validatedPrepareNotSucceeded: "cleanup-revoke",
+      validationNotSucceeded: "no-aws"
     } and
     .evidence.schemaVersion ==
       "archon.aws-foundation-policy-migration-receipt/v1" and
