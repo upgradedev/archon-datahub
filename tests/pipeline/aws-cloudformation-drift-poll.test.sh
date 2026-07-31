@@ -14,6 +14,16 @@ set -euo pipefail
 n="$(<"${SLEEP_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${SLEEP_COUNTER}"
 printf '%s\n' "$1" >>"${SLEEP_ARGUMENT_LOG}"
 SLEEP
+cat >"${fake_bin}/date" <<'DATE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_CLOCK_MODE:-}" == deterministic ]]; then
+  [[ "$#" -eq 1 && "$1" == '+%s' ]]
+  if [[ -e "${CLOCK_EXPIRED_MARKER}" ]]; then printf '%s\n' "${CLOCK_DEADLINE}";else printf '%s\n' "${CLOCK_START}";fi
+  exit 0
+fi
+exec /bin/date "$@"
+DATE
 cat >"${fake_bin}/aws" <<'AWS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -57,7 +67,7 @@ if [[ "${joined}" == *' cloudformation describe-stack-drift-detection-status '* 
 fi
 if [[ "${joined}" == *' cloudformation describe-stack-resource-drifts '* ]]; then
   [[ "${joined}" == *" --stack-name ${STACK_ID} "* ]] || exit 97
-  if [[ "${SCENARIO}" == deadline-resource ]]; then /bin/sleep 2; fi
+  if [[ "${SCENARIO}" == deadline-resource ]]; then : >"${CLOCK_EXPIRED_MARKER}"; fi
   resource_stack="${STACK_ID}";resource_time="${ACTIVE_DETECTION_TIMESTAMP}";resource_status='IN_SYNC'
   [[ "${SCENARIO}" == different-incarnation ]] && resource_stack="${OTHER_STACK_ID}"
   [[ "${SCENARIO}" == stale-resource ]] && resource_time="${STALE_TIMESTAMP}"
@@ -71,7 +81,7 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
   [[ "${joined}" == *" --stack-name ${STACK_ID} "* ]] || exit 97
   n="$(<"${FINAL_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${FINAL_COUNTER}"
   case "${SCENARIO}" in
-    deadline-final) /bin/sleep 2 ;;
+    deadline-final) : >"${CLOCK_EXPIRED_MARKER}" ;;
     final-api-transient) ((n == 1)) && exit 1 ;;
     final-api-persistent) exit 1 ;;
     final-malformed) printf '{not-json\n'; exit 0 ;;
@@ -110,7 +120,7 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
 fi
 exit 97
 AWS
-chmod 0700 "${fake_bin}/aws" "${fake_bin}/sleep";export PATH="${fake_bin}:${PATH}"
+chmod 0700 "${fake_bin}/aws" "${fake_bin}/date" "${fake_bin}/sleep";export PATH="${fake_bin}:${PATH}"
 export DETECTION_ID='11111111-2222-3333-4444-555555555555' ACCOUNT_ID='123456789012' REGION='eu-west-1' STACK_NAME='Archon-Test-Stack'
 export STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 export OTHER_STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -170,7 +180,7 @@ run_poll_case invalid-detection-id failure 0 0
 run_poll_case deadline-during-status failure 1 0 1
 run_resource_case(){
   local name="$1" expected="$2" expected_resource="$3" expected_final="$4" expected_sleep="$5" expected_category="${6:--}" deadline_offset="${7:-60}" expected_rc="${8:-}"
-  local dir="${test_root}/resource-${name}" stdout stderr rc=0 resources finals sleeps active_detection_timestamp deadline detect_calls status_calls sleep_argument=0
+  local dir="${test_root}/resource-${name}" stdout stderr rc=0 resources finals sleeps active_detection_timestamp deadline detect_calls status_calls sleep_argument=0 clock_start
   mkdir -p "${dir}";export RUNNER_TEMP="${dir}" SCENARIO="${name}" AWS_CALL_LOG="${dir}/calls.log" STATUS_COUNTER="${dir}/status.count" SLEEP_COUNTER="${dir}/sleep.count" SLEEP_ARGUMENT_LOG="${dir}/sleep.args" FINAL_COUNTER="${dir}/final.count"
   :>"${AWS_CALL_LOG}";:>"${SLEEP_ARGUMENT_LOG}";printf '0\n'>"${STATUS_COUNTER}";printf '0\n'>"${SLEEP_COUNTER}";printf '0\n'>"${FINAL_COUNTER}"
   active_detection_timestamp="${DETECTION_TIMESTAMP}"
@@ -187,7 +197,13 @@ run_resource_case(){
     invalid-final-max) export CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS=6 ;;
     invalid-final-delay) export CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS=3 ;;
   esac
-  deadline="$(( $(date +%s) + deadline_offset ))";stdout="${dir}/stdout";stderr="${dir}/stderr"
+  unset FAKE_CLOCK_MODE CLOCK_START CLOCK_DEADLINE CLOCK_EXPIRED_MARKER
+  if [[ "${name}" == deadline-resource || "${name}" == deadline-final ]];then
+    clock_start="$(/bin/date +%s)";export FAKE_CLOCK_MODE=deterministic CLOCK_START="${clock_start}" CLOCK_DEADLINE="$((clock_start + 10))" CLOCK_EXPIRED_MARKER="${dir}/clock.expired";deadline="${CLOCK_DEADLINE}"
+  else
+    deadline="$(( $(/bin/date +%s) + deadline_offset ))"
+  fi
+  stdout="${dir}/stdout";stderr="${dir}/stderr"
   if verify_cloudformation_stack_resource_drifts "${REGION}" "${STACK_NAME}" "${STACK_ID}" "${ACTIVE_DETECTION_TIMESTAMP}" "${ACCOUNT_ID}" "${deadline}" >"${stdout}" 2>"${stderr}";then rc=0;else rc=$?;fi
   if [[ "${expected}" == success ]];then
     assert_equals 0 "${rc}" "${name} result";assert_equals 1 "$(<"${stdout}")" "${name} count";assert_no_category "${stderr}"
@@ -235,7 +251,7 @@ run_resource_case final-invalid-second failure 1 1 0 final-stack-malformed-respo
 run_resource_case final-invalid-fraction failure 1 1 0 final-stack-malformed-response
 run_resource_case final-malformed failure 1 1 0 final-stack-malformed-response
 run_resource_case final-oversize failure 1 1 0 final-stack-malformed-response
-run_resource_case deadline-resource failure 1 0 0 resource-api-error-or-timeout 1
+run_resource_case deadline-resource failure 1 0 0 timeout
 run_resource_case deadline-final failure 1 1 0 timeout 1
 if bash "${helper}" >/dev/null 2>&1;then fail 'source-only helper allowed execution';fi
 grep -Fq 'stack-drift-detection-complete' "${helper}"&&fail 'unsupported waiter remains'
