@@ -314,8 +314,8 @@ does not depend on a later `master` head, and both privileged locks use `queue: 
 newer run cannot evict a waiting cleanup follower. Immediately before temporary privilege is
 installed, the workflow also proves the exact reviewer, no-admin-bypass, and master-only
 branch policy of both GitHub environments. Retained evidence contains only canonical document
-digests, version IDs, state, and revocation proof; it excludes account IDs, ARNs, and raw IAM
-documents.
+digests, version IDs, state, and revocation proof; it excludes account IDs, ARNs, and
+raw IAM documents.
 
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
