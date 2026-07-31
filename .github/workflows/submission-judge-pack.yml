@@ -1210,8 +1210,10 @@ jobs:
               --arg release "${RELEASE_SHA}" \
               --argjson currentAttempt "${GITHUB_RUN_ATTEMPT}" \
               --argjson runId "${GITHUB_RUN_ID}" '
-                "^submission-judge-pack-" + $release +
-                  "-(?<attempt>[1-9][0-9]*)$" as $pattern |
+                (
+                  "^submission-judge-pack-" + $release +
+                    "-(?<attempt>[1-9][0-9]*)$"
+                ) as $pattern |
                 [
                   .[] |
                   .artifacts[] |
