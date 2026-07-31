@@ -27,6 +27,7 @@
   },
   "implementation": {
     "driver": "scripts/run-aws-foundation-policy-migration.sh",
+    "environmentVerifier": "scripts/verify-github-environment-protection.sh",
     "libraries": [
       "scripts/aws-foundation-policy-migration-authorization.sh",
       "scripts/aws-foundation-policy-migration-common.sh",

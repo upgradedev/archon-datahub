@@ -19,6 +19,7 @@ main_driver="${repository_root}/scripts/run-aws-foundation-policy-migration.sh"
 common="${repository_root}/scripts/aws-foundation-policy-migration-common.sh"
 authorization="${repository_root}/scripts/aws-foundation-policy-migration-authorization.sh"
 state="${repository_root}/scripts/aws-foundation-policy-migration-state.sh"
+environment_verifier="${repository_root}/scripts/verify-github-environment-protection.sh"
 behavior="${repository_root}/tests/pipeline/aws-foundation-policy-migration-driver.test.sh"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 
@@ -63,13 +64,19 @@ for path in \
   "${common}" \
   "${authorization}" \
   "${state}" \
+  "${environment_verifier}" \
   "${behavior}" \
   "${ci_workflow}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must not be a symlink"
 done
 
-for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
+for script in \
+  "${main_driver}" \
+  "${common}" \
+  "${authorization}" \
+  "${state}" \
+  "${environment_verifier}"; do
   bash -n "${script}"
 done
 
@@ -114,6 +121,7 @@ jq --exit-status '
   } and
   .implementation == {
     driver: "scripts/run-aws-foundation-policy-migration.sh",
+    environmentVerifier: "scripts/verify-github-environment-protection.sh",
     libraries: [
       "scripts/aws-foundation-policy-migration-authorization.sh",
       "scripts/aws-foundation-policy-migration-common.sh",
@@ -225,14 +233,11 @@ require_text "${driver_workflow}" \
   'cancel-in-progress: false' \
   'name: aws-foundation' \
   'name: governed-canary-recovery' \
+  'actions: read' \
   'deployments: read' \
-  '.can_admins_bypass == false' \
-  '.prevent_self_review == false' \
-  '(.reviewers | length) == 1' \
-  '.reviewers[0].type == "User"' \
-  'custom_branch_policies: true' \
-  'verify_environment aws-foundation' \
-  'verify_environment governed-canary-recovery' \
+  'bash scripts/verify-github-environment-protection.sh' \
+  'Revalidate recovery environment immediately before OIDC' \
+  'Revalidate foundation environment immediately before OIDC' \
   'unset-current-credentials: true' \
   'if: always()' \
   'AUTHORIZATION_MODE:' \
@@ -241,12 +246,28 @@ require_text "${driver_workflow}" \
   'bash scripts/run-aws-foundation-policy-migration.sh rollback' \
   'bash scripts/run-aws-foundation-policy-migration.sh revoke' \
   'Clear AWS credentials before evidence handling' \
-  'printf ''%s=\n'' "${variable}" >>"${GITHUB_ENV}"' \
+  'printf '\''%s=\n'\'' "${variable}" >>"${GITHUB_ENV}"' \
   'test -z "${!variable:-}"' \
   'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
   'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
   'if-no-files-found: error' \
   'retention-days: 90'
+test "$(grep -Ec '^      actions: read$' "${driver_workflow}")" -eq 4 ||
+  fail "driver must grant actions: read to exactly four environment jobs"
+test "$(grep -Ec '^      deployments: read$' "${driver_workflow}")" -eq 4 ||
+  fail "driver must grant deployments: read to exactly four environment jobs"
+require_text "${environment_verifier}" \
+  '[[ "${GITHUB_ACTIONS:-}" == "true" ]]' \
+  '[[ "${GITHUB_REPOSITORY}" == "upgradedev/archon-datahub" ]]' \
+  'aws-foundation | governed-canary-recovery' \
+  '.can_admins_bypass == false' \
+  '(.protection_rules | length) == 2' \
+  '.prevent_self_review == false' \
+  '(.reviewers | length) == 1' \
+  '.reviewers[0].type == "User"' \
+  '.reviewers[0].reviewer.login == $owner' \
+  '.total_count == 1' \
+  '{name: "master", type: "branch"}'
 require_text "${cleanup}" \
   'group: archon-aws-control-plane' \
   'queue: max' \
@@ -315,7 +336,12 @@ require_text "${state}" \
   'require_rollback_pending_state rollback-before-delete old' \
   'delete-policy-version' \
   'Unexpected managed-policy version count'
-for script in "${main_driver}" "${common}" "${authorization}" "${state}"; do
+for script in \
+  "${main_driver}" \
+  "${common}" \
+  "${authorization}" \
+  "${state}" \
+  "${environment_verifier}"; do
   forbid_text "${script}" \
     'set -x' \
     'set +e' \
@@ -459,4 +485,5 @@ require_text "${ci_workflow}" \
   'scripts/run-aws-foundation-policy-migration.sh' \
   'scripts/aws-foundation-policy-migration-common.sh' \
   'scripts/aws-foundation-policy-migration-authorization.sh' \
-  'scripts/aws-foundation-policy-migration-state.sh'
+  'scripts/aws-foundation-policy-migration-state.sh' \
+  'scripts/verify-github-environment-protection.sh'

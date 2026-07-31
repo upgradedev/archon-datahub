@@ -43,6 +43,7 @@ jobs:
     environment:
       name: aws-foundation
     permissions:
+      actions: read
       contents: read
       deployments: read
       id-token: write
@@ -94,47 +95,9 @@ jobs:
       - name: Prove both protected environment configurations
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          verify_environment() {
-            local name="$1"
-            local configuration branch_policies
-            configuration="$(gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "/repos/${GITHUB_REPOSITORY}/environments/${name}")"
-            branch_policies="$(gh api \
-              -H 'Accept: application/vnd.github+json' \
-              "/repos/${GITHUB_REPOSITORY}/environments/${name}/deployment-branch-policies?per_page=100")"
-            jq -e \
-              --arg name "${name}" \
-              --arg owner "${GITHUB_REPOSITORY_OWNER}" '
-                .name == $name and
-                .can_admins_bypass == false and
-                .deployment_branch_policy == {
-                  custom_branch_policies: true,
-                  protected_branches: false
-                } and
-                (.protection_rules | length) == 2 and
-                ([.protection_rules[] |
-                  select(.type == "branch_policy")] | length) == 1 and
-                ([.protection_rules[] |
-                  select(.type == "required_reviewers")] | length) == 1 and
-                ([.protection_rules[] |
-                  select(.type == "required_reviewers")][0] |
-                  .prevent_self_review == false and
-                  (.reviewers | length) == 1 and
-                  .reviewers[0].type == "User" and
-                  .reviewers[0].reviewer.login == $owner)
-              ' <<<"${configuration}" >/dev/null
-            jq -e '
-              .total_count == 1 and
-              ([.branch_policies[] | {name, type}]) == [
-                {name: "master", type: "branch"}
-              ]
-            ' <<<"${branch_policies}" >/dev/null
-          }
-          verify_environment aws-foundation
-          verify_environment governed-canary-recovery
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          aws-foundation governed-canary-recovery
 
       - name: Assume separately approved foundation role
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -169,7 +132,9 @@ jobs:
     environment:
       name: governed-canary-recovery
     permissions:
+      actions: read
       contents: read
+      deployments: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -197,6 +162,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
+
+      - name: Revalidate recovery environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          governed-canary-recovery
 
       - name: Assume separately approved recovery role
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -239,7 +211,9 @@ jobs:
     environment:
       name: governed-canary-recovery
     permissions:
+      actions: read
       contents: read
+      deployments: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -270,6 +244,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
+
+      - name: Revalidate recovery environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          governed-canary-recovery
 
       - name: Assume separately approved recovery role for rollback only
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -317,8 +298,10 @@ jobs:
     environment:
       name: aws-foundation
     permissions:
+      actions: read
       attestations: write
       contents: read
+      deployments: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -341,6 +324,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
+
+      - name: Revalidate foundation environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          aws-foundation
 
       - name: Assume separately approved foundation role for revocation
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3

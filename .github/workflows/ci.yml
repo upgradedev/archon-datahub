@@ -73,6 +73,7 @@ jobs:
             scripts/aws-foundation-policy-migration-common.sh \
             scripts/aws-foundation-policy-migration-state.sh \
             scripts/run-aws-foundation-policy-migration.sh \
+            scripts/verify-github-environment-protection.sh \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-github-control-plane.sh \
             scripts/verify-github-repository-posture.sh \
