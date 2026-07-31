@@ -102,7 +102,8 @@ wait_for_temp_digest() {
       sleep "${RETRY_DELAY_SECONDS}"
     fi
   done
-  fail \
+  fail "The temporary migration authorization was not canonically readable"
+  return 1
 }
 
 install_temp_policy() {
@@ -247,5 +248,6 @@ revoke_temp_policy() {
       sleep "${RETRY_DELAY_SECONDS}"
     fi
   done
-  fail \
+  fail "Temporary authorization lacks three consecutive exact-baseline absence reads"
+  return 1
 }
