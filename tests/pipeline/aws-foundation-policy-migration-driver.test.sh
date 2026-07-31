@@ -82,6 +82,56 @@ test "${direct_sha}" != "${changed_sha}"
         .Sid != "ReadExactStagePoliciesForDrift"))
     ' >"${expected_old}"
   canonical_iam_policy "${expected_old}" | cmp -s - "${OLD_POLICY}"
+
+  valid_assets="${test_root}/valid-assets.json"
+  cp -- "${NEW_POLICY}" "${valid_assets}"
+  wrong_resource="${test_root}/assets-wrong-resource.json"
+  jq -cS '
+    . as $policy |
+    (.Statement[] |
+      select(.Sid == "ReadExactStagePoliciesForDrift") |
+      .Resource) =
+    ($policy.Statement[] |
+      select(.Sid == "ReconcileExactBootstrapBuckets") |
+      .Resource)
+  ' "${valid_assets}" >"${wrong_resource}"
+  missing_sid="${test_root}/assets-missing-delta-sid.json"
+  jq -cS '
+    .Statement |= map(
+      select(.Sid != "ReadExactStagePoliciesForDrift")
+    )
+  ' "${valid_assets}" >"${missing_sid}"
+
+  assert_render_rejected() {
+    local fixture="$1"
+    local label="$2"
+    local stderr="${test_root}/render-${label}.stderr"
+    local status
+
+    set +e
+    (
+      set -Eeuo pipefail
+      node() { cat -- "${fixture}"; }
+      render_policy_documents
+    ) >/dev/null 2>"${stderr}"
+    status=$?
+    set -e
+
+    if ((status == 0)); then
+      echo "::error::${label} render mutant was accepted" >&2
+      exit 1
+    fi
+    grep -Fxq \
+      "::error::The rendered assets policy delta is invalid" \
+      "${stderr}"
+    if grep -Fq "${AWS_ACCOUNT_ID}" "${stderr}"; then
+      echo "::error::${label} leaked the account binding" >&2
+      exit 1
+    fi
+  }
+
+  assert_render_rejected "${wrong_resource}" wrong-resource
+  assert_render_rejected "${missing_sid}" missing-delta-sid
 )
 (
   leaked_stderr="${test_root}/safe-aws-redaction.stderr"

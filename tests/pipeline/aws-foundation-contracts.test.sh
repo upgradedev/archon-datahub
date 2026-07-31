@@ -23,6 +23,7 @@ bootstrap_sealer="${repository_root}/scripts/seal-cdk-bootstrap-templates.sh"
 canonical_flow_renderer="${repository_root}/scripts/render-canonical-flow-yaml.mjs"
 inline_template_renderer="${repository_root}/scripts/render-inline-cloudformation-template.sh"
 foundation_renderer="${repository_root}/scripts/render-aws-foundation-policy.mjs"
+foundation_policy_validator="${repository_root}/scripts/validate-aws-foundation-policy.jq"
 foundation_bootstrap="${repository_root}/scripts/bootstrap-aws-foundation-role.sh"
 dependency_patcher="${repository_root}/scripts/patch-cdk-brace-expansion.sh"
 dependency_audit_verifier="${repository_root}/scripts/verify-cdk-npm-audit-compensation.sh"
@@ -81,6 +82,7 @@ for path in \
   "${bootstrap_sealer}" \
   "${inline_template_renderer}" \
   "${foundation_renderer}" \
+  "${foundation_policy_validator}" \
   "${foundation_bootstrap}" \
   "${dependency_patcher}" \
   "${dependency_audit_verifier}" \
@@ -709,6 +711,39 @@ for group in control assets identity attachments; do
     jq -cS . <<<"${renderer_stdout[${group}]}"
   )"
 done
+
+jq --exit-status \
+  --slurpfile migration "${migration_contract}" \
+  --from-file "${foundation_policy_validator}" \
+  "${foundation_policy}" >/dev/null
+
+wrong_source_policy="${renderer_runtime_dir}/wrong-source-policy.json"
+jq '
+  . as $policy |
+  (.Statement[] |
+    select(.Sid == "ReadExactStagePoliciesForDrift") |
+    .Resource) =
+  ($policy.Statement[] |
+    select(.Sid == "ReconcileExactBootstrapBuckets") |
+    .Resource)
+' "${foundation_policy}" >"${wrong_source_policy}"
+missing_source_sid_policy="${renderer_runtime_dir}/missing-source-sid-policy.json"
+jq '
+  .Statement |= map(
+    select(.Sid != "ReadExactStagePoliciesForDrift")
+  )
+' "${foundation_policy}" >"${missing_source_sid_policy}"
+for invalid_policy in \
+  "${wrong_source_policy}" \
+  "${missing_source_sid_policy}"; do
+  if jq --exit-status \
+    --slurpfile migration "${migration_contract}" \
+    --from-file "${foundation_policy_validator}" \
+    "${invalid_policy}" >/dev/null 2>&1; then
+    fail "shared foundation policy validator accepted $(basename "${invalid_policy}")"
+  fi
+done
+
 cleanup_renderer_runtime
 trap - EXIT
 
@@ -1303,9 +1338,18 @@ for sid in \
 done
 require_text "${foundation_workflow}" \
   'contracts/aws-foundation-policy-migration-v1.json' \
+  '--from-file scripts/validate-aws-foundation-policy.jq' \
   'cloudformation:DetectStackResourceDrift' \
   'cloudformation:BatchDescribeTypeConfigurations' \
   'queue: max'
+forbid_text "${foundation_workflow}" \
+  '.policy.exactDelta.stackScopedStatement' \
+  '.policy.exactDelta.wildcardStatement'
+require_text "${foundation_policy_validator}" \
+  '($m.policy.exactDelta.statements) as $delta' \
+  '$spec.resourcesMatchStatement' \
+  'all($delta[];' \
+  'all($delta[].actions[];'
 
 require_text "${api_gateway_account}" \
   'AWS::ApiGateway::Account' \
