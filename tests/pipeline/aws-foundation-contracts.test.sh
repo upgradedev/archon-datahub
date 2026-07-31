@@ -28,6 +28,8 @@ dependency_patcher="${repository_root}/scripts/patch-cdk-brace-expansion.sh"
 dependency_audit_verifier="${repository_root}/scripts/verify-cdk-npm-audit-compensation.sh"
 dependency_override_verifier="${repository_root}/scripts/verify-exact-npm-overrides.mjs"
 reconciler="${repository_root}/scripts/reconcile-aws-foundation.sh"
+drift_poller="${repository_root}/scripts/aws-cloudformation-drift.sh"
+drift_poller_test="${repository_root}/tests/pipeline/aws-cloudformation-drift-poll.test.sh"
 failure_sanitizer="${repository_root}/scripts/sanitize-cloudformation-failure.mjs"
 failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure-sanitizer.test.mjs"
 iam_resource_arn_verifier="${repository_root}/scripts/verify-iam-policy-resource-arns.mjs"
@@ -84,6 +86,8 @@ for path in \
   "${dependency_audit_verifier}" \
   "${dependency_override_verifier}" \
   "${reconciler}" \
+  "${drift_poller}" \
+  "${drift_poller_test}" \
   "${failure_sanitizer}" \
   "${failure_sanitizer_test}" \
   "${iam_resource_arn_verifier}" \
@@ -368,6 +372,27 @@ jq --exit-status '
     migrationRequiredState:
       "foundation-complete-deploy-migration-required",
     readyState: "ready-for-deploy"
+  } and
+  .evidence.driftVerification == {
+    cliConnectTimeoutSeconds: 5,
+    cliReadTimeoutSeconds: 15,
+    coverage: "cloudformation-supported-resources",
+    failureMode: "fail-closed",
+    globalTimeoutSeconds: 900,
+    helper: "scripts/aws-cloudformation-drift.sh",
+    maximumConsecutiveApiFailuresPerStack: 3,
+    maximumPollAttemptsPerStack: 120,
+    method: "detect-then-bounded-describe-poll",
+    pollDelaySeconds: 2,
+    rawAwsStderr: "suppressed",
+    responseBinding: ["StackDriftDetectionId", "StackId"],
+    terminalSuccess: {
+      detectionStatus: "DETECTION_COMPLETE",
+      driftedStackResourceCount: 0,
+      returnedResourceStatuses: ["IN_SYNC"],
+      stackDriftStatus: "IN_SYNC"
+    },
+    unsupportedCliWaiter: "forbidden"
   } and
   .evidence.failureDiagnostics == {
     allowlistedStackLabels: [
@@ -1354,8 +1379,75 @@ require_text "${runbook}" \
 forbid_text "${runbook}" \
   'ten CloudFormation stack instances' \
   'reconciles all ten stacks' \
-  'ten-stack drift evidence'
+  'ten-stack drift evidence'require_text "${ci_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
+  'bash tests/pipeline/aws-cloudformation-drift-poll.test.sh'
+require_text "${foundation_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'coverage: "cloudformation-supported-resources"' \
+  'method: "detect-then-bounded-describe-poll"'
 require_text "${reconciler}" \
+  "readonly CFN_DRIFT_HELPER='scripts/aws-cloudformation-drift.sh'" \
+  'source "${CFN_DRIFT_HELPER}"' \
+  'readonly CFN_DRIFT_MAX_ATTEMPTS=120' \
+  'readonly CFN_DRIFT_DELAY_SECONDS=2' \
+  'readonly CFN_DRIFT_MAX_API_FAILURES=3' \
+  'readonly CFN_DRIFT_PHASE_TIMEOUT_SECONDS=900' \
+  'detect_and_wait_for_cloudformation_stack_in_sync \' \
+  '.StackResourceDriftStatus == "IN_SYNC"' \
+  'coverage: "cloudformation-supported-resources"' \
+  'detectionStatus: "DETECTION_COMPLETE"' \
+  'checkedResourceCount: $checkedResourceCount' \
+  'pollAttempts: $pollAttempts' \
+  'pollElapsedSeconds: $pollElapsedSeconds' \
+  'scripts/aws-cloudformation-drift.sh \'
+require_text "${drift_poller}" \
+  'detect_and_wait_for_cloudformation_stack_in_sync() {' \
+  '--cli-connect-timeout 5' \
+  '--cli-read-timeout 15' \
+  'cloudformation detect-stack-drift' \
+  'cloudformation describe-stack-drift-detection-status' \
+  '.StackDriftDetectionId == $detectionId' \
+  'startswith($stackPrefix)' \
+  'DETECTION_IN_PROGRESS' \
+  'DETECTION_COMPLETE' \
+  'DETECTION_FAILED' \
+  '.DriftedStackResourceCount |' \
+  'max_api_failures > 3' \
+  'response_bytes > 65536' \
+  '>"${candidate}" 2>/dev/null' \
+  'mv -T -- "${candidate}" "${status_json}"'
+require_text "${drift_poller_test}" \
+  'progress-success' 'immediate-success' 'transient-success' \
+  'persistent-error' 'perpetual-progress' 'detection-failed' \
+  'drifted' 'missing-count' 'wrong-detection-id' 'wrong-stack-id' \
+  'malformed' 'unknown-status' 'PRIVATE_AWS_MARKER' \
+  'invalid inputs reached AWS'
+forbid_text "${reconciler}" \
+  'stack-drift-detection-complete' \
+  '(.DriftedStackResourceCount // 0) == 0' \
+  '.StackResourceDrifts[]?'
+forbid_text "${drift_poller}" \
+  'stack-drift-detection-complete' \
+  'DetectionStatusReason'
+helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
+helper_describe_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
+helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE" and' "${drift_poller}" | cut -d: -f1)"
+helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
+test "${helper_detect_line}" -lt "${helper_describe_line}" || fail 'drift helper must detect before polling'
+test "${helper_describe_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
+test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'
+reconciler_poll_line="$(grep -nF 'detect_and_wait_for_cloudformation_stack_in_sync \' "${reconciler}" | cut -d: -f1)"
+reconciler_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${reconciler}" | cut -d: -f1)"
+reconciler_evidence_line="$(grep -nF 'checkedResourceCount: $checkedResourceCount' "${reconciler}" | cut -d: -f1)"
+test "${reconciler_poll_line}" -lt "${reconciler_resource_line}" || fail 'stack proof must precede resource inspection'
+test "${reconciler_resource_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
+require_text "${runbook}" \
+  'Bounded CloudFormation drift polling' \
+  '30596290772' \
+  'cloudformation-supported-resources' \
+  'does not support remain outside this claim'require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
   "foundation_phase='startup'" \
