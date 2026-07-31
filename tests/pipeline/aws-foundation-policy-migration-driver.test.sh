@@ -89,7 +89,7 @@ test "${direct_sha}" != "${changed_sha}"
     failed_calls=$((failed_calls + 1))
     return 1
   }
-  if wait_for_state migrated; then
+  if wait_for_state migrated 2>/dev/null; then
     echo '::error::persistent API failure was accepted' >&2
     exit 1
   fi
@@ -97,10 +97,14 @@ test "${direct_sha}" != "${changed_sha}"
 )
 
 (
-  pending_calls=0
+  pending_counter="${test_root}/pending-counter"
+  printf '0\n' >"${pending_counter}"
   sleep() { :; }
   require_rollback_pending_state() {
+    local pending_calls
+    pending_calls="$(cat "${pending_counter}")"
     pending_calls=$((pending_calls + 1))
+    printf '%s\n' "${pending_calls}" >"${pending_counter}"
     if ((pending_calls < 2)); then
       return 1
     fi
@@ -108,7 +112,7 @@ test "${direct_sha}" != "${changed_sha}"
   }
   pending="$(wait_for_rollback_pending_state create-propagation old)"
   assert_equal "${pending}" $'v1\nv2' "nondefault create propagation"
-  assert_equal "${pending_calls}" "2" "nondefault create polling"
+  assert_equal "$(cat "${pending_counter}")" "2" "nondefault create polling"
 )
 
 (
