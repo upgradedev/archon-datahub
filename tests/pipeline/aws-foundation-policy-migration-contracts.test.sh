@@ -457,9 +457,11 @@ for job_environment in \
     fail "driver job ${job} must invoke the environment verifier exactly once"
   expected_environment_gate="$(printf '    environment:\n      name: %s' \
     "${expected_environment}")"
+  padded_block=$'\n'"${block}"$'\n'
+  padded_environment_gate=$'\n'"${expected_environment_gate}"$'\n'
   test "$(grep -Fxc '    environment:' <<<"${block}")" -eq 1 ||
     fail "driver job ${job} must contain exactly one environment gate"
-  [[ "${block}" == *"${expected_environment_gate}"* ]] ||
+  [[ "${padded_block}" == *"${padded_environment_gate}"* ]] ||
     fail "driver job ${job} has a noncanonical protected environment gate"
   case "${job}" in
     prepare)
@@ -480,7 +482,8 @@ for job_environment in \
       ;;
     *) fail "unexpected driver job ${job}" ;;
   esac
-  [[ "${block}" == *"${expected_verifier_call}"* ]] ||
+  padded_verifier_call=$'\n'"${expected_verifier_call}"$'\n'
+  [[ "${padded_block}" == *"${padded_verifier_call}"* ]] ||
     fail "driver job ${job} verifies the wrong environment arguments"
   verifier_line="$(grep -nF \
     'bash scripts/verify-github-environment-protection.sh' \
