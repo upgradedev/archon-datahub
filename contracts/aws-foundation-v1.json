@@ -437,6 +437,14 @@
         "Timestamp",
         "DriftInformation.LastCheckTimestamp"
       ],
+      "finalStackBinding": {
+        "method": "bounded-describe-stacks-poll",
+        "maximumAttempts": 5,
+        "pollDelaySeconds": 2,
+        "timestampComparison": "exact-normalized-utc-instant",
+        "staleOrUnpublishedProjection": "retry",
+        "newerOrDifferentProjection": "fail-closed"
+      },
       "terminalSuccess": {
         "detectionStatus": "DETECTION_COMPLETE",
         "stackDriftStatus": "IN_SYNC",

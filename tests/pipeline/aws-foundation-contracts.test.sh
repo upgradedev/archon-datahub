@@ -391,6 +391,14 @@ jq --exit-status '
     pollDelaySeconds: 2,
     rawAwsStderr: "suppressed",
     responseBinding: ["StackDriftDetectionId", "StackId", "Timestamp", "DriftInformation.LastCheckTimestamp"],
+    finalStackBinding: {
+      method: "bounded-describe-stacks-poll",
+      maximumAttempts: 5,
+      newerOrDifferentProjection: "fail-closed",
+      pollDelaySeconds: 2,
+      staleOrUnpublishedProjection: "retry",
+      timestampComparison: "exact-normalized-utc-instant"
+    },
     staleResourceEvidence: "forbidden",
     terminalSuccess: {
       detectionStatus: "DETECTION_COMPLETE",
@@ -1466,7 +1474,9 @@ require_text "${drift_poller}" \
   '.StackDriftDetectionId == $detectionId' \
   'ltrimstr($stackPrefix)' \
   '.StackId == $exactStackId' \
-  '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' \
+  'CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS' \
+  'exact-normalized-utc-instant' \
+  'final-stack-binding-stale' \
   '.StackResourceDriftStatus == "IN_SYNC"' \
   'trap cleanup EXIT' \
   'max_api_failures > 3' \
@@ -1476,7 +1486,10 @@ require_text "${drift_poller_test}" \
   'perpetual-progress' 'detection-failed' 'drifted' 'missing-count' \
   'missing-timestamp' 'wrong-detection-id' 'wrong-stack-id' \
   'deadline-during-status' 'different-incarnation' 'stale-resource' \
-  'not-checked-resource' 'final-timestamp-mismatch' 'deadline-resource' \
+  'subsecond-stale-resource' 'not-checked-resource' \
+  'final-equivalent-utc' 'final-stale-then-current' \
+  'final-stale-persistent' 'final-api-transient' 'final-api-persistent' \
+  'final-subsecond-mismatch' 'final-timestamp-mismatch' 'deadline-resource' \
   'PRIVATE_AWS_MARKER' 'left raw files'
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \

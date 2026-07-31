@@ -505,9 +505,15 @@ The terminal response contributes its exact stack ARN/UUID and detection
 timestamp. The follow-up resource query targets that exact ARN, requires a real
 `StackResourceDrifts` array, rejects older timestamps and accepts only exact
 stack-ID entries whose status is `IN_SYNC`; `NOT_CHECKED` is not converted into
-a pass. A final `DescribeStacks` read must still report the same stack ID,
+a pass. A bounded final `DescribeStacks` poll must still report the same stack ID,
 `IN_SYNC`, and a `LastCheckTimestamp` equal to the exact detection timestamp.
-All raw status, resource, and final-stack JSON is mode 0600 and deleted on every
+Equivalent UTC spellings (`Z` versus `+00:00` and fractional trailing zeroes)
+are compared as one exact instant without discarding non-zero subsecond
+precision. Only an older or not-yet-published final projection is retried; a
+newer/different operation, unsafe status, wrong incarnation, malformed response,
+or exhausted retry fails closed. The final projection shares the 900-second
+global wall-clock deadline, allows at most five reads with two-second pauses,
+and never reruns drift detection. All raw status, resource, and final-stack JSON is mode 0600 and deleted on every
 success or failure exit. The sealed `drift.json` records poll attempts, elapsed
 seconds, returned resource count, stack-incarnation binding, and
 `coverage: cloudformation-supported-resources`. Resources that CloudFormation
@@ -523,6 +529,16 @@ diagnostic wrapper; this limitation is recorded rather than fabricating a
 CloudFormation failure event. The run remains durable failure evidence for the
 portability fix, and the next exact-master run must provide the sealed positive
 drift receipt.
+
+Exact-master foundation run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+then completed every reconciliation group and reached resource drift validation,
+but rejected the first final stack projection with the sanitized category
+`final-stack-binding-mismatch`. The prior raw-string timestamp equality could
+not distinguish equivalent AWS CLI UTC serialization from a short-lived stale
+projection. No success artifact was authored. The shared deadline-bound,
+precision-preserving final projection poll above is the reviewed remediation;
+only a later successful protected run may supersede this recorded failure.
 ## Sanitized managed-stack failure evidence
 
 A managed foundation stack rejected in a failed preflight state, or a managed

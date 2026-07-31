@@ -470,6 +470,14 @@ jobs:
                 "Timestamp",
                 "DriftInformation.LastCheckTimestamp"
               ],
+              finalStackBinding: {
+                method: "bounded-describe-stacks-poll",
+                maximumAttempts: 5,
+                newerOrDifferentProjection: "fail-closed",
+                pollDelaySeconds: 2,
+                staleOrUnpublishedProjection: "retry",
+                timestampComparison: "exact-normalized-utc-instant"
+              },
               staleResourceEvidence: "forbidden",
               terminalSuccess: {
                 detectionStatus: "DETECTION_COMPLETE",

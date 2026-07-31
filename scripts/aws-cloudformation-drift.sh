@@ -173,7 +173,11 @@ verify_cloudformation_stack_resource_drifts() (
   if [[ "$#" -ne 6 ]]; then cloudformation_drift_poll_error 'category=invalid-resource-invocation'; exit 64; fi
   local region="$1" stack_name="$2" exact_stack_id="$3" detection_timestamp="$4"
   local account_id="$5" deadline_epoch="$6" prefix suffix resource_json='' final_json=''
-  local resource_bytes final_bytes checked_resource_count
+  local resource_bytes final_bytes checked_resource_count final_attempt final_state
+  local final_api_failures=0
+  local final_max_attempts="${CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS:-5}"
+  local final_delay_seconds="${CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS:-2}"
+  local max_api_failures="${CFN_DRIFT_MAX_API_FAILURES:-3}"
   cleanup(){ rm -f -- "${resource_json}" "${final_json}"; }
   trap cleanup EXIT
   prefix="arn:aws:cloudformation:${region}:${account_id}:stack/${stack_name}/"
@@ -183,6 +187,13 @@ verify_cloudformation_stack_resource_drifts() (
     cloudformation_drift_poll_error 'category=invalid-resource-input'; exit 64
   fi
   suffix="${exact_stack_id:${#prefix}}"; [[ "${suffix}" =~ ^[A-Za-z0-9-]+$ ]] || exit 64
+  if [[ ! "${final_max_attempts}" =~ ^[1-9][0-9]*$ ]] ||
+    [[ ! "${final_delay_seconds}" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    [[ ! "${max_api_failures}" =~ ^[1-9][0-9]*$ ]] ||
+    ((final_max_attempts > 10 || final_delay_seconds > 30 ||
+      max_api_failures > 3 || max_api_failures > final_max_attempts)); then
+    cloudformation_drift_poll_error 'category=invalid-final-binding-bounds'; exit 64
+  fi
   resource_json="$(mktemp "${RUNNER_TEMP}/cloudformation-resource-drifts.XXXXXX.json")"
   final_json="$(mktemp "${RUNNER_TEMP}/cloudformation-final-stack.XXXXXX.json")"
   chmod 0600 "${resource_json}" "${final_json}"
@@ -195,36 +206,90 @@ verify_cloudformation_stack_resource_drifts() (
   resource_bytes="$(wc -c <"${resource_json}")"
   [[ "${resource_bytes}" =~ ^[0-9]+$ ]] && ((resource_bytes > 0 && resource_bytes <= 1048576)) || exit 1
   if ! jq -e --arg exactStackId "${exact_stack_id}" --arg detectionTimestamp "${detection_timestamp}" '
-    def epoch:
-      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T") then
-        sub("[+]00:00$"; "Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601
-      else error("invalid timestamp") end;
-    ($detectionTimestamp | epoch) as $detectionEpoch |
+    def utc_key:
+      if type != "string" then error("invalid timestamp") else
+        sub("[+]00:00$"; "Z") |
+        capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") |
+        .base + "." + (((.fraction // "") + "000000000")[0:9])
+      end;
+    ($detectionTimestamp | utc_key) as $detectionKey |
     type == "object" and (.StackResourceDrifts | type) == "array" and
     all(.StackResourceDrifts[];
       .StackId == $exactStackId and .StackResourceDriftStatus == "IN_SYNC" and
-      ((.Timestamp | epoch) >= $detectionEpoch))
+      ((.Timestamp | utc_key) >= $detectionKey))
   ' "${resource_json}" >/dev/null 2>&1; then
     cloudformation_drift_poll_error 'category=resource-drift-stale-or-mismatched'; exit 1
   fi
   checked_resource_count="$(jq -er '.StackResourceDrifts | length' "${resource_json}" 2>/dev/null)"
   [[ "${checked_resource_count}" =~ ^[0-9]+$ ]] || exit 1
-  if ! run_bounded_cloudformation_drift_aws "${deadline_epoch}" --cli-connect-timeout 5 --cli-read-timeout 15 \
-    --no-cli-pager cloudformation describe-stacks --region "${region}" --stack-name "${exact_stack_id}" \
-    --output json >"${final_json}" 2>/dev/null; then
-    cloudformation_drift_poll_error 'category=final-stack-api-error-or-timeout'; exit 1
-  fi
-  cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
-  final_bytes="$(wc -c <"${final_json}")"
-  [[ "${final_bytes}" =~ ^[0-9]+$ ]] && ((final_bytes > 0 && final_bytes <= 65536)) || exit 1
-  if ! jq -e --arg exactStackId "${exact_stack_id}" --arg detectionTimestamp "${detection_timestamp}" '
-    type == "object" and (.Stacks | type) == "array" and (.Stacks | length) == 1 and
-    .Stacks[0].StackId == $exactStackId and
-    .Stacks[0].DriftInformation.StackDriftStatus == "IN_SYNC" and
-    .Stacks[0].DriftInformation.LastCheckTimestamp == $detectionTimestamp
-  ' "${final_json}" >/dev/null 2>&1; then
-    cloudformation_drift_poll_error 'category=final-stack-binding-mismatch'; exit 1
-  fi
+  for ((final_attempt = 1; final_attempt <= final_max_attempts; final_attempt += 1)); do
+    : >"${final_json}"
+    if ! run_bounded_cloudformation_drift_aws "${deadline_epoch}" \
+      --cli-connect-timeout 5 --cli-read-timeout 15 --no-cli-pager \
+      cloudformation describe-stacks --region "${region}" \
+      --stack-name "${exact_stack_id}" --output json \
+      >"${final_json}" 2>/dev/null; then
+      final_api_failures="$((final_api_failures + 1))"
+      if ((final_api_failures >= max_api_failures ||
+        final_attempt == final_max_attempts)); then
+        cloudformation_drift_poll_error 'category=final-stack-api-error-or-timeout'; exit 1
+      fi
+      if ! cloudformation_drift_bounded_sleep \
+        "${deadline_epoch}" "${final_delay_seconds}"; then
+        cloudformation_drift_poll_error 'category=timeout'; exit 1
+      fi
+      continue
+    fi
+    final_api_failures=0
+    cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
+    final_bytes="$(wc -c <"${final_json}")"
+    if [[ ! "${final_bytes}" =~ ^[0-9]+$ ]] ||
+      ((final_bytes == 0 || final_bytes > 65536)); then
+      cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1
+    fi
+    if ! final_state="$(jq -er \
+      --arg exactStackId "${exact_stack_id}" \
+      --arg detectionTimestamp "${detection_timestamp}" '
+        def utc_key:
+          if type != "string" then error("invalid timestamp") else
+            sub("[+]00:00$"; "Z") |
+            capture("^(?<base>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.(?<fraction>[0-9]{1,9}))?Z$") |
+            .base + "." + (((.fraction // "") + "000000000")[0:9])
+          end;
+        if type != "object" or (.Stacks | type) != "array" or
+          (.Stacks | length) != 1 or .Stacks[0].StackId != $exactStackId or
+          (.Stacks[0].DriftInformation | type) != "object" or
+          .Stacks[0].DriftInformation.StackDriftStatus != "IN_SYNC" then
+          "mismatch"
+        elif (.Stacks[0].DriftInformation | has("LastCheckTimestamp") | not) or
+          .Stacks[0].DriftInformation.LastCheckTimestamp == null then
+          "stale"
+        else
+          ($detectionTimestamp | utc_key) as $expectedKey |
+          (.Stacks[0].DriftInformation.LastCheckTimestamp | utc_key) as $actualKey |
+          if $actualKey == $expectedKey then "match"
+          elif $actualKey < $expectedKey then "stale"
+          else "mismatch" end
+        end
+      ' "${final_json}" 2>/dev/null)"; then
+      cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1
+    fi
+    case "${final_state}" in
+      match) break ;;
+      stale)
+        if ((final_attempt == final_max_attempts)); then
+          cloudformation_drift_poll_error 'category=final-stack-binding-stale'; exit 1
+        fi
+        if ! cloudformation_drift_bounded_sleep \
+          "${deadline_epoch}" "${final_delay_seconds}"; then
+          cloudformation_drift_poll_error 'category=timeout'; exit 1
+        fi ;;
+      mismatch)
+        cloudformation_drift_poll_error 'category=final-stack-binding-mismatch'; exit 1 ;;
+      *)
+        cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1 ;;
+    esac
+  done
   cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
   printf '%s\n' "${checked_resource_count}"
 )
