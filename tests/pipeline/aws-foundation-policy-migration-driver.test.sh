@@ -58,6 +58,32 @@ assert_equal "${direct_sha}" "${permuted_sha}" "statement/action/resource permut
 assert_equal "${direct_sha}" "${wrapped_sha}" "wrapped IAM policy canonicalization"
 test "${direct_sha}" != "${changed_sha}"
 (
+  AWS_ACCOUNT_ID=123456789012
+  render_policy_documents
+  test -f "${NEW_POLICY}"
+  test -f "${OLD_POLICY}"
+  jq -e '
+    ([.Statement[] | select(.Sid == "ReadExactBootstrapBucketsForDrift")] | length) == 1 and
+    ([.Statement[] | select(.Sid == "ReadExactStagePoliciesForDrift")] | length) == 1
+  ' "${NEW_POLICY}" >/dev/null
+  jq -e '
+    ([.Statement[] |
+      select(.Sid == "ReadExactBootstrapBucketsForDrift" or
+        .Sid == "ReadExactStagePoliciesForDrift")] | length) == 0
+  ' "${OLD_POLICY}" >/dev/null
+  expected_old="${test_root}/expected-assets-old.json"
+  node "${RENDERER}" \
+    --input "${SOURCE_POLICY}" \
+    --account "${AWS_ACCOUNT_ID}" \
+    --stdout-group assets |
+    jq -cS '
+      .Statement |= map(select(
+        .Sid != "ReadExactBootstrapBucketsForDrift" and
+        .Sid != "ReadExactStagePoliciesForDrift"))
+    ' >"${expected_old}"
+  canonical_iam_policy "${expected_old}" | cmp -s - "${OLD_POLICY}"
+)
+(
   leaked_stderr="${test_root}/safe-aws-redaction.stderr"
   leaked_output="${test_root}/safe-aws-redaction.json"
   aws() {
@@ -77,7 +103,7 @@ test "${direct_sha}" != "${changed_sha}"
 )
 run_real_state_case() (
   local scenario="$1"
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   OLD_POLICY_SHA="${direct_sha}"
   NEW_POLICY_SHA="${changed_sha}"
   local state_file="${test_root}/real-${scenario}-state"
@@ -126,11 +152,11 @@ run_real_state_case() (
         fi
         printf '%s\n' "${state}" >"${state_file}"
         jq -cn \
-          --arg arn "${CONTROL_POLICY_ARN}" \
+          --arg arn "${TARGET_POLICY_ARN}" \
           --arg default_version "${default_version}" '
             {Policy: {
               Arn: $arn,
-              PolicyName: "archon-aws-foundation-control",
+              PolicyName: "archon-aws-foundation-assets",
               Path: "/",
               IsAttachable: true,
               AttachmentCount: 1,
@@ -342,7 +368,7 @@ run_real_state_case unknown-document
 (
   OLD_POLICY_SHA=old
   NEW_POLICY_SHA=new
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   AUTHORIZATION_MODE=rollback
   EXPECTED_TEMP_POLICY_SHA=temp
   mutations=()
@@ -380,7 +406,7 @@ run_real_state_case unknown-document
 (
   OLD_POLICY_SHA=old
   NEW_POLICY_SHA=new
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   AUTHORIZATION_MODE=rollback
   EXPECTED_TEMP_POLICY_SHA=temp
   mutations=()
@@ -403,7 +429,7 @@ run_real_state_case unknown-document
 (
   OLD_POLICY_SHA=old
   NEW_POLICY_SHA=new
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   AUTHORIZATION_MODE=rollback
   EXPECTED_TEMP_POLICY_SHA=temp
   mutations=()
@@ -442,7 +468,7 @@ run_real_state_case unknown-document
 run_install_ttl_case() (
   local remaining="$1"
   local expected_result="$2"
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
   FAKE_NOW=1000
   FAKE_EXPIRY=$((FAKE_NOW + remaining))
@@ -478,7 +504,7 @@ run_install_ttl_case 1200 success
 run_install_ttl_case 1139 failure
 run_install_ttl_case 1201 failure
 (
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
   now_calls="${test_root}/ttl-second-check.calls"
   printf '0\n' >"${now_calls}"
@@ -512,7 +538,7 @@ run_install_ttl_case 1201 failure
   assert_equal "$(<"${now_calls}")" "2" "TTL checked twice before put"
 )
 (
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
   put_calls=0
   date() {
@@ -537,7 +563,7 @@ run_install_ttl_case 1201 failure
 run_live_ttl_case() (
   local test_remaining="$1"
   local expected_result="$2"
-  CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
+  TARGET_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-assets
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
   local expected_policy="${test_root}/live-expected-${test_remaining}.json"
   local live_policy="${test_root}/live-policy-${test_remaining}.json"
@@ -547,7 +573,7 @@ run_live_ttl_case() (
   jq -cn --slurpfile policy "${expected_policy}" '
     {
       RoleName: "archon-datahub-github-governed-canary-recovery",
-      PolicyName: "archon-foundation-control-policy-migration",
+      PolicyName: "archon-foundation-assets-policy-migration",
       PolicyDocument: ($policy[0] | .Statement |= reverse)
     }
   ' >"${live_policy}"
