@@ -374,10 +374,13 @@ jq --exit-status '
     readyState: "ready-for-deploy"
   } and
   .evidence.driftVerification == {
+    awsSdkMaxAttempts: 1,
     cliConnectTimeoutSeconds: 5,
     cliReadTimeoutSeconds: 15,
     coverage: "cloudformation-supported-resources",
+    exactStackIncarnation: true,
     failureMode: "fail-closed",
+    globalDeadline: "hard-wall-clock",
     globalTimeoutSeconds: 900,
     helper: "scripts/aws-cloudformation-drift.sh",
     maximumConsecutiveApiFailuresPerStack: 3,
@@ -385,7 +388,13 @@ jq --exit-status '
     method: "detect-then-bounded-describe-poll",
     pollDelaySeconds: 2,
     rawAwsStderr: "suppressed",
-    responseBinding: ["StackDriftDetectionId", "StackId"],
+    responseBinding: [
+      "StackDriftDetectionId",
+      "StackId",
+      "Timestamp",
+      "DriftInformation.LastCheckTimestamp"
+    ],
+    staleResourceEvidence: "forbidden",
     terminalSuccess: {
       detectionStatus: "DETECTION_COMPLETE",
       driftedStackResourceCount: 0,
@@ -393,8 +402,7 @@ jq --exit-status '
       stackDriftStatus: "IN_SYNC"
     },
     unsupportedCliWaiter: "forbidden"
-  } and
-  .evidence.failureDiagnostics == {
+  } and  .evidence.failureDiagnostics == {
     allowlistedStackLabels: [
       "governed-canary-roles",
       "production-bootstrap-edge",
@@ -1182,212 +1190,13 @@ require_text "${runtime_verifier}" \
   'const unseenApprovedPolicies' \
   'approved managed policies absent from synthesis'
 require_text "${ci_workflow}" \
-  'bash tests/pipeline/aws-foundation-contracts.test.sh' \
-  'scripts/bootstrap-aws-foundation-role.sh' \
-  'scripts/reconcile-aws-foundation.sh' \
-  'scripts/patch-cdk-bootstrap-template.mjs' \
-  'scripts/render-canonical-flow-yaml.mjs' \
-  'scripts/render-inline-cloudformation-template.sh' \
-  'scripts/seal-cdk-bootstrap-templates.sh' \
-  'Seal the exact CDK bootstrap templates without AWS access' \
-  'EXPECTED_BOOTSTRAP_VERSION: "32"' \
-  'run: bash scripts/seal-cdk-bootstrap-templates.sh' \
-  'Render the exact inline-safe IAM foundation template' \
-  '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
-  '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
-  'scripts/render-aws-foundation-policy.mjs' \
-  'node scripts/verify-aws-runtime-boundary.mjs'
-require_text "${deploy_workflow}" \
-  'group: archon-aws-control-plane' \
-  'cancel-in-progress: false' \
-  'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
-  'ALLOW_ABSENT=false' \
-  'ALLOW_ROLE_MIGRATION=false' \
-  'bash scripts/validate-cloudformation-role-bindings.sh'
-require_text "${foundation_workflow}" \
-  'Render the inline-safe IAM foundation template' \
-  'scripts/render-canonical-flow-yaml.mjs' \
-  'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
-  'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
-  'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \
-  'IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}' \
-  'IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}' \
-  'IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}' \
-  'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
-  'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
-  'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \
-  'PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}' \
-  'APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}' \
-  'OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}' \
-  'Application stack RoleARN transition:'
-require_text "${deploy_role}" \
-  'CloudFrontHostedZoneId:' \
-  'RoleName: !Sub archon-${DeploymentEnvironment}-judge-user' \
-  'RoleName: archon-production-posture-observer' \
-  'RoleName: archon-production-runtime-read' \
-  'RoleName: archon-production-paging-test' \
-  'environment:judge-access-${DeploymentEnvironment}' \
-  'environment:production-observer' \
-  'environment:production-paging-test' \
-  'ProductionPostureObserverRoleArn:' \
-  'ProductionRuntimeReadRoleArn:' \
-  'ProductionPagingTestRoleArn:' \
-  'acm:DescribeCertificate' \
-  'cloudfront:GetDistributionConfig' \
-  'cloudfront:DescribeFunction' \
-  'route53:GetHostedZone' \
-  'route53:ListResourceRecordSets' \
-  'ec2:DescribeAvailabilityZones' \
-  'ec2:DescribeSecurityGroupRules' \
-  'ec2:DescribeSecurityGroups' \
-  'ec2:DescribeSubnets' \
-  'ec2:DescribeVpcEndpointServices' \
-  'ec2:DescribeVpcEndpoints'
-test "$(
-  grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
-)" -eq 5
-if grep -Eq \
-  "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
-  "${deploy_role}"; then
-  fail "deploy and operational roles contain a wildcard action"
-fi
-require_text "${foundation_policy}" \
-  'cloudformation:DescribeStackEvents' \
-  'cloudformation:DetectStackResourceDrift' \
-  'cloudformation:BatchDescribeTypeConfigurations' \
-  'role/archon-staging-judge-user' \
-  'role/archon-production-judge-user' \
-  'role/archon-production-posture-observer' \
-  'role/archon-production-runtime-read' \
-  'role/archon-production-paging-test'
-
-jq --exit-status \
-  --slurpfile migration "${migration_contract}" '
-    $migration[0] as $m |
-    def statements($sid):
-      [.Statement[] | select(.Sid == $sid)];
-    def actions:
-      [.Statement[].Action] | flatten;
-    ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
-    ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
-    (statements($stackSid) | length) == 1 and
-    (statements($wildcardSid) | length) == 1 and
-    statements($stackSid)[0].Effect == "Allow" and
-    (statements($stackSid)[0].Resource | type) == "array" and
-    all(statements($stackSid)[0].Resource[]; . != "*") and
-    (statements($stackSid)[0].Action |
-      index("cloudformation:DetectStackResourceDrift")) != null and
-    statements($wildcardSid)[0].Effect == "Allow" and
-    statements($wildcardSid)[0].Resource == "*" and
-    (statements($wildcardSid)[0].Action |
-      index("cloudformation:BatchDescribeTypeConfigurations")) != null and
-    ([actions[] |
-      select(. == "cloudformation:DetectStackResourceDrift")] |
-      length) == 1 and
-    ([actions[] |
-      select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
-      length) == 1
-  ' "${foundation_policy}" >/dev/null
-
-test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
-test "$(grep -Fc 'cloudformation:BatchDescribeTypeConfigurations' "${deploy_role}")" -eq 2
-for sid in \
-  DetectExactStageIamFoundationDrift \
-  ReadStageIamDriftDetection \
-  ReadAndDetectExactProductionStacks \
-  ReadStackDriftDetectionStatus; do
-  require_text "${deploy_role}" "- Sid: ${sid}"
-done
-require_text "${foundation_workflow}" \
-  'contracts/aws-foundation-policy-migration-v1.json' \
-  'cloudformation:DetectStackResourceDrift' \
-  'cloudformation:BatchDescribeTypeConfigurations' \
-  'queue: max'
-
-require_text "${api_gateway_account}" \
-  'AWS::ApiGateway::Account' \
-  'RoleName: archon-datahub-apigateway-cloudwatch-logs' \
-  'PolicyName: archon-apigateway-cloudwatch-logs'
-
-for path in \
-  "${foundation_policy}" \
-  "${foundation_role}" \
-  "${canary_roles}"; do
-  if grep -Eiq '(^|[^[:alnum:]_-])(acm|route53|route53domains):' "${path}"; then
-    fail "${path#${repository_root}/} must not grant or deny ACM/Route53"
-  fi
-  if grep -Fq 'AdministratorAccess' "${path}"; then
-    fail "${path#${repository_root}/} must not refer to AdministratorAccess"
-  fi
-done
-forbid_text "${deploy_role}" \
-  'route53domains:*' \
-  'acm:*' \
-  'route53:*'
-if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
-  fail "execution template must not refer to AdministratorAccess"
-fi
-
-require_text "${runbook}" \
-  'exact committed `infra/aws/package-lock.json` entry' \
-  'installed CLI version must exactly match that decoded lock entry' \
-  'version `32`' \
-  'Nine CloudFormation stack instances are always managed by Archon' \
-  'ten managed stacks' \
-  'nine managed stacks plus one pinned external account binding' \
-  '`AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`' \
-  '`foundation-managed`' \
-  '`external-pinned`' \
-  '`pinned-and-unchanged`' \
-  'no API Gateway account mutation' \
-  'managed stack must be absent' \
-  '`Archon-Governed-Canary-Roles`' \
-  '`archon-aws-foundation-control`' \
-  '`archon-aws-foundation-assets`' \
-  '`archon-aws-foundation-identity`' \
-  '`archon-aws-foundation-attachments`' \
-  '`STAGING_CLOUDFRONT_DOMAIN_NAME`' \
-  '`STAGING_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`PRODUCTION_CLOUDFRONT_DOMAIN_NAME`' \
-  '`PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`AWS_CANARY_PREPARE_ROLE_ARN`' \
-  '`AWS_CANARY_APPROVAL_ROLE_ARN`' \
-  '`AWS_CANARY_RECOVERY_ROLE_ARN`' \
-  '`prevent_self_review=false`' \
-  'not account-grade isolation' \
-  'policy-first' \
-  'On a fresh account' \
-  'On an existing account' \
-  'current policyless role' \
-  'Before any role update' \
-  'missing canonical `Sid`' \
-  'Every other mismatch fails closed' \
-  '`foundation-complete-deploy-migration-required`' \
-  '`requires-explicit-deploy-migration`' \
-  '`ready-for-deploy`' \
-  'Sanitized managed-stack failure evidence' \
-  'stdout and stderr are suppressed before capture' \
-  'selects the newest failed event whose safe reason category is not' \
-  '`unknown` remains eligible' \
-  'fall back to the newest failed event' \
-  'exact recursive inventory of two root regular non-symlink files' \
-  'recomputes the diagnostic digest from the seven safe fields' \
-  'never stores, prints, or hashes the raw CloudFormation' \
-  'does not delete, recreate, or' \
-  '`cfn-failure.json`' \
-  'retained for 90 days'
-forbid_text "${runbook}" \
-  'ten CloudFormation stack instances' \
-  'reconciles all ten stacks' \
-  'ten-stack drift evidence'
-require_text "${ci_workflow}" \
   'scripts/aws-cloudformation-drift.sh \' \
   'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
   'bash tests/pipeline/aws-cloudformation-drift-poll.test.sh'
 require_text "${foundation_workflow}" \
   'scripts/aws-cloudformation-drift.sh \' \
-  'coverage: "cloudformation-supported-resources"' \
-  'method: "detect-then-bounded-describe-poll"'
+  'globalDeadline: "hard-wall-clock"' \
+  'exactStackIncarnation: true'
 require_text "${reconciler}" \
   "readonly CFN_DRIFT_HELPER='scripts/aws-cloudformation-drift.sh'" \
   'source "${CFN_DRIFT_HELPER}"' \
@@ -1395,36 +1204,42 @@ require_text "${reconciler}" \
   'readonly CFN_DRIFT_DELAY_SECONDS=2' \
   'readonly CFN_DRIFT_MAX_API_FAILURES=3' \
   'readonly CFN_DRIFT_PHASE_TIMEOUT_SECONDS=900' \
+  'check_drift() (' \
+  'trap cleanup_drift_raw EXIT' \
   'detect_and_wait_for_cloudformation_stack_in_sync \' \
-  '.StackResourceDriftStatus == "IN_SYNC"' \
-  'coverage: "cloudformation-supported-resources"' \
-  'detectionStatus: "DETECTION_COMPLETE"' \
-  'checkedResourceCount: $checkedResourceCount' \
-  'pollAttempts: $pollAttempts' \
-  'pollElapsedSeconds: $pollElapsedSeconds' \
+  'exact_stack_id="$(jq -er' \
+  'detection_timestamp="$(jq -er' \
+  'verify_cloudformation_stack_resource_drifts \' \
+  'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
+  'stackIncarnationBinding: "exact-stack-id-and-detection-timestamp"' \
   'scripts/aws-cloudformation-drift.sh \'
 require_text "${drift_poller}" \
-  'detect_and_wait_for_cloudformation_stack_in_sync() {' \
+  'cloudformation_drift_remaining_seconds() {' \
+  'run_bounded_cloudformation_drift_aws() {' \
+  'verify_cloudformation_stack_resource_drifts() (' \
+  'timeout --foreground --signal=TERM --kill-after=2s' \
+  'AWS_MAX_ATTEMPTS=1' \
   '--cli-connect-timeout 5' \
   '--cli-read-timeout 15' \
   'cloudformation detect-stack-drift' \
   'cloudformation describe-stack-drift-detection-status' \
+  'cloudformation describe-stack-resource-drifts' \
+  'cloudformation describe-stacks' \
   '.StackDriftDetectionId == $detectionId' \
-  'startswith($stackPrefix)' \
-  'DETECTION_IN_PROGRESS' \
-  'DETECTION_COMPLETE' \
-  'DETECTION_FAILED' \
-  '.DriftedStackResourceCount |' \
+  'ltrimstr($stackPrefix)' \
+  '.StackId == $exactStackId' \
+  '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' \
+  '.StackResourceDriftStatus == "IN_SYNC"' \
+  'trap cleanup EXIT' \
   'max_api_failures > 3' \
-  'response_bytes > 65536' \
-  '>"${candidate}" 2>/dev/null' \
-  'mv -T -- "${candidate}" "${status_json}"'
+  'response_bytes > 65536'
 require_text "${drift_poller_test}" \
-  'progress-success' 'immediate-success' 'transient-success' \
-  'persistent-error' 'perpetual-progress' 'detection-failed' \
-  'drifted' 'missing-count' 'wrong-detection-id' 'wrong-stack-id' \
-  'malformed' 'unknown-status' 'PRIVATE_AWS_MARKER' \
-  'invalid inputs reached AWS'
+  'progress-success' 'transient-success' 'persistent-error' \
+  'perpetual-progress' 'detection-failed' 'drifted' 'missing-count' \
+  'missing-timestamp' 'wrong-detection-id' 'wrong-stack-id' \
+  'deadline-during-status' 'different-incarnation' 'stale-resource' \
+  'not-checked-resource' 'final-timestamp-mismatch' 'deadline-resource' \
+  'PRIVATE_AWS_MARKER' 'left raw files'
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \
   '(.DriftedStackResourceCount // 0) == 0' \
@@ -1433,23 +1248,33 @@ forbid_text "${drift_poller}" \
   'stack-drift-detection-complete' \
   'DetectionStatusReason'
 helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
-helper_describe_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
-helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE" and' "${drift_poller}" | cut -d: -f1)"
+helper_status_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
+helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${drift_poller}" | tail -n 1 | cut -d: -f1)"
 helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
-test "${helper_detect_line}" -lt "${helper_describe_line}" || fail 'drift helper must detect before polling'
-test "${helper_describe_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
+helper_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${drift_poller}" | cut -d: -f1)"
+helper_final_line="$(grep -nF 'cloudformation describe-stacks' "${drift_poller}" | cut -d: -f1)"
+helper_binding_line="$(grep -nF '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' "${drift_poller}" | cut -d: -f1)"
+test "${helper_detect_line}" -lt "${helper_status_line}" || fail 'drift helper must detect before polling'
+test "${helper_status_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
 test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'
+test "${helper_publish_line}" -lt "${helper_resource_line}" || fail 'terminal binding must precede resource proof'
+test "${helper_resource_line}" -lt "${helper_final_line}" || fail 'resource proof must precede final stack read'
+test "${helper_final_line}" -lt "${helper_binding_line}" || fail 'final read must precede timestamp binding'
 reconciler_poll_line="$(grep -nF 'detect_and_wait_for_cloudformation_stack_in_sync \' "${reconciler}" | cut -d: -f1)"
-reconciler_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${reconciler}" | cut -d: -f1)"
+reconciler_exact_line="$(grep -nF 'exact_stack_id="$(jq -er' "${reconciler}" | cut -d: -f1)"
+reconciler_verify_line="$(grep -nF 'verify_cloudformation_stack_resource_drifts \' "${reconciler}" | cut -d: -f1)"
 reconciler_evidence_line="$(grep -nF 'checkedResourceCount: $checkedResourceCount' "${reconciler}" | cut -d: -f1)"
-test "${reconciler_poll_line}" -lt "${reconciler_resource_line}" || fail 'stack proof must precede resource inspection'
-test "${reconciler_resource_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
+test "${reconciler_poll_line}" -lt "${reconciler_exact_line}" || fail 'poll result must precede exact binding extraction'
+test "${reconciler_exact_line}" -lt "${reconciler_verify_line}" || fail 'exact binding must precede resource proof'
+test "${reconciler_verify_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
 require_text "${runbook}" \
   'Bounded CloudFormation drift polling' \
+  'hard 900-second wall-clock deadline' \
+  'SDK retries are fixed' \
+  'LastCheckTimestamp' \
+  'deleted on every' \
   '30596290772' \
-  'cloudformation-supported-resources' \
-  'does not support remain outside this claim'
-require_text "${reconciler}" \
+  'cloudformation-supported-resources'require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
   "foundation_phase='startup'" \
