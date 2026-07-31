@@ -1379,7 +1379,8 @@ require_text "${runbook}" \
 forbid_text "${runbook}" \
   'ten CloudFormation stack instances' \
   'reconciles all ten stacks' \
-  'ten-stack drift evidence'require_text "${ci_workflow}" \
+  'ten-stack drift evidence'
+require_text "${ci_workflow}" \
   'scripts/aws-cloudformation-drift.sh \' \
   'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
   'bash tests/pipeline/aws-cloudformation-drift-poll.test.sh'
