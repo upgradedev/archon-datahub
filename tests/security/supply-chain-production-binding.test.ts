@@ -10,6 +10,10 @@ const ciWorkflow = readFileSync(
   new URL("../../.github/workflows/ci.yml", import.meta.url),
   "utf8"
 );
+const dockerfile = readFileSync(
+  new URL("../../Dockerfile", import.meta.url),
+  "utf8"
+);
 const deploymentWorkflow = readFileSync(
   new URL("../../.github/workflows/deploy.yml", import.meta.url),
   "utf8"
@@ -1002,4 +1006,41 @@ test("staging and production synth only with the same repaired CDK tree", () => 
     )?.length,
     2
   );
+});
+
+test("production container is version-aligned, shell-free, and independently rebound", () => {
+  assert.ok(
+    dockerfile.includes(
+      "ARG BUILD_NODE_IMAGE=node:22.23.1-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3"
+    )
+  );
+  assert.ok(
+    dockerfile.includes(
+      "ARG RUNTIME_NODE_IMAGE=gcr.io/distroless/nodejs22-debian13:nonroot@sha256:a2723a2817c5b01b8e7b98d567bc8b5a6b0e713e25bfb0a82b6ade4b9db06f50"
+    )
+  );
+  const runtimeStage = dockerfile.slice(
+    dockerfile.indexOf("FROM ${RUNTIME_NODE_IMAGE} AS runtime")
+  );
+  assert.doesNotMatch(runtimeStage, /^RUN /mu);
+  assert.doesNotMatch(runtimeStage, /CMD-SHELL|\/bin\/sh|busybox/u);
+  assert.equal(runtimeStage.match(/--chown=65532:65532/gu)?.length, 3);
+  assert.ok(runtimeStage.includes("USER 65532"));
+  assert.ok(runtimeStage.includes('ENTRYPOINT ["/nodejs/bin/node"]'));
+  assert.ok(runtimeStage.includes('CMD ["dist/http/server.js"]'));
+  assert.ok(
+    runtimeStage.includes(
+      'CMD ["/nodejs/bin/node", "-e", "fetch('
+    )
+  );
+
+  for (const contract of [ciWorkflow, workflow]) {
+    assert.ok(contract.includes('= "65532"'));
+    assert.ok(contract.includes("/nodejs/bin/node"));
+    assert.ok(contract.includes('v22.23.1'));
+    assert.doesNotMatch(contract, /Config\.User[^\n]+\)" = "node"/u);
+  }
+  assert.ok(ciWorkflow.includes('process.version !== "v22.23.1"'));
+  assert.ok(ciWorkflow.includes('entry.name.endsWith(".node")'));
+  assert.ok(ciWorkflow.includes(".State.Health.Status"));
 });

@@ -1356,6 +1356,20 @@ describe("Archon AWS reference architecture", () => {
     const byName = Object.fromEntries(
       containers.map((container: any) => [container.Name, container])
     );
+    expect(byName.Api.HealthCheck.Command).toEqual([
+      "CMD",
+      "/nodejs/bin/node",
+      "-e",
+      "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    ]);
+    for (const workerName of ["AuditWorker", "RemediationWorker"]) {
+      expect(byName[workerName].HealthCheck.Command).toEqual([
+        "CMD",
+        "/nodejs/bin/node",
+        "-e",
+        "try{process.kill(1,0)}catch{process.exit(1)}"
+      ]);
+    }
     expect(byName.Api.Command).toBeUndefined();
     expect(byName.AuditWorker.Command).toEqual(["dist/audit-worker.js"]);
     expect(byName.RemediationWorker.Command).toEqual([
