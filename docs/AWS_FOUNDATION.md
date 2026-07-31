@@ -509,11 +509,15 @@ a pass. A bounded final `DescribeStacks` poll must still report the same stack I
 `IN_SYNC`, and a `LastCheckTimestamp` equal to the exact detection timestamp.
 Equivalent UTC spellings (`Z` versus `+00:00` and fractional trailing zeroes)
 are compared as one exact instant without discarding non-zero subsecond
-precision. Only an older or not-yet-published final projection is retried; a
-newer/different operation, unsafe status, wrong incarnation, malformed response,
-or exhausted retry fails closed. The final projection shares the 900-second
-global wall-clock deadline, allows at most five reads with two-second pauses,
-and never reruns drift detection. All raw status, resource, and final-stack JSON is mode 0600 and deleted on every
+precision. Shape alone is insufficient: year, leap day, month/day, hour, minute,
+and second are validated with locale-independent Gregorian arithmetic. An absent
+optional `DriftInformation`, a valid status without `LastCheckTimestamp`, or a
+valid older projection is retried. Once the timestamp is current, only `IN_SYNC`
+passes; a newer/different operation, unsafe current status, wrong incarnation,
+malformed response, or exhausted retry fails closed. The final projection shares
+the 900-second global wall-clock deadline, enforces a hard maximum of five reads
+with at most two-second pauses, and never reruns drift detection. All raw status,
+resource, and final-stack JSON is mode 0600 and deleted on every
 success or failure exit. The sealed `drift.json` records poll attempts, elapsed
 seconds, returned resource count, stack-incarnation binding, and
 `coverage: cloudformation-supported-resources`. Resources that CloudFormation
