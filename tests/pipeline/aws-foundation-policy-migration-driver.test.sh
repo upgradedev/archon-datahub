@@ -57,7 +57,24 @@ changed_sha="$(iam_policy_sha "${policy_changed}")"
 assert_equal "${direct_sha}" "${permuted_sha}" "statement/action/resource permutation"
 assert_equal "${direct_sha}" "${wrapped_sha}" "wrapped IAM policy canonicalization"
 test "${direct_sha}" != "${changed_sha}"
-
+(
+  leaked_stderr="${test_root}/safe-aws-redaction.stderr"
+  leaked_output="${test_root}/safe-aws-redaction.json"
+  aws() {
+    echo 'PRIVATE_AWS_MARKER' >&2
+    return 254
+  }
+  if safe_aws "sanitized API failure" "${leaked_output}" \
+    iam get-policy 2>"${leaked_stderr}"; then
+    echo '::error::safe_aws accepted a failed AWS command' >&2
+    exit 1
+  fi
+  grep -Fq 'sanitized API failure' "${leaked_stderr}"
+  if grep -Fq 'PRIVATE_AWS_MARKER' "${leaked_stderr}"; then
+    echo '::error::safe_aws exposed raw AWS stderr' >&2
+    exit 1
+  fi
+)
 run_real_state_case() (
   local scenario="$1"
   CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control

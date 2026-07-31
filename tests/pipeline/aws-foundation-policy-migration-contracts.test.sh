@@ -457,6 +457,27 @@ for job_environment in \
     fail "driver job ${job} must invoke the environment verifier exactly once"
   grep -Fqx "      name: ${expected_environment}" <<<"${block}" ||
     fail "driver job ${job} uses the wrong protected environment"
+  case "${job}" in
+    prepare)
+      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          aws-foundation governed-canary-recovery'
+      expected_oidc_step='      - name: Assume separately approved foundation role'
+      ;;
+    migrate)
+      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
+      expected_oidc_step='      - name: Assume separately approved recovery role'
+      ;;
+    rollback)
+      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          governed-canary-recovery'
+      expected_oidc_step='      - name: Assume separately approved recovery role for rollback only'
+      ;;
+    revoke)
+      expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          aws-foundation'
+      expected_oidc_step='      - name: Assume separately approved foundation role for revocation'
+      ;;
+    *) fail "unexpected driver job ${job}" ;;
+  esac
+  grep -Fq "${expected_verifier_call}" <<<"${block}" ||
+    fail "driver job ${job} verifies the wrong environment arguments"
   verifier_line="$(grep -nF \
     'bash scripts/verify-github-environment-protection.sh' \
     <<<"${block}" | cut -d: -f1)"
@@ -467,6 +488,12 @@ for job_environment in \
     fail "driver job ${job} verifier/OIDC placement is ambiguous"
   ((verifier_line < oidc_line)) ||
     fail "driver job ${job} verifies environment protection after OIDC"
+  first_step_after_verifier="$(
+    tail -n "+$((verifier_line + 1))" <<<"${block}" |
+      grep -m1 -E '^      - (name|uses):'
+  )"
+  test "${first_step_after_verifier}" = "${expected_oidc_step}" ||
+    fail "driver job ${job} inserts a step between verification and OIDC"
 done
 for script in \
   "${main_driver}" \
