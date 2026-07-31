@@ -1463,6 +1463,9 @@ require_text "${reconciler}" \
   'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
   'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' \
   'scripts/aws-cloudformation-drift.sh \'
+test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 4 ||
+  fail 'drift receipt producer and validator bindings must have four exact monotonic occurrences'
+
 require_text "${drift_poller}" \
   'cloudformation_drift_remaining_seconds() {' \
   'run_bounded_cloudformation_drift_aws() {' \
@@ -1519,7 +1522,8 @@ require_text "${drift_poller_test}" \
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \
   '(.DriftedStackResourceCount // 0) == 0' \
-  '.StackResourceDrifts[]?'
+  '.StackResourceDrifts[]?' \
+  'exact-stack-id-and-detection-timestamp'
 forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason' \
   'final_max_attempts > 10' 'final_delay_seconds > 30' \
   'fromdateiso8601' 'strptime(' 'mktime' \
