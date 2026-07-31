@@ -1,0 +1,104 @@
+name: Migrate AWS foundation control policy
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: Exact lowercase 40-character current master SHA
+        required: true
+        type: string
+      confirmation:
+        description: Type MIGRATE EXACT FOUNDATION CONTROL POLICY
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-aws-control-plane
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  validate:
+    name: Bind migration to protected exact master
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      control_plane_sha: ${{ steps.source.outputs.control_plane_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate signed immutable migration control plane
+        id: source
+        env:
+          CONFIRMATION_INPUT: ${{ inputs.confirmation }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF_VALUE: ${{ github.workflow_ref }}
+          WORKFLOW_SHA_VALUE: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${GITHUB_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${CONFIRMATION_INPUT}" = \
+            "MIGRATE EXACT FOUNDATION CONTROL POLICY"
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
+          test "${WORKFLOW_SHA_VALUE}" = "${CONTROL_PLANE_SHA}"
+          test "${WORKFLOW_REF_VALUE}" = \
+            "${GITHUB_REPOSITORY}/.github/workflows/aws-foundation-policy-migration.yml@refs/heads/master"
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test "$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+          commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${CONTROL_PLANE_SHA}")"
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${commit}" >/dev/null
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          gate="${RUNNER_TEMP}/control-plane-security-gates.json"
+          CONTROL_PLANE_SHA="${CONTROL_PLANE_SHA}" \
+          OUTPUT_PATH="${gate}" \
+          ATTEMPTS=1 \
+            bash scripts/verify-github-control-plane.sh
+          test -f "${gate}"
+          test ! -L "${gate}"
+          echo "control_plane_sha=${CONTROL_PLANE_SHA}" >>"${GITHUB_OUTPUT}"
+
+  migrate:
+    name: Hold outer lock through reviewed migration transaction
+    needs: validate
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      deployments: read
+      id-token: write
+    uses: ./.github/workflows/aws-foundation-policy-migration-driver.yml
+    with:
+      operation: migrate
+      expected_head_sha: ${{ needs.validate.outputs.control_plane_sha }}
+      confirmation: MIGRATE EXACT FOUNDATION CONTROL POLICY

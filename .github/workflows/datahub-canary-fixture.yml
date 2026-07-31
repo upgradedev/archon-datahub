@@ -28,6 +28,7 @@ permissions:
 concurrency:
   group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
+  queue: max
 
 env:
   UV_VERSION: "0.11.31"

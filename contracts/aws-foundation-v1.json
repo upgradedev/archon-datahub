@@ -39,6 +39,7 @@
     },
     "foundationPolicies": {
       "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+      "migrationContract": "contracts/aws-foundation-policy-migration-v1.json",
       "sourceBundleAttachable": false,
       "renderer": "scripts/render-aws-foundation-policy.mjs",
       "maximumDocumentBytes": 6144,

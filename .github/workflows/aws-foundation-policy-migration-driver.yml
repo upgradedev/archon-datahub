@@ -1,0 +1,468 @@
+name: AWS foundation control policy migration driver
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        description: migrate or classified cleanup operation
+        required: true
+        type: string
+      expected_head_sha:
+        description: Exact trusted source SHA
+        required: true
+        type: string
+      confirmation:
+        description: Exact operation confirmation
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archon-governed-canary-mutation-recovery
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    name: Install exact expiring authorization
+    if: >-
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (
+        (inputs.operation == 'migrate' &&
+         inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY') ||
+        (inputs.operation == 'cleanup-rollback' &&
+         inputs.confirmation ==
+           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+    outputs:
+      authorization_mode: ${{ steps.prepare.outputs.authorization_mode }}
+      expires_at: ${{ steps.prepare.outputs.expires_at }}
+      new_policy_sha: ${{ steps.prepare.outputs.new_policy_sha }}
+      old_policy_sha: ${{ steps.prepare.outputs.old_policy_sha }}
+      old_version_id: ${{ steps.prepare.outputs.old_version_id }}
+      source_state: ${{ steps.prepare.outputs.source_state }}
+      temp_policy_sha: ${{ steps.prepare.outputs.temp_policy_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate trusted source after foundation approval
+        env:
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${CONTROL_PLANE_SHA}")"
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${commit}" >/dev/null
+          if [[ "${OPERATION}" == "migrate" ]]; then
+            test "$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+          fi
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Prove both protected environment configurations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          aws-foundation governed-canary-recovery
+
+      - name: Assume separately approved foundation role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-policy-authorize-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Prove exact state and install twenty-minute authorization
+        id: prepare
+        env:
+          AUTHORIZATION_MODE: ${{ inputs.operation == 'migrate' && 'migrate' || 'rollback' }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          set -euo pipefail
+          EXPIRES_AT="$(date --utc --date='+20 minutes' '+%Y-%m-%dT%H:%M:%SZ')"
+          export EXPIRES_AT
+          bash scripts/run-aws-foundation-policy-migration.sh prepare
+
+  migrate:
+    name: Create, read back, and switch exactly once
+    needs: prepare
+    if: inputs.operation == 'migrate' && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: governed-canary-recovery
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate current master after recovery approval
+        env:
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          test "$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+            --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Revalidate recovery environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          governed-canary-recovery
+
+      - name: Assume separately approved recovery role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-policy-migrate-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Execute exact managed-policy version migration
+        id: migrate
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_CANARY_RECOVERY_ROLE_ARN: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_EXPIRES_AT: ${{ needs.prepare.outputs.expires_at }}
+          EXPECTED_NEW_POLICY_SHA: ${{ needs.prepare.outputs.new_policy_sha }}
+          EXPECTED_OLD_POLICY_SHA: ${{ needs.prepare.outputs.old_policy_sha }}
+          EXPECTED_OLD_VERSION_ID: ${{ needs.prepare.outputs.old_version_id }}
+          EXPECTED_TEMP_POLICY_SHA: ${{ needs.prepare.outputs.temp_policy_sha }}
+        run: bash scripts/run-aws-foundation-policy-migration.sh migrate
+
+  rollback:
+    name: Roll back only a known incomplete migration
+    needs:
+      - prepare
+      - migrate
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (
+        inputs.operation == 'cleanup-rollback' ||
+        (inputs.operation == 'migrate' && needs.migrate.result != 'success')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: governed-canary-recovery
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate trusted rollback source after approval
+        env:
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          if [[ "${OPERATION}" == "migrate" ]]; then
+            test "$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha')" = "${CONTROL_PLANE_SHA}"
+          fi
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Revalidate recovery environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          governed-canary-recovery
+
+      - name: Assume separately approved recovery role for rollback only
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-policy-rollback-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Restore old default and delete only reviewed new version
+        id: rollback
+        env:
+          AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_CANARY_RECOVERY_ROLE_ARN: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_TEMP_POLICY_SHA: ${{ needs.prepare.outputs.temp_policy_sha }}
+        run: bash scripts/run-aws-foundation-policy-migration.sh rollback
+
+  revoke:
+    name: Always revoke authorization and seal terminal state
+    needs:
+      - prepare
+      - migrate
+      - rollback
+    if: >-
+      always() &&
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (
+        (inputs.operation == 'migrate' &&
+         inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY') ||
+        ((inputs.operation == 'cleanup-revoke' ||
+          inputs.operation == 'cleanup-rollback' ||
+          inputs.operation == 'cleanup-migrated') &&
+         inputs.confirmation ==
+           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment:
+      name: aws-foundation
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      deployments: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Revalidate trusted revocation source after approval
+        env:
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "${CONTROL_PLANE_SHA}"
+          commit="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/commits/${CONTROL_PLANE_SHA}")"
+          jq -e '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${commit}" >/dev/null
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.1"
+
+      - name: Revalidate foundation environment immediately before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          bash scripts/verify-github-environment-protection.sh
+          aws-foundation
+
+      - name: Assume separately approved foundation role for revocation
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          output-credentials: false
+          role-session-name: archon-policy-revoke-${{ github.run_id }}
+          unset-current-credentials: true
+
+      - name: Revoke, prove three absences, and create sanitized receipt
+        id: revoke
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          MIGRATE_RESULT: ${{ needs.migrate.result }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          case "${OPERATION}" in
+            cleanup-revoke)
+              EXPECTED_STATE=terminal
+              ;;
+            cleanup-migrated)
+              EXPECTED_STATE=migrated
+              ;;
+            cleanup-rollback)
+              EXPECTED_STATE=rolled-back
+              ;;
+            migrate)
+              if [[ "${MIGRATE_RESULT}" == "success" ]]; then
+                EXPECTED_STATE=migrated
+              else
+                EXPECTED_STATE=rolled-back
+              fi
+              ;;
+            *)
+              echo "::error::Invalid migration cleanup operation" >&2
+              exit 1
+              ;;
+          esac
+          export EXPECTED_STATE
+          bash scripts/run-aws-foundation-policy-migration.sh revoke
+
+      - name: Clear AWS credentials before evidence handling
+        if: always()
+        id: clear
+        run: |
+          set -euo pipefail
+          test -f "${GITHUB_ENV}"
+          test ! -L "${GITHUB_ENV}"
+          for variable in \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+            AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+            unset "${variable}"
+            printf '%s=\n' "${variable}" >>"${GITHUB_ENV}"
+            test -z "${!variable:-}"
+          done
+          echo "cleared=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate exact sanitized evidence inventory
+        if: >-
+          steps.revoke.outcome == 'success' &&
+          steps.clear.outputs.cleared == 'true'
+        id: evidence
+        env:
+          EVIDENCE_DIR: ${{ steps.revoke.outputs.evidence_dir }}
+        run: |
+          set -euo pipefail
+          for variable in \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+            AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+            test -z "${!variable:-}"
+          done
+          test -d "${EVIDENCE_DIR}"
+          test ! -L "${EVIDENCE_DIR}"
+          expected="$({
+            printf '%s\n' SHA256SUMS attestation-predicate.json migration.json
+          } | sort)"
+          actual="$(
+            find "${EVIDENCE_DIR}" -mindepth 1 -maxdepth 1 -type f \
+              -printf '%f\n' | sort
+          )"
+          test "${actual}" = "${expected}"
+          for file in SHA256SUMS attestation-predicate.json migration.json; do
+            test -f "${EVIDENCE_DIR}/${file}"
+            test ! -L "${EVIDENCE_DIR}/${file}"
+            test "$(stat -c '%s' "${EVIDENCE_DIR}/${file}")" -le 8192
+          done
+          (cd "${EVIDENCE_DIR}" && sha256sum --check --strict SHA256SUMS)
+          jq -e '
+            .schemaVersion ==
+              "archon.aws-foundation-policy-migration-receipt/v1" and
+            .repository == "upgradedev/archon-datahub" and
+            .authorization == {absenceReadCount: 3, state: "absent"} and
+            (.controlPlaneSha | test("^[0-9a-f]{40}$")) and
+            (.policy.newDocumentSha256 | test("^sha256:[a-f0-9]{64}$")) and
+            (.policy.previousDocumentSha256 |
+              test("^sha256:[a-f0-9]{64}$")) and
+            (.policy.state == "migrated" or .policy.state == "rolled-back")
+          ' "${EVIDENCE_DIR}/migration.json" >/dev/null
+
+      - name: Attest sanitized migration receipt
+        if: steps.evidence.outcome == 'success'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.revoke.outputs.checksums }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-foundation-policy-migration/v1
+          predicate-path: ${{ steps.revoke.outputs.predicate }}
+
+      - name: Retain only checksum-sealed sanitized migration evidence
+        if: >-
+          always() &&
+          steps.revoke.outcome == 'success' &&
+          steps.clear.outputs.cleared == 'true' &&
+          steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-foundation-policy-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.revoke.outputs.evidence_dir }}/migration.json
+            ${{ steps.revoke.outputs.evidence_dir }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90

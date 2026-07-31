@@ -72,7 +72,8 @@ At minimum, the role needs:
       "Effect": "Allow",
       "Action": [
         "cloudformation:DescribeStacks",
-        "cloudformation:DetectStackDrift"
+        "cloudformation:DetectStackDrift",
+        "cloudformation:DetectStackResourceDrift"
       ],
       "Resource": [
         "arn:aws:cloudformation:WORKLOAD_REGION:ACCOUNT_ID:stack/Archon-Registry/*",
@@ -89,7 +90,10 @@ At minimum, the role needs:
     {
       "Sid": "PollBoundedDriftOperations",
       "Effect": "Allow",
-      "Action": "cloudformation:DescribeStackDriftDetectionStatus",
+      "Action": [
+        "cloudformation:BatchDescribeTypeConfigurations",
+        "cloudformation:DescribeStackDriftDetectionStatus"
+      ],
       "Resource": "*"
     },
     {
@@ -121,9 +125,13 @@ At minimum, the role needs:
 
 Replace every uppercase placeholder with the protected environment's exact value.
 `sts:GetCallerIdentity` does not require an identity-policy grant.
-`cloudformation:DescribeStackDriftDetectionStatus` does not support resource-level IAM
-permissions, so its narrowly scoped statement must use `Resource: "*"`; it can only read
-the opaque drift-operation IDs created by this run.
+`cloudformation:DetectStackDrift` also invokes
+`cloudformation:DetectStackResourceDrift` for the exact stack resources, so both actions
+remain stack-ARN scoped. `cloudformation:BatchDescribeTypeConfigurations` and
+`cloudformation:DescribeStackDriftDetectionStatus` do not support resource-level IAM
+permissions; their read-only statement therefore uses `Resource: "*"`. These calls can
+only resolve registered type configuration and poll the opaque drift-operation IDs created
+by this run.
 `cloudformation:ListStackResources` is scoped to the exact production stack ARN. The
 workflow uses this paginated API instead of `DescribeStackResources`, whose response is
 limited to the first 100 resources. `cloudwatch:DescribeAlarms` supports alarm-resource

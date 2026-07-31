@@ -22,6 +22,7 @@ permissions:
 concurrency:
   group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
+  queue: max
 
 env:
   AWS_PAGER: ""

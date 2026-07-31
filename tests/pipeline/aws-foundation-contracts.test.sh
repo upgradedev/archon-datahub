@@ -9,6 +9,7 @@ foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
 deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
+migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
 infra_package_manifest="${repository_root}/infra/aws/package.json"
 infra_package_lock="${repository_root}/infra/aws/package-lock.json"
 foundation_policy="${repository_root}/infra/aws/foundation/github-actions-foundation-policy.json"
@@ -65,6 +66,7 @@ for path in \
   "${deploy_workflow}" \
   "${ci_workflow}" \
   "${contract}" \
+  "${migration_contract}" \
   "${infra_package_manifest}" \
   "${infra_package_lock}" \
   "${foundation_policy}" \
@@ -138,6 +140,8 @@ jq --exit-status '
       "archon-aws-foundation-attachments"
     ],
     maximumDocumentBytes: 6144,
+    migrationContract:
+      "contracts/aws-foundation-policy-migration-v1.json",
     renderer: "scripts/render-aws-foundation-policy.mjs",
     roleAttachedPolicyCount: 4,
     roleInlinePolicyCount: 0,
@@ -1224,11 +1228,56 @@ if grep -Eq \
 fi
 require_text "${foundation_policy}" \
   'cloudformation:DescribeStackEvents' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
   'role/archon-production-runtime-read' \
   'role/archon-production-paging-test'
+
+jq --exit-status \
+  --slurpfile migration "${migration_contract}" '
+    $migration[0] as $m |
+    def statements($sid):
+      [.Statement[] | select(.Sid == $sid)];
+    def actions:
+      [.Statement[].Action] | flatten;
+    ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
+    ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
+    (statements($stackSid) | length) == 1 and
+    (statements($wildcardSid) | length) == 1 and
+    statements($stackSid)[0].Effect == "Allow" and
+    (statements($stackSid)[0].Resource | type) == "array" and
+    all(statements($stackSid)[0].Resource[]; . != "*") and
+    (statements($stackSid)[0].Action |
+      index("cloudformation:DetectStackResourceDrift")) != null and
+    statements($wildcardSid)[0].Effect == "Allow" and
+    statements($wildcardSid)[0].Resource == "*" and
+    (statements($wildcardSid)[0].Action |
+      index("cloudformation:BatchDescribeTypeConfigurations")) != null and
+    ([actions[] |
+      select(. == "cloudformation:DetectStackResourceDrift")] |
+      length) == 1 and
+    ([actions[] |
+      select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
+      length) == 1
+  ' "${foundation_policy}" >/dev/null
+
+test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
+test "$(grep -Fc 'cloudformation:BatchDescribeTypeConfigurations' "${deploy_role}")" -eq 2
+for sid in \
+  DetectExactStageIamFoundationDrift \
+  ReadStageIamDriftDetection \
+  ReadAndDetectExactProductionStacks \
+  ReadStackDriftDetectionStatus; do
+  require_text "${deploy_role}" "- Sid: ${sid}"
+done
+require_text "${foundation_workflow}" \
+  'contracts/aws-foundation-policy-migration-v1.json' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
+  'queue: max'
 
 require_text "${api_gateway_account}" \
   'AWS::ApiGateway::Account' \

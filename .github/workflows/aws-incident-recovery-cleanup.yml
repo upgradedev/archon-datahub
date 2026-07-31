@@ -91,6 +91,7 @@ jobs:
     concurrency:
       group: archon-aws-control-plane
       cancel-in-progress: false
+      queue: max
     permissions:
       actions: read
       attestations: write

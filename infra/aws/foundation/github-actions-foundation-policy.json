@@ -15,6 +15,7 @@
         "cloudformation:CreateStack",
         "cloudformation:DeleteChangeSet",
         "cloudformation:DetectStackDrift",
+        "cloudformation:DetectStackResourceDrift",
         "cloudformation:DescribeChangeSet",
         "cloudformation:DescribeStackEvents",
         "cloudformation:DescribeStackResource",
@@ -47,6 +48,7 @@
       "Sid": "InspectFoundationTemplates",
       "Effect": "Allow",
       "Action": [
+        "cloudformation:BatchDescribeTypeConfigurations",
         "cloudformation:GetTemplateSummary",
         "cloudformation:ListStacks",
         "cloudformation:DescribeStackDriftDetectionStatus",
