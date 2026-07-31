@@ -312,7 +312,9 @@ verify_cloudformation_stack_resource_drifts() (
       continue
     fi
     final_api_failures=0
-    if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then`n      cloudformation_drift_poll_error 'category=timeout'; exit 1`n    fi
+    if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then
+      cloudformation_drift_poll_error 'category=timeout'; exit 1
+    fi
     final_bytes="$(wc -c <"${final_json}")"
     if [[ ! "${final_bytes}" =~ ^[0-9]+$ ]] ||
       ((final_bytes == 0 || final_bytes > 65536)); then
@@ -391,6 +393,8 @@ verify_cloudformation_stack_resource_drifts() (
         cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1 ;;
     esac
   done
-  if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then`n    cloudformation_drift_poll_error 'category=timeout'; exit 1`n  fi
+  if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then
+    cloudformation_drift_poll_error 'category=timeout'; exit 1
+  fi
   printf '%s\n' "${checked_resource_count}"
 )
