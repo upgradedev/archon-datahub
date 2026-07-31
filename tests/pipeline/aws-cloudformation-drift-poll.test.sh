@@ -93,10 +93,15 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
     final-nonzero-equivalent) last_check="${NONZERO_EQUIVALENT_TIMESTAMP}" ;;
     final-stale-then-current) ((n == 1)) && last_check="${STALE_TIMESTAMP}" ;;
     final-stale-persistent|final-stale-default) last_check="${STALE_TIMESTAMP}" ;;
-    final-timestamp-mismatch) last_check="${NEWER_TIMESTAMP}" ;;
-    final-subsecond-mismatch) last_check="${SUBSECOND_NEWER_TIMESTAMP}" ;;
+    final-newer-in-sync) last_check="${NEWER_TIMESTAMP}" ;;
+    final-newer-subsecond-in-sync) last_check="${SUBSECOND_NEWER_TIMESTAMP}" ;;
     final-different-incarnation) final_stack="${OTHER_STACK_ID}" ;;
     final-drifted) final_status='DRIFTED' ;;
+    final-newer-drifted) last_check="${NEWER_TIMESTAMP}"; final_status='DRIFTED' ;;
+    final-newer-unknown) last_check="${NEWER_TIMESTAMP}"; final_status='UNKNOWN' ;;
+    final-newer-not-checked) last_check="${NEWER_TIMESTAMP}"; final_status='NOT_CHECKED' ;;
+    final-indeterminate-default) final_status='NOT_CHECKED' ;;
+    final-invalid-drift-status) final_status='SURPRISE' ;;
     final-invalid-calendar) last_check="${INVALID_FINAL_TIMESTAMP}" ;;
     final-invalid-second) last_check="${INVALID_SECOND_TIMESTAMP}" ;;
     final-invalid-fraction) last_check="${INVALID_FRACTION_TIMESTAMP}" ;;
@@ -109,6 +114,10 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s"}]}\n' "${STACK_ID}";exit 0;fi ;;
     final-not-checked-missing-then-current)
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"NOT_CHECKED"}}]}\n' "${STACK_ID}";exit 0;fi ;;
+    final-unknown-current-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"UNKNOWN","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}";exit 0;fi ;;
+    final-not-checked-current-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"NOT_CHECKED","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}";exit 0;fi ;;
     final-drifted-stale-then-current)
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"DRIFTED","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${STALE_TIMESTAMP}";exit 0;fi ;;
     final-multiple-stacks)
@@ -193,7 +202,7 @@ run_resource_case(){
   export ACTIVE_DETECTION_TIMESTAMP="${active_detection_timestamp}"
   export CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS=3 CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS=0 CFN_DRIFT_MAX_API_FAILURES=3
   case "${name}" in
-    final-stale-default) unset CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS;sleep_argument=2 ;;
+    final-stale-default|final-indeterminate-default) unset CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS;sleep_argument=2 ;;
     invalid-final-max) export CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS=6 ;;
     invalid-final-delay) export CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS=3 ;;
   esac
@@ -217,6 +226,8 @@ run_resource_case(){
   assert_equals 0 "${detect_calls}" "${name} detect calls";assert_equals 0 "${status_calls}" "${name} status calls"
   assert_equals "${expected_resource}" "${resources}" "${name} resource calls";assert_equals "${expected_final}" "${finals}" "${name} final calls";assert_equals "${expected_sleep}" "${sleeps}" "${name} sleeps";assert_sleep_arguments "${sleep_argument}" "${SLEEP_ARGUMENT_LOG}" "${expected_sleep}"
   grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
+  grep -Fq "${STACK_ID}" "${stdout}" "${stderr}"&&fail "${name} leaked exact stack id"
+  grep -Fq "${ACTIVE_DETECTION_TIMESTAMP}" "${stdout}" "${stderr}"&&fail "${name} leaked detection timestamp"
   find "${dir}" -maxdepth 1 \( -name 'cloudformation-resource-drifts.*' -o -name 'cloudformation-final-stack.*' \) -print -quit|grep -q .&&fail "${name} left raw files"
   return 0
 }
@@ -224,10 +235,14 @@ run_resource_case resource-success success 1 1 0
 run_resource_case leap-day-success success 1 1 0
 run_resource_case final-equivalent-utc success 1 1 0
 run_resource_case final-nonzero-equivalent success 1 1 0
+run_resource_case final-newer-in-sync success 1 1 0
+run_resource_case final-newer-subsecond-in-sync success 1 1 0
 run_resource_case final-stale-then-current success 1 2 1
 run_resource_case final-missing-then-current success 1 2 1
 run_resource_case final-absent-drift-info-then-current success 1 2 1
 run_resource_case final-not-checked-missing-then-current success 1 2 1
+run_resource_case final-unknown-current-then-current success 1 2 1
+run_resource_case final-not-checked-current-then-current success 1 2 1
 run_resource_case final-drifted-stale-then-current success 1 2 1
 run_resource_case final-api-transient success 1 2 1
 run_resource_case different-incarnation failure 1 0 0 resource-drift-stale-or-mismatched
@@ -239,16 +254,19 @@ run_resource_case invalid-detection-calendar failure 0 0 0 invalid-resource-inpu
 run_resource_case invalid-final-max failure 0 0 0 invalid-final-binding-bounds 60 64
 run_resource_case invalid-final-delay failure 0 0 0 invalid-final-binding-bounds 60 64
 run_resource_case final-stale-default failure 1 5 4 final-stack-binding-stale
+run_resource_case final-indeterminate-default failure 1 5 4 final-stack-current-indeterminate
 run_resource_case final-stale-persistent failure 1 3 2 final-stack-binding-stale
 run_resource_case final-api-persistent failure 1 3 2 final-stack-api-error-or-timeout
-run_resource_case final-timestamp-mismatch failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-subsecond-mismatch failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-different-incarnation failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-drifted failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-multiple-stacks failure 1 1 0 final-stack-binding-mismatch
+run_resource_case final-different-incarnation failure 1 1 0 final-stack-selection-mismatch
+run_resource_case final-drifted failure 1 1 0 final-stack-current-drifted
+run_resource_case final-newer-drifted failure 1 1 0 final-stack-current-drifted
+run_resource_case final-newer-unknown failure 1 3 2 final-stack-current-indeterminate
+run_resource_case final-newer-not-checked failure 1 3 2 final-stack-current-indeterminate
+run_resource_case final-multiple-stacks failure 1 1 0 final-stack-selection-mismatch
 run_resource_case final-invalid-calendar failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-second failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-fraction failure 1 1 0 final-stack-malformed-response
+run_resource_case final-invalid-drift-status failure 1 1 0 final-stack-malformed-response
 run_resource_case final-malformed failure 1 1 0 final-stack-malformed-response
 run_resource_case final-oversize failure 1 1 0 final-stack-malformed-response
 run_resource_case deadline-resource failure 1 0 0 timeout

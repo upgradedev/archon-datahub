@@ -358,7 +358,7 @@ verify_cloudformation_stack_resource_drifts() (
         if type != "object" or (.Stacks | type) != "array" or
           (.Stacks | length) != 1 or (.Stacks[0].StackId | type) != "string" or
           .Stacks[0].StackId != $exactStackId then
-          "mismatch"
+          "selection-mismatch"
         else
           .Stacks[0].DriftInformation as $drift |
           if $drift == null then "stale"
@@ -369,9 +369,9 @@ verify_cloudformation_stack_resource_drifts() (
           else
             ($drift.LastCheckTimestamp | utc_key) as $actualKey |
             if $actualKey < $detectionKey then "stale"
-            elif $actualKey > $detectionKey then "mismatch"
             elif $drift.StackDriftStatus == "IN_SYNC" then "match"
-            else "mismatch" end
+            elif $drift.StackDriftStatus == "DRIFTED" then "current-drifted"
+            else "current-indeterminate" end
           end
         end
       ' "${final_json}" 2>/dev/null)"; then
@@ -387,8 +387,18 @@ verify_cloudformation_stack_resource_drifts() (
           "${deadline_epoch}" "${final_delay_seconds}"; then
           cloudformation_drift_poll_error 'category=timeout'; exit 1
         fi ;;
-      mismatch)
-        cloudformation_drift_poll_error 'category=final-stack-binding-mismatch'; exit 1 ;;
+      current-drifted)
+        cloudformation_drift_poll_error 'category=final-stack-current-drifted'; exit 1 ;;
+      current-indeterminate)
+        if ((final_attempt == final_max_attempts)); then
+          cloudformation_drift_poll_error 'category=final-stack-current-indeterminate'; exit 1
+        fi
+        if ! cloudformation_drift_bounded_sleep \
+          "${deadline_epoch}" "${final_delay_seconds}"; then
+          cloudformation_drift_poll_error 'category=timeout'; exit 1
+        fi ;;
+      selection-mismatch)
+        cloudformation_drift_poll_error 'category=final-stack-selection-mismatch'; exit 1 ;;
       *)
         cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1 ;;
     esac
