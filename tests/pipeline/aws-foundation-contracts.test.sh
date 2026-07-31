@@ -1303,9 +1303,15 @@ for sid in \
 done
 require_text "${foundation_workflow}" \
   'contracts/aws-foundation-policy-migration-v1.json' \
+  '($m.policy.exactDelta.statements) as $delta' \
+  '$spec.resourcesMatchStatement' \
+  'all($delta[];' \
   'cloudformation:DetectStackResourceDrift' \
   'cloudformation:BatchDescribeTypeConfigurations' \
   'queue: max'
+forbid_text "${foundation_workflow}" \
+  '.policy.exactDelta.stackScopedStatement' \
+  '.policy.exactDelta.wildcardStatement'
 
 require_text "${api_gateway_account}" \
   'AWS::ApiGateway::Account' \
