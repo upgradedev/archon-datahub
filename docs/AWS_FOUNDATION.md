@@ -305,10 +305,12 @@ consecutive exact-baseline reads.
 
 [`aws-foundation-policy-migration-cleanup.yml`](../.github/workflows/aws-foundation-policy-migration-cleanup.yml)
 follows any non-successful transaction and can also be dispatched manually. The automatic
-follower binds itself to the exact parent attempt and classifies its exact prepare, migrate,
-rollback, and revoke jobs. A failure before prepare or after a completed rollback gets
-revoke-only cleanup; an incomplete mutation gets a fresh rollback-only grant; and a completed
-migration whose evidence step failed remains migrated while authorization is revoked. Only
+follower binds itself to the exact parent attempt and classifies its exact validation, prepare,
+migrate, rollback, and revoke jobs. If validation did not succeed, it records a `no-aws`
+outcome and never assumes a cloud role or executes target scripts with AWS credentials. After
+successful validation, a failure before prepare or after a completed rollback gets revoke-only
+cleanup; an incomplete mutation gets a fresh rollback-only grant; and a completed migration
+whose evidence step failed remains migrated while authorization is revoked. Only
 the rollback path can restore the previous default and delete the reviewed new version. It
 does not depend on a later `master` head, and both privileged locks use `queue: max`, so a
 newer run cannot evict a waiting cleanup follower. Immediately before temporary privilege is
