@@ -93,10 +93,13 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
     final-nonzero-equivalent) last_check="${NONZERO_EQUIVALENT_TIMESTAMP}" ;;
     final-stale-then-current) ((n == 1)) && last_check="${STALE_TIMESTAMP}" ;;
     final-stale-persistent|final-stale-default) last_check="${STALE_TIMESTAMP}" ;;
-    final-timestamp-mismatch) last_check="${NEWER_TIMESTAMP}" ;;
-    final-subsecond-mismatch) last_check="${SUBSECOND_NEWER_TIMESTAMP}" ;;
+    final-newer-in-sync) last_check="${NEWER_TIMESTAMP}" ;;
+    final-newer-subsecond-in-sync) last_check="${SUBSECOND_NEWER_TIMESTAMP}" ;;
     final-different-incarnation) final_stack="${OTHER_STACK_ID}" ;;
     final-drifted) final_status='DRIFTED' ;;
+    final-newer-drifted) last_check="${NEWER_TIMESTAMP}"; final_status='DRIFTED' ;;
+    final-newer-unknown) last_check="${NEWER_TIMESTAMP}"; final_status='UNKNOWN' ;;
+    final-newer-not-checked) last_check="${NEWER_TIMESTAMP}"; final_status='NOT_CHECKED' ;;
     final-invalid-calendar) last_check="${INVALID_FINAL_TIMESTAMP}" ;;
     final-invalid-second) last_check="${INVALID_SECOND_TIMESTAMP}" ;;
     final-invalid-fraction) last_check="${INVALID_FRACTION_TIMESTAMP}" ;;
@@ -109,6 +112,10 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s"}]}\n' "${STACK_ID}";exit 0;fi ;;
     final-not-checked-missing-then-current)
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"NOT_CHECKED"}}]}\n' "${STACK_ID}";exit 0;fi ;;
+    final-unknown-current-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"UNKNOWN","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}";exit 0;fi ;;
+    final-not-checked-current-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"NOT_CHECKED","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}";exit 0;fi ;;
     final-drifted-stale-then-current)
       if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"DRIFTED","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${STALE_TIMESTAMP}";exit 0;fi ;;
     final-multiple-stacks)
@@ -224,10 +231,14 @@ run_resource_case resource-success success 1 1 0
 run_resource_case leap-day-success success 1 1 0
 run_resource_case final-equivalent-utc success 1 1 0
 run_resource_case final-nonzero-equivalent success 1 1 0
+run_resource_case final-newer-in-sync success 1 1 0
+run_resource_case final-newer-subsecond-in-sync success 1 1 0
 run_resource_case final-stale-then-current success 1 2 1
 run_resource_case final-missing-then-current success 1 2 1
 run_resource_case final-absent-drift-info-then-current success 1 2 1
 run_resource_case final-not-checked-missing-then-current success 1 2 1
+run_resource_case final-unknown-current-then-current success 1 2 1
+run_resource_case final-not-checked-current-then-current success 1 2 1
 run_resource_case final-drifted-stale-then-current success 1 2 1
 run_resource_case final-api-transient success 1 2 1
 run_resource_case different-incarnation failure 1 0 0 resource-drift-stale-or-mismatched
@@ -241,11 +252,12 @@ run_resource_case invalid-final-delay failure 0 0 0 invalid-final-binding-bounds
 run_resource_case final-stale-default failure 1 5 4 final-stack-binding-stale
 run_resource_case final-stale-persistent failure 1 3 2 final-stack-binding-stale
 run_resource_case final-api-persistent failure 1 3 2 final-stack-api-error-or-timeout
-run_resource_case final-timestamp-mismatch failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-subsecond-mismatch failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-different-incarnation failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-drifted failure 1 1 0 final-stack-binding-mismatch
-run_resource_case final-multiple-stacks failure 1 1 0 final-stack-binding-mismatch
+run_resource_case final-different-incarnation failure 1 1 0 final-stack-selection-mismatch
+run_resource_case final-drifted failure 1 1 0 final-stack-current-drifted
+run_resource_case final-newer-drifted failure 1 1 0 final-stack-current-drifted
+run_resource_case final-newer-unknown failure 1 3 2 final-stack-current-indeterminate
+run_resource_case final-newer-not-checked failure 1 3 2 final-stack-current-indeterminate
+run_resource_case final-multiple-stacks failure 1 1 0 final-stack-selection-mismatch
 run_resource_case final-invalid-calendar failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-second failure 1 1 0 final-stack-malformed-response
 run_resource_case final-invalid-fraction failure 1 1 0 final-stack-malformed-response
