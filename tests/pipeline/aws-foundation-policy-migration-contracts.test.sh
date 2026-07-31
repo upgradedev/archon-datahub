@@ -306,7 +306,7 @@ require_text "${authorization}" \
 require_text "${state}" \
   'list-policy-versions' \
   'get-policy-version' \
-  'require_rollback_pending_state rollback-before-switch new' \
+  'wait_for_rollback_pending_state rollback-before-switch new' \
   'require_rollback_pending_state rollback-before-delete old' \
   'delete-policy-version' \
   'Unexpected managed-policy version count'
