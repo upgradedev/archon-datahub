@@ -5,116 +5,125 @@ helper="${repository_root}/scripts/aws-cloudformation-drift.sh"
 test -f "${helper}" && test ! -L "${helper}"
 # shellcheck source=scripts/aws-cloudformation-drift.sh
 source "${helper}"
-test_root="$(mktemp -d)"
-trap 'rm -rf -- "${test_root}"' EXIT
-readonly DETECTION_ID='11111111-2222-3333-4444-555555555555'
-readonly ACCOUNT_ID='123456789012'
-readonly REGION='eu-west-1'
-readonly STACK_NAME='Archon-Test-Stack'
-readonly STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-scenario='';status_calls=0;sleep_calls=0;AWS_CALL_LOG=''
-fail(){ echo "::error::$*" >&2; exit 1; }
-assert_equals(){ [[ "$2" == "$1" ]] || fail "$3: expected $1, got $2"; }
-sleep(){ sleep_calls="$((sleep_calls + 1))"; return 0; }
-aws() {
-  local joined=" $* "
-  printf '%s\n' "$*" >>"${AWS_CALL_LOG}"
-  [[ "${joined}" == *' --cli-connect-timeout 5 '* ]] || return 97
-  [[ "${joined}" == *' --cli-read-timeout 15 '* ]] || return 97
-  [[ "${joined}" == *' --no-cli-pager '* ]] || return 97
-  [[ "${joined}" == *" --region ${REGION} "* ]] || return 97
-  if [[ "${joined}" == *' cloudformation detect-stack-drift '* ]]; then
-    [[ "${joined}" == *" --stack-name ${STACK_NAME} "* ]] || return 97
-    [[ "${joined}" == *' --query StackDriftDetectionId '* ]] || return 97
-    [[ "${joined}" == *' --output text '* ]] || return 97
-    if [[ "${scenario}" == 'invalid-detection-id' ]]; then printf 'None\n'; else printf '%s\n' "${DETECTION_ID}"; fi
-    return 0
-  fi
-  [[ "${joined}" == *' cloudformation describe-stack-drift-detection-status '* ]] || return 97
-  [[ "${joined}" == *" --stack-drift-detection-id ${DETECTION_ID} "* ]] || return 97
-  [[ "${joined}" == *' --output json '* ]] || return 97
-  status_calls="$((status_calls + 1))"
-  case "${scenario}" in
+test_root="$(mktemp -d)";trap 'rm -rf -- "${test_root}"' EXIT
+fake_bin="${test_root}/bin";mkdir -p "${fake_bin}"
+cat >"${fake_bin}/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+n="$(<"${SLEEP_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${SLEEP_COUNTER}"
+SLEEP
+cat >"${fake_bin}/aws" <<'AWS'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${AWS_CALL_LOG}"
+echo 'PRIVATE_AWS_MARKER provider detail' >&2
+[[ "${AWS_MAX_ATTEMPTS:-}" == 1 && "${AWS_RETRY_MODE:-}" == standard &&
+  "${AWS_CLI_AUTO_PROMPT:-}" == off && -z "${AWS_PAGER:-x}" ]] || exit 97
+joined=" $* "
+[[ "${joined}" == *' --cli-connect-timeout 5 '* && "${joined}" == *' --cli-read-timeout 15 '* &&
+  "${joined}" == *' --no-cli-pager '* && "${joined}" == *" --region ${REGION} "* ]] || exit 97
+if [[ "${joined}" == *' cloudformation detect-stack-drift '* ]]; then
+  [[ "${joined}" == *" --stack-name ${STACK_NAME} "* && "${joined}" == *' --query StackDriftDetectionId '* &&
+    "${joined}" == *' --output text '* ]] || exit 97
+  if [[ "${SCENARIO}" == invalid-detection-id ]]; then printf 'None\n'; else printf '%s\n' "${DETECTION_ID}"; fi
+  exit 0
+fi
+if [[ "${joined}" == *' cloudformation describe-stack-drift-detection-status '* ]]; then
+  [[ "${joined}" == *" --stack-drift-detection-id ${DETECTION_ID} "* && "${joined}" == *' --output json '* ]] || exit 97
+  n="$(<"${STATUS_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${STATUS_COUNTER}"
+  case "${SCENARIO}" in
     progress-success)
-      if ((status_calls == 1)); then
-        printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"NOT_CHECKED","DetectionStatus":"DETECTION_IN_PROGRESS","DriftedStackResourceCount":null}\n' "${STACK_ID}" "${DETECTION_ID}"
-      else
-        printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}"
-      fi ;;
-    immediate-success)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    transient-success)
-      if ((status_calls == 1)); then echo 'PRIVATE_AWS_MARKER transient provider error' >&2; return 1; fi
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    persistent-error) echo 'PRIVATE_AWS_MARKER persistent provider error' >&2; return 1 ;;
-    perpetual-progress)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"NOT_CHECKED","DetectionStatus":"DETECTION_IN_PROGRESS","DriftedStackResourceCount":null}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    detection-failed)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"UNKNOWN","DetectionStatus":"DETECTION_FAILED","DetectionStatusReason":"PRIVATE_AWS_MARKER"}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    drifted)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"DRIFTED","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":1}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    missing-count)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE"}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    wrong-detection-id)
-      printf '{"StackId":"%s","StackDriftDetectionId":"00000000-0000-0000-0000-000000000000","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" ;;
-    wrong-stack-id)
-      printf '{"StackId":"arn:aws:cloudformation:eu-west-1:123456789012:stack/Other-Stack/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${DETECTION_ID}" ;;
+      if ((n == 1)); then printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"NOT_CHECKED","DetectionStatus":"DETECTION_IN_PROGRESS","DriftedStackResourceCount":null}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}";
+      else printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}"; fi ;;
+    immediate-success|transient-success)
+      if [[ "${SCENARIO}" == transient-success && "${n}" == 1 ]]; then exit 1; fi
+      printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    persistent-error) exit 1 ;;
+    perpetual-progress) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","DetectionStatus":"DETECTION_IN_PROGRESS"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    detection-failed) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","DetectionStatus":"DETECTION_FAILED","DetectionStatusReason":"PRIVATE_AWS_MARKER"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    drifted) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"DRIFTED","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":1}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    missing-count) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    missing-timestamp) printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
+    wrong-detection-id) printf '{"StackId":"%s","StackDriftDetectionId":"00000000-0000-0000-0000-000000000000","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_TIMESTAMP}" ;;
+    wrong-stack-id) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${OTHER_STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
     malformed) printf '{not-json\n' ;;
-    unknown-status)
-      printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"SURPRISE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
-    *) return 98 ;;
+    unknown-status) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","DetectionStatus":"SURPRISE"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    deadline-during-status) /bin/sleep 2; printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    *) exit 98 ;;
   esac
-}
-run_case() {
-  local case_name="$1" expected_result="$2" expected_status_calls="$3" expected_sleeps="$4"
-  local case_dir="${test_root}/${case_name}" output_path stdout_path stderr_path rc=0 detect_calls described_calls
-  mkdir -p "${case_dir}";export RUNNER_TEMP="${case_dir}"
+  exit 0
+fi
+if [[ "${joined}" == *' cloudformation describe-stack-resource-drifts '* ]]; then
+  [[ "${joined}" == *" --stack-name ${STACK_ID} "* ]] || exit 97
+  if [[ "${SCENARIO}" == deadline-resource ]]; then /bin/sleep 2; fi
+  resource_stack="${STACK_ID}";resource_time="${DETECTION_TIMESTAMP}";resource_status='IN_SYNC'
+  [[ "${SCENARIO}" == different-incarnation ]] && resource_stack="${OTHER_STACK_ID}"
+  [[ "${SCENARIO}" == stale-resource ]] && resource_time="${STALE_TIMESTAMP}"
+  [[ "${SCENARIO}" == not-checked-resource ]] && resource_status='NOT_CHECKED'
+  printf '{"StackResourceDrifts":[{"StackId":"%s","Timestamp":"%s","StackResourceDriftStatus":"%s"}]}\n' "${resource_stack}" "${resource_time}" "${resource_status}"
+  exit 0
+fi
+if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
+  [[ "${joined}" == *" --stack-name ${STACK_ID} "* ]] || exit 97
+  last_check="${DETECTION_TIMESTAMP}";[[ "${SCENARIO}" == final-timestamp-mismatch ]] && last_check="${NEWER_TIMESTAMP}"
+  printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"IN_SYNC","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}"
+  exit 0
+fi
+exit 97
+AWS
+chmod 0700 "${fake_bin}/aws" "${fake_bin}/sleep";export PATH="${fake_bin}:${PATH}"
+export DETECTION_ID='11111111-2222-3333-4444-555555555555' ACCOUNT_ID='123456789012' REGION='eu-west-1' STACK_NAME='Archon-Test-Stack'
+export STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+export OTHER_STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
+export DETECTION_TIMESTAMP='2026-07-31T00:00:00.000Z' STALE_TIMESTAMP='2026-07-30T23:59:59.000Z' NEWER_TIMESTAMP='2026-07-31T00:00:01.000Z'
+fail(){ echo "::error::$*" >&2;exit 1; }
+assert_equals(){ [[ "$2" == "$1" ]]||fail "$3: expected $1, got $2"; }
+run_poll_case(){
+  local name="$1" expected="$2" expected_status="$3" expected_sleep="$4" deadline_offset="${5:-60}"
+  local dir="${test_root}/poll-${name}" output stdout stderr rc=0 detect_calls
+  mkdir -p "${dir}";export RUNNER_TEMP="${dir}" SCENARIO="${name}" AWS_CALL_LOG="${dir}/calls.log" STATUS_COUNTER="${dir}/status.count" SLEEP_COUNTER="${dir}/sleep.count"
+  : >"${AWS_CALL_LOG}";printf '0\n'>"${STATUS_COUNTER}";printf '0\n'>"${SLEEP_COUNTER}"
   export CFN_DRIFT_MAX_ATTEMPTS=3 CFN_DRIFT_DELAY_SECONDS=0 CFN_DRIFT_MAX_API_FAILURES=3 CFN_DRIFT_PHASE_TIMEOUT_SECONDS=60
-  export CFN_DRIFT_DEADLINE_EPOCH="$(( $(date +%s) + 60 ))"
-  scenario="${case_name}";status_calls=0;sleep_calls=0;AWS_CALL_LOG="${case_dir}/aws-calls.log";: >"${AWS_CALL_LOG}"
-  output_path="${RUNNER_TEMP}/drift-${REGION}-${STACK_NAME}.json";stdout_path="${case_dir}/stdout.log";stderr_path="${case_dir}/stderr.log"
-  if detect_and_wait_for_cloudformation_stack_in_sync "${REGION}" "${STACK_NAME}" "${output_path}" "${ACCOUNT_ID}" >"${stdout_path}" 2>"${stderr_path}"; then rc=0; else rc="$?"; fi
-  if [[ "${expected_result}" == success ]]; then
-    assert_equals 0 "${rc}" "${case_name} return code"
-    test -f "${output_path}" && test ! -L "${output_path}" || fail "${case_name} missing terminal status"
-    assert_equals 600 "$(stat -c '%a' "${output_path}")" "${case_name} status mode"
-    jq -e --arg detectionId "${DETECTION_ID}" --arg stackId "${STACK_ID}" '
-      .StackDriftDetectionId == $detectionId and .StackId == $stackId and
-      .DetectionStatus == "DETECTION_COMPLETE" and .StackDriftStatus == "IN_SYNC" and
-      .DriftedStackResourceCount == 0' "${output_path}" >/dev/null
-  else
-    [[ "${rc}" -ne 0 ]] || fail "${case_name} unexpectedly succeeded"
-    [[ ! -e "${output_path}" ]] || fail "${case_name} published failure state"
-  fi
-  detect_calls="$(awk '/cloudformation detect-stack-drift/{n+=1} END{print n+0}' "${AWS_CALL_LOG}")"
-  described_calls="$(awk '/cloudformation describe-stack-drift-detection-status/{n+=1} END{print n+0}' "${AWS_CALL_LOG}")"
-  assert_equals 1 "${detect_calls}" "${case_name} detect call count"
-  assert_equals "${expected_status_calls}" "${described_calls}" "${case_name} status call count"
-  assert_equals "${expected_sleeps}" "${sleep_calls}" "${case_name} sleep count"
-  grep -Fq 'PRIVATE_AWS_MARKER' "${stdout_path}" "${stderr_path}" && fail "${case_name} exposed raw provider content"
-  grep -Fq "${DETECTION_ID}" "${stdout_path}" "${stderr_path}" && fail "${case_name} exposed detection identifier"
-  grep -Fq 'stack-drift-detection-complete' "${AWS_CALL_LOG}" && fail "${case_name} invoked unsupported waiter"
-  return 0
+  export CFN_DRIFT_DEADLINE_EPOCH="$(( $(date +%s) + deadline_offset ))"
+  output="${RUNNER_TEMP}/drift-${REGION}-${STACK_NAME}.json";stdout="${dir}/stdout";stderr="${dir}/stderr"
+  if detect_and_wait_for_cloudformation_stack_in_sync "${REGION}" "${STACK_NAME}" "${output}" "${ACCOUNT_ID}" >"${stdout}" 2>"${stderr}";then rc=0;else rc=$?;fi
+  if [[ "${expected}" == success ]];then [[ "${rc}" == 0 ]]||fail "${name} failed";test -f "${output}"&&test ! -L "${output}";assert_equals 600 "$(stat -c '%a' "${output}")" "${name} mode";jq -e --arg id "${DETECTION_ID}" --arg stack "${STACK_ID}" --arg ts "${DETECTION_TIMESTAMP}" '.StackDriftDetectionId==$id and .StackId==$stack and .Timestamp==$ts and .DetectionStatus=="DETECTION_COMPLETE" and .StackDriftStatus=="IN_SYNC" and .DriftedStackResourceCount==0' "${output}">/dev/null;else [[ "${rc}" != 0 ]]||fail "${name} unexpectedly passed";[[ ! -e "${output}" ]]||fail "${name} published failure";fi
+  detect_calls="$(awk '/cloudformation detect-stack-drift/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals 1 "${detect_calls}" "${name} detect calls";assert_equals "${expected_status}" "$(<"${STATUS_COUNTER}")" "${name} status calls";assert_equals "${expected_sleep}" "$(<"${SLEEP_COUNTER}")" "${name} sleeps"
+  grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
+  find "${dir}" -maxdepth 1 -name 'cloudformation-drift-status.*' -print -quit|grep -q .&&fail "${name} left raw candidate"
 }
-run_case progress-success success 2 1
-run_case immediate-success success 1 0
-run_case transient-success success 2 1
-run_case persistent-error failure 3 2
-run_case perpetual-progress failure 3 2
-run_case detection-failed failure 1 0
-run_case drifted failure 1 0
-run_case missing-count failure 1 0
-run_case wrong-detection-id failure 1 0
-run_case wrong-stack-id failure 1 0
-run_case malformed failure 1 0
-run_case unknown-status failure 1 0
-run_case invalid-detection-id failure 0 0
-input_case_dir="${test_root}/invalid-inputs";mkdir -p "${input_case_dir}";export RUNNER_TEMP="${input_case_dir}"
-export CFN_DRIFT_DEADLINE_EPOCH="$(( $(date +%s) + 60 ))";AWS_CALL_LOG="${input_case_dir}/aws-calls.log";: >"${AWS_CALL_LOG}"
-if detect_and_wait_for_cloudformation_stack_in_sync ap-south-1 "${STACK_NAME}" "${RUNNER_TEMP}/drift-ap-south-1-${STACK_NAME}.json" "${ACCOUNT_ID}" >/dev/null 2>&1; then fail 'invalid region was accepted'; fi
-if detect_and_wait_for_cloudformation_stack_in_sync "${REGION}" '../unsafe' "${RUNNER_TEMP}/drift-${REGION}-../unsafe.json" "${ACCOUNT_ID}" >/dev/null 2>&1; then fail 'unsafe stack name was accepted'; fi
-if detect_and_wait_for_cloudformation_stack_in_sync "${REGION}" "${STACK_NAME}" "${test_root}/outside.json" "${ACCOUNT_ID}" >/dev/null 2>&1; then fail 'outside output was accepted'; fi
-test ! -s "${AWS_CALL_LOG}" || fail 'invalid inputs reached AWS'
-if bash "${helper}" >"${test_root}/direct.out" 2>"${test_root}/direct.err"; then fail 'source-only helper allowed direct execution'; fi
-grep -Fq 'stack-drift-detection-complete' "${helper}" && fail 'helper contains unsupported waiter'
-echo 'CloudFormation drift polling behavior tests passed'
+run_poll_case progress-success success 2 1
+run_poll_case immediate-success success 1 0
+run_poll_case transient-success success 2 1
+run_poll_case persistent-error failure 3 2
+run_poll_case perpetual-progress failure 3 2
+run_poll_case detection-failed failure 1 0
+run_poll_case drifted failure 1 0
+run_poll_case missing-count failure 1 0
+run_poll_case missing-timestamp failure 1 0
+run_poll_case wrong-detection-id failure 1 0
+run_poll_case wrong-stack-id failure 1 0
+run_poll_case malformed failure 1 0
+run_poll_case unknown-status failure 1 0
+run_poll_case invalid-detection-id failure 0 0
+run_poll_case deadline-during-status failure 1 0 1
+run_resource_case(){
+  local name="$1" expected="$2" expected_resource="$3" expected_final="$4" deadline_offset="${5:-60}"
+  local dir="${test_root}/resource-${name}" stdout stderr rc=0 resources finals
+  mkdir -p "${dir}";export RUNNER_TEMP="${dir}" SCENARIO="${name}" AWS_CALL_LOG="${dir}/calls.log" STATUS_COUNTER="${dir}/status.count" SLEEP_COUNTER="${dir}/sleep.count";:>"${AWS_CALL_LOG}";printf '0\n'>"${STATUS_COUNTER}";printf '0\n'>"${SLEEP_COUNTER}"
+  deadline="$(( $(date +%s) + deadline_offset ))";stdout="${dir}/stdout";stderr="${dir}/stderr"
+  if verify_cloudformation_stack_resource_drifts "${REGION}" "${STACK_NAME}" "${STACK_ID}" "${DETECTION_TIMESTAMP}" "${ACCOUNT_ID}" "${deadline}" >"${stdout}" 2>"${stderr}";then rc=0;else rc=$?;fi
+  if [[ "${expected}" == success ]];then assert_equals 0 "${rc}" "${name} result";assert_equals 1 "$(<"${stdout}")" "${name} count";else [[ "${rc}" != 0 ]]||fail "${name} unexpectedly passed";fi
+  resources="$(awk '/describe-stack-resource-drifts/{n++}END{print n+0}' "${AWS_CALL_LOG}")";finals="$(awk '/cloudformation describe-stacks/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals "${expected_resource}" "${resources}" "${name} resource calls";assert_equals "${expected_final}" "${finals}" "${name} final calls"
+  grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
+  find "${dir}" -maxdepth 1 \( -name 'cloudformation-resource-drifts.*' -o -name 'cloudformation-final-stack.*' \) -print -quit|grep -q .&&fail "${name} left raw files"
+}
+run_resource_case resource-success success 1 1
+run_resource_case different-incarnation failure 1 0
+run_resource_case stale-resource failure 1 0
+run_resource_case not-checked-resource failure 1 0
+run_resource_case final-timestamp-mismatch failure 1 1
+run_resource_case deadline-resource failure 1 0 1
+if bash "${helper}" >/dev/null 2>&1;then fail 'source-only helper allowed execution';fi
+grep -Fq 'stack-drift-detection-complete' "${helper}"&&fail 'unsupported waiter remains'
+echo 'CloudFormation drift polling and stack-incarnation tests passed'
