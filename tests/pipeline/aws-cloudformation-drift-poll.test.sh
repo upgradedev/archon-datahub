@@ -18,7 +18,7 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${AWS_CALL_LOG}"
 echo 'PRIVATE_AWS_MARKER provider detail' >&2
 [[ "${AWS_MAX_ATTEMPTS:-}" == 1 && "${AWS_RETRY_MODE:-}" == standard &&
-  "${AWS_CLI_AUTO_PROMPT:-}" == off && -z "${AWS_PAGER:-x}" ]] || exit 97
+  "${AWS_CLI_AUTO_PROMPT:-}" == off && "${AWS_PAGER-__unset__}" == "" ]] || exit 97
 joined=" $* "
 [[ "${joined}" == *' --cli-connect-timeout 5 '* && "${joined}" == *' --cli-read-timeout 15 '* &&
   "${joined}" == *' --no-cli-pager '* && "${joined}" == *" --region ${REGION} "* ]] || exit 97
