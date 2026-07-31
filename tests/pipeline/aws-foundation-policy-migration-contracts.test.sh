@@ -203,6 +203,16 @@ jq --exit-status \
   ' "${foundation_contract}" >/dev/null
 
 workflow_triggers() {
+  if awk '
+    /^on:[[:space:]]*$/ { inside=1; next }
+    inside && /^[^[:space:]]/ { inside=0 }
+    inside && /^  ["\047][A-Za-z0-9_]+["\047][[:space:]]*:/ {
+      quoted=1
+    }
+    END { exit quoted ? 0 : 1 }
+  ' "$1"; then
+    fail "${1#${repository_root}/} contains a quoted trigger key"
+  fi
   awk '
     /^on:[[:space:]]*$/ { inside=1; next }
     inside && /^[^[:space:]]/ { exit }
@@ -299,6 +309,17 @@ for workflow in "${entry}" "${driver_workflow}" "${cleanup}"; do
     'pull-requests: write' \
     'security-events: write' \
     'secrets: inherit'
+  if awk '
+    /^[[:space:]]*(-[[:space:]]*)?["\047]uses["\047][[:space:]]*:/ {
+      noncanonical=1
+    }
+    /^[[:space:]]*(-[[:space:]]*)?uses[[:space:]]+:/ {
+      noncanonical=1
+    }
+    END { exit noncanonical ? 0 : 1 }
+  ' "${workflow}"; then
+    fail "${workflow#${repository_root}/} contains a noncanonical uses key"
+  fi
   while IFS= read -r ref; do
     [[ "${ref}" == ./* ]] && continue
     [[ "${ref}" =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] ||
@@ -343,6 +364,108 @@ require_text "${state}" \
   'require_rollback_pending_state rollback-before-delete old' \
   'delete-policy-version' \
   'Unexpected managed-policy version count'
+
+mapfile -t migrate_authorization_lines < <(
+  grep -nF 'verify_live_temp_policy migrate "${EXPECTED_TEMP_POLICY_SHA}"' \
+    "${main_driver}" | cut -d: -f1
+)
+mapfile -t migrate_initial_lines < <(
+  grep -nF 'require_initial_state migrate-initial' "${main_driver}" | cut -d: -f1
+)
+mapfile -t migrate_create_lines < <(
+  grep -nF 'iam create-policy-version' "${main_driver}" | cut -d: -f1
+)
+mapfile -t migrate_readback_lines < <(
+  grep -nF 'wait_for_rollback_pending_state migrate-before-switch old' \
+    "${main_driver}" | cut -d: -f1
+)
+mapfile -t migrate_switch_lines < <(
+  grep -nF 'iam set-default-policy-version' "${main_driver}" | cut -d: -f1
+)
+test "${#migrate_authorization_lines[@]}" -eq 3 ||
+  fail "migrate must perform exactly three live authorization checks"
+test "${#migrate_initial_lines[@]}" -eq 1
+test "${#migrate_create_lines[@]}" -eq 1
+test "${#migrate_readback_lines[@]}" -eq 1
+test "${#migrate_switch_lines[@]}" -eq 1
+((migrate_authorization_lines[0] < migrate_initial_lines[0] &&
+  migrate_initial_lines[0] < migrate_authorization_lines[1] &&
+  migrate_authorization_lines[1] < migrate_create_lines[0] &&
+  migrate_create_lines[0] < migrate_readback_lines[0] &&
+  migrate_readback_lines[0] < migrate_authorization_lines[2] &&
+  migrate_authorization_lines[2] < migrate_switch_lines[0])) ||
+  fail "migrate authorization, state proof, and mutations are out of order"
+
+mapfile -t rollback_authorization_lines < <(
+  grep -nF 'verify_live_temp_policy \' "${state}" | cut -d: -f1
+)
+mapfile -t rollback_switch_lines < <(
+  grep -nF 'iam set-default-policy-version' "${state}" | cut -d: -f1
+)
+mapfile -t rollback_delete_lines < <(
+  grep -nF 'iam delete-policy-version' "${state}" | cut -d: -f1
+)
+test "${#rollback_authorization_lines[@]}" -eq 2 ||
+  fail "rollback must perform exactly two live authorization checks"
+test "${#rollback_switch_lines[@]}" -eq 1
+test "${#rollback_delete_lines[@]}" -eq 1
+((rollback_authorization_lines[0] < rollback_switch_lines[0] &&
+  rollback_switch_lines[0] < rollback_authorization_lines[1] &&
+  rollback_authorization_lines[1] < rollback_delete_lines[0])) ||
+  fail "rollback authorization checks and mutations are out of order"
+
+mapfile -t install_ttl_lines < <(
+  grep -nF '((remaining >= 1140 && remaining <= 1200))' \
+    "${authorization}" | cut -d: -f1
+)
+mapfile -t install_put_lines < <(
+  grep -nF 'if ! aws iam put-role-policy' "${authorization}" | cut -d: -f1
+)
+test "${#install_ttl_lines[@]}" -eq 2 ||
+  fail "authorization installation must perform exactly two TTL checks"
+test "${#install_put_lines[@]}" -eq 1
+((install_ttl_lines[0] < install_ttl_lines[1] &&
+  install_ttl_lines[1] < install_put_lines[0])) ||
+  fail "authorization TTL must be rechecked immediately before installation"
+
+extract_job_block() {
+  local job="$1"
+  awk -v job="${job}" '
+    $0 == "  " job ":" { inside=1 }
+    inside && $0 ~ /^  [A-Za-z0-9_-]+:$/ && $0 != "  " job ":" { exit }
+    inside { print }
+  ' "${driver_workflow}"
+}
+
+for job_environment in \
+  prepare:aws-foundation \
+  migrate:governed-canary-recovery \
+  rollback:governed-canary-recovery \
+  revoke:aws-foundation; do
+  job="${job_environment%%:*}"
+  expected_environment="${job_environment#*:}"
+  block="$(extract_job_block "${job}")"
+  test -n "${block}" || fail "driver job ${job} is absent"
+  test "$(grep -Fc '      actions: read' <<<"${block}")" -eq 1 ||
+    fail "driver job ${job} must grant actions: read exactly once"
+  test "$(grep -Fc '      deployments: read' <<<"${block}")" -eq 1 ||
+    fail "driver job ${job} must grant deployments: read exactly once"
+  test "$(grep -Fc 'bash scripts/verify-github-environment-protection.sh' \
+    <<<"${block}")" -eq 1 ||
+    fail "driver job ${job} must invoke the environment verifier exactly once"
+  grep -Fqx "      name: ${expected_environment}" <<<"${block}" ||
+    fail "driver job ${job} uses the wrong protected environment"
+  verifier_line="$(grep -nF \
+    'bash scripts/verify-github-environment-protection.sh' \
+    <<<"${block}" | cut -d: -f1)"
+  oidc_line="$(grep -nF 'uses: aws-actions/configure-aws-credentials@' \
+    <<<"${block}" | cut -d: -f1)"
+  [[ "${verifier_line}" =~ ^[1-9][0-9]*$ &&
+    "${oidc_line}" =~ ^[1-9][0-9]*$ ]] ||
+    fail "driver job ${job} verifier/OIDC placement is ambiguous"
+  ((verifier_line < oidc_line)) ||
+    fail "driver job ${job} verifies environment protection after OIDC"
+done
 for script in \
   "${main_driver}" \
   "${common}" \
@@ -413,7 +536,11 @@ extract_sid_block() {
 assert_sid_block() {
   local sid="$1"
   local expected_block="$2"
-  local actual
+  local actual count
+  count="$(grep -Ec \
+    "^[[:space:]]+- Sid: ${sid}[[:space:]]*$" "${deploy_role}")"
+  test "${count}" -eq 1 ||
+    fail "deploy role statement ${sid} must occur exactly once"
   actual="$(extract_sid_block "${sid}")"
   test "${actual}" = "${expected_block}" ||
     fail "deploy role statement ${sid} differs from its exact action/resource scope"
