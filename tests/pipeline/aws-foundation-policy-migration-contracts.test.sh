@@ -562,7 +562,7 @@ jq --exit-status \
     $migration[0] as $m |
     . as $policy |
     def statements($sid):
-      [.Statement[] | select(.Sid == $sid)];
+      [$policy.Statement[] | select(.Sid == $sid)];
     def actions:
       [.Statement[].Action] | flatten;
     ($m.policy.exactDelta.statements | length) == 2 and
