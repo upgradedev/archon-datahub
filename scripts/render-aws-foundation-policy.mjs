@@ -102,6 +102,8 @@ const statementGroups = {
     "ConfigureSharedApiGatewayLogging"
   ]),
   assets: new Set([
+    "ReadExactBootstrapBucketsForDrift",
+    "ReadExactStagePoliciesForDrift",
     "ReconcileExactBootstrapBuckets",
     "ReconcileExactBootstrapRepositories",
     "ReconcileExactBootstrapVersionParameters"

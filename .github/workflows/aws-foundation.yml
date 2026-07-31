@@ -200,6 +200,7 @@ jobs:
             infra/aws/foundation/github-actions-foundation-role.yml \
             infra/aws/foundation/governed-canary-roles.yml \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/aws-cloudformation-drift.sh \
             scripts/patch-cdk-brace-expansion.sh \
             scripts/patch-cdk-bootstrap-template.mjs \
             scripts/render-canonical-flow-yaml.mjs \
@@ -208,6 +209,7 @@ jobs:
             scripts/reconcile-aws-foundation.sh \
             scripts/sanitize-cloudformation-failure.mjs \
             scripts/render-aws-foundation-policy.mjs \
+            scripts/validate-aws-foundation-policy.jq \
             scripts/verify-aws-runtime-boundary.mjs \
             scripts/verify-cdk-npm-audit-compensation.sh \
             scripts/verify-exact-npm-overrides.mjs; do
@@ -447,6 +449,48 @@ jobs:
                 "foundation-complete-deploy-migration-required",
               readyState: "ready-for-deploy"
             } and
+            .evidence.driftVerification == {
+              cliConnectTimeoutSeconds: 5,
+              cliReadTimeoutSeconds: 15,
+              awsSdkMaxAttempts: 1,
+              coverage: "cloudformation-supported-resources",
+              exactStackIncarnation: true,
+              failureMode: "fail-closed",
+              globalDeadline: "hard-wall-clock",
+              globalTimeoutSeconds: 900,
+              helper: "scripts/aws-cloudformation-drift.sh",
+              maximumConsecutiveApiFailuresPerStack: 3,
+              maximumPollAttemptsPerStack: 120,
+              method: "detect-then-bounded-describe-poll",
+              pollDelaySeconds: 2,
+              rawAwsStderr: "suppressed",
+              responseBinding: [
+                "StackDriftDetectionId",
+                "StackId",
+                "Timestamp",
+                "DriftInformation.LastCheckTimestamp"
+              ],
+              finalStackBinding: {
+                method: "bounded-describe-stacks-poll",
+                maximumAttempts: 5,
+                pollDelaySeconds: 2,
+                timestampComparison: "normalized-utc-monotonic-lower-bound",
+                currentOrNewerInSyncProjection: "accept",
+                currentDriftedProjection: "fail-closed",
+                currentOrNewerIndeterminateProjection: "bounded-retry",
+                staleOrUnpublishedProjection: "bounded-retry",
+                selectionMismatch: "fail-closed",
+                malformedProjection: "fail-closed"
+              },
+              staleResourceEvidence: "forbidden",
+              terminalSuccess: {
+                detectionStatus: "DETECTION_COMPLETE",
+                driftedStackResourceCount: 0,
+                returnedResourceStatuses: ["IN_SYNC"],
+                stackDriftStatus: "IN_SYNC"
+              },
+              unsupportedCliWaiter: "forbidden"
+            } and
             .evidence.failureDiagnostics == {
               allowlistedStackLabels: [
                 "governed-canary-roles",
@@ -508,36 +552,10 @@ jobs:
           ' contracts/aws-foundation-v1.json >/dev/null
           jq -e \
             --slurpfile migration \
-              contracts/aws-foundation-policy-migration-v1.json '
-              $migration[0] as $m |
-              def statements($sid):
-                [.Statement[] | select(.Sid == $sid)];
-              def actions:
-                [.Statement[].Action] | flatten;
-              ($m.policy.exactDelta.stackScopedStatement) as $stackSid |
-              ($m.policy.exactDelta.wildcardStatement) as $wildcardSid |
-              .Version == "2012-10-17" and
-              (actions | index("*") | not) and
-              (statements("RejectLegacySharedDeployRole") | length) == 1 and
-              (statements("ConfigureSharedApiGatewayLogging") | length) == 1 and
-              (statements($stackSid) | length) == 1 and
-              (statements($wildcardSid) | length) == 1 and
-              statements($stackSid)[0].Effect == "Allow" and
-              (statements($stackSid)[0].Resource | type) == "array" and
-              all(statements($stackSid)[0].Resource[]; . != "*") and
-              (statements($stackSid)[0].Action |
-                index("cloudformation:DetectStackResourceDrift")) != null and
-              statements($wildcardSid)[0].Effect == "Allow" and
-              statements($wildcardSid)[0].Resource == "*" and
-              (statements($wildcardSid)[0].Action |
-                index("cloudformation:BatchDescribeTypeConfigurations")) != null and
-              ([actions[] |
-                select(. == "cloudformation:DetectStackResourceDrift")] |
-                length) == 1 and
-              ([actions[] |
-                select(. == "cloudformation:BatchDescribeTypeConfigurations")] |
-                length) == 1
-            ' infra/aws/foundation/github-actions-foundation-policy.json >/dev/null
+              contracts/aws-foundation-policy-migration-v1.json \
+            --from-file scripts/validate-aws-foundation-policy.jq \
+            infra/aws/foundation/github-actions-foundation-policy.json \
+            >/dev/null
           test "$(grep -cF \
             '                  - cloudformation:DetectStackResourceDrift' \
             infra/aws/foundation/github-actions-deploy-role.yml)" = "2"
@@ -1199,7 +1217,7 @@ jobs:
             echo
             echo "- Regions: \`eu-west-1\`, \`us-east-1\`"
             echo "- Bootstraps: \`CDKToolkit-archonstg\`, \`CDKToolkit-archonprd\` (version 32)"
-            echo "- Stage execution policies and runtime boundaries: exact and drift-free"
+            echo "- Stage execution policies and runtime boundaries: exact; CloudFormation-supported resources IN_SYNC"
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
             echo "- Operational roles: stage judge access plus production posture, runtime, and paging"

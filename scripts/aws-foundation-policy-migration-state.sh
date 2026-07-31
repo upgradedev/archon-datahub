@@ -4,23 +4,23 @@ load_policy_state() {
   local prefix="$1"
   local metadata="${WORK_ROOT}/${prefix}-policy.json"
   local versions="${WORK_ROOT}/${prefix}-versions.json"
-  safe_aws "Unable to inspect the exact foundation control policy" "${metadata}" \
-    iam get-policy --policy-arn "${CONTROL_POLICY_ARN}" --output json || return 1
+  safe_aws "Unable to inspect the exact foundation assets policy" "${metadata}" \
+    iam get-policy --policy-arn "${TARGET_POLICY_ARN}" --output json || return 1
   jq -e \
-    --arg arn "${CONTROL_POLICY_ARN}" '
+    --arg arn "${TARGET_POLICY_ARN}" '
       .Policy.Arn == $arn and
-      .Policy.PolicyName == "archon-aws-foundation-control" and
+      .Policy.PolicyName == "archon-aws-foundation-assets" and
       .Policy.Path == "/" and
       .Policy.IsAttachable == true and
       .Policy.AttachmentCount == 1 and
       .Policy.PermissionsBoundaryUsageCount == 0 and
       (.Policy.DefaultVersionId | test("^v[1-9][0-9]*$"))
     ' "${metadata}" >/dev/null || {
-      fail "The foundation control policy metadata differs"
+      fail "The foundation assets policy metadata differs"
       return 1
     }
-  safe_aws "Unable to list exact foundation control policy versions" "${versions}" \
-    iam list-policy-versions --policy-arn "${CONTROL_POLICY_ARN}" --output json ||
+  safe_aws "Unable to list exact foundation assets policy versions" "${versions}" \
+    iam list-policy-versions --policy-arn "${TARGET_POLICY_ARN}" --output json ||
     return 1
   jq -e '
     (.Versions | type) == "array" and
@@ -33,7 +33,7 @@ load_policy_state() {
       (.CreateDate | type) == "string") and
     ([.Versions[] | select(.IsDefaultVersion == true)] | length) == 1
   ' "${versions}" >/dev/null || {
-    fail "The foundation control policy version inventory differs"
+    fail "The foundation assets policy version inventory differs"
     return 1
   }
   POLICY_DEFAULT_VERSION="$(jq -er '.Policy.DefaultVersionId' "${metadata}")" ||
@@ -53,9 +53,9 @@ load_policy_state() {
       return 1
     }
     response="${WORK_ROOT}/${prefix}-${version_id}.json"
-    safe_aws "Unable to read a foundation control policy version" "${response}" \
+    safe_aws "Unable to read a foundation assets policy version" "${response}" \
       iam get-policy-version \
-      --policy-arn "${CONTROL_POLICY_ARN}" \
+      --policy-arn "${TARGET_POLICY_ARN}" \
       --version-id "${version_id}" \
       --output json || return 1
     jq -e \
@@ -120,7 +120,7 @@ require_initial_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
   test "${#POLICY_VERSION_IDS[@]}" -eq 1 || {
-    fail "Initial control policy must contain exactly one version"
+    fail "Initial assets policy must contain exactly one version"
     return 1
   }
   local old_id old_default
@@ -144,7 +144,7 @@ require_migrated_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
   test "${#POLICY_VERSION_IDS[@]}" -eq 2 || {
-    fail "Migrated control policy must contain exactly two versions"
+    fail "Migrated assets policy must contain exactly two versions"
     return 1
   }
   local old_id new_id old_default new_default
@@ -206,7 +206,7 @@ require_rolled_back_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
   test "${#POLICY_VERSION_IDS[@]}" -eq 1 || {
-    fail "Rolled-back control policy must contain exactly one version"
+    fail "Rolled-back assets policy must contain exactly one version"
     return 1
   }
   local old_id old_default
@@ -291,7 +291,7 @@ rollback_exact_migration() {
       verify_live_temp_policy \
         "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
       if ! aws iam set-default-policy-version \
-        --policy-arn "${CONTROL_POLICY_ARN}" \
+        --policy-arn "${TARGET_POLICY_ARN}" \
         --version-id "${old_version}" \
         >/dev/null 2>/dev/null; then
         fail "Unable to restore the exact previous default policy version"
@@ -327,7 +327,7 @@ rollback_exact_migration() {
     verify_live_temp_policy \
       "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
     if ! aws iam delete-policy-version \
-      --policy-arn "${CONTROL_POLICY_ARN}" \
+      --policy-arn "${TARGET_POLICY_ARN}" \
       --version-id "${new_version}" \
       >/dev/null 2>/dev/null; then
       fail "Unable to delete only the reviewed nondefault migration version"

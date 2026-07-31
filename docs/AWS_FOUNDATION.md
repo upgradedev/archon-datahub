@@ -284,41 +284,38 @@ OIDC provider, then renders and verifies all four managed policies in memory
 before it inspects or creates the role. A missing policy is created; a
 mismatched existing policy is never overwritten.
 
-### Existing foundation-policy version migration
+### Protected foundation-policy version migrations
 
-Foundation run `30586169834` proved that CloudFormation stack drift also needs
-`cloudformation:DetectStackResourceDrift` and
-`cloudformation:BatchDescribeTypeConfigurations`. The reviewed source adds only those two
-dependencies in their correct stack-scoped and read-only wildcard statements. Because the
-bootstrap intentionally refuses to overwrite a mismatched managed policy, the change uses
-the dedicated CI-only
-[`aws-foundation-policy-migration.yml`](../.github/workflows/aws-foundation-policy-migration.yml)
-transaction rather than a workstation or direct AWS mutation.
+Foundation run `30586169834` established the first two CloudFormation control-plane
+dependencies, `cloudformation:DetectStackResourceDrift` and
+`cloudformation:BatchDescribeTypeConfigurations`. Those actions were migrated to
+`archon-aws-foundation-control` by successful protected run `30596065876` and remain
+unchanged.
 
-The workflow requires the signed, exact current `master`, green CI, CodeQL, and workflow
-security gates, the literal `MIGRATE EXACT FOUNDATION CONTROL POLICY` confirmation, and
-separate `aws-foundation` and `governed-canary-recovery` approvals. It creates a new
-non-default `archon-aws-foundation-control` version, canonically reads it back, changes the
-default exactly once, and retains the previous version as the rollback point. A temporary
-20-minute inline grant targets only that managed-policy ARN and is removed after three
-consecutive exact-baseline reads.
+Exact-master foundation run `30600085506` then completed reconciliation and failed closed
+at the first drift check with `DETECTION_FAILED`. The public CloudFormation resource-provider
+schemas identify the missing read surface: `iam:ListEntitiesForPolicy` for
+`AWS::IAM::ManagedPolicy`, plus 15 bucket-configuration reads for `AWS::S3::Bucket`.
+The source adds those 16 read-only actions in two isolated statements. Both statements use
+the same exact four stage-policy or bootstrap-bucket resources as their existing reconciliation
+statements; neither grants object reads nor a wildcard resource.
 
-[`aws-foundation-policy-migration-cleanup.yml`](../.github/workflows/aws-foundation-policy-migration-cleanup.yml)
-follows any non-successful transaction and can also be dispatched manually. The automatic
-follower binds itself to the exact parent attempt and classifies its exact validation, prepare,
-migrate, rollback, and revoke jobs. If validation did not succeed, it records a `no-aws`
-outcome and never assumes a cloud role or executes target scripts with AWS credentials. After
-successful validation, a failure before prepare or after a completed rollback gets revoke-only
-cleanup; an incomplete mutation gets a fresh rollback-only grant; and a completed migration
-whose evidence step failed remains migrated while authorization is revoked. Only
-the rollback path can restore the previous default and delete the reviewed new version. It
-does not depend on a later `master` head, and both privileged locks use `queue: max`, so a
-newer run cannot evict a waiting cleanup follower. Immediately before temporary privilege is
-installed, the workflow also proves the exact reviewer, no-admin-bypass, and master-only
-branch policy of both GitHub environments. Retained evidence contains only canonical document
-digests, version IDs, state, and revocation proof; it excludes account IDs, ARNs, and
-raw IAM documents.
+The two statements are deliberately placed together in the previously untouched
+`archon-aws-foundation-assets` shard. IAM evaluates the union of all four policies attached to
+the foundation role, so this preserves the exact effective authorization while keeping the
+migration an atomic, proven one-policy 1→2 transaction. The protected workflow requires the
+signed exact current `master`, green CI, CodeQL, and workflow-security gates, the literal
+`MIGRATE EXACT FOUNDATION ASSETS POLICY` confirmation, and separate `aws-foundation` and
+`governed-canary-recovery` approvals. It derives the live previous document by removing only
+the two reviewed statements, creates and canonically reads a non-default version, changes the
+default exactly once, and retains the previous version as the rollback point.
 
+A temporary 20-minute inline grant targets only the exact assets-policy ARN and is removed
+after three consecutive baseline reads. The cleanup follower binds itself to the exact parent
+attempt. An incomplete mutation gets a fresh rollback-only grant; a completed migration whose
+evidence step failed remains migrated while authorization is revoked. Both privileged locks use
+`queue: max`. Retained evidence contains only canonical document digests, version IDs, state,
+and revocation proof; it excludes account identifiers, ARNs, and raw IAM documents.
 On a fresh account, after the four policies are exact, the script creates the
 role with the exact path, description, OIDC trust, session duration, and tags.
 On an existing account, a canonical role may already have any subset of the
@@ -479,6 +476,91 @@ evidence for the exact nine or ten managed stacks. External mode additionally
 records one takeover-forbidden, no-mutation binding as pinned and unchanged.
 It contains no raw account ID, role ARN, secret, token, password, credential,
 or API key and is attested before retention.
+
+## Bounded CloudFormation drift polling
+
+The AWS CLI has no `stack-drift-detection-complete` waiter. The protected
+workflow therefore follows the documented CloudFormation API sequence: it
+starts `DetectStackDrift`, retains the opaque detection ID only in a mode-0600
+file below `RUNNER_TEMP`, and polls
+[`DescribeStackDriftDetectionStatus`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DescribeStackDriftDetectionStatus.html).
+The published
+[AWS CLI CloudFormation waiter list](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/wait/)
+is also a negative contract: the nonexistent drift waiter is forbidden by CI.
+
+Polling is fail-closed under one hard 900-second wall-clock deadline. Every AWS
+call is clamped to the exact remaining time by `timeout`, SDK retries are fixed
+to one attempt, and success is rechecked against the deadline before any raw or
+sealed result is published. Each stack permits at most 120 status reads with a
+two-second delay and at most three consecutive API failures. Every CLI call
+also uses a five-second connection timeout and a 15-second read timeout.
+Provider stderr is discarded. Each successful response
+must bind both the exact in-memory detection ID and expected
+partition/region/account/stack ARN prefix, use one of the three documented
+detection statuses, and finish as `DETECTION_COMPLETE`, `IN_SYNC`, with an
+integer drifted-resource count of zero. A failed, unknown, malformed, mismatched,
+drifted, or timed-out result cannot create success evidence.
+
+The terminal response contributes its exact stack ARN/UUID and detection
+timestamp. The follow-up resource query targets that exact ARN, requires a real
+`StackResourceDrifts` array, rejects older timestamps and accepts only exact
+stack-ID entries whose status is `IN_SYNC`; `NOT_CHECKED` is not converted into
+a pass. A bounded final `DescribeStacks` poll must still report the same stack ID,
+`IN_SYNC`, and a valid `LastCheckTimestamp` that is not older than the exact
+detection timestamp. AWS defines that field as the most recent drift operation
+initiated on the stack or any supported individual resource, so a newer value is
+valid fresher evidence and exact equality would overstate the provider contract.
+Equivalent UTC spellings (`Z` versus `+00:00` and fractional trailing zeroes)
+are compared without discarding non-zero subsecond precision. Shape alone is
+insufficient: year, leap day, month/day, hour, minute, and second are validated
+with locale-independent Gregorian arithmetic. An absent optional
+`DriftInformation`, a valid status without `LastCheckTimestamp`, or a valid older
+projection is retried. A current or newer `IN_SYNC` projection passes; `DRIFTED`
+fails immediately, `UNKNOWN` or `NOT_CHECKED` receives only the same bounded
+retry budget, and wrong selection, malformed response, or exhausted retry fails
+closed. The final projection shares the 900-second global wall-clock deadline,
+enforces a hard maximum of five reads with at most two-second pauses, and never
+reruns drift detection. All raw status,
+resource, and final-stack JSON is mode 0600 and deleted on every
+success or failure exit. The sealed `drift.json` records poll attempts, elapsed
+seconds, returned resource count, stack-incarnation binding, and
+`coverage: cloudformation-supported-resources`. Resources that CloudFormation
+does not support remain outside this claim and are never described as globally
+drift-free.
+
+Exact-master foundation run
+[`30596290772`](https://github.com/upgradedev/archon-datahub/actions/runs/30596290772)
+completed every reconciliation group and failed at the first drift gate because
+the prior implementation invoked the unsupported waiter. It produced no
+sanitized failure artifact because that command was outside the managed-stack
+diagnostic wrapper; this limitation is recorded rather than fabricating a
+CloudFormation failure event. The run remains durable failure evidence for the
+portability fix, and the next exact-master run must provide the sealed positive
+drift receipt.
+
+Exact-master foundation run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+then completed every reconciliation group and reached resource drift validation,
+but rejected the first final stack projection with the sanitized category
+`final-stack-binding-mismatch`. The prior raw-string timestamp equality could
+not distinguish equivalent AWS CLI UTC serialization from a short-lived stale
+projection. No success artifact was authored. The shared deadline-bound,
+precision-preserving final projection poll above is the reviewed remediation;
+only a later successful protected run may supersede this recorded failure.
+Exact-master foundation run
+[`30613749992`](https://github.com/upgradedev/archon-datahub/actions/runs/30613749992)
+reproduced `final-stack-binding-mismatch` after all reconciliation groups and
+each selected stack's resource-level `IN_SYNC` proof. The retained sanitized
+evidence does not include the failed final projection or its attempt count.
+Similar timing to run
+[`30604563202`](https://github.com/upgradedev/archon-datahub/actions/runs/30604563202)
+strongly indicates that no stale-projection retry was consumed, but this remains
+an inference rather than retained proof. Independently, the AWS API definitions
+show why exact timestamp equality is unsupported: stack-level `Timestamp` is the
+stack operation start, while `LastCheckTimestamp` may reflect a later supported
+resource check. No success or drift artifact was authored. The monotonic
+lower-bound contract is the reviewed remediation; only a later successful
+protected run may supersede this recorded failure.
 
 ## Sanitized managed-stack failure evidence
 

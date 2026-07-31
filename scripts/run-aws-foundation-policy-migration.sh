@@ -99,7 +99,7 @@ migrate() {
   local created="${WORK_ROOT}/create-version.json"
   safe_aws "Unable to create the reviewed nondefault policy version" "${created}" \
     iam create-policy-version \
-    --policy-arn "${CONTROL_POLICY_ARN}" \
+    --policy-arn "${TARGET_POLICY_ARN}" \
     --policy-document "file://${NEW_POLICY}" \
     --no-set-as-default \
     --output json
@@ -120,7 +120,7 @@ migrate() {
     fail "Canonical readback of the new nondefault version differs"
   verify_live_temp_policy migrate "${EXPECTED_TEMP_POLICY_SHA}"
   if ! aws iam set-default-policy-version \
-    --policy-arn "${CONTROL_POLICY_ARN}" \
+    --policy-arn "${TARGET_POLICY_ARN}" \
     --version-id "${new_version}" \
     >/dev/null 2>/dev/null; then
     fail "Unable to perform the single reviewed default-version switch"
@@ -203,7 +203,7 @@ write_receipt() {
         controlPlaneSha: $controlPlaneSha,
         policy: {
           currentDefaultVersion: $currentVersion,
-          name: "archon-aws-foundation-control",
+          name: "archon-aws-foundation-assets",
           newDocumentSha256: $newPolicySha,
           previousDocumentSha256: $oldPolicySha,
           previousVersion: $previousVersion,
@@ -215,7 +215,7 @@ write_receipt() {
           attempt: ($runAttempt | tonumber),
           id: ($runId | tonumber)
         },
-        sourceFailure: {runId: 30586169834}
+        sourceFailure: {runId: 30600085506}
       }
     ' >"${evidence_dir}/migration.json"
   chmod 0600 "${evidence_dir}/migration.json"

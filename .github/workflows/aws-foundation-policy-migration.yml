@@ -1,4 +1,4 @@
-name: Migrate AWS foundation control policy
+name: Migrate AWS foundation assets policy
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type MIGRATE EXACT FOUNDATION CONTROL POLICY
+        description: Type MIGRATE EXACT FOUNDATION ASSETS POLICY
         required: true
         type: string
 
@@ -28,7 +28,7 @@ jobs:
       github.ref == 'refs/heads/master' &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner &&
-      inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY'
+      inputs.confirmation == 'MIGRATE EXACT FOUNDATION ASSETS POLICY'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -58,7 +58,7 @@ jobs:
           test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
           test "${GITHUB_REF}" = "refs/heads/master"
           test "${CONFIRMATION_INPUT}" = \
-            "MIGRATE EXACT FOUNDATION CONTROL POLICY"
+            "MIGRATE EXACT FOUNDATION ASSETS POLICY"
           [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           test "${GITHUB_SHA}" = "${CONTROL_PLANE_SHA}"
           test "${WORKFLOW_SHA_VALUE}" = "${CONTROL_PLANE_SHA}"
@@ -101,4 +101,4 @@ jobs:
     with:
       operation: migrate
       expected_head_sha: ${{ needs.validate.outputs.control_plane_sha }}
-      confirmation: MIGRATE EXACT FOUNDATION CONTROL POLICY
+      confirmation: MIGRATE EXACT FOUNDATION ASSETS POLICY

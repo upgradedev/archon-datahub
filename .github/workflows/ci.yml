@@ -67,6 +67,7 @@ jobs:
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/observe-aws-live-runtime.sh \
             scripts/bootstrap-aws-foundation-role.sh \
+            scripts/aws-cloudformation-drift.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/run-aws-incident-recovery.sh \
             scripts/aws-foundation-policy-migration-authorization.sh \
@@ -91,6 +92,7 @@ jobs:
             tests/pipeline/judge-user-contracts.test.sh \
             tests/pipeline/openvex-maintenance-contracts.test.sh \
             tests/pipeline/aws-foundation-contracts.test.sh \
+            tests/pipeline/aws-cloudformation-drift-poll.test.sh \
             tests/pipeline/aws-incident-recovery-contracts.test.sh \
             tests/pipeline/aws-incident-recovery-driver.test.sh \
             tests/pipeline/aws-security-contracts.test.sh; do
@@ -105,6 +107,7 @@ jobs:
             node --check "${script}"
           done
           bash tests/pipeline/aws-security-contracts.test.sh
+          bash tests/pipeline/aws-cloudformation-drift-poll.test.sh
           bash tests/pipeline/aws-foundation-contracts.test.sh
           bash tests/pipeline/aws-foundation-policy-migration-contracts.test.sh
           bash tests/pipeline/aws-foundation-policy-migration-driver.test.sh
