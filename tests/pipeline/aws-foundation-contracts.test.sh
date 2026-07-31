@@ -391,6 +391,14 @@ jq --exit-status '
     pollDelaySeconds: 2,
     rawAwsStderr: "suppressed",
     responseBinding: ["StackDriftDetectionId", "StackId", "Timestamp", "DriftInformation.LastCheckTimestamp"],
+    finalStackBinding: {
+      method: "bounded-describe-stacks-poll",
+      maximumAttempts: 5,
+      newerOrDifferentProjection: "fail-closed",
+      pollDelaySeconds: 2,
+      staleOrUnpublishedProjection: "retry",
+      timestampComparison: "exact-normalized-utc-instant"
+    },
     staleResourceEvidence: "forbidden",
     terminalSuccess: {
       detectionStatus: "DETECTION_COMPLETE",
@@ -1454,6 +1462,7 @@ require_text "${reconciler}" \
 require_text "${drift_poller}" \
   'cloudformation_drift_remaining_seconds() {' \
   'run_bounded_cloudformation_drift_aws() {' \
+  'cloudformation_drift_utc_key() {' \
   'verify_cloudformation_stack_resource_drifts() (' \
   'timeout --foreground --signal=TERM --kill-after=2s' \
   'AWS_MAX_ATTEMPTS=1' \
@@ -1466,7 +1475,16 @@ require_text "${drift_poller}" \
   '.StackDriftDetectionId == $detectionId' \
   'ltrimstr($stackPrefix)' \
   '.StackId == $exactStackId' \
-  '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' \
+  'CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS:-5' \
+  'CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS:-2' \
+  'def leap_year($year):' \
+  'month_days($year; $month)' \
+  'final_max_attempts > 5' \
+  'final_delay_seconds > 2' \
+  'if $drift == null then "stale"' \
+  'if $actualKey < $detectionKey then "stale"' \
+  'elif $drift.StackDriftStatus == "IN_SYNC" then "match"' \
+  'final-stack-binding-stale' \
   '.StackResourceDriftStatus == "IN_SYNC"' \
   'trap cleanup EXIT' \
   'max_api_failures > 3' \
@@ -1476,20 +1494,30 @@ require_text "${drift_poller_test}" \
   'perpetual-progress' 'detection-failed' 'drifted' 'missing-count' \
   'missing-timestamp' 'wrong-detection-id' 'wrong-stack-id' \
   'deadline-during-status' 'different-incarnation' 'stale-resource' \
-  'not-checked-resource' 'final-timestamp-mismatch' 'deadline-resource' \
-  'PRIVATE_AWS_MARKER' 'left raw files'
+  'subsecond-stale-resource' 'not-checked-resource' \
+  'leap-day-success' 'invalid-detection-calendar' 'invalid-resource-calendar' \
+  'final-equivalent-utc' 'final-nonzero-equivalent' 'final-stale-then-current' \
+  'final-absent-drift-info-then-current' 'final-not-checked-missing-then-current' \
+  'final-drifted-stale-then-current' 'final-stale-default' 'final-stale-persistent' \
+  'invalid-final-max' 'invalid-final-delay' 'final-api-transient' 'final-api-persistent' \
+  'final-subsecond-mismatch' 'final-timestamp-mismatch' 'final-different-incarnation' \
+  'final-invalid-calendar' 'final-invalid-second' 'final-invalid-fraction' \
+  'final-malformed' 'final-oversize' 'deadline-resource' 'deadline-final' \
+  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files'
 forbid_text "${reconciler}" \
   'stack-drift-detection-complete' \
   '(.DriftedStackResourceCount // 0) == 0' \
   '.StackResourceDrifts[]?'
-forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason'
+forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason' \
+  'final_max_attempts > 10' 'final_delay_seconds > 30' \
+  'fromdateiso8601' 'strptime(' 'mktime'
 helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
 helper_status_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
 helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${drift_poller}" | tail -n 1 | cut -d: -f1)"
 helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
 helper_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${drift_poller}" | cut -d: -f1)"
 helper_final_line="$(grep -nF 'cloudformation describe-stacks' "${drift_poller}" | cut -d: -f1)"
-helper_binding_line="$(grep -nF '.DriftInformation.LastCheckTimestamp == $detectionTimestamp' "${drift_poller}" | cut -d: -f1)"
+helper_binding_line="$(grep -nF 'if $actualKey < $detectionKey then "stale"' "${drift_poller}" | cut -d: -f1)"
 test "${helper_detect_line}" -lt "${helper_status_line}" || fail 'drift helper must detect before polling'
 test "${helper_status_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
 test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'

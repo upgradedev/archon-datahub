@@ -35,6 +35,44 @@ cloudformation_drift_bounded_sleep() {
   sleep "${pause_seconds}"
 }
 
+cloudformation_drift_utc_key() {
+  if [[ "$#" -ne 1 ]]; then return 64; fi
+  jq -ner --arg timestamp "$1" '
+    def digits_number:
+      sub("^0+"; "") | if . == "" then 0 else tonumber end;
+    def leap_year($year):
+      (($year % 4) == 0) and ((($year % 100) != 0) or (($year % 400) == 0));
+    def month_days($year; $month):
+      if $month == 2 then (if leap_year($year) then 29 else 28 end)
+      elif ($month == 4 or $month == 6 or $month == 9 or $month == 11) then 30
+      elif ($month >= 1 and $month <= 12) then 31
+      else 0 end;
+    def utc_key:
+      if type != "string" then error("invalid timestamp") else
+        sub("[+]00:00$"; "Z") |
+        capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T" +
+          "(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})" +
+          "(?:\\.(?<fraction>[0-9]{1,9}))?Z$") |
+        (.year | digits_number) as $year |
+        (.month | digits_number) as $month |
+        (.day | digits_number) as $day |
+        (.hour | digits_number) as $hour |
+        (.minute | digits_number) as $minute |
+        (.second | digits_number) as $second |
+        if ($year < 1 or $month < 1 or $month > 12 or $day < 1 or
+          $day > month_days($year; $month) or $hour > 23 or
+          $minute > 59 or $second > 59) then
+          error("invalid timestamp")
+        else
+          .year + "-" + .month + "-" + .day + "T" + .hour + ":" +
+          .minute + ":" + .second + "." +
+          (((.fraction // "") + "000000000")[0:9])
+        end
+      end;
+    $timestamp | utc_key
+  ' 2>/dev/null
+}
+
 detect_and_wait_for_cloudformation_stack_in_sync() {
   if [[ "$#" -ne 4 ]]; then cloudformation_drift_poll_error 'category=invalid-input'; return 64; fi
   local region="$1" stack_name="$2" status_json="$3" account_id="$4"
@@ -173,16 +211,30 @@ verify_cloudformation_stack_resource_drifts() (
   if [[ "$#" -ne 6 ]]; then cloudformation_drift_poll_error 'category=invalid-resource-invocation'; exit 64; fi
   local region="$1" stack_name="$2" exact_stack_id="$3" detection_timestamp="$4"
   local account_id="$5" deadline_epoch="$6" prefix suffix resource_json='' final_json=''
-  local resource_bytes final_bytes checked_resource_count
+  local resource_bytes final_bytes checked_resource_count final_attempt final_state detection_utc_key
+  local final_api_failures=0
+  local final_max_attempts="${CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS:-5}"
+  local final_delay_seconds="${CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS:-2}"
+  local max_api_failures="${CFN_DRIFT_MAX_API_FAILURES:-3}"
   cleanup(){ rm -f -- "${resource_json}" "${final_json}"; }
   trap cleanup EXIT
   prefix="arn:aws:cloudformation:${region}:${account_id}:stack/${stack_name}/"
   if [[ ! "${region}" =~ ^(eu-west-1|us-east-1)$ ]] || [[ ! "${stack_name}" =~ ^[A-Za-z][A-Za-z0-9-]{0,127}$ ]] ||
     [[ ! "${account_id}" =~ ^[0-9]{12}$ ]] || [[ "${exact_stack_id}" != "${prefix}"* ]] ||
-    [[ ! "${detection_timestamp}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)$ ]]; then
+    [[ ! "${detection_timestamp}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|\+00:00)$ ]]; then
+    cloudformation_drift_poll_error 'category=invalid-resource-input'; exit 64
+  fi
+  if ! detection_utc_key="$(cloudformation_drift_utc_key "${detection_timestamp}")"; then
     cloudformation_drift_poll_error 'category=invalid-resource-input'; exit 64
   fi
   suffix="${exact_stack_id:${#prefix}}"; [[ "${suffix}" =~ ^[A-Za-z0-9-]+$ ]] || exit 64
+  if [[ ! "${final_max_attempts}" =~ ^[1-9][0-9]*$ ]] ||
+    [[ ! "${final_delay_seconds}" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    [[ ! "${max_api_failures}" =~ ^[1-9][0-9]*$ ]] ||
+    ((final_max_attempts > 5 || final_delay_seconds > 2 ||
+      max_api_failures > 3 || max_api_failures > final_max_attempts)); then
+    cloudformation_drift_poll_error 'category=invalid-final-binding-bounds'; exit 64
+  fi
   resource_json="$(mktemp "${RUNNER_TEMP}/cloudformation-resource-drifts.XXXXXX.json")"
   final_json="$(mktemp "${RUNNER_TEMP}/cloudformation-final-stack.XXXXXX.json")"
   chmod 0600 "${resource_json}" "${final_json}"
@@ -191,40 +243,158 @@ verify_cloudformation_stack_resource_drifts() (
     --stack-name "${exact_stack_id}" --output json >"${resource_json}" 2>/dev/null; then
     cloudformation_drift_poll_error 'category=resource-api-error-or-timeout'; exit 1
   fi
-  cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
+  if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then
+    cloudformation_drift_poll_error 'category=timeout'; exit 1
+  fi
   resource_bytes="$(wc -c <"${resource_json}")"
-  [[ "${resource_bytes}" =~ ^[0-9]+$ ]] && ((resource_bytes > 0 && resource_bytes <= 1048576)) || exit 1
-  if ! jq -e --arg exactStackId "${exact_stack_id}" --arg detectionTimestamp "${detection_timestamp}" '
-    def epoch:
-      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T") then
-        sub("[+]00:00$"; "Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601
-      else error("invalid timestamp") end;
-    ($detectionTimestamp | epoch) as $detectionEpoch |
+  if [[ ! "${resource_bytes}" =~ ^[0-9]+$ ]] ||
+    ((resource_bytes == 0 || resource_bytes > 1048576)); then
+    cloudformation_drift_poll_error 'category=resource-malformed-response'; exit 1
+  fi
+  if ! jq -e --arg exactStackId "${exact_stack_id}" --arg detectionKey "${detection_utc_key}" '
+    def digits_number:
+      sub("^0+"; "") | if . == "" then 0 else tonumber end;
+    def leap_year($year):
+      (($year % 4) == 0) and ((($year % 100) != 0) or (($year % 400) == 0));
+    def month_days($year; $month):
+      if $month == 2 then (if leap_year($year) then 29 else 28 end)
+      elif ($month == 4 or $month == 6 or $month == 9 or $month == 11) then 30
+      elif ($month >= 1 and $month <= 12) then 31
+      else 0 end;
+    def utc_key:
+      if type != "string" then error("invalid timestamp") else
+        sub("[+]00:00$"; "Z") |
+        capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T" +
+          "(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})" +
+          "(?:\\.(?<fraction>[0-9]{1,9}))?Z$") |
+        (.year | digits_number) as $year |
+        (.month | digits_number) as $month |
+        (.day | digits_number) as $day |
+        (.hour | digits_number) as $hour |
+        (.minute | digits_number) as $minute |
+        (.second | digits_number) as $second |
+        if ($year < 1 or $month < 1 or $month > 12 or $day < 1 or
+          $day > month_days($year; $month) or $hour > 23 or
+          $minute > 59 or $second > 59) then error("invalid timestamp")
+        else
+          .year + "-" + .month + "-" + .day + "T" + .hour + ":" +
+          .minute + ":" + .second + "." +
+          (((.fraction // "") + "000000000")[0:9])
+        end
+      end;
     type == "object" and (.StackResourceDrifts | type) == "array" and
     all(.StackResourceDrifts[];
       .StackId == $exactStackId and .StackResourceDriftStatus == "IN_SYNC" and
-      ((.Timestamp | epoch) >= $detectionEpoch))
+      ((.Timestamp | utc_key) >= $detectionKey))
   ' "${resource_json}" >/dev/null 2>&1; then
     cloudformation_drift_poll_error 'category=resource-drift-stale-or-mismatched'; exit 1
   fi
-  checked_resource_count="$(jq -er '.StackResourceDrifts | length' "${resource_json}" 2>/dev/null)"
-  [[ "${checked_resource_count}" =~ ^[0-9]+$ ]] || exit 1
-  if ! run_bounded_cloudformation_drift_aws "${deadline_epoch}" --cli-connect-timeout 5 --cli-read-timeout 15 \
-    --no-cli-pager cloudformation describe-stacks --region "${region}" --stack-name "${exact_stack_id}" \
-    --output json >"${final_json}" 2>/dev/null; then
-    cloudformation_drift_poll_error 'category=final-stack-api-error-or-timeout'; exit 1
+  if ! checked_resource_count="$(jq -er '.StackResourceDrifts | length' "${resource_json}" 2>/dev/null)" ||
+    [[ ! "${checked_resource_count}" =~ ^[0-9]+$ ]]; then
+    cloudformation_drift_poll_error 'category=resource-malformed-response'; exit 1
   fi
-  cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
-  final_bytes="$(wc -c <"${final_json}")"
-  [[ "${final_bytes}" =~ ^[0-9]+$ ]] && ((final_bytes > 0 && final_bytes <= 65536)) || exit 1
-  if ! jq -e --arg exactStackId "${exact_stack_id}" --arg detectionTimestamp "${detection_timestamp}" '
-    type == "object" and (.Stacks | type) == "array" and (.Stacks | length) == 1 and
-    .Stacks[0].StackId == $exactStackId and
-    .Stacks[0].DriftInformation.StackDriftStatus == "IN_SYNC" and
-    .Stacks[0].DriftInformation.LastCheckTimestamp == $detectionTimestamp
-  ' "${final_json}" >/dev/null 2>&1; then
-    cloudformation_drift_poll_error 'category=final-stack-binding-mismatch'; exit 1
+  for ((final_attempt = 1; final_attempt <= final_max_attempts; final_attempt += 1)); do
+    : >"${final_json}"
+    if ! run_bounded_cloudformation_drift_aws "${deadline_epoch}" \
+      --cli-connect-timeout 5 --cli-read-timeout 15 --no-cli-pager \
+      cloudformation describe-stacks --region "${region}" \
+      --stack-name "${exact_stack_id}" --output json \
+      >"${final_json}" 2>/dev/null; then
+      final_api_failures="$((final_api_failures + 1))"
+      if ((final_api_failures >= max_api_failures ||
+        final_attempt == final_max_attempts)); then
+        cloudformation_drift_poll_error 'category=final-stack-api-error-or-timeout'; exit 1
+      fi
+      if ! cloudformation_drift_bounded_sleep \
+        "${deadline_epoch}" "${final_delay_seconds}"; then
+        cloudformation_drift_poll_error 'category=timeout'; exit 1
+      fi
+      continue
+    fi
+    final_api_failures=0
+    if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then
+      cloudformation_drift_poll_error 'category=timeout'; exit 1
+    fi
+    final_bytes="$(wc -c <"${final_json}")"
+    if [[ ! "${final_bytes}" =~ ^[0-9]+$ ]] ||
+      ((final_bytes == 0 || final_bytes > 65536)); then
+      cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1
+    fi
+    if ! final_state="$(jq -er \
+      --arg exactStackId "${exact_stack_id}" \
+      --arg detectionKey "${detection_utc_key}" '
+        def digits_number:
+          sub("^0+"; "") | if . == "" then 0 else tonumber end;
+        def leap_year($year):
+          (($year % 4) == 0) and ((($year % 100) != 0) or (($year % 400) == 0));
+        def month_days($year; $month):
+          if $month == 2 then (if leap_year($year) then 29 else 28 end)
+          elif ($month == 4 or $month == 6 or $month == 9 or $month == 11) then 30
+          elif ($month >= 1 and $month <= 12) then 31
+          else 0 end;
+        def utc_key:
+          if type != "string" then error("invalid timestamp") else
+            sub("[+]00:00$"; "Z") |
+            capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T" +
+              "(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})" +
+              "(?:\\.(?<fraction>[0-9]{1,9}))?Z$") |
+            (.year | digits_number) as $year |
+            (.month | digits_number) as $month |
+            (.day | digits_number) as $day |
+            (.hour | digits_number) as $hour |
+            (.minute | digits_number) as $minute |
+            (.second | digits_number) as $second |
+            if ($year < 1 or $month < 1 or $month > 12 or $day < 1 or
+              $day > month_days($year; $month) or $hour > 23 or
+              $minute > 59 or $second > 59) then error("invalid timestamp")
+            else
+              .year + "-" + .month + "-" + .day + "T" + .hour + ":" +
+              .minute + ":" + .second + "." +
+              (((.fraction // "") + "000000000")[0:9])
+            end
+          end;
+        def valid_stack_drift_status:
+          . == "DRIFTED" or . == "IN_SYNC" or . == "UNKNOWN" or . == "NOT_CHECKED";
+        if type != "object" or (.Stacks | type) != "array" or
+          (.Stacks | length) != 1 or (.Stacks[0].StackId | type) != "string" or
+          .Stacks[0].StackId != $exactStackId then
+          "mismatch"
+        else
+          .Stacks[0].DriftInformation as $drift |
+          if $drift == null then "stale"
+          elif ($drift | type) != "object" then error("invalid drift information")
+          elif (($drift.StackDriftStatus | type) != "string") then error("invalid drift status")
+          elif (($drift.StackDriftStatus | valid_stack_drift_status) | not) then error("invalid drift status")
+          elif $drift.LastCheckTimestamp == null then "stale"
+          else
+            ($drift.LastCheckTimestamp | utc_key) as $actualKey |
+            if $actualKey < $detectionKey then "stale"
+            elif $actualKey > $detectionKey then "mismatch"
+            elif $drift.StackDriftStatus == "IN_SYNC" then "match"
+            else "mismatch" end
+          end
+        end
+      ' "${final_json}" 2>/dev/null)"; then
+      cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1
+    fi
+    case "${final_state}" in
+      match) break ;;
+      stale)
+        if ((final_attempt == final_max_attempts)); then
+          cloudformation_drift_poll_error 'category=final-stack-binding-stale'; exit 1
+        fi
+        if ! cloudformation_drift_bounded_sleep \
+          "${deadline_epoch}" "${final_delay_seconds}"; then
+          cloudformation_drift_poll_error 'category=timeout'; exit 1
+        fi ;;
+      mismatch)
+        cloudformation_drift_poll_error 'category=final-stack-binding-mismatch'; exit 1 ;;
+      *)
+        cloudformation_drift_poll_error 'category=final-stack-malformed-response'; exit 1 ;;
+    esac
+  done
+  if ! cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null; then
+    cloudformation_drift_poll_error 'category=timeout'; exit 1
   fi
-  cloudformation_drift_remaining_seconds "${deadline_epoch}" >/dev/null || exit 124
   printf '%s\n' "${checked_resource_count}"
 )
