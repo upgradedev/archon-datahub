@@ -3,7 +3,7 @@ name: Recover AWS foundation policy migration
 on:
   workflow_run:
     workflows:
-      - Migrate AWS foundation control policy
+      - Migrate AWS foundation assets policy
     types:
       - completed
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION
+        description: Type RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION
         required: true
         type: string
 
@@ -38,7 +38,7 @@ jobs:
         (github.event_name == 'workflow_dispatch' &&
          github.triggering_actor == github.repository_owner &&
          inputs.confirmation ==
-           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+           'RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION')
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -95,7 +95,7 @@ jobs:
               --argjson runId "${TRIGGER_RUN_ID}" '
                 .id == $runId and
                 .run_attempt == $attempt and
-                .name == "Migrate AWS foundation control policy" and
+                .name == "Migrate AWS foundation assets policy" and
                 .path ==
                   ".github/workflows/aws-foundation-policy-migration.yml" and
                 .head_repository.full_name == $repository and
@@ -195,7 +195,7 @@ jobs:
           else
             test "${GITHUB_TRIGGERING_ACTOR}" = "${GITHUB_REPOSITORY_OWNER}"
             test "${CONFIRMATION_INPUT}" = \
-              "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION"
+              "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION"
             [[ "${CURRENT_CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]]
             current_master="$(gh api \
               -H 'Accept: application/vnd.github+json' \
@@ -261,4 +261,4 @@ jobs:
     with:
       operation: ${{ needs.validate.outputs.cleanup_operation }}
       expected_head_sha: ${{ needs.validate.outputs.target_sha }}
-      confirmation: RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION
+      confirmation: RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION

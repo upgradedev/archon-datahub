@@ -14,8 +14,8 @@ exec 3>&1
 readonly FOUNDATION_ROLE_NAME="archon-datahub-github-foundation"
 readonly RECOVERY_ROLE_NAME="archon-datahub-github-governed-canary-recovery"
 readonly BASE_POLICY_NAME="archon-staging-stack-read"
-readonly TEMP_POLICY_NAME="archon-foundation-control-policy-migration"
-readonly CONTROL_POLICY_NAME="archon-aws-foundation-control"
+readonly TEMP_POLICY_NAME="archon-foundation-assets-policy-migration"
+readonly TARGET_POLICY_NAME="archon-aws-foundation-assets"
 readonly CONTRACT="contracts/aws-foundation-policy-migration-v1.json"
 readonly SOURCE_POLICY="infra/aws/foundation/github-actions-foundation-policy.json"
 readonly RENDERER="scripts/render-aws-foundation-policy.mjs"
@@ -97,9 +97,15 @@ validate_common() {
   jq -e '
     .schemaVersion == "archon.aws-foundation-policy-migration/v1" and
     .status == "ready-for-migration" and
-    .sourceFailure.runId == 30586169834 and
-    .sourceFailure.runAttempt == 1 and
-    .sourceFailure.phase == "drift-verification" and
+    .sourceFailure == {
+      awsMutationsBeforeFailure: "reconciliation-completed-postchecks-passed",
+      diagnostic: "incomplete-resource-handler-read-permissions",
+      failureArtifact: "not-authored-sanitized-detection-failure",
+      headSha: "b1aed8dfe66848557b7670da5ce280084a128457",
+      phase: "drift-verification",
+      runAttempt: 1,
+      runId: 30600085506
+    } and
     .workflow.entry ==
       ".github/workflows/aws-foundation-policy-migration.yml" and
     .workflow.driver ==
@@ -111,9 +117,9 @@ validate_common() {
     .workflow.innerConcurrencyGroup ==
       "archon-governed-canary-mutation-recovery" and
     .workflow.queue == "max" and
-    .workflow.confirmation == "MIGRATE EXACT FOUNDATION CONTROL POLICY" and
+    .workflow.confirmation == "MIGRATE EXACT FOUNDATION ASSETS POLICY" and
     .workflow.cleanupConfirmation ==
-      "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION" and
+      "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION" and
     .workflow.ownerActorOnly == true and
     .workflow.exactHeadRequired == true and
     .workflow.exactParentAttemptJobsRequired == true and
@@ -121,23 +127,47 @@ validate_common() {
     .policy.sourceBundle ==
       "infra/aws/foundation/github-actions-foundation-policy.json" and
     .policy.renderer == "scripts/render-aws-foundation-policy.mjs" and
-    .policy.group == "control" and
-    .policy.name == "archon-aws-foundation-control" and
+    .policy.group == "assets" and
+    .policy.name == "archon-aws-foundation-assets" and
     .policy.initialVersionCount == 1 and
     .policy.successfulVersionCount == 2 and
     .policy.retainPreviousDefaultForRollback == true and
     .policy.exactDelta == {
-      stackScopedActions: ["cloudformation:DetectStackResourceDrift"],
-      stackScopedStatement: "ReconcileExactFoundationStacks",
-      wildcardActions: ["cloudformation:BatchDescribeTypeConfigurations"],
-      wildcardStatement: "InspectFoundationTemplates"
+      statements: [
+        {
+          actions: [
+            "s3:GetAccelerateConfiguration",
+            "s3:GetAnalyticsConfiguration",
+            "s3:GetBucketAbac",
+            "s3:GetBucketCORS",
+            "s3:GetBucketLogging",
+            "s3:GetBucketMetadataTableConfiguration",
+            "s3:GetBucketNotification",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketWebsite",
+            "s3:GetIntelligentTieringConfiguration",
+            "s3:GetInventoryConfiguration",
+            "s3:GetMetricsConfiguration",
+            "s3:GetReplicationConfiguration",
+            "s3:ListTagsForResource"
+          ],
+          resourcesMatchStatement: "ReconcileExactBootstrapBuckets",
+          sid: "ReadExactBootstrapBucketsForDrift"
+        },
+        {
+          actions: ["iam:ListEntitiesForPolicy"],
+          resourcesMatchStatement: "ReconcileExactStagePolicies",
+          sid: "ReadExactStagePoliciesForDrift"
+        }
+      ]
     } and
     .authorization.installerEnvironment == "aws-foundation" and
     .authorization.executorEnvironment == "governed-canary-recovery" and
     .authorization.executorRoleName ==
       "archon-datahub-github-governed-canary-recovery" and
     .authorization.temporaryPolicyName ==
-      "archon-foundation-control-policy-migration" and
+      "archon-foundation-assets-policy-migration" and
     .authorization.ttlSeconds == 1200 and
     .authorization.managedPolicyActions == [
       "iam:CreatePolicyVersion",
@@ -203,60 +233,85 @@ verify_caller() {
 }
 
 render_policy_documents() {
-  NEW_POLICY="${WORK_ROOT}/control-new.json"
-  OLD_POLICY="${WORK_ROOT}/control-old.json"
-  local raw="${WORK_ROOT}/control-new.raw.json"
+  NEW_POLICY="${WORK_ROOT}/assets-new.json"
+  OLD_POLICY="${WORK_ROOT}/assets-old.json"
+  local raw="${WORK_ROOT}/assets-new.raw.json"
   node "${RENDERER}" \
     --input "${SOURCE_POLICY}" \
     --account "${AWS_ACCOUNT_ID}" \
-    --stdout-group control >"${raw}" || fail "Unable to render the exact control policy"
+    --stdout-group assets >"${raw}" || fail "Unable to render the exact assets policy"
   canonical_iam_policy "${raw}" >"${NEW_POLICY}" || {
-    fail "Rendered control policy is invalid"
+    fail "Rendered assets policy is invalid"
     return 1
   }
   chmod 0600 "${raw}" "${NEW_POLICY}"
   jq -e \
+    --slurpfile contract "${CONTRACT}" \
     --arg account "${AWS_ACCOUNT_ID}" '
+      . as $policy |
+      ($contract[0].policy.exactDelta.statements) as $delta |
       .Version == "2012-10-17" and
       (.Statement | type == "array" and length > 0) and
-      ([.Statement[] |
-        select(.Sid == "ReconcileExactFoundationStacks") |
-        .Action[] |
-        select(. == "cloudformation:DetectStackResourceDrift")] | length) == 1 and
-      ([.Statement[] |
-        select(.Sid == "InspectFoundationTemplates") |
-        .Action[] |
-        select(. == "cloudformation:BatchDescribeTypeConfigurations")] | length) == 1 and
+      ($delta | length) == 2 and
+      all($delta[];
+        . as $spec |
+        ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+        ([$policy.Statement[] |
+          select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+        ($added | length) == 1 and
+        ($source | length) == 1 and
+        ($added[0] | keys | sort) == ["Action", "Effect", "Resource", "Sid"] and
+        $added[0].Effect == "Allow" and
+        (($added[0].Action |
+          if type == "array" then sort else [.] end) ==
+          ($spec.actions | sort)) and
+        ($added[0].Resource | type) == "array" and
+        (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+        all($added[0].Resource[]; . != "*" and contains($account))) and
       (tostring | contains($account)) and
       (tostring | contains("${AWS::AccountId}") | not) and
       (tostring | contains("${aws:PrincipalAccount}") | not)
-    ' "${NEW_POLICY}" >/dev/null || fail "The rendered control policy delta is invalid"
-  local old_raw="${WORK_ROOT}/control-old.raw.json"
-  jq -cS '
+    ' "${NEW_POLICY}" >/dev/null || fail "The rendered assets policy delta is invalid"
+  local old_raw="${WORK_ROOT}/assets-old.raw.json"
+  jq -cS --slurpfile contract "${CONTRACT}" '
+    ($contract[0].policy.exactDelta.statements | map(.sid)) as $deltaSids |
     .Statement |= map(
-      if .Sid == "ReconcileExactFoundationStacks" then
-        .Action |= map(select(. != "cloudformation:DetectStackResourceDrift"))
-      elif .Sid == "InspectFoundationTemplates" then
-        .Action |= map(select(. != "cloudformation:BatchDescribeTypeConfigurations"))
-      else . end
+      . as $statement |
+      select(($deltaSids | index($statement.Sid)) == null)
     )
   ' "${NEW_POLICY}" >"${old_raw}" || {
-    fail "Unable to derive the exact previous policy"
+    fail "Unable to derive the exact previous assets policy"
     return 1
   }
   canonical_iam_policy "${old_raw}" >"${OLD_POLICY}" || return 1
   chmod 0600 "${old_raw}" "${OLD_POLICY}"
+  jq -e \
+    --slurpfile contract "${CONTRACT}" \
+    --slurpfile old "${OLD_POLICY}" '
+      . as $new |
+      ($contract[0].policy.exactDelta.statements | map(.sid)) as $deltaSids |
+      ($old[0]) as $previous |
+      ($new.Statement | length) ==
+        (($previous.Statement | length) + ($deltaSids | length)) and
+      all($deltaSids[];
+        . as $sid |
+        ([$new.Statement[] | select(.Sid == $sid)] | length) == 1 and
+        ([$previous.Statement[] | select(.Sid == $sid)] | length) == 0) and
+      ([$new.Statement[] |
+        . as $statement |
+        select(($deltaSids | index($statement.Sid)) == null)] ==
+        $previous.Statement)
+    ' "${NEW_POLICY}" >/dev/null || fail "The previous assets policy derivation differs"
   NEW_POLICY_SHA="$(iam_policy_sha "${NEW_POLICY}")"
   OLD_POLICY_SHA="$(iam_policy_sha "${OLD_POLICY}")"
   [[ "${NEW_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
   [[ "${OLD_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" || fail "The migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
-    fail "The rendered control policy exceeds the managed-policy document limit"
-  CONTROL_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${CONTROL_POLICY_NAME}"
+    fail "The rendered assets policy exceeds the managed-policy document limit"
+  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
   RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
 }
-
 verify_recovery_role_baseline() {
   local role="${WORK_ROOT}/recovery-role.json"
   local inline="${WORK_ROOT}/recovery-inline.json"

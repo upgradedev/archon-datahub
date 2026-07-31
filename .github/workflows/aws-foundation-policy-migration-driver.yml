@@ -33,10 +33,10 @@ jobs:
       github.triggering_actor == github.repository_owner &&
       (
         (inputs.operation == 'migrate' &&
-         inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY') ||
+         inputs.confirmation == 'MIGRATE EXACT FOUNDATION ASSETS POLICY') ||
         (inputs.operation == 'cleanup-rollback' &&
          inputs.confirmation ==
-           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+           'RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION')
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -286,12 +286,12 @@ jobs:
       github.triggering_actor == github.repository_owner &&
       (
         (inputs.operation == 'migrate' &&
-         inputs.confirmation == 'MIGRATE EXACT FOUNDATION CONTROL POLICY') ||
+         inputs.confirmation == 'MIGRATE EXACT FOUNDATION ASSETS POLICY') ||
         ((inputs.operation == 'cleanup-revoke' ||
           inputs.operation == 'cleanup-rollback' ||
           inputs.operation == 'cleanup-migrated') &&
          inputs.confirmation ==
-           'RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION')
+           'RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION')
       )
     runs-on: ubuntu-24.04
     timeout-minutes: 25
