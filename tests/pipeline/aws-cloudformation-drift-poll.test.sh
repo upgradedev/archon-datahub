@@ -62,6 +62,7 @@ if [[ "${joined}" == *' cloudformation describe-stack-resource-drifts '* ]]; the
   [[ "${SCENARIO}" == different-incarnation ]] && resource_stack="${OTHER_STACK_ID}"
   [[ "${SCENARIO}" == stale-resource ]] && resource_time="${STALE_TIMESTAMP}"
   [[ "${SCENARIO}" == subsecond-stale-resource ]] && resource_time="${SUBSECOND_STALE_TIMESTAMP}"
+  [[ "${SCENARIO}" == invalid-resource-calendar ]] && resource_time="${INVALID_RESOURCE_TIMESTAMP}"
   [[ "${SCENARIO}" == not-checked-resource ]] && resource_status='NOT_CHECKED'
   printf '{"StackResourceDrifts":[{"StackId":"%s","Timestamp":"%s","StackResourceDriftStatus":"%s"}]}\n' "${resource_stack}" "${resource_time}" "${resource_status}"
   exit 0
@@ -70,23 +71,36 @@ if [[ "${joined}" == *' cloudformation describe-stacks '* ]]; then
   [[ "${joined}" == *" --stack-name ${STACK_ID} "* ]] || exit 97
   n="$(<"${FINAL_COUNTER}")";n="$((n + 1))";printf '%s\n' "${n}" >"${FINAL_COUNTER}"
   case "${SCENARIO}" in
+    deadline-final) /bin/sleep 2 ;;
     final-api-transient) ((n == 1)) && exit 1 ;;
     final-api-persistent) exit 1 ;;
+    final-malformed) printf '{not-json\n'; exit 0 ;;
+    final-oversize) printf '{"Stacks":[],"Padding":"'; printf '%065537d' 0; printf '"}\n'; exit 0 ;;
   esac
   final_stack="${STACK_ID}";final_status='IN_SYNC';last_check="${ACTIVE_DETECTION_TIMESTAMP}"
   case "${SCENARIO}" in
     final-equivalent-utc) last_check="${EQUIVALENT_TIMESTAMP}" ;;
+    final-nonzero-equivalent) last_check="${NONZERO_EQUIVALENT_TIMESTAMP}" ;;
     final-stale-then-current) ((n == 1)) && last_check="${STALE_TIMESTAMP}" ;;
-    final-stale-persistent) last_check="${STALE_TIMESTAMP}" ;;
+    final-stale-persistent|final-stale-default) last_check="${STALE_TIMESTAMP}" ;;
     final-timestamp-mismatch) last_check="${NEWER_TIMESTAMP}" ;;
     final-subsecond-mismatch) last_check="${SUBSECOND_NEWER_TIMESTAMP}" ;;
-    final-wrong-stack) final_stack="${WRONG_STACK_ID}" ;;
+    final-different-incarnation) final_stack="${OTHER_STACK_ID}" ;;
     final-drifted) final_status='DRIFTED' ;;
+    final-invalid-calendar) last_check="${INVALID_FINAL_TIMESTAMP}" ;;
+    final-invalid-second) last_check="${INVALID_SECOND_TIMESTAMP}" ;;
+    final-invalid-fraction) last_check="${INVALID_FRACTION_TIMESTAMP}" ;;
     final-missing-then-current)
       if ((n == 1)); then
         printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"IN_SYNC"}}]}\n' "${STACK_ID}"
         exit 0
       fi ;;
+    final-absent-drift-info-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s"}]}\n' "${STACK_ID}";exit 0;fi ;;
+    final-not-checked-missing-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"NOT_CHECKED"}}]}\n' "${STACK_ID}";exit 0;fi ;;
+    final-drifted-stale-then-current)
+      if ((n == 1)); then printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"DRIFTED","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${STALE_TIMESTAMP}";exit 0;fi ;;
     final-multiple-stacks)
       printf '{"Stacks":[{"StackId":"%s","DriftInformation":{"StackDriftStatus":"IN_SYNC","LastCheckTimestamp":"%s"}},{"StackId":"%s","DriftInformation":{"StackDriftStatus":"IN_SYNC","LastCheckTimestamp":"%s"}}]}\n' "${STACK_ID}" "${last_check}" "${STACK_ID}" "${last_check}"
       exit 0 ;;
