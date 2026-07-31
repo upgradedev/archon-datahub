@@ -124,7 +124,7 @@ test "${direct_sha}" != "${changed_sha}"
     POLICY_VERSION_DEFAULTS=(true false)
     POLICY_DEFAULT_VERSION=v1
   }
-  if require_migrated_state wrong-default >/dev/null; then
+  if require_migrated_state wrong-default >/dev/null 2>&1; then
     echo '::error::wrong default managed-policy version was accepted' >&2
     exit 1
   fi
@@ -134,7 +134,7 @@ test "${direct_sha}" != "${changed_sha}"
   POLICY_VERSION_IDS=(v1 v2)
   POLICY_VERSION_SHAS=(old old)
   POLICY_VERSION_DEFAULTS=(true false)
-  if version_for_sha old >/dev/null; then
+  if version_for_sha old >/dev/null 2>&1; then
     echo '::error::duplicate policy documents were accepted' >&2
     exit 1
   fi
@@ -149,7 +149,7 @@ test "${direct_sha}" != "${changed_sha}"
     POLICY_VERSION_DEFAULTS=(true false)
     POLICY_DEFAULT_VERSION=v1
   }
-  if require_migrated_state duplicate-id >/dev/null; then
+  if require_migrated_state duplicate-id >/dev/null 2>&1; then
     echo '::error::duplicate version IDs were accepted' >&2
     exit 1
   fi
@@ -164,7 +164,7 @@ test "${direct_sha}" != "${changed_sha}"
     POLICY_VERSION_DEFAULTS=(false true)
     POLICY_DEFAULT_VERSION=v3
   }
-  if require_migrated_state unknown-extra >/dev/null; then
+  if require_migrated_state unknown-extra >/dev/null 2>&1; then
     echo '::error::unknown extra policy version was accepted' >&2
     exit 1
   fi
@@ -297,7 +297,7 @@ run_install_ttl_case() (
     install_temp_policy migrate 2099-01-01T00:00:00Z
     assert_equal "${put_calls}" "1" "accepted install TTL ${remaining}"
   else
-    if install_temp_policy migrate 2099-01-01T00:00:00Z; then
+    if install_temp_policy migrate 2099-01-01T00:00:00Z 2>/dev/null; then
       echo "::error::invalid install TTL ${remaining} was accepted" >&2
       exit 1
     fi
@@ -319,19 +319,19 @@ run_install_ttl_case 1201 failure
     printf '1000\n'
   }
   aws() { echo '::error::PutRolePolicy reached after malformed date' >&2; return 1; }
-  if install_temp_policy migrate not-a-date; then
+  if install_temp_policy migrate not-a-date 2>/dev/null; then
     echo '::error::malformed authorization date was accepted' >&2
     exit 1
   fi
 )
 
 run_live_ttl_case() (
-  local remaining="$1"
+  local test_remaining="$1"
   local expected_result="$2"
   CONTROL_POLICY_ARN=arn:aws:iam::123456789012:policy/archon-aws-foundation-control
   RECOVERY_ROLE_ARN=arn:aws:iam::123456789012:role/archon-datahub-github-governed-canary-recovery
-  local expected_policy="${test_root}/live-expected-${remaining}.json"
-  local live_policy="${test_root}/live-policy-${remaining}.json"
+  local expected_policy="${test_root}/live-expected-${test_remaining}.json"
+  local live_policy="${test_root}/live-policy-${test_remaining}.json"
   build_temp_policy migrate 2099-01-01T00:00:00Z "${expected_policy}"
   local expected_sha
   expected_sha="$(iam_policy_sha "${expected_policy}")"
@@ -358,8 +358,8 @@ run_live_ttl_case() (
   }
   if [[ "${expected_result}" == success ]]; then
     verify_live_temp_policy migrate "${expected_sha}"
-  elif verify_live_temp_policy migrate "${expected_sha}"; then
-    echo "::error::invalid live TTL ${remaining} was accepted" >&2
+  elif verify_live_temp_policy migrate "${expected_sha}" 2>/dev/null; then
+    echo "::error::invalid live TTL ${test_remaining} was accepted" >&2
     exit 1
   fi
 )
