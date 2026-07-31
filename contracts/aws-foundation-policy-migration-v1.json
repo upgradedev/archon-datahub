@@ -2,13 +2,13 @@
   "schemaVersion": "archon.aws-foundation-policy-migration/v1",
   "status": "ready-for-migration",
   "sourceFailure": {
-    "runId": 30586169834,
+    "runId": 30600085506,
     "runAttempt": 1,
-    "headSha": "06680d074c4d2a4bc18a64b9c217c137c3bdcf5a",
+    "headSha": "b1aed8dfe66848557b7670da5ce280084a128457",
     "phase": "drift-verification",
-    "diagnostic": "missing-drift-dependency-permissions",
+    "diagnostic": "incomplete-resource-handler-read-permissions",
     "awsMutationsBeforeFailure": "reconciliation-completed-postchecks-passed",
-    "failureArtifact": "not-authored-command-outside-sanitized-wrapper"
+    "failureArtifact": "not-authored-sanitized-detection-failure"
   },
   "workflow": {
     "entry": ".github/workflows/aws-foundation-policy-migration.yml",
@@ -18,8 +18,8 @@
     "outerConcurrencyGroup": "archon-aws-control-plane",
     "innerConcurrencyGroup": "archon-governed-canary-mutation-recovery",
     "queue": "max",
-    "confirmation": "MIGRATE EXACT FOUNDATION CONTROL POLICY",
-    "cleanupConfirmation": "RECOVER EXACT FOUNDATION CONTROL POLICY MIGRATION",
+    "confirmation": "MIGRATE EXACT FOUNDATION ASSETS POLICY",
+    "cleanupConfirmation": "RECOVER EXACT FOUNDATION ASSETS POLICY MIGRATION",
     "ownerActorOnly": true,
     "exactHeadRequired": true,
     "exactParentAttemptJobsRequired": true,
@@ -37,19 +37,41 @@
   "policy": {
     "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
     "renderer": "scripts/render-aws-foundation-policy.mjs",
-    "group": "control",
-    "name": "archon-aws-foundation-control",
+    "group": "assets",
+    "name": "archon-aws-foundation-assets",
     "initialVersionCount": 1,
     "successfulVersionCount": 2,
     "retainPreviousDefaultForRollback": true,
     "exactDelta": {
-      "stackScopedStatement": "ReconcileExactFoundationStacks",
-      "stackScopedActions": [
-        "cloudformation:DetectStackResourceDrift"
-      ],
-      "wildcardStatement": "InspectFoundationTemplates",
-      "wildcardActions": [
-        "cloudformation:BatchDescribeTypeConfigurations"
+      "statements": [
+        {
+          "sid": "ReadExactBootstrapBucketsForDrift",
+          "resourcesMatchStatement": "ReconcileExactBootstrapBuckets",
+          "actions": [
+            "s3:GetAccelerateConfiguration",
+            "s3:GetAnalyticsConfiguration",
+            "s3:GetBucketAbac",
+            "s3:GetBucketCORS",
+            "s3:GetBucketLogging",
+            "s3:GetBucketMetadataTableConfiguration",
+            "s3:GetBucketNotification",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketWebsite",
+            "s3:GetIntelligentTieringConfiguration",
+            "s3:GetInventoryConfiguration",
+            "s3:GetMetricsConfiguration",
+            "s3:GetReplicationConfiguration",
+            "s3:ListTagsForResource"
+          ]
+        },
+        {
+          "sid": "ReadExactStagePoliciesForDrift",
+          "resourcesMatchStatement": "ReconcileExactStagePolicies",
+          "actions": [
+            "iam:ListEntitiesForPolicy"
+          ]
+        }
       ]
     }
   },
@@ -57,7 +79,7 @@
     "installerEnvironment": "aws-foundation",
     "executorEnvironment": "governed-canary-recovery",
     "executorRoleName": "archon-datahub-github-governed-canary-recovery",
-    "temporaryPolicyName": "archon-foundation-control-policy-migration",
+    "temporaryPolicyName": "archon-foundation-assets-policy-migration",
     "ttlSeconds": 1200,
     "managedPolicyActions": [
       "iam:CreatePolicyVersion",
