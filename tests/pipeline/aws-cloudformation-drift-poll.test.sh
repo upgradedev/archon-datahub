@@ -45,7 +45,7 @@ if [[ "${joined}" == *' cloudformation describe-stack-drift-detection-status '* 
     missing-count) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
     missing-timestamp) printf '{"StackId":"%s","StackDriftDetectionId":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" ;;
     wrong-detection-id) printf '{"StackId":"%s","StackDriftDetectionId":"00000000-0000-0000-0000-000000000000","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_TIMESTAMP}" ;;
-    wrong-stack-id) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${OTHER_STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
+    wrong-stack-id) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${WRONG_STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
     malformed) printf '{not-json\n' ;;
     unknown-status) printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","DetectionStatus":"SURPRISE"}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
     deadline-during-status) /bin/sleep 2; printf '{"StackId":"%s","StackDriftDetectionId":"%s","Timestamp":"%s","StackDriftStatus":"IN_SYNC","DetectionStatus":"DETECTION_COMPLETE","DriftedStackResourceCount":0}\n' "${STACK_ID}" "${DETECTION_ID}" "${DETECTION_TIMESTAMP}" ;;
@@ -75,6 +75,7 @@ chmod 0700 "${fake_bin}/aws" "${fake_bin}/sleep";export PATH="${fake_bin}:${PATH
 export DETECTION_ID='11111111-2222-3333-4444-555555555555' ACCOUNT_ID='123456789012' REGION='eu-west-1' STACK_NAME='Archon-Test-Stack'
 export STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 export OTHER_STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/${STACK_NAME}/ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
+export WRONG_STACK_ID="arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/Not-${STACK_NAME}/ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
 export DETECTION_TIMESTAMP='2026-07-31T00:00:00.000Z' STALE_TIMESTAMP='2026-07-30T23:59:59.000Z' NEWER_TIMESTAMP='2026-07-31T00:00:01.000Z'
 fail(){ echo "::error::$*" >&2;exit 1; }
 assert_equals(){ [[ "$2" == "$1" ]]||fail "$3: expected $1, got $2"; }
