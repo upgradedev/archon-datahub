@@ -455,8 +455,10 @@ for job_environment in \
   test "$(grep -Fc 'bash scripts/verify-github-environment-protection.sh' \
     <<<"${block}")" -eq 1 ||
     fail "driver job ${job} must invoke the environment verifier exactly once"
-  grep -Fqx "      name: ${expected_environment}" <<<"${block}" ||
-    fail "driver job ${job} uses the wrong protected environment"
+  expected_environment_gate="$(printf '    environment:\n      name: %s' \
+    "${expected_environment}")"
+  test "$(grep -Fc "${expected_environment_gate}" <<<"${block}")" -eq 1 ||
+    fail "driver job ${job} has a noncanonical protected environment gate"
   case "${job}" in
     prepare)
       expected_verifier_call=$'bash scripts/verify-github-environment-protection.sh\n          aws-foundation governed-canary-recovery'

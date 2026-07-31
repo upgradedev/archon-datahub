@@ -15,6 +15,8 @@ set -Eeuo pipefail
 [[ "${1:-}" == "api" ]] || exit 91
 endpoint="${!#}"
 scenario="${ENVIRONMENT_SCENARIO:?}"
+: "${GH_CALL_LOG:?}"
+printf '%s\n' "${endpoint}" >>"${GH_CALL_LOG}"
 [[ "${scenario}" != "api-failure" ]] || exit 70
 environment="${endpoint#*/environments/}"
 environment="${environment%%/*}"
@@ -96,17 +98,34 @@ verifier="${repository_root}/scripts/verify-github-environment-protection.sh"
 run_pass() {
   local scenario="$1"
   shift
+  local call_log="${test_root}/${scenario}.calls"
+  : >"${call_log}"
+  GH_CALL_LOG="${call_log}" \
   ENVIRONMENT_SCENARIO="${scenario}" \
     bash "${verifier}" "$@" \
       >"${test_root}/${scenario}.stdout" \
       2>"${test_root}/${scenario}.stderr"
+  test "$(wc -l <"${call_log}")" -eq "$((2 * $#))" || {
+    echo "::error::environment verifier did not query every ${scenario} endpoint" >&2
+    exit 1
+  }
+  local environment configuration_endpoint branch_endpoint
+  for environment in "$@"; do
+    configuration_endpoint="/repos/${GITHUB_REPOSITORY}/environments/${environment}"
+    branch_endpoint="${configuration_endpoint}/deployment-branch-policies?per_page=100"
+    test "$(grep -Fxc "${configuration_endpoint}" "${call_log}")" -eq 1
+    test "$(grep -Fxc "${branch_endpoint}" "${call_log}")" -eq 1
+  done
 }
 
 run_fail() {
   local label="$1"
   local scenario="$2"
   shift 2
-  if ENVIRONMENT_SCENARIO="${scenario}" \
+  local call_log="${test_root}/${label}.calls"
+  : >"${call_log}"
+  if GH_CALL_LOG="${call_log}" \
+    ENVIRONMENT_SCENARIO="${scenario}" \
     bash "${verifier}" "$@" \
       >"${test_root}/${label}.stdout" \
       2>"${test_root}/${label}.stderr"; then
