@@ -114,6 +114,7 @@ jobs:
                   custom_branch_policies: true,
                   protected_branches: false
                 } and
+                (.protection_rules | length) == 2 and
                 ([.protection_rules[] |
                   select(.type == "branch_policy")] | length) == 1 and
                 ([.protection_rules[] |
@@ -121,9 +122,9 @@ jobs:
                 ([.protection_rules[] |
                   select(.type == "required_reviewers")][0] |
                   .prevent_self_review == false and
-                  [.reviewers[] |
-                    select(.type == "User") |
-                    .reviewer.login] == [$owner])
+                  (.reviewers | length) == 1 and
+                  .reviewers[0].type == "User" and
+                  .reviewers[0].reviewer.login == $owner)
               ' <<<"${configuration}" >/dev/null
             jq -e '
               .total_count == 1 and
@@ -392,11 +393,13 @@ jobs:
         id: clear
         run: |
           set -euo pipefail
-          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-          unset AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION
+          test -f "${GITHUB_ENV}"
+          test ! -L "${GITHUB_ENV}"
           for variable in \
             AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
             AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+            unset "${variable}"
+            printf '%s=\n' "${variable}" >>"${GITHUB_ENV}"
             test -z "${!variable:-}"
           done
           echo "cleared=true" >>"${GITHUB_OUTPUT}"
@@ -410,6 +413,11 @@ jobs:
           EVIDENCE_DIR: ${{ steps.revoke.outputs.evidence_dir }}
         run: |
           set -euo pipefail
+          for variable in \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+            AWS_SECURITY_TOKEN AWS_REGION AWS_DEFAULT_REGION; do
+            test -z "${!variable:-}"
+          done
           test -d "${EVIDENCE_DIR}"
           test ! -L "${EVIDENCE_DIR}"
           expected="$({

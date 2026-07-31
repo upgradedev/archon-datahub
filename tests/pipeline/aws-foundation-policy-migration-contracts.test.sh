@@ -228,6 +228,8 @@ require_text "${driver_workflow}" \
   'deployments: read' \
   '.can_admins_bypass == false' \
   '.prevent_self_review == false' \
+  '(.reviewers | length) == 1' \
+  '.reviewers[0].type == "User"' \
   'custom_branch_policies: true' \
   'verify_environment aws-foundation' \
   'verify_environment governed-canary-recovery' \
@@ -239,6 +241,8 @@ require_text "${driver_workflow}" \
   'bash scripts/run-aws-foundation-policy-migration.sh rollback' \
   'bash scripts/run-aws-foundation-policy-migration.sh revoke' \
   'Clear AWS credentials before evidence handling' \
+  'printf ''%s=\n'' "${variable}" >>"${GITHUB_ENV}"' \
+  'test -z "${!variable:-}"' \
   'actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26' \
   'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' \
   'if-no-files-found: error' \
