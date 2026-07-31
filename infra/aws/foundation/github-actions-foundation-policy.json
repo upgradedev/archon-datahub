@@ -86,9 +86,7 @@
     {
       "Sid": "ReadExactStagePoliciesForDrift",
       "Effect": "Allow",
-      "Action": [
-        "iam:ListEntitiesForPolicy"
-      ],
+      "Action": "iam:ListEntitiesForPolicy",
       "Resource": [
         "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-staging",
         "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-cdk-*-production",
