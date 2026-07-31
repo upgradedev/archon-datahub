@@ -18,11 +18,7 @@ on:
         type: string
 
 permissions:
-  actions: read
-  attestations: write
   contents: read
-  deployments: read
-  id-token: write
 
 concurrency:
   group: archon-aws-control-plane

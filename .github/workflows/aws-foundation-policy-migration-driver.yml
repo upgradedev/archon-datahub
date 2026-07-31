@@ -18,7 +18,6 @@ on:
 
 permissions:
   contents: read
-  deployments: read
 
 concurrency:
   group: archon-governed-canary-mutation-recovery
