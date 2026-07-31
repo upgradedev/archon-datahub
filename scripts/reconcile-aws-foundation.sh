@@ -18,6 +18,12 @@ report_foundation_error() {
 trap 'report_foundation_error "$?" "$LINENO"' ERR
 shopt -s inherit_errexit
 
+readonly CFN_DRIFT_HELPER='scripts/aws-cloudformation-drift.sh'
+test -f "${CFN_DRIFT_HELPER}"
+test ! -L "${CFN_DRIFT_HELPER}"
+# shellcheck source=scripts/aws-cloudformation-drift.sh
+source "${CFN_DRIFT_HELPER}"
+
 : "${EXPECTED_ACCOUNT_ID:?EXPECTED_ACCOUNT_ID is required}"
 : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
@@ -69,6 +75,10 @@ test "${STAGING_CLOUDFRONT_DOMAIN_NAME}" != \
 
 readonly PRIMARY_REGION="eu-west-1"
 readonly EDGE_REGION="us-east-1"
+readonly CFN_DRIFT_MAX_ATTEMPTS=120
+readonly CFN_DRIFT_DELAY_SECONDS=2
+readonly CFN_DRIFT_MAX_API_FAILURES=3
+readonly CFN_DRIFT_PHASE_TIMEOUT_SECONDS=900
 readonly SHARED_API_STACK="Archon-Shared-ApiGateway-Logging"
 readonly SHARED_API_ROLE="archon-datahub-apigateway-cloudwatch-logs"
 readonly CANARY_ROLE_STACK="Archon-Governed-Canary-Roles"
@@ -1531,56 +1541,56 @@ foundation_phase='drift-verification'
 echo "::group::Require every managed foundation stack to be IN_SYNC"
 revalidate_master
 drift_file="${RUNNER_TEMP}/aws-foundation-drift.json"
+drift_started_epoch="$(date +%s)"
+[[ "${drift_started_epoch}" =~ ^[1-9][0-9]*$ ]]
+readonly CFN_DRIFT_DEADLINE_EPOCH="$((drift_started_epoch + CFN_DRIFT_PHASE_TIMEOUT_SECONDS))"
 printf '[]' >"${drift_file}"
 check_drift() {
-  local stage="$1"
-  local kind="$2"
-  local region="$3"
-  local stack_name="$4"
-  local detection_id
+  local stage="$1" kind="$2" region="$3" stack_name="$4"
   local status_json="${RUNNER_TEMP}/drift-${region}-${stack_name}.json"
   local resource_json="${RUNNER_TEMP}/resource-drift-${region}-${stack_name}.json"
-  detection_id="$(
-    aws cloudformation detect-stack-drift \
-      --region "${region}" \
-      --stack-name "${stack_name}" \
-      --query StackDriftDetectionId \
-      --output text
-  )"
-  aws cloudformation wait stack-drift-detection-complete \
-    --region "${region}" \
-    --stack-drift-detection-id "${detection_id}"
-  aws cloudformation describe-stack-drift-detection-status \
-    --region "${region}" \
-    --stack-drift-detection-id "${detection_id}" \
-    --output json >"${status_json}"
-  jq -e '
-    .DetectionStatus == "DETECTION_COMPLETE" and
-    .StackDriftStatus == "IN_SYNC" and
-    (.DriftedStackResourceCount // 0) == 0
-  ' "${status_json}" >/dev/null
-  aws cloudformation describe-stack-resource-drifts \
-    --region "${region}" \
-    --stack-name "${stack_name}" \
-    --output json >"${resource_json}"
-  jq -e '
-    [
-      .StackResourceDrifts[]? |
-      select(
-        .StackResourceDriftStatus != "IN_SYNC" and
-        .StackResourceDriftStatus != "NOT_CHECKED"
-      )
-    ] |
-    length == 0
-  ' "${resource_json}" >/dev/null
-  jq \
-    --arg stage "${stage}" \
-    --arg kind "${kind}" \
-    --arg region "${region}" \
-    --arg stackName "${stack_name}" '
+  local expected_stack_prefix resource_bytes checked_resource_count
+  expected_stack_prefix="arn:aws:cloudformation:${region}:${EXPECTED_ACCOUNT_ID}:stack/${stack_name}/"
+  detect_and_wait_for_cloudformation_stack_in_sync \
+    "${region}" "${stack_name}" "${status_json}" "${EXPECTED_ACCOUNT_ID}"
+  [[ "${CFN_DRIFT_POLL_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]
+  [[ "${CFN_DRIFT_POLL_ELAPSED_SECONDS}" =~ ^[0-9]+$ ]]
+  (umask 077 && : >"${resource_json}")
+  if ! aws --cli-connect-timeout 5 --cli-read-timeout 15 --no-cli-pager \
+    cloudformation describe-stack-resource-drifts --region "${region}" \
+    --stack-name "${stack_name}" --output json >"${resource_json}" 2>/dev/null; then
+    cloudformation_drift_poll_error 'category=resource-api-error'
+    return 1
+  fi
+  resource_bytes="$(wc -c <"${resource_json}")"
+  if [[ ! "${resource_bytes}" =~ ^[0-9]+$ ]] ||
+    ((resource_bytes == 0 || resource_bytes > 1048576)); then
+    cloudformation_drift_poll_error 'category=malformed-resource-response'
+    return 1
+  fi
+  if ! jq -e --arg stackPrefix "${expected_stack_prefix}" '
+      type == "object" and (.StackResourceDrifts | type) == "array" and
+      all(.StackResourceDrifts[];
+        (.StackId | (type == "string" and startswith($stackPrefix))) and
+        .StackResourceDriftStatus == "IN_SYNC")
+    ' "${resource_json}" >/dev/null 2>&1; then
+    cloudformation_drift_poll_error 'category=resource-drift-or-malformed-response'
+    return 1
+  fi
+  checked_resource_count="$(jq -er '.StackResourceDrifts | length' "${resource_json}" 2>/dev/null)"
+  [[ "${checked_resource_count}" =~ ^[0-9]+$ ]]
+  jq --arg stage "${stage}" --arg kind "${kind}" --arg region "${region}" \
+    --arg stackName "${stack_name}" --argjson checkedResourceCount "${checked_resource_count}" \
+    --argjson pollAttempts "${CFN_DRIFT_POLL_ATTEMPTS}" \
+    --argjson pollElapsedSeconds "${CFN_DRIFT_POLL_ELAPSED_SECONDS}" '
       . + [{
+        checkedResourceCount: $checkedResourceCount,
+        coverage: "cloudformation-supported-resources",
+        detectionStatus: "DETECTION_COMPLETE",
         driftedResourceCount: 0,
         kind: $kind,
+        pollAttempts: $pollAttempts,
+        pollElapsedSeconds: $pollElapsedSeconds,
         region: $region,
         stackDriftStatus: "IN_SYNC",
         stackName: $stackName,
@@ -1589,6 +1599,7 @@ check_drift() {
       }]
     ' "${drift_file}" >"${drift_file}.next"
   mv "${drift_file}.next" "${drift_file}"
+  rm -f -- "${status_json}" "${resource_json}"
 }
 for stage in staging production; do
   check_drift "${stage}" iam "${PRIMARY_REGION}" "${IAM_STACK[${stage}]}"
@@ -1612,7 +1623,18 @@ if [[ "${shared_api_gateway_mode}" == "foundation-managed" ]]; then
 else
   test "${drift_stack_count}" -eq 9
 fi
-jq -e 'all(.[]; .stackDriftStatus == "IN_SYNC")' "${drift_file}" >/dev/null
+jq -e '
+  length > 0 and all(.[];
+    keys == ["checkedResourceCount", "coverage", "detectionStatus",
+      "driftedResourceCount", "kind", "pollAttempts", "pollElapsedSeconds",
+      "region", "stackDriftStatus", "stackName", "stage", "validation"] and
+    .coverage == "cloudformation-supported-resources" and
+    .detectionStatus == "DETECTION_COMPLETE" and .driftedResourceCount == 0 and
+    .stackDriftStatus == "IN_SYNC" and .validation == "passed" and
+    (.checkedResourceCount | (type == "number" and floor == . and . >= 0)) and
+    (.pollAttempts | (type == "number" and floor == . and . >= 1 and . <= 120)) and
+    (.pollElapsedSeconds | (type == "number" and floor == . and . >= 0 and . <= 900)))
+' "${drift_file}" >/dev/null
 drift_sha="$(sha256sum "${drift_file}" | awk '{print $1}')"
 echo "::endgroup::"
 
