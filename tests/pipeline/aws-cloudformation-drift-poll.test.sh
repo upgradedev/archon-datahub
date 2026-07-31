@@ -127,14 +127,14 @@ assert_sleep_arguments(){
 run_poll_case(){
   local name="$1" expected="$2" expected_status="$3" expected_sleep="$4" deadline_offset="${5:-60}"
   local dir="${test_root}/poll-${name}" output stdout stderr rc=0 detect_calls
-  mkdir -p "${dir}";export RUNNER_TEMP="${dir}" SCENARIO="${name}" AWS_CALL_LOG="${dir}/calls.log" STATUS_COUNTER="${dir}/status.count" SLEEP_COUNTER="${dir}/sleep.count"
-  : >"${AWS_CALL_LOG}";printf '0\n'>"${STATUS_COUNTER}";printf '0\n'>"${SLEEP_COUNTER}"
+  mkdir -p "${dir}";export RUNNER_TEMP="${dir}" SCENARIO="${name}" AWS_CALL_LOG="${dir}/calls.log" STATUS_COUNTER="${dir}/status.count" SLEEP_COUNTER="${dir}/sleep.count" SLEEP_ARGUMENT_LOG="${dir}/sleep.args"
+  : >"${AWS_CALL_LOG}";: >"${SLEEP_ARGUMENT_LOG}";printf '0\n'>"${STATUS_COUNTER}";printf '0\n'>"${SLEEP_COUNTER}"
   export CFN_DRIFT_MAX_ATTEMPTS=3 CFN_DRIFT_DELAY_SECONDS=0 CFN_DRIFT_MAX_API_FAILURES=3 CFN_DRIFT_PHASE_TIMEOUT_SECONDS=60
   export CFN_DRIFT_DEADLINE_EPOCH="$(( $(date +%s) + deadline_offset ))"
   output="${RUNNER_TEMP}/drift-${REGION}-${STACK_NAME}.json";stdout="${dir}/stdout";stderr="${dir}/stderr"
   if detect_and_wait_for_cloudformation_stack_in_sync "${REGION}" "${STACK_NAME}" "${output}" "${ACCOUNT_ID}" >"${stdout}" 2>"${stderr}";then rc=0;else rc=$?;fi
   if [[ "${expected}" == success ]];then [[ "${rc}" == 0 ]]||fail "${name} failed";test -f "${output}"&&test ! -L "${output}";assert_equals 600 "$(stat -c '%a' "${output}")" "${name} mode";jq -e --arg id "${DETECTION_ID}" --arg stack "${STACK_ID}" --arg ts "${DETECTION_TIMESTAMP}" '.StackDriftDetectionId==$id and .StackId==$stack and .Timestamp==$ts and .DetectionStatus=="DETECTION_COMPLETE" and .StackDriftStatus=="IN_SYNC" and .DriftedStackResourceCount==0' "${output}">/dev/null;else [[ "${rc}" != 0 ]]||fail "${name} unexpectedly passed";[[ ! -e "${output}" ]]||fail "${name} published failure";fi
-  detect_calls="$(awk '/cloudformation detect-stack-drift/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals 1 "${detect_calls}" "${name} detect calls";assert_equals "${expected_status}" "$(<"${STATUS_COUNTER}")" "${name} status calls";assert_equals "${expected_sleep}" "$(<"${SLEEP_COUNTER}")" "${name} sleeps"
+  detect_calls="$(awk '/cloudformation detect-stack-drift/{n++}END{print n+0}' "${AWS_CALL_LOG}")";assert_equals 1 "${detect_calls}" "${name} detect calls";assert_equals "${expected_status}" "$(<"${STATUS_COUNTER}")" "${name} status calls";assert_equals "${expected_sleep}" "$(<"${SLEEP_COUNTER}")" "${name} sleeps";assert_sleep_arguments 0 "${SLEEP_ARGUMENT_LOG}" "${expected_sleep}"
   grep -Fq 'PRIVATE_AWS_MARKER' "${stdout}" "${stderr}"&&fail "${name} leaked provider detail"
   find "${dir}" -maxdepth 1 -name 'cloudformation-drift-status.*' -print -quit|grep -q .&&fail "${name} left raw candidate"
   return 0
