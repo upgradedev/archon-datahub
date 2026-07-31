@@ -1447,7 +1447,8 @@ require_text "${runbook}" \
   'Bounded CloudFormation drift polling' \
   '30596290772' \
   'cloudformation-supported-resources' \
-  'does not support remain outside this claim'require_text "${reconciler}" \
+  'does not support remain outside this claim'
+require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
   "foundation_phase='startup'" \
