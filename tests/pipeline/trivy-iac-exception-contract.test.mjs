@@ -28,7 +28,7 @@ const NOW = new Date("2026-08-02T12:00:00Z");
 function ids(stage) {
   return {
     sink: "AccessLogBucketABCDEF12",
-    logsKey: "LogsKeyABCDEF12",
+    kmsResource: "LogsKeyABCDEF12",
     cloudFrontLogs: "CloudFrontLogBucketABCDEF12",
     spa: "SpaBucketABCDEF12",
     checkpoint: "CloudCheckpointBucketABCDEF12",
@@ -103,7 +103,7 @@ function template(stage) {
             stack + "/AccessLogBucket/Resource"
         }
       },
-      [id.logsKey]: {
+      [id.kmsResource]: {
         Type: "AWS::KMS::Key",
         Properties: {
           KeyPolicy: {
@@ -138,7 +138,7 @@ function template(stage) {
                 BucketKeyEnabled: true,
                 ServerSideEncryptionByDefault: {
                   KMSMasterKeyID: {
-                    "Fn::GetAtt": [id.logsKey, "Arn"]
+                    "Fn::GetAtt": [id.kmsResource, "Arn"]
                   },
                   SSEAlgorithm: "aws:kms"
                 }
