@@ -69,6 +69,7 @@ jobs:
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/aws-cloudformation-drift.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/load-datahub-cloud-canary-credentials.sh \
             scripts/run-aws-incident-recovery.sh \
             scripts/aws-foundation-policy-migration-authorization.sh \
             scripts/aws-foundation-policy-migration-common.sh \
@@ -140,6 +141,8 @@ jobs:
             python3 tests/pipeline/submission_project_access_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_operations_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/post_merge_readiness_contracts_test.py
           bash tests/pipeline/judge-user-contracts.test.sh
           bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh
