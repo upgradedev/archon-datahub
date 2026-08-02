@@ -325,8 +325,8 @@ def validate_contract(workflow: str, helper: str) -> None:
             'availability_dir / "observation.json"',
             "availability_observation_observed",
             "availability_observation_observed > availability_observed",
-            "availability_observed - availability_observation_observed",
-            "dt.timedelta(minutes=5)",
+            "availability_observed - availability_observation_observed\n"
+            "              > dt.timedelta(minutes=5)",
             "now - availability_observation_observed",
             '["openid", "email", "profile", "archon/approve"]',
             "dt.timedelta(hours=7)",
@@ -388,7 +388,8 @@ def validate_contract(workflow: str, helper: str) -> None:
         (
             'if [[ "${key}" == "deployment" || "${key}" == "availability" ]]',
             "verify-lean-submission-runtime-source.sh",
-            "lean-verification/binding.json",
+            'lean_verification="${work}/lean-verification"',
+            '"${lean_verification}/binding.json"',
             "archon.submission-lean-runtime-source/v2",
             "Archon-production-Core",
             "Archon-production-Edge",
@@ -432,8 +433,8 @@ def validate_contract(workflow: str, helper: str) -> None:
             "availability_dir / \"observation.json\"",
             "availability_observation_observed",
             "availability_observation_observed > availability_observed",
-            "availability_observed - availability_observation_observed",
-            "dt.timedelta(minutes=5)",
+            "availability_observed - availability_observation_observed\n"
+            "              > dt.timedelta(minutes=5)",
             "now - availability_observation_observed",
             "journey_dir / \"production-runtime-config.json\"",
             "archon.aws-deployment-evidence/v2",
@@ -610,6 +611,14 @@ tamper_cases: dict[str, tuple[str, str]] = {
             workflow_text,
             "          retention-days: 90\n",
             "          retention-days: 14\n",
+        ),
+        helper_text,
+    ),
+    "attester lean binding redirected": (
+        replace_exact(
+            workflow_text,
+            '"${lean_verification}/binding.json"',
+            '"${lean_verification}/manifest.json"',
         ),
         helper_text,
     ),
