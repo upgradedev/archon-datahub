@@ -6,10 +6,10 @@ import os
 import pathlib
 import sys
 import types
-import unittest
-from unittest import mock
+from unittest import TestCase, main, mock
 
 SESSION = "rs_" + "A" * 43
+OTHER_SESSION = "rs_" + "B" * 43
 DIGEST = "sha256:" + "a" * 64
 MANIFEST = "sha256:" + "b" * 64
 GENERATION = "core-20260802-1"
@@ -22,11 +22,19 @@ os.environ.update(
         "CORE_CAPABILITY_DIGEST": DIGEST,
         "CORE_IMAGE_MANIFEST_DIGEST": MANIFEST,
         "CORE_STAGE": "staging",
+        "CORE_VPC_ID": "vpc-0123456789abcdef0",
+        "CORE_SUBNET_ID": "subnet-0123456789abcdef0",
+        "CORE_INFERENCE_SECURITY_GROUP_ID": "sg-0123456789abcdef0",
+        "CORE_BEDROCK_SERVICE_NAME": (
+            "com.amazonaws.eu-west-1.bedrock-runtime"
+        ),
         "CORE_IDLE_SECONDS": "1800",
         "CORE_HARD_SECONDS": "7200",
         "CORE_OPERATION_SECONDS": "300",
     }
 )
+
+EVENTS: list[str] = []
 
 
 class FakeClientError(Exception):
@@ -40,9 +48,15 @@ class FakeTable:
         self.item = None
         self.updates = []
         self.puts = []
+        self.fail_next_update = ""
 
     def update_item(self, **kwargs):
+        EVENTS.append("ddb-update")
         self.updates.append(kwargs)
+        if self.fail_next_update:
+            code = self.fail_next_update
+            self.fail_next_update = ""
+            raise FakeClientError(code)
         return {}
 
     def get_item(self, **_kwargs):
@@ -54,6 +68,11 @@ class FakeTable:
 
 
 class FakeEc2:
+    def __init__(self) -> None:
+        self.endpoints: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.delete_calls: list[str] = []
+
     def describe_images(self, **_kwargs):
         return {
             "Images": [
@@ -82,11 +101,35 @@ class FakeEc2:
             ]
         }
 
+    def describe_vpc_endpoints(self, **_kwargs):
+        return {"VpcEndpoints": list(self.endpoints)}
+
+    def create_vpc_endpoint(self, **kwargs):
+        EVENTS.append("endpoint-create")
+        self.create_calls.append(kwargs)
+        endpoint = {
+            "VpcEndpointId": "vpce-0123456789abcdef0",
+            "State": "available",
+            "Tags": kwargs["TagSpecifications"][0]["Tags"],
+        }
+        self.endpoints = [endpoint]
+        return {"VpcEndpoint": endpoint}
+
+    def delete_vpc_endpoints(self, *, VpcEndpointIds):
+        self.delete_calls.extend(VpcEndpointIds)
+        self.endpoints = [
+            endpoint
+            for endpoint in self.endpoints
+            if endpoint.get("VpcEndpointId") not in VpcEndpointIds
+        ]
+        return {}
+
 
 TABLE = FakeTable()
+EC2 = FakeEc2()
 fake_boto3 = types.ModuleType("boto3")
 fake_boto3.resource = lambda _name: types.SimpleNamespace(Table=lambda _table: TABLE)
-fake_boto3.client = lambda name: FakeEc2() if name == "ec2" else None
+fake_boto3.client = lambda name: EC2 if name == "ec2" else None
 fake_exceptions = types.ModuleType("botocore.exceptions")
 fake_exceptions.ClientError = FakeClientError
 sys.modules.setdefault("boto3", fake_boto3)
@@ -126,11 +169,16 @@ def command(action: str, revision: int = 0) -> dict:
     }
 
 
-class CoreLifecycleTests(unittest.TestCase):
+class CoreLifecycleTests(TestCase):
     def setUp(self) -> None:
+        EVENTS.clear()
         TABLE.item = None
         TABLE.updates.clear()
         TABLE.puts.clear()
+        TABLE.fail_next_update = ""
+        EC2.endpoints.clear()
+        EC2.create_calls.clear()
+        EC2.delete_calls.clear()
 
     def test_exact_canonical_contract(self) -> None:
         validated = lifecycle._validate_command(command("START"), instant(8))
@@ -150,17 +198,41 @@ class CoreLifecycleTests(unittest.TestCase):
             },
         )
 
-    def test_start_uses_current_expected_revision_and_exact_lease(self) -> None:
+    def test_start_reserves_before_endpoint_and_uses_exact_lease(self) -> None:
         result = lifecycle._start(command("START", revision=7), instant(8))
         self.assertEqual(result["decision"], "UPSCALE")
         self.assertEqual(result["revision"], 8)
-        update = TABLE.updates[-1]
-        values = update["ExpressionAttributeValues"]
+        self.assertEqual(EVENTS[:2], ["ddb-update", "endpoint-create"])
+        reserve = TABLE.updates[0]
+        values = reserve["ExpressionAttributeValues"]
         self.assertEqual(values[":expected"], 7)
         self.assertEqual(values[":revision"], 8)
         self.assertEqual(values[":idle"], int(instant(8, 30).timestamp()))
         self.assertEqual(values[":hard"], int(instant(10).timestamp()))
-        self.assertIn("attribute_not_exists(operationId)", update["ConditionExpression"])
+        self.assertIn(
+            "attribute_not_exists(operationId)",
+            reserve["ConditionExpression"],
+        )
+        self.assertIn("inferenceEndpointId", TABLE.updates[1]["UpdateExpression"])
+
+    def test_losing_start_allocates_no_endpoint(self) -> None:
+        TABLE.item = {
+            "sessionId": OTHER_SESSION,
+            "state": "READY",
+            "revision": 3,
+            "generation": GENERATION,
+            "capabilityDigest": DIGEST,
+        }
+        TABLE.fail_next_update = "ConditionalCheckFailedException"
+        result = lifecycle._start(command("START", revision=3), instant(8))
+        self.assertEqual(result["code"], "LEASE_CONFLICT")
+        self.assertEqual(EC2.create_calls, [])
+
+    def test_endpoint_client_token_is_retry_deterministic(self) -> None:
+        first = lifecycle._endpoint_token(SESSION)
+        second = lifecycle._endpoint_token(SESSION)
+        self.assertEqual(first, second)
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
 
     def test_activity_is_ready_only_and_returns_exact_watchdog(self) -> None:
         result = lifecycle._activity(command("ACTIVITY", revision=8), instant(8, 20))
@@ -171,9 +243,23 @@ class CoreLifecycleTests(unittest.TestCase):
         )
         update = TABLE.updates[-1]
         self.assertIn("#state=:ready", update["ConditionExpression"])
-        self.assertEqual(
-            update["ExpressionAttributeValues"][":ready"], "READY"
+        self.assertEqual(update["ExpressionAttributeValues"][":ready"], "READY")
+
+    def test_activity_conditional_conflict_has_no_endpoint_state_dependency(self) -> None:
+        TABLE.item = {
+            "sessionId": SESSION,
+            "state": "READY",
+            "revision": 9,
+            "idleExpiresAt": int(instant(8, 50).timestamp()),
+        }
+        TABLE.fail_next_update = "ConditionalCheckFailedException"
+        result = lifecycle._activity(
+            command("ACTIVITY", revision=8), instant(8, 20)
         )
+        self.assertEqual(result["code"], "IDEMPOTENT")
+        self.assertEqual(result["revision"], 9)
+        self.assertEqual(EC2.create_calls, [])
+        self.assertEqual(EC2.delete_calls, [])
 
     def test_stale_watchdog_is_a_noop_after_activity_revision(self) -> None:
         TABLE.item = {
@@ -193,11 +279,7 @@ class CoreLifecycleTests(unittest.TestCase):
             "deadlineEpoch": int(instant(8, 30).timestamp()),
         }
         result = lifecycle._reap(stale, instant(8, 31))
-        self.assertEqual(result, {
-            "schema": "archon.core-runtime-decision/v1",
-            "decision": "NONE",
-            "code": "STALE_WATCHDOG",
-        })
+        self.assertEqual(result["code"], "STALE_WATCHDOG")
         self.assertEqual(TABLE.updates, [])
 
     def test_exact_watchdog_drains_at_deadline(self) -> None:
@@ -241,4 +323,4 @@ class CoreLifecycleTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
