@@ -677,11 +677,8 @@ async function reconcile(value, currentTime) {
     session.state === "EXPIRED" &&
     session.binding.profileId === "core"
   ) {
-    readCoreLease()
-      .then((lease) => coreCommand("STOP", session, lease.revision))
-      .catch(() => {
-        process.stderr.write("[runtime-control] expiry_stop_dispatch_failed\n");
-      });
+    const lease = await readCoreLease();
+    await coreCommand("STOP", session, lease.revision);
   }
   return updateSession(original, session);
 }
