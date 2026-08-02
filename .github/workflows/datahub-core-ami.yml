@@ -418,15 +418,19 @@ jobs:
                 runtimePullsAllowed:false
               }
             ' >"${evidence}/resolved-images.json"
+          checksums="${RUNNER_TEMP}/core-supply-chain-SHA256SUMS"
           (
             cd "${evidence}"
             find . -type f ! -name SHA256SUMS -print0 |
-              LC_ALL=C sort -z | xargs -0 sha256sum >SHA256SUMS
+              LC_ALL=C sort -z | xargs -0 sha256sum >"${checksums}"
+            mv "${checksums}" SHA256SUMS
           )
           manifest_sha="$(sha256sum "${evidence}/resolved-images.json" | awk '{print $1}')"
-          echo "directory=${evidence}" >>"${GITHUB_OUTPUT}"
-          echo "manifest_sha256=${manifest_sha}" >>"${GITHUB_OUTPUT}"
-          echo "actionable_total=${actionable_total}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "directory=${evidence}"
+            echo "manifest_sha256=${manifest_sha}"
+            echo "actionable_total=${actionable_total}"
+          } >>"${GITHUB_OUTPUT}"
       - name: Upload Core image SARIF
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
@@ -578,10 +582,12 @@ jobs:
               sha256sum | awk '{print "sha256:" $1}'
           )"
           image_manifest_digest="sha256:${RESOLVED_MANIFEST_SHA256}"
-          echo "path=${bundle}" >>"${GITHUB_OUTPUT}"
-          echo "sha256=${bundle_sha}" >>"${GITHUB_OUTPUT}"
-          echo "capability_digest=${capability_digest}" >>"${GITHUB_OUTPUT}"
-          echo "image_manifest_digest=${image_manifest_digest}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "path=${bundle}"
+            echo "sha256=${bundle_sha}"
+            echo "capability_digest=${capability_digest}"
+            echo "image_manifest_digest=${image_manifest_digest}"
+          } >>"${GITHUB_OUTPUT}"
       - name: Create exact no-ingress builder boundary
         id: boundary
         run: |
@@ -749,9 +755,11 @@ jobs:
               $tags["archon:BuildRun"] == $buildRun
             ' <<<"${image}" >/dev/null
           test -s "${bake_evidence}"
-          echo "ami_id=${ami_id}" >>"${GITHUB_OUTPUT}"
-          echo "manifest=${manifest}" >>"${GITHUB_OUTPUT}"
-          echo "bake_evidence=${bake_evidence}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "ami_id=${ami_id}"
+            echo "manifest=${manifest}"
+            echo "bake_evidence=${bake_evidence}"
+          } >>"${GITHUB_OUTPUT}"
       - name: Validate downloaded AMI bake evidence
         id: bake
         env:
@@ -841,8 +849,7 @@ jobs:
         run: |
           set -euo pipefail
           retry_aws() {
-            local attempt
-            for attempt in 1 2 3 4 5 6; do
+            for _ in 1 2 3 4 5 6; do
               if "$@"; then
                 return 0
               fi
