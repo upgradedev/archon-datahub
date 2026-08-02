@@ -671,6 +671,23 @@ class DataHubCloudTrialContracts(unittest.TestCase):
                 "ArchonSecretsKeyArn",
             ],
         )
+        self.assertIn("GitHubDataHubCloudTrialRoleName:", foundation)
+        self.assertEqual(
+            role["foundationRole"],
+            {
+                "stackNameTemplate": "Archon-GitHub-<stage>-Deploy-Role",
+                "stackOutputs": [
+                    "GitHubDataHubCloudTrialRoleArn",
+                    "GitHubDataHubCloudTrialRoleName",
+                ],
+                "workflowOutputs": {
+                    "staging":
+                        "steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn",
+                    "production":
+                        "steps.reconcile.outputs.datahub_cloud_trial_production_role_arn",
+                },
+            },
+        )
 
     def test_confirmations_and_trial_continuity_are_exact(self) -> None:
         self.assertEqual(
