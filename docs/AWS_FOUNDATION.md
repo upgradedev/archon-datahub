@@ -56,6 +56,13 @@ malformed, stale, indeterminate and drifted states all fail closed.
 machine-readable authority. Policy changes are promoted and verified in CI;
 manual console grants are not evidence.
 
+The sealed staging IAM incident is closed. Its authoritative
+`contracts/aws-incident-recovery-v1.json` record has status
+`recovered-delete-complete-cleanup-proven`: exactly one bounded `DeleteStack`
+was executed, canonical target absence and cleanup were proven, and the
+short-lived recovery authorization was revoked. This is retained evidence, not
+permission to rerun recovery against the now-absent target.
+
 ## Protected foundation-policy version migrations
 
 Foundation managed-policy changes are explicit protected transactions, never an

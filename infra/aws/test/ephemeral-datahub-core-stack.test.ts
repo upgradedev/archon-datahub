@@ -78,7 +78,7 @@ describe("ephemeral DataHub Core stack", () => {
       )
     ) as [string, any][];
     expect(providers).toHaveLength(1);
-    const [, provider] = providers[0];
+    const [, provider] = providers[0]!;
     expect(provider.Properties.ReservedConcurrentExecutions).toBe(1);
     expect(provider.Properties.TracingConfig).toEqual({ Mode: "Active" });
     expect(provider.Properties.VpcConfig).toBeUndefined();
@@ -109,7 +109,7 @@ describe("ephemeral DataHub Core stack", () => {
         resource.Properties.KeyUsage === "SIGN_VERIFY"
     ) as [string, any][];
     expect(signingKeys).toHaveLength(1);
-    const [logicalId, signingKey] = signingKeys[0];
+    const [logicalId, signingKey] = signingKeys[0]!;
     expect(signingKey.Properties).toEqual(
       expect.objectContaining({
         KeySpec: "ECC_NIST_P256",

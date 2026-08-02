@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           [[ "${ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
           test "${OBSERVER_ROLE}" = \
-            "arn:aws:iam::${ACCOUNT_ID}:role/archon-production-observer"
+            "arn:aws:iam::${ACCOUNT_ID}:role/archon-production-posture-observer"
           [[ "${APPLICATION_URL}" =~ ^https://[A-Za-z0-9.-]+$ ]]
           [[ "${APPLICATION_URL}" != *..* ]]
 

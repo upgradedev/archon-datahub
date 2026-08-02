@@ -16,6 +16,8 @@ test("availability is a protected attested lean-runtime probe", () => {
   assert.match(workflow, /configure-aws-credentials@[0-9a-f]{40}/);
   assert.match(workflow, /vars\\.AWS_READ_ROLE_ARN/);
   assert.doesNotMatch(workflow, /AWS_OBSERVER_ROLE_ARN/);
+  assert.match(workflow, /role/archon-production-posture-observer/);
+  assert.doesNotMatch(workflow, /role/archon-production-observer/);
   assert.match(workflow, /observe-aws-live-runtime\.sh/);
   assert.match(workflow, /EXPECT_CORE_IDLE: "true"/);
   assert.match(workflow, /--proto '=https' --tlsv1\.2/);
