@@ -22,3 +22,15 @@ paths = [
 regexes = [
   '''DATAHUB_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
 ]
+[[allowlists]]
+description = "One historical synthetic AWS key shape tests checkpoint credential detection"
+targetRules = ["aws-access-token"]
+condition = "AND"
+regexTarget = "match"
+commits = ["9ada20069ab02b6de49a4eb0e5875108a622f45d"]
+paths = [
+  '''^services/datahub-cloud-runtime/tests/test_contracts\.py$''',
+]
+regexes = [
+  '''ASIAABCDEFGHIJKLMNOP''',
+]

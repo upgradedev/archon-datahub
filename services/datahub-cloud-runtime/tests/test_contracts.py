@@ -171,8 +171,9 @@ def test_safe_error_never_contains_exception_message():
 
 
 def test_checkpoint_credential_scan_detects_all_secret_classes():
+    synthetic_aws_key = b"ASIA" + b"ABCDEFGHIJKLMNOP"
     assert contracts.checkpoint_contains_credentials(
-        [b"safe", b"ASIAABCDEFGHIJKLMNOP"],
+        [b"safe", synthetic_aws_key],
         [],
     )
     assert contracts.checkpoint_contains_credentials(
