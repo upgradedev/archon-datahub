@@ -18,9 +18,9 @@ _CLOUDWATCH = boto3.client("cloudwatch")
 ALLOWED_KEYS = {"CORE#LEASE", "RUNTIME#core"}
 ALLOWED_STATES = {
     "STARTING",
-    "ACTIVE",
+    "READY",
     "UNHEALTHY",
-    "STOPPING",
+    "DRAINING",
     "STOPPED",
     "EXPIRED",
     "FAILED",
