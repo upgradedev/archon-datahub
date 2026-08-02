@@ -59,19 +59,23 @@ def require_under(path: Path, root: Path, label: str) -> Path:
     return resolved
 
 
-def write_decision(path: Path, runner_temp: Path, decision: dict[str, Any]) -> None:
+def write_json_output(
+    path: Path,
+    runner_temp: Path,
+    payload: dict[str, Any],
+) -> None:
     resolved = path.resolve(strict=False)
     try:
         resolved.relative_to(runner_temp)
     except ValueError as error:
-        raise AssertionError("decision output must remain below RUNNER_TEMP") from error
+        raise AssertionError("CI output must remain below RUNNER_TEMP") from error
     if resolved.parent != runner_temp:
-        raise AssertionError("decision output must be directly below RUNNER_TEMP")
+        raise AssertionError("CI output must be directly below RUNNER_TEMP")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(resolved, flags, 0o600)
     try:
-        payload = (json.dumps(decision, sort_keys=True) + "\n").encode("utf-8")
-        os.write(descriptor, payload)
+        encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+        os.write(descriptor, encoded)
     finally:
         os.close(descriptor)
 
@@ -122,6 +126,16 @@ def validate_environment(workspace: Path) -> tuple[dict[str, Any], dict[str, Any
         "--frozen --no-dev --no-build"
     ) in normalized
     assert 'UV_PYTHON_DOWNLOADS: "manual"' in workflow
+
+    main_ci = regular_bytes(
+        workspace / ".github/workflows/ci.yml",
+        524_288,
+    ).decode("utf-8")
+    expected_allowlist = (
+        "allow-ghsas: GHSA-mh99-v99m-4gvg, GHSA-h35f-9h28-mq5c"
+    )
+    assert expected_allowlist in main_ci
+    assert main_ci.count("allow-ghsas:") == 1
     return lock, frozen
 
 
@@ -228,6 +242,7 @@ def main() -> None:
     parser.add_argument("--sarif", required=True)
     parser.add_argument("--vex", required=True)
     parser.add_argument("--decision", required=True)
+    parser.add_argument("--projection", required=True)
     args = parser.parse_args()
 
     if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
@@ -250,6 +265,23 @@ def main() -> None:
     _, expires = validate_vex(vex)
     disposition, rules = validate_sarif(sarif)
 
+    projection = json.loads(json.dumps(sarif))
+    if rules:
+        justification = (
+            f"Accepted by {EXPECTED_VEX_ID}; expires "
+            f"{expires.isoformat().replace('+00:00', 'Z')}; "
+            "Linux wheel-only runtime with source builds denied."
+        )
+        for run in projection["runs"]:
+            for result in run.get("results") or []:
+                result["suppressions"] = [
+                    {
+                        "kind": "external",
+                        "status": "accepted",
+                        "justification": justification,
+                    }
+                ]
+
     decision = {
         "schemaVersion": "archon.datahub-agent-stack-audit-decision/v1",
         "decision": disposition,
@@ -264,7 +296,8 @@ def main() -> None:
         "vexId": EXPECTED_VEX_ID if rules else None,
         "vexExpiresAt": expires.isoformat().replace("+00:00", "Z"),
     }
-    write_decision(Path(args.decision), runner_temp, decision)
+    write_json_output(Path(args.projection), runner_temp, projection)
+    write_json_output(Path(args.decision), runner_temp, decision)
     print(json.dumps(decision, sort_keys=True))
 
 
