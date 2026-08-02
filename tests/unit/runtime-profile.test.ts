@@ -6,8 +6,10 @@ import {
   isRuntimeReady,
   runtimeCapabilityDigest,
   selectRuntime,
+  validateRuntimeBinding,
   type RuntimeCapabilities,
   type RuntimeProfileSnapshot,
+  type RuntimeBinding,
 } from "../../src/datahub/runtime-profile.js";
 
 const NOW = "2026-08-02T08:00:00.000Z";
@@ -161,6 +163,7 @@ test("a pinned binding rejects profile, generation, or capability drift", () => 
       capabilityDigest:
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
     },
+    { ...expected, resolution: "explicit" as const },
   ]) {
     assert.throws(
       () => assertPinnedRuntime(expected, actual),
@@ -195,5 +198,93 @@ test("duplicate profiles, noncanonical instants, and long leases fail closed", (
         leaseExpiresAt: "2026-08-02T10:00:00.001Z",
       }),
     /two-hour ceiling/
+  );
+});
+
+test("runtime binding validation rejects extra fields and malformed leases", () => {
+  const binding = selectRuntime("core", [snapshot("core")], {
+    now: NOW,
+    leaseExpiresAt: EXPIRES,
+  });
+  const validated = validateRuntimeBinding(binding);
+  assert.equal(Object.isFrozen(validated), true);
+
+  const invalid: unknown[] = [
+    { ...binding, endpoint: "https://forbidden.example" },
+    { ...binding, boundAt: "2026-08-02T08:00:00Z" },
+    { ...binding, leaseExpiresAt: binding.boundAt },
+    {
+      ...binding,
+      leaseExpiresAt: "2026-08-02T10:00:00.001Z",
+    },
+    { ...binding, resolution: "fallback" },
+  ];
+  for (const candidate of invalid) {
+    assert.throws(
+      () => validateRuntimeBinding(candidate as RuntimeBinding),
+      (error: unknown) =>
+        error instanceof RuntimeSelectionError &&
+        error.code === "INVALID_RUNTIME_BINDING"
+    );
+  }
+});
+
+test("pinned runtime rejects resolution drift and identical malformed bindings", () => {
+  const expected = selectRuntime("cloud", [snapshot("cloud")], {
+    now: NOW,
+    leaseExpiresAt: EXPIRES,
+  });
+  assert.throws(
+    () =>
+      assertPinnedRuntime(expected, {
+        ...expected,
+        resolution: "explicit",
+      }),
+    (error: unknown) =>
+      error instanceof RuntimeSelectionError &&
+      error.code === "RUNTIME_BINDING_MISMATCH"
+  );
+
+  const malformed = {
+    ...expected,
+    boundAt: "2026-08-02T08:00:00Z",
+  } as RuntimeBinding;
+  assert.throws(
+    () => assertPinnedRuntime(malformed, malformed),
+    (error: unknown) =>
+      error instanceof RuntimeSelectionError &&
+      error.code === "RUNTIME_BINDING_MISMATCH"
+  );
+});
+
+test("runtime snapshot and selection object shapes fail closed at runtime", () => {
+  assert.throws(
+    () =>
+      selectRuntime(
+        "auto",
+        [null as unknown as RuntimeProfileSnapshot],
+        { now: NOW, leaseExpiresAt: EXPIRES }
+      ),
+    /runtime snapshot must be an object/
+  );
+  assert.throws(
+    () =>
+      isRuntimeReady(
+        {
+          ...snapshot("cloud"),
+          capabilities: null as unknown as RuntimeCapabilities,
+        },
+        NOW
+      ),
+    /runtime capabilities must be an object/
+  );
+  assert.throws(
+    () =>
+      selectRuntime("auto", [snapshot("cloud")], {
+        now: NOW,
+        leaseExpiresAt: EXPIRES,
+        endpoint: "forbidden",
+      } as never),
+    /exact schema/
   );
 });
