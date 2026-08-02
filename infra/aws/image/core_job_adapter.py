@@ -413,7 +413,7 @@ class CoreJobAdapter:
             else:
                 raise RuntimeError("operation is not allowlisted")
             self._complete(item, attempt_id, "SUCCEEDED", result=result)
-        except (Exception, RecursionError):
+        except Exception:
             self._complete(
                 item,
                 attempt_id,
@@ -478,6 +478,8 @@ class CoreJobAdapter:
         entity = request["entityUrn"]
         column = request["columnPath"]
         raw = self._mcp_call("get_entities", {"urns": [entity]})
+        if not _json_value(raw):
+            raise RuntimeError("governed MCP read result exceeded policy")
         found, tags = _column_tags(raw, column)
         if not found:
             raise RuntimeError("bound DataHub column was not found")
