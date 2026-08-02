@@ -24,6 +24,39 @@ function judgeTemplate(
 }
 
 describe("ArchonJudgeStack", () => {
+  test("rejects an unsupported deployment stage", () => {
+    const app = new App();
+    expect(
+      () =>
+        new ArchonJudgeStack(
+          app,
+          "Archon-Unsupported-Judge-Test",
+          {
+            stage: "development" as any,
+            env: {
+              account: "123456789012",
+              region: "eu-west-1"
+            }
+          }
+        )
+    ).toThrow(
+      "ArchonJudgeStack stage must be staging or production"
+    );
+  });
+
+  test("rejects unresolved deployment account and region", () => {
+    const app = new App();
+    expect(
+      () =>
+        new ArchonJudgeStack(
+          app,
+          "Archon-Unresolved-Judge-Test",
+          { stage: "staging" }
+        )
+    ).toThrow(
+      "ArchonJudgeStack requires an explicit AWS account and region"
+    );
+  });
   test("synthesizes the exact low-cost serverless topology", () => {
     const template = judgeTemplate();
 
@@ -254,6 +287,25 @@ describe("ArchonJudgeStack", () => {
       template.findResources("AWS::S3::Bucket")
     ) as any[];
     expect(buckets).toHaveLength(2);
+    expect(
+      buckets
+        .map((bucket) => bucket.Properties.BucketName)
+        .sort()
+    ).toEqual([
+      "archon-staging-cloud-checkpoints-123456789012-eu-west-1",
+      "archon-staging-spa-123456789012-eu-west-1"
+    ]);
+    const productionBuckets = Object.values(
+      judgeTemplate("production").findResources("AWS::S3::Bucket")
+    ) as any[];
+    expect(
+      productionBuckets
+        .map((bucket) => bucket.Properties.BucketName)
+        .sort()
+    ).toEqual([
+      "archon-production-cloud-checkpoints-123456789012-eu-west-1",
+      "archon-production-spa-123456789012-eu-west-1"
+    ]);
     for (const bucket of buckets) {
       expect(bucket.Properties.VersioningConfiguration).toEqual({
         Status: "Enabled"
@@ -444,6 +496,18 @@ describe("ArchonJudgeStack", () => {
     });
     expect(loggingFilter).not.toHaveProperty("defaultBehavior");
     expect(loggingFilter).not.toHaveProperty("filters");
+
+    const redactedFields =
+      loggingConfigurations[0].Properties.RedactedFields;
+    expect(redactedFields).toEqual([
+      { SingleHeader: { Name: "authorization" } },
+      { SingleHeader: { Name: "cookie" } },
+      { SingleHeader: { Name: "x-api-key" } }
+    ]);
+    for (const field of redactedFields) {
+      expect(field).not.toHaveProperty("singleHeader");
+      expect(field.SingleHeader).not.toHaveProperty("name");
+    }
   });
 
   test("pins the Cloud image to account, region and digest", () => {

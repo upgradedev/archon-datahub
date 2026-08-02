@@ -49,6 +49,29 @@ describe_stack() {
     ' "${destination}" >/dev/null
 }
 
+assert_retired_stack_absent() {
+  local stack_name="$1"
+  local region="$2"
+  local safe stdout_path stderr_path status
+  safe="$(printf '%s' "${stack_name}" | tr -c 'A-Za-z0-9._-' '_')"
+  stdout_path="${work_dir}/retired-${safe}.json"
+  stderr_path="${work_dir}/retired-${safe}.stderr"
+  if aws cloudformation describe-stacks \
+    --stack-name "${stack_name}" \
+    --region "${region}" \
+    --no-paginate \
+    --output json >"${stdout_path}" 2>"${stderr_path}"; then
+    echo "::error::retired CloudFormation stack is still active: ${stack_name}" >&2
+    return 1
+  else
+    status=$?
+  fi
+  test "${status}" -ne 0
+  test ! -s "${stdout_path}"
+  grep -Fq 'An error occurred (ValidationError)' "${stderr_path}"
+  grep -Fq "Stack with id ${stack_name} does not exist" "${stderr_path}"
+}
+
 stack_output() {
   local document="$1"
   local key="$2"
@@ -64,6 +87,11 @@ stack_output() {
 describe_stack "${judge_stack}" "${AWS_REGION}" "${work_dir}/judge.json"
 describe_stack "${core_stack}" "${AWS_REGION}" "${work_dir}/core.json"
 describe_stack "${edge_stack}" "${AWS_EDGE_REGION}" "${work_dir}/edge.json"
+
+legacy_stack_absence_proven=false
+assert_retired_stack_absent "Archon-${ARCHON_STAGE}" "${AWS_REGION}"
+assert_retired_stack_absent "Archon-Registry" "${AWS_REGION}"
+legacy_stack_absence_proven=true
 
 release_sha="$(stack_output "${work_dir}/judge.json" ArchonReleaseSha)"
 image_uri="$(stack_output "${work_dir}/judge.json" ArchonCloudRuntimeImageUri)"
@@ -230,18 +258,26 @@ jq -e --arg arn "${regional_waf_arn}" '.WebACL.ARN == $arn' \
 jq -e --arg arn "${regional_waf_arn}" '.WebACL.ARN == $arn' \
   "${work_dir}/cognito-waf.json" >/dev/null
 
+alarm_names=(
+  "archon-${ARCHON_STAGE}-control-plane-errors"
+  "archon-${ARCHON_STAGE}-runtime-failure-queue-visible"
+)
 aws cloudwatch describe-alarms \
-  --alarm-name-prefix "archon-${ARCHON_STAGE}-" \
+  --alarm-names "${alarm_names[@]}" \
+  --alarm-types MetricAlarm \
   --region "${AWS_REGION}" \
   --no-paginate \
   --output json >"${work_dir}/alarms.json"
-jq -e --arg topic "${alarm_topic}" '
-  [.MetricAlarms[] |
-   select(.AlarmName |
-     test("^archon-(staging|production)-(control-plane-errors|runtime-failure-queue-visible)$"))
-  ] as $judge |
-  ($judge | length) == 2 and
-  all($judge[];
+jq -e \
+  --arg topic "${alarm_topic}" \
+  --arg stage "${ARCHON_STAGE}" '
+  ([
+    "archon-" + $stage + "-control-plane-errors",
+    "archon-" + $stage + "-runtime-failure-queue-visible"
+  ] | sort) as $expected |
+  ([.MetricAlarms[].AlarmName] | sort) == $expected and
+  (.MetricAlarms | length) == 2 and
+  all(.MetricAlarms[];
     .ActionsEnabled == true and
     .AlarmActions == [$topic] and
     .OKActions == [$topic] and
@@ -266,7 +302,8 @@ jq -cnS \
   --arg imageDigest "${image_digest}" \
   --arg observedAt "${observed_at}" \
   --arg stackFingerprintSha256 "${stack_fingerprint}" \
-  --argjson coreIdle "$([[ "${EXPECT_CORE_IDLE}" == true ]] && echo true || echo false)" '
+  --argjson coreIdle "$([[ "${EXPECT_CORE_IDLE}" == true ]] && echo true || echo false)" \
+  --argjson legacyAlwaysOnRuntimeAbsent "${legacy_stack_absence_proven}" '
   {
     schemaVersion:$schemaVersion,
     stage:$stage,
@@ -274,7 +311,7 @@ jq -cnS \
     observedAt:$observedAt,
     topology:{
       coreIdle:$coreIdle,
-      legacyAlwaysOnRuntimeAbsent:true,
+      legacyAlwaysOnRuntimeAbsent:$legacyAlwaysOnRuntimeAbsent,
       stackFingerprintSha256:$stackFingerprintSha256
     },
     runtime:{

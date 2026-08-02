@@ -38,6 +38,33 @@ grep -Fq 'CloudRuntimeReleaseDigest' .github/workflows/deploy.yml
 grep -Fq 'DataHubCoreImageManifestDigest' .github/workflows/deploy.yml
 grep -Fq 'SpaArtifactSha256=${SPA_TAR_SHA256}' .github/workflows/deploy.yml
 grep -Fq 'LambdaArtifactSha256=${LAMBDA_TAR_SHA256}' .github/workflows/deploy.yml
+grep -Fq '`archon-${stage}-spa-${physicalNameSuffix}`' \
+  infra/aws/lib/archon-judge-stack.ts
+grep -Fq '`archon-${stage}-cloud-checkpoints-${physicalNameSuffix}`' \
+  infra/aws/lib/archon-judge-stack.ts
+grep -Fq 'assert_retired_stack_absent "Archon-${ARCHON_STAGE}"' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq 'assert_retired_stack_absent "Archon-Registry"' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq 'An error occurred (ValidationError)' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq 'Stack with id ${stack_name} does not exist' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq -- '--alarm-names "${alarm_names[@]}"' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq -- '--alarm-types MetricAlarm' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq 'legacyAlwaysOnRuntimeAbsent:$legacyAlwaysOnRuntimeAbsent' \
+  scripts/observe-aws-live-runtime.sh
+if grep -Fq -- '--alarm-name-prefix' scripts/observe-aws-live-runtime.sh; then
+  echo "::error::Runtime observer must request exact alarm names" >&2
+  exit 1
+fi
+if grep -Fq 'legacyAlwaysOnRuntimeAbsent:true' \
+  scripts/observe-aws-live-runtime.sh; then
+  echo "::error::Legacy-runtime absence must be observed, not hardcoded" >&2
+  exit 1
+fi
 grep -Fq 'for name in control runtime-control' .github/workflows/ci.yml
 grep -Fq 'control|control/*|runtime-control|runtime-control/*' \
   .github/workflows/supply-chain.yml

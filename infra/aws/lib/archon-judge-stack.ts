@@ -60,6 +60,8 @@ export class ArchonJudgeStack extends Stack {
       );
     }
     const isProduction = stage === "production";
+    const physicalNameSuffix =
+      `${Stack.of(this).account}-${Stack.of(this).region}`;
     const boundary = iam.ManagedPolicy.fromManagedPolicyArn(
       this,
       "RuntimePermissionsBoundary",
@@ -179,6 +181,8 @@ export class ArchonJudgeStack extends Stack {
     allowCloudWatchLogs(logsKey, stage);
 
     const spaBucket = new s3.Bucket(this, "SpaBucket", {
+      bucketName:
+        `archon-${stage}-spa-${physicalNameSuffix}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       bucketKeyEnabled: true,
       encryption: s3.BucketEncryption.KMS,
@@ -199,6 +203,8 @@ export class ArchonJudgeStack extends Stack {
       this,
       "CloudCheckpointBucket",
       {
+        bucketName:
+          `archon-${stage}-cloud-checkpoints-${physicalNameSuffix}`,
         blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         bucketKeyEnabled: true,
         encryption: s3.BucketEncryption.KMS,

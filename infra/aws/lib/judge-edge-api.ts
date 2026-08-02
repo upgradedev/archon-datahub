@@ -507,10 +507,12 @@ export function addJudgeEdgeApi(
           }
         ]
       },
+      // The L1 serializer maps singleHeader to SingleHeader but passes its
+      // untyped value through, so the nested Name must use CFN casing.
       redactedFields: [
-        { singleHeader: { name: "authorization" } },
-        { singleHeader: { name: "cookie" } },
-        { singleHeader: { name: "x-api-key" } }
+        { singleHeader: { Name: "authorization" } },
+        { singleHeader: { Name: "cookie" } },
+        { singleHeader: { Name: "x-api-key" } }
       ]
     }
   );

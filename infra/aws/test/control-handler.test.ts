@@ -1034,6 +1034,26 @@ describe("async audit control Lambda", () => {
     });
   });
 
+  test("sanitizes and rethrows remediation wrapper failures", async () => {
+    const failure = new Error("synthetic remediation stream failure");
+    const event = Object.defineProperty({}, "Records", {
+      get: () => {
+        throw failure;
+      }
+    }) as Record<string, any>;
+    const stderr = jest
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    try {
+      await expect(remediationHandler(event)).rejects.toBe(failure);
+      expect(stderr).toHaveBeenCalledWith(
+        "[runtime-remediation] approval_stream_failed\n"
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   test("dispatches profile-bound Core jobs and never starts the legacy audit state machine", async () => {
     const sessionId = "rs_" + "V".repeat(43);
     const runtime = runtimeSessionItem(sessionId);

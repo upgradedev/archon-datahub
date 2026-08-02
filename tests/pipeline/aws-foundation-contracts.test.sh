@@ -1388,7 +1388,7 @@ require_text "${deploy_workflow}" \
   'id: deploy_authority' \
   'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
   'expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-deploy"' \
-  'printf '\''role_arn=%s\\n'\'' "${AWS_DEPLOY_ROLE_ARN}" >>"${GITHUB_OUTPUT}"' \
+  'printf '\''role_arn=%s\n'\'' "${AWS_DEPLOY_ROLE_ARN}" >>"${GITHUB_OUTPUT}"' \
   'role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}' \
   'allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}' \
   'mask-aws-account-id: true' \
