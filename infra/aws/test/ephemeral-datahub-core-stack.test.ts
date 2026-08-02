@@ -59,6 +59,13 @@ describe("ephemeral DataHub Core stack", () => {
     ]) {
       expect(Object.keys(resources(template, forbidden))).toHaveLength(0);
     }
+    const subnets = Object.values(
+      resources(template, "AWS::EC2::Subnet")
+    ) as any[];
+    expect(subnets).toHaveLength(1);
+    expect(subnets[0].Properties.AvailabilityZone).toEqual({
+      "Fn::Select": [0, { "Fn::GetAZs": "" }]
+    });
   });
 
   test("keeps exactly one private encrypted host at zero desired capacity", () => {

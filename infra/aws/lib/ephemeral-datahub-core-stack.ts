@@ -4,6 +4,7 @@ import {
   CfnOutput,
   CfnParameter,
   Duration,
+  Fn,
   RemovalPolicy,
   Stack,
   Tags,
@@ -208,7 +209,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
 
     const vpc = new ec2.Vpc(this, "CoreVpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.77.0.0/24"),
-      maxAzs: 1,
+      availabilityZones: [Fn.select(0, Fn.getAzs(""))],
       natGateways: 0,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [
