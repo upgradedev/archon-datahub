@@ -18,6 +18,11 @@ PATHS = {
     "canary": ".github/workflows/governed-canary.yml",
     "recovery": ".github/workflows/governed-canary-recovery.yml",
     "credentials": "scripts/load-datahub-cloud-canary-credentials.sh",
+    "docs_foundation": "docs/AWS_FOUNDATION.md",
+    "docs_trial": "docs/DATAHUB_CLOUD_TRIAL.md",
+    "docs_live": "docs/LIVE_DATAHUB_PROOF.md",
+    "docs_core": "docs/DATAHUB_CORE.md",
+    "docs_canary": "docs/GOVERNED_CANARY.md",
 }
 SOURCES = {
     name: (ROOT / relative).read_text(encoding="utf-8")
@@ -49,6 +54,11 @@ def validate(sources: dict[str, str]) -> None:
     canary = sources["canary"]
     recovery = sources["recovery"]
     credentials = sources["credentials"]
+    docs_foundation = sources["docs_foundation"]
+    docs_trial = sources["docs_trial"]
+    docs_live = sources["docs_live"]
+    docs_core = sources["docs_core"]
+    docs_canary = sources["docs_canary"]
 
     require(
         '(.aws.applicationStackRolePreflight | length) == 6' in reconcile,
@@ -268,6 +278,72 @@ def validate(sources: dict[str, str]) -> None:
             f"credential loader persists or emits secret material: {forbidden}",
         )
 
+    require_all(
+        docs_foundation,
+        (
+            "datahub_cloud_trial_staging_role_arn",
+            "datahub_cloud_trial_production_role_arn",
+            "cloud_runtime_publisher_role_arn",
+            "core_ami_foundation.outputs.build_role_arn",
+            "core_ami_foundation.outputs.instance_profile",
+            "printf '%s' \"$value\" | gh variable set",
+        ),
+        "Foundation runbook",
+    )
+    require("--body -" not in docs_foundation, "Foundation runbook persists a hyphen")
+    require_all(
+        docs_trial,
+        (
+            "datahub_cloud_trial_staging_role_arn",
+            "datahub_cloud_trial_production_role_arn",
+            "archon-datahub-github-<stage>-cloud-trial",
+        ),
+        "Cloud trial runbook",
+    )
+    require_all(
+        docs_live,
+        (
+            "selected protected `staging` or",
+            "reads only `AWSCURRENT`",
+            "credential-binding digest",
+            "submission-judge-journey.yml",
+            "Stop & teardown",
+            "runs in `finally`",
+        ),
+        "live proof runbook",
+    )
+    require(
+        "DATAHUB_CLOUD_GMS_TOKEN" not in docs_live
+        and "protected `datahub-demo` environment" not in docs_live,
+        "live proof runbook returned to static credentials",
+    )
+    require_all(
+        docs_core,
+        (
+            "current remote",
+            "refs/heads/master",
+            "gh attestation verify",
+            "denial of self-hosted runners",
+        ),
+        "Core runbook",
+    )
+    require_all(
+        docs_canary,
+        (
+            "exactly three environments",
+            "AWS_CANARY_RECOVERY_ROLE_ARN",
+            "reads only `AWSCURRENT`",
+            "source-only AWS loader",
+        ),
+        "canary runbook",
+    )
+    require(
+        "| `governed-canary-rollback` |" not in docs_canary
+        and "CANARY_DATAHUB_READ_TOKEN" not in docs_canary
+        and "CANARY_DATAHUB_WRITE_TOKEN" not in docs_canary,
+        "canary runbook documents a retired environment or static token",
+    )
+
 
 def mutate(
     sources: dict[str, str],
@@ -388,6 +464,31 @@ MUTATIONS = {
         "credentials",
         "archon.datahub-cloud-writer-secret/v1",
         "archon.datahub-cloud-reader-secret/v1",
+    ),
+    "Foundation runbook loses production trial handoff": (
+        "docs_foundation",
+        "datahub_cloud_trial_production_role_arn",
+        "missing_production_trial_role_arn",
+    ),
+    "Cloud trial runbook loses verified staging handoff": (
+        "docs_trial",
+        "datahub_cloud_trial_staging_role_arn",
+        "missing_staging_trial_role_arn",
+    ),
+    "live runbook restores a static token": (
+        "docs_live",
+        "No static GitHub DataHub token secret is used.",
+        "Use DATAHUB_CLOUD_GMS_TOKEN.",
+    ),
+    "Core runbook weakens the signed source ref": (
+        "docs_core",
+        "refs/heads/master",
+        "refs/heads/feature",
+    ),
+    "canary runbook restores four environments": (
+        "docs_canary",
+        "exactly three environments",
+        "four intentionally distinct environments",
     ),
 }
 
