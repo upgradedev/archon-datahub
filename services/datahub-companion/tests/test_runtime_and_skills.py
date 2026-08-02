@@ -66,7 +66,7 @@ def test_binding_rejects_inactive_and_oversized_lease(runtime):
     assert raised.value.status_code == 400
 
 
-def test_run_handle_is_opaque_bound_and_tamper_evident(runtime, monkeypatch):
+def test_run_handle_failures_share_one_generic_not_found(runtime, monkeypatch):
     current = binding()
     handle = companion.issue_run_handle(
         CONVERSATION, current, CONTEXT, GROUNDING,
@@ -75,20 +75,49 @@ def test_run_handle_is_opaque_bound_and_tamper_evident(runtime, monkeypatch):
     assert CONVERSATION not in handle
     payload = companion.resolve_run_handle(handle, current)
     assert payload["conversationId"] == CONVERSATION
-    assert payload["contextDigest"] == CONTEXT
 
-    tampered = handle[:-1] + ("A" if handle[-1] != "A" else "B")
-    with pytest.raises(HTTPException) as raised:
-        companion.resolve_run_handle(tampered, current)
-    assert raised.value.status_code == 400
+    invalid_handles = [
+        handle[:-1] + ("A" if handle[-1] != "A" else "B"),
+        "run_" + "A" * 80,
+    ]
+    for invalid in invalid_handles:
+        with pytest.raises(HTTPException) as raised:
+            companion.resolve_run_handle(invalid, current)
+        assert (raised.value.status_code, raised.value.detail) == (
+            404, "run handle not found",
+        )
 
     monkeypatch.setenv("ARCHON_RUNTIME_GENERATION", "generation-2")
     with pytest.raises(HTTPException) as rebound:
         companion.resolve_run_handle(
             handle, binding(generation="generation-2"),
         )
-    assert rebound.value.status_code == 409
+    assert (rebound.value.status_code, rebound.value.detail) == (
+        404, "run handle not found",
+    )
 
+    monkeypatch.setenv("ARCHON_RUNTIME_GENERATION", "generation-1")
+    monkeypatch.setattr(
+        companion, "utc_now", lambda: NOW + timedelta(minutes=31),
+    )
+    with pytest.raises(HTTPException) as expired:
+        companion.resolve_run_handle(handle, current)
+    assert (expired.value.status_code, expired.value.detail) == (
+        404, "run handle not found",
+    )
+
+
+def test_unknown_ack_receipt_has_no_exception_fingerprint():
+    class SensitiveInternalFailure(Exception):
+        pass
+
+    def failing(**_):
+        raise SensitiveInternalFailure("do not expose")
+
+    receipt = companion.guarded_tool("search", {"query": "x"}, failing)
+    assert receipt["status"] == "unknown"
+    assert receipt["result"] == {"reason": "tool unavailable"}
+    assert "SensitiveInternalFailure" not in json.dumps(receipt)
 
 def test_dataset_selection_rejects_non_dataset_and_malformed_urns():
     result = {
