@@ -49,6 +49,14 @@ jest.mock(
     GetItemCommand: class {
       readonly kind = "GetItemCommand";
       constructor(readonly input: Record<string, unknown>) {}
+    },
+    PutItemCommand: class {
+      readonly kind = "PutItemCommand";
+      constructor(readonly input: Record<string, unknown>) {}
+    },
+    UpdateItemCommand: class {
+      readonly kind = "UpdateItemCommand";
+      constructor(readonly input: Record<string, unknown>) {}
     }
   }),
   { virtual: true }
@@ -90,6 +98,11 @@ process.env.CHECKPOINT_TABLE = "checkpoint-table";
 process.env.APPROVAL_TABLE = "approval-table";
 process.env.EVIDENCE_BUCKET = "evidence-bucket";
 process.env.ARCHON_DEMO_QUERY = "domain:Commerce";
+process.env.RUNTIME_SESSION_TABLE = "runtime-session-table";
+process.env.CORE_LEASE_TABLE = "core-lease-table";
+process.env.CORE_SESSION_STATE_MACHINE_ARN =
+  "arn:aws:states:eu-west-1:111111111111:stateMachine:archon-core-session";
+process.env.RUNTIME_OPERATOR_GROUP = "archon-approvers";
 
 const { handler } = require("../lambda/control/index.js") as {
   handler: (event: Record<string, any>) => Promise<{
@@ -645,11 +658,160 @@ function currentActionableCheckpoint(
   };
 }
 
+const runtimeIdentity = {
+  subject: "2f6dcb5a-9f76-4f65-960d-f2637d65b9cb",
+  issuer: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TEST",
+  groups: "[archon-approvers]"
+};
+
+function runtimeSessionItem(sessionId: string) {
+  const boundAtMs = Date.now() - 60_000;
+  const boundAt = new Date(boundAtMs).toISOString();
+  const hardExpiresAt = new Date(boundAtMs + 2 * 60 * 60_000).toISOString();
+  const session = {
+    schemaVersion: "archon.runtime-session/v1",
+    sessionId,
+    requestedProfile: "cloud",
+    binding: {
+      schemaVersion: "archon.runtime-binding/v1",
+      profileId: "cloud",
+      generation: "cloud-2026-08-02",
+      capabilityDigest: "sha256:" + "8".repeat(64),
+      resolution: "explicit",
+      boundAt,
+      leaseExpiresAt: hardExpiresAt
+    },
+    state: "ACTIVE",
+    createdAt: boundAt,
+    updatedAt: boundAt,
+    lastActivityAt: boundAt,
+    idleExpiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+    hardExpiresAt,
+    revision: 4,
+    endReason: null,
+    failureCode: null
+  };
+  return {
+    session,
+    item: {
+      payload: { S: JSON.stringify(session) },
+      revision: { N: "4" },
+      principalHash: {
+        S: digest({
+          issuer: runtimeIdentity.issuer,
+          subject: runtimeIdentity.subject
+        })
+      }
+    }
+  };
+}
 describe("async audit control Lambda", () => {
   beforeEach(() => {
     mockDdbSend.mockReset();
     mockS3Send.mockReset();
     mockSfnSend.mockReset();
+  });
+
+  test("starts v2 only from an owned active runtime and seals binding evidence", async () => {
+    const sessionId = "rs_" + "V".repeat(43);
+    const runtime = runtimeSessionItem(sessionId);
+    mockDdbSend.mockImplementation(async (command: any) => {
+      if (command.kind === "GetItemCommand") {
+        expect(command.input.Key).toEqual({
+          pk: { S: "SESSION#" + sessionId },
+          sk: { S: "RUNTIME" }
+        });
+        return { Item: runtime.item };
+      }
+      if (
+        command.kind === "UpdateItemCommand" ||
+        command.kind === "PutItemCommand"
+      ) {
+        return {};
+      }
+      throw new Error("unexpected DDB command");
+    });
+    mockSfnSend.mockResolvedValue({
+      executionArn:
+        "arn:aws:states:eu-west-1:111111111111:execution:archon-staging-control-loop:v2"
+    });
+
+    const result = await handler({
+      operation: "startV2",
+      requestId: "request-v2-123",
+      body: {
+        query: "domain:Commerce",
+        mode: "READ_ONLY",
+        sessionId
+      },
+      identity: runtimeIdentity
+    });
+
+    expect(result.statusCode).toBe(202);
+    expect(result.payload).toMatchObject({
+      schemaVersion: "archon.control-loop-start/v2",
+      status: "RUNNING",
+      pollUrl: expect.stringMatching(/^\/api\/control-loops-v2\/[a-f0-9]{64}$/),
+      runtimeEvidence: {
+        schemaVersion: "archon.runtime-binding-evidence/v1",
+        runtimeSessionId: sessionId,
+        profileId: "cloud",
+        generation: "cloud-2026-08-02",
+        capabilityDigest: runtime.session.binding.capabilityDigest,
+        bindingDigest: digest(runtime.session.binding),
+        sessionRevision: 5,
+        digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+      }
+    });
+    const update = mockDdbSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => command.kind === "UpdateItemCommand") as any;
+    expect(update.input.ConditionExpression).toBe("revision = :expected");
+    expect(update.input.ExpressionAttributeValues[":expected"]).toEqual({
+      N: "4"
+    });
+    const sealed = mockDdbSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => command.kind === "PutItemCommand") as any;
+    const evidence = JSON.parse(sealed.input.Item.payload.S);
+    expect(evidence.digest).toBe(digest(without(evidence, ["digest"])));
+    const execution = mockSfnSend.mock.calls[0]![0] as any;
+    expect(JSON.parse(execution.input.input)).toEqual({
+      schemaVersion: "archon.audit-request/v1",
+      requestId: result.payload.auditId,
+      requestedAt: result.payload.submittedAt,
+      mode: "READ_ONLY",
+      query: "domain:Commerce"
+    });
+    expect(JSON.stringify(execution.input.input)).not.toContain("binding");
+    expect(JSON.stringify(result.payload)).not.toContain("principalHash");
+  });
+
+  test("rejects client-provided v2 binding and missing identity before execution", async () => {
+    const sessionId = "rs_" + "W".repeat(43);
+    const injected = await handler({
+      operation: "startV2",
+      requestId: "request-v2-unsafe",
+      body: {
+        query: "domain:Commerce",
+        sessionId,
+        binding: { profileId: "core" }
+      },
+      identity: runtimeIdentity
+    });
+    const anonymous = await handler({
+      operation: "startV2",
+      requestId: "request-v2-anonymous",
+      body: { query: "domain:Commerce", sessionId }
+    });
+
+    expect(injected.statusCode).toBe(400);
+    expect(injected.payload).toEqual({
+      error: "invalid_runtime_control_request"
+    });
+    expect(anonymous.statusCode).toBe(404);
+    expect(mockDdbSend).not.toHaveBeenCalled();
+    expect(mockSfnSend).not.toHaveBeenCalled();
   });
 
   test("starts a strict Standard execution and returns only an opaque polling capability", async () => {
