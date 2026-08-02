@@ -480,6 +480,7 @@ jobs:
             echo "path=${raw}"
             echo "digest=sha256:$(sha256sum "${raw}" | awk '{print $1}')"
             echo "semantic_path=${semantic}"
+            echo "credential_binding_digest=${credential_binding_digest}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Verify exact governed canary rollback attestation
@@ -671,6 +672,7 @@ jobs:
           SESSION_DIGEST: ${{ steps.runtime.outputs.session_digest }}
           SESSION_STATUS_DIGEST: ${{ steps.runtime.outputs.session_status_digest }}
           SEMANTIC_DIGEST: ${{ steps.semantic.outputs.digest || 'null' }}
+          CREDENTIAL_BINDING_DIGEST: ${{ steps.semantic.outputs.credential_binding_digest || 'null' }}
         run: |
           set -euo pipefail
           subjects="${RUNNER_TEMP}/live-proof/subjects"
@@ -692,6 +694,7 @@ jobs:
             --arg sessionIdDigest "${SESSION_DIGEST}" \
             --arg sessionStatusDigest "${SESSION_STATUS_DIGEST}" \
             --arg semanticDigest "${SEMANTIC_DIGEST}" \
+            --arg credentialBindingDigest "${CREDENTIAL_BINDING_DIGEST}" \
             --arg queryDigest "${query_digest}" '
               {
                 schemaVersion:"archon.live-dual-runtime-proof/v2",
@@ -728,6 +731,9 @@ jobs:
                      end),
                   semanticProofDigest:
                     (if $semanticDigest == "null" then null else $semanticDigest end),
+                  credentialBindingDigest:
+                    (if $credentialBindingDigest == "null"
+                     then null else $credentialBindingDigest end),
                   exactCanonicalQuery:true,
                   queryDigest:$queryDigest,
                   governedMutationAuthority:"separate-human-approved-canary"
