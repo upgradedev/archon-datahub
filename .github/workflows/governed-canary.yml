@@ -89,7 +89,7 @@ jobs:
           test "$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha)" = "${GITHUB_SHA}"
           run="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
           jq -e --arg sha "${CANARY_RELEASE_SHA}" --argjson id "${CANARY_DEPLOYMENT_RUN_ID}" '
-            .id==$id and .name=="Deploy immutable AWS release" and
+            .id==$id and .name=="Deploy lean dual-runtime AWS release" and
             .path==".github/workflows/deploy.yml" and .event=="workflow_dispatch" and
             .head_branch=="master" and .head_sha==$sha and
             .status=="completed" and .conclusion=="success"
