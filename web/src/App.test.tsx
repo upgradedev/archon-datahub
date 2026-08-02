@@ -471,20 +471,27 @@ describe("Archon control plane", () => {
     await waitFor(() => expect(run).toBeEnabled());
     fireEvent.click(run);
 
-    const improve = await screen.findByRole("button", {
+    const panel = await screen.findByTestId("agent-stack-panel");
+    const improve = await within(panel).findByRole("button", {
       name: "Generate proposal",
     });
     await waitFor(() => expect(improve).toBeEnabled());
     fireEvent.click(improve);
 
-    const approve = await screen.findByRole("button", {
+    const approve = await within(panel).findByRole("button", {
       name: "Approve exact plan",
     });
     await waitFor(() => expect(approve).toBeEnabled());
-    expect(screen.getAllByText("urn:li:tag:PII")).not.toHaveLength(0);
+    expect(within(panel).getAllByText("urn:li:tag:PII")).not.toHaveLength(0);
     fireEvent.click(approve);
+    await waitFor(() =>
+      expect(runtimeMocks.submitRuntimeApproval).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(runtimeMocks.resumeRuntimeAgentStack).toHaveBeenCalledTimes(1),
+    );
 
-    expect(await screen.findByTestId("governed-proof")).toHaveTextContent(
+    expect(await within(panel).findByTestId("governed-proof")).toHaveTextContent(
       "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
     );
     expect(runtimeMocks.submitRuntimeApproval).toHaveBeenCalledWith(
@@ -507,4 +514,5 @@ describe("Archon control plane", () => {
       ),
     ).toBeInTheDocument();
     expect(runtimeMocks.loadRuntimeAgentStack).toHaveBeenCalledTimes(2);
-  });});
+  });
+});
