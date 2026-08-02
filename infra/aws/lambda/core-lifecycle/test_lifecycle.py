@@ -50,6 +50,7 @@ os.environ.update(
         "CORE_INTERFACE_SECURITY_GROUP_ID": "sg-0123456789abcdef0",
         "CORE_BEDROCK_SERVICE_NAME": "com.amazonaws.eu-west-1.bedrock-runtime",
         "CORE_KMS_SERVICE_NAME": "com.amazonaws.eu-west-1.kms",
+        "CORE_STS_SERVICE_NAME": "com.amazonaws.eu-west-1.sts",
         "CORE_DATA_KEY_ARN": DATA_KEY_ARN,
         "CORE_MUTATION_SIGNING_KEY_ARN": MUTATION_KEY_ARN,
         "CORE_ANALYTICS_ROLE_ARN": ANALYTICS_ROLE_ARN,
@@ -144,11 +145,11 @@ class FakeEc2:
         EVENTS.append(f"endpoint-create:{capability}")
         self.create_calls.append(kwargs)
         endpoint = {
-            "VpcEndpointId": (
-                "vpce-0123456789abcdef0"
-                if capability == "kms"
-                else "vpce-0fedcba9876543210"
-            ),
+            "VpcEndpointId": {
+                "kms": "vpce-0123456789abcdef0",
+                "bedrock": "vpce-0fedcba9876543210",
+                "sts": "vpce-00112233445566778",
+            }[capability],
             "State": "available",
             "Tags": tags,
         }
@@ -285,7 +286,7 @@ class CoreLifecycleTests(TestCase):
         with self.assertRaises(ValueError):
             lifecycle._validate_command(invalid, instant(8))
 
-    def test_start_reserves_then_creates_kms_and_bedrock_and_stores_only_ciphertext(self) -> None:
+    def test_start_reserves_then_creates_three_endpoints_and_stores_only_ciphertext(self) -> None:
         result = lifecycle._start(command("START", revision=7), instant(8))
         self.assertEqual(result["decision"], "UPSCALE")
         self.assertEqual(
@@ -294,6 +295,7 @@ class CoreLifecycleTests(TestCase):
                 "ddb-update",
                 "endpoint-create:kms",
                 "endpoint-create:bedrock",
+                "endpoint-create:sts",
                 "sts-assume",
                 "kms-encrypt",
                 "sts-assume",
@@ -304,6 +306,7 @@ class CoreLifecycleTests(TestCase):
         self.assertEqual([call["ServiceName"] for call in EC2.create_calls], [
             "com.amazonaws.eu-west-1.kms",
             "com.amazonaws.eu-west-1.bedrock-runtime",
+            "com.amazonaws.eu-west-1.sts",
         ])
         kms_policy = EC2.create_calls[0]["PolicyDocument"]["Statement"][0]
         self.assertEqual(kms_policy["Principal"], {"AWS": INSTANCE_ROLE_ARN})
@@ -333,6 +336,10 @@ class CoreLifecycleTests(TestCase):
         bedrock_policy = EC2.create_calls[1]["PolicyDocument"]["Statement"][0]
         self.assertEqual(bedrock_policy["Principal"], {"AWS": ANALYTICS_ROLE_ARN})
         self.assertEqual(bedrock_policy["Resource"], BEDROCK_RESOURCES)
+        sts_policy = EC2.create_calls[2]["PolicyDocument"]["Statement"][0]
+        self.assertEqual(sts_policy["Principal"], {"AWS": ANALYTICS_ROLE_ARN})
+        self.assertEqual(sts_policy["Action"], "sts:GetCallerIdentity")
+        self.assertEqual(sts_policy["Resource"], "*")
         persisted = TABLE.updates[1]["ExpressionAttributeValues"]
         serialized = json.dumps(persisted)
         self.assertNotIn("secret-value-never-in-ddb", serialized)
@@ -393,7 +400,7 @@ class CoreLifecycleTests(TestCase):
         self.assertEqual(STS.calls, [])
         self.assertEqual(KMS.encrypt_calls, [])
 
-    def test_finalize_down_removes_ciphertext_and_both_endpoints(self) -> None:
+    def test_finalize_down_removes_ciphertext_and_all_three_endpoints(self) -> None:
         EC2.endpoints = [
             {
                 "VpcEndpointId": "vpce-0123456789abcdef0",
@@ -411,6 +418,14 @@ class CoreLifecycleTests(TestCase):
                     {"Key": "ArchonCapability", "Value": "bedrock"},
                 ],
             },
+            {
+                "VpcEndpointId": "vpce-00112233445566778",
+                "State": "available",
+                "Tags": [
+                    {"Key": "ArchonSessionId", "Value": SESSION},
+                    {"Key": "ArchonCapability", "Value": "sts"},
+                ],
+            },
         ]
         TABLE.item = {
             **active_lease(instant(8)),
@@ -418,6 +433,7 @@ class CoreLifecycleTests(TestCase):
             "operationId": "1" * 32,
             "inferenceEndpointId": "vpce-0fedcba9876543210",
             "kmsEndpointId": "vpce-0123456789abcdef0",
+            "stsEndpointId": "vpce-00112233445566778",
         }
         final = {
             "schema": "archon.core-runtime-command/v1",
@@ -433,9 +449,10 @@ class CoreLifecycleTests(TestCase):
         self.assertIn("analyticsCredentialsCiphertext", update)
         self.assertIn("gatewayCredentialsCiphertext", update)
         self.assertIn("kmsEndpointId", update)
+        self.assertIn("stsEndpointId", update)
         self.assertEqual(
             sorted(EC2.delete_calls),
-            sorted(["vpce-0123456789abcdef0", "vpce-0fedcba9876543210"]),
+            sorted(["vpce-0123456789abcdef0", "vpce-0fedcba9876543210", "vpce-00112233445566778"]),
         )
 
     def test_lifecycle_has_no_autoscaling_or_direct_bedrock_authority(self) -> None:

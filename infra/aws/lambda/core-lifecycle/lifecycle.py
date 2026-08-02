@@ -96,6 +96,9 @@ BEDROCK_SERVICE_NAME = _required_env(
 KMS_SERVICE_NAME = _required_env(
     "CORE_KMS_SERVICE_NAME", re.compile(r"^com\.amazonaws\.eu-west-1\.kms$")
 )
+STS_SERVICE_NAME = _required_env(
+    "CORE_STS_SERVICE_NAME", re.compile(r"^com\.amazonaws\.eu-west-1\.sts$")
+)
 INTERFACE_SECURITY_GROUP_ID = _required_env(
     "CORE_INTERFACE_SECURITY_GROUP_ID", re.compile(r"^sg-[0-9a-f]{8,17}$")
 )
@@ -366,7 +369,7 @@ def _runtime_endpoints(capability: str | None = None) -> list[dict[str, Any]]:
         {"Name": "tag:Environment", "Values": [STAGE]},
     ]
     if capability is not None:
-        if capability not in {"bedrock", "kms"}:
+        if capability not in {"bedrock", "kms", "sts"}:
             raise ValueError("endpoint capability is invalid")
         filters.append({"Name": "tag:ArchonCapability", "Values": [capability]})
     response = _EC2.describe_vpc_endpoints(Filters=filters)
@@ -448,6 +451,17 @@ def _endpoint_policy(capability: str, session_id: str) -> dict[str, Any]:
                 "Resource": list(BEDROCK_RESOURCES),
             }],
         }
+    if capability == "sts":
+        return {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "OnlyScopedAnalyticsIdentityProof",
+                "Effect": "Allow",
+                "Principal": {"AWS": ANALYTICS_ROLE_ARN},
+                "Action": "sts:GetCallerIdentity",
+                "Resource": "*",
+            }],
+        }
     raise ValueError("endpoint capability is invalid")
 
 def _delete_endpoint(endpoint_id: Any) -> None:
@@ -514,7 +528,7 @@ def _abandon_start(
                 UpdateExpression=(
                     "SET #state=:failed, updatedAt=:updated "
                     "REMOVE operationId, operationExpiresAt, inferenceEndpointId, "
-                    "kmsEndpointId, analyticsCredentialsCiphertext, "
+                    "kmsEndpointId, stsEndpointId, analyticsCredentialsCiphertext, "
                     "analyticsCredentialsExpiresAt, analyticsCredentialsVersion, "
                     "gatewayCredentialsCiphertext, gatewayCredentialsExpiresAt, "
                     "gatewayCredentialsVersion"
@@ -551,6 +565,7 @@ def _ensure_endpoint(
     service_name = {
         "bedrock": BEDROCK_SERVICE_NAME,
         "kms": KMS_SERVICE_NAME,
+        "sts": STS_SERVICE_NAME,
     }.get(capability)
     if service_name is None:
         raise ValueError("endpoint capability is invalid")
@@ -731,7 +746,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "resolution=:resolution, boundAt=:bound, "
                 "idleExpiresAt=:idle, hardExpiresAt=:hard, updatedAt=:updated, "
                 "operationId=:operation, operationExpiresAt=:operationExpiry, "
-                "expiresAt=:ttl REMOVE stoppedAt, inferenceEndpointId, kmsEndpointId, "
+                "expiresAt=:ttl REMOVE stoppedAt, inferenceEndpointId, kmsEndpointId, stsEndpointId, "
                 "analyticsCredentialsCiphertext, analyticsCredentialsExpiresAt, "
                 "analyticsCredentialsVersion, gatewayCredentialsCiphertext, "
                 "gatewayCredentialsExpiresAt, gatewayCredentialsVersion"
@@ -786,6 +801,10 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
             "bedrock", session_id, operation_expires_at
         )
         endpoint_ids.append(inference_endpoint_id)
+        sts_endpoint_id, _ = _ensure_endpoint(
+            "sts", session_id, operation_expires_at
+        )
+        endpoint_ids.append(sts_endpoint_id)
         analytics_credential = _mint_analytics_credentials(session_id, now)
         gateway_credential = _mint_gateway_credentials(session_id, now)
         try:
@@ -793,7 +812,8 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
                 UpdateExpression=(
                     "SET inferenceEndpointId=:inferenceEndpoint, "
-                    "kmsEndpointId=:kmsEndpoint, updatedAt=:updated, "
+                    "kmsEndpointId=:kmsEndpoint, stsEndpointId=:stsEndpoint, "
+                    "updatedAt=:updated, "
                     "analyticsCredentialsCiphertext=:analyticsCiphertext, "
                     "analyticsCredentialsExpiresAt=:analyticsExpiry, "
                     "analyticsCredentialsVersion=:analyticsVersion, "
@@ -810,6 +830,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 ExpressionAttributeValues={
                     ":inferenceEndpoint": inference_endpoint_id,
                     ":kmsEndpoint": kms_endpoint_id,
+                    ":stsEndpoint": sts_endpoint_id,
                     ":analyticsCiphertext": analytics_credential["ciphertext"],
                     ":analyticsExpiry": analytics_credential["expiresAt"],
                     ":analyticsVersion": analytics_credential["version"],
@@ -836,6 +857,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 and current.get("operationId") == operation_id
                 and current.get("inferenceEndpointId") == inference_endpoint_id
                 and current.get("kmsEndpointId") == kms_endpoint_id
+                and current.get("stsEndpointId") == sts_endpoint_id
                 and isinstance(current.get("analyticsCredentialsCiphertext"), str)
                 and isinstance(current.get("analyticsCredentialsVersion"), str)
                 and int(current.get("analyticsCredentialsExpiresAt", 0)) > _epoch(now) + 900
@@ -1108,6 +1130,7 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         (
             str(before.get("inferenceEndpointId", "")),
             str(before.get("kmsEndpointId", "")),
+            str(before.get("stsEndpointId", "")),
         )
         if before
         else ()
@@ -1117,7 +1140,7 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         + (", stoppedAt=:updated" if final_state == "STOPPED" else "")
         + (
             " REMOVE operationId, operationExpiresAt, inferenceEndpointId, "
-            "kmsEndpointId, analyticsCredentialsCiphertext, "
+            "kmsEndpointId, stsEndpointId, analyticsCredentialsCiphertext, "
             "analyticsCredentialsExpiresAt, analyticsCredentialsVersion, "
                     "gatewayCredentialsCiphertext, gatewayCredentialsExpiresAt, "
                     "gatewayCredentialsVersion"

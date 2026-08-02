@@ -151,6 +151,8 @@ describe("ephemeral DataHub Core stack", () => {
     expect(serialized).toContain("ec2:DeleteVpcEndpoints");
     expect(serialized).toContain("CORE_BEDROCK_SERVICE_NAME");
     expect(serialized).toContain("CORE_KMS_SERVICE_NAME");
+    expect(serialized).toContain("CORE_STS_SERVICE_NAME");
+    expect(serialized).toContain("com.amazonaws.eu-west-1.sts");
     expect(serialized).toContain("CORE_INTERFACE_SECURITY_GROUP_ID");
   });
 
@@ -184,6 +186,8 @@ describe("ephemeral DataHub Core stack", () => {
     expect(serialized).toContain("ARCHON_DELIGHT_LLM_MODEL");
     expect(serialized).toContain("ARCHON_DEMO_QUERY");
     expect(serialized).toContain("ARCHON_ANALYTICS_QUESTION");
+    expect(serialized).toContain("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN");
+    expect(serialized).toContain("AWS_STS_REGIONAL_ENDPOINTS=regional");
     expect(serialized).toContain("http://127.0.0.1:18080");
     expect(serialized).not.toContain("https://127.0.0.1:9443");
   });
@@ -215,6 +219,7 @@ describe("ephemeral DataHub Core stack", () => {
         CORE_HARD_SECONDS: "7200",
         CORE_OPERATION_SECONDS: "300",
         CORE_KMS_SERVICE_NAME: expect.anything(),
+        CORE_STS_SERVICE_NAME: expect.anything(),
         CORE_DATA_KEY_ARN: expect.anything(),
         CORE_MUTATION_SIGNING_KEY_ARN: expect.anything(),
         CORE_ANALYTICS_ROLE_ARN: expect.anything(),

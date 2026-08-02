@@ -38,6 +38,9 @@ os.environ.update(
         "ARCHON_IMAGE_MANIFEST_DIGEST": "sha256:" + "b" * 64,
         "ARCHON_CORE_DATA_KEY_ARN": DATA_KEY,
         "ARCHON_MUTATION_SIGNING_KEY_ARN": SIGNING_KEY,
+        "ARCHON_EXPECTED_ANALYTICS_ROLE_ARN": (
+            "arn:aws:iam::123456789012:role/archon-staging-core-analytics"
+        ),
         "ARCHON_LLM_PROVIDER": "bedrock",
         "ARCHON_LLM_MODEL": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "ARCHON_CHART_LLM_MODEL": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
@@ -148,6 +151,15 @@ class BootstrapBoundaryTests(TestCase):
         self.assertEqual(len(oauth_lines), 1)
         self.assertRegex(oauth_lines[0].split("=", 1)[1], r"^[A-Za-z0-9_-]{43}=$")
         self.assertNotIn("OAUTH_MASTER_KEY", values["companion"])
+        self.assertIn(
+            "ARCHON_EXPECTED_ANALYTICS_ROLE_ARN="
+            "arn:aws:iam::123456789012:role/archon-staging-core-analytics",
+            values["companion"],
+        )
+        self.assertIn("AWS_STS_REGIONAL_ENDPOINTS=regional", values["companion"])
+        self.assertNotIn("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN", values["read"])
+        self.assertNotIn("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN", values["writer"])
+        self.assertNotIn("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN", values["gateway"])
 
     def test_analytics_oauth_key_survives_rotation_and_plaintext_pat_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -338,6 +350,8 @@ class BootstrapBoundaryTests(TestCase):
             "gatewayUnsignedDenied",
             "def _run_handle_key",
             '"OAUTH_MASTER_KEY": oauth_master_key',
+            '"ARCHON_EXPECTED_ANALYTICS_ROLE_ARN": expected_analytics_role',
+            '"AWS_STS_REGIONAL_ENDPOINTS": "regional"',
             "def _assert_analytics_token_not_at_rest",
             'str(ROOT / "datahub/docker-compose.images.yml")',
         ):

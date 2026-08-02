@@ -52,6 +52,7 @@ REQUIRED = (
     "ARCHON_IMAGE_MANIFEST_DIGEST",
     "ARCHON_CORE_DATA_KEY_ARN",
     "ARCHON_MUTATION_SIGNING_KEY_ARN",
+    "ARCHON_EXPECTED_ANALYTICS_ROLE_ARN",
     "ARCHON_LLM_PROVIDER",
     "ARCHON_LLM_MODEL",
     "ARCHON_CHART_LLM_MODEL",
@@ -759,6 +760,7 @@ def _analytics_env_values(
         "DELIGHT_LLM_MODEL": _required("ARCHON_DELIGHT_LLM_MODEL"),
         "AWS_REGION": region,
         "AWS_DEFAULT_REGION": region,
+        "AWS_STS_REGIONAL_ENDPOINTS": "regional",
         "DATAHUB_TELEMETRY_ENABLED": "false",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "",
         "ARCHON_ANALYTICS_CREDENTIAL_VERSION": version,
@@ -844,6 +846,12 @@ def _prepare_process_env(
     )
     model = _required("ARCHON_LLM_MODEL")
     region = _required("AWS_REGION")
+    expected_analytics_role = _required("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN")
+    if re.fullmatch(
+        r"arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}",
+        expected_analytics_role,
+    ) is None:
+        raise RuntimeError("expected Analytics role ARN is invalid")
     fernet_key = _run_handle_key()
     _write_env(
         companion_env,
@@ -863,6 +871,8 @@ def _prepare_process_env(
             "ARCHON_ANALYTICS_LLM_PROVIDER": "bedrock",
             "ARCHON_ANALYTICS_LLM_MODEL": model,
             "ARCHON_ANALYTICS_AWS_REGION": region,
+            "ARCHON_EXPECTED_ANALYTICS_ROLE_ARN": expected_analytics_role,
+            "AWS_STS_REGIONAL_ENDPOINTS": "regional",
             "ARCHON_DEMO_QUERY": _required("ARCHON_DEMO_QUERY"),
             "ARCHON_ANALYTICS_QUESTION": _required("ARCHON_ANALYTICS_QUESTION"),
             "DATAHUB_GMS_URL": CONTAINER_GMS_URL,

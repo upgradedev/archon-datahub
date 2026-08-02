@@ -147,6 +147,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     const bedrockRuntimeServiceName =
       `com.amazonaws.${Aws.REGION}.bedrock-runtime`;
     const kmsServiceName = `com.amazonaws.${Aws.REGION}.kms`;
+    const stsServiceName = `com.amazonaws.${Aws.REGION}.sts`;
     const exactBedrockResources = [
       `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${llmModelId.valueAsString}`,
       `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:application-inference-profile/${llmModelId.valueAsString}`,
@@ -260,7 +261,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       {
         vpc,
         description:
-          "Ephemeral Bedrock Runtime and KMS endpoints accept TLS only from the Core host",
+          "Ephemeral Bedrock Runtime, KMS, and STS endpoints accept TLS only from the Core host",
         allowAllOutbound: false,
         allowAllIpv6Outbound: false,
         disableInlineRules: true
@@ -269,12 +270,12 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     inferenceEndpointSecurityGroup.addIngressRule(
       hostSecurityGroup,
       ec2.Port.tcp(443),
-      "Core host to ephemeral Bedrock Runtime and KMS endpoints"
+      "Core host to ephemeral Bedrock Runtime, KMS, and STS endpoints"
     );
     hostSecurityGroup.addEgressRule(
       inferenceEndpointSecurityGroup,
       ec2.Port.tcp(443),
-      "Ephemeral session-owned Bedrock Runtime and KMS interface endpoints only"
+      "Ephemeral session-owned Bedrock Runtime, KMS, and STS interface endpoints only"
     );
 
     const instanceRole = new iam.Role(this, "CoreInstanceRole", {
@@ -476,6 +477,8 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       `ARCHON_IMAGE_MANIFEST_DIGEST=${imageManifestDigest.valueAsString}`,
       `ARCHON_CORE_DATA_KEY_ARN=${dataKey.keyArn}`,
       `ARCHON_MUTATION_SIGNING_KEY_ARN=${mutationSigningKey.keyArn}`,
+      `ARCHON_EXPECTED_ANALYTICS_ROLE_ARN=${analyticsRole.roleArn}`,
+      "AWS_STS_REGIONAL_ENDPOINTS=regional",
       "ARCHON_LLM_PROVIDER=bedrock",
       `ARCHON_LLM_MODEL=${llmModelId.valueAsString}`,
       `ARCHON_CHART_LLM_MODEL=${llmModelId.valueAsString}`,
@@ -593,6 +596,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
             inferenceEndpointSecurityGroup.securityGroupId,
           CORE_BEDROCK_SERVICE_NAME: bedrockRuntimeServiceName,
           CORE_KMS_SERVICE_NAME: kmsServiceName,
+          CORE_STS_SERVICE_NAME: stsServiceName,
           CORE_DATA_KEY_ARN: dataKey.keyArn,
           CORE_MUTATION_SIGNING_KEY_ARN: mutationSigningKey.keyArn,
           CORE_ANALYTICS_ROLE_ARN: analyticsRole.roleArn,
