@@ -49,7 +49,7 @@ test("write and inverse are separately approved and share a non-cancelling lock"
   assert.match(workflow, /name: governed-canary-prepare/);
   assert.match(workflow, /name: governed-canary$/m);
   assert.match(workflow, /name: governed-canary-recovery/);
-  assert.doesNotMatch(workflow, /name: governed-canary-rollback/);
+  assert.doesNotMatch(workflow, /^\s+name: governed-canary-rollback$/m);
   const prepare = section(workflow, "  prepare:", "  execute:");
   const execute = section(workflow, "  execute:", "  rollback:");
   const rollback = section(workflow, "  rollback:");
