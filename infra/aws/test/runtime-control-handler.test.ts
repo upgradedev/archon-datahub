@@ -42,6 +42,7 @@ process.env.RUNTIME_SESSION_TABLE = "runtime-session-table";
 process.env.CORE_LEASE_TABLE = "core-lease-table";
 process.env.CORE_SESSION_STATE_MACHINE_ARN =
   "arn:aws:states:eu-west-1:111111111111:stateMachine:archon-core-session";
+process.env.RUNTIME_OPERATOR_GROUP = "archon-approvers";
 
 const { handler } = require("../lambda/runtime-control/index.js") as {
   handler: (event: Record<string, unknown>) => Promise<{
@@ -100,11 +101,24 @@ function healthItem(
   };
 }
 
+const identity = {
+  subject: "judge-user-123",
+  issuer: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TEST",
+  groups: "[archon-approvers]"
+};
+
 function event(
   operation: string,
   extra: Record<string, unknown> = {}
 ): Record<string, unknown> {
-  return { operation, requestId: "request-runtime-123", ...extra };
+  return {
+    operation,
+    requestId: "request-runtime-123",
+    ...(["sessionStart", "sessionActivity", "sessionStop"].includes(operation)
+      ? { identity }
+      : {}),
+    ...extra
+  };
 }
 
 describe("runtime session control Lambda", () => {
@@ -252,6 +266,44 @@ describe("runtime session control Lambda", () => {
       })
     });
     expect(JSON.stringify(input)).not.toContain("endpoint");
+  });
+
+  test.each([
+    [
+      "missing identity",
+      {
+        operation: "sessionStart",
+        requestId: "request-runtime-123",
+        body: { requestedProfile: "auto" }
+      },
+      404,
+      "not_found"
+    ],
+    [
+      "wrong operator group",
+      event("sessionStart", {
+        body: { requestedProfile: "auto" },
+        identity: { ...identity, groups: "[another-group]" }
+      }),
+      403,
+      "runtime_operator_role_required"
+    ],
+    [
+      "malformed issuer",
+      event("sessionStart", {
+        body: { requestedProfile: "auto" },
+        identity: { ...identity, issuer: "http://not-trusted.example" }
+      }),
+      401,
+      "authenticated_runtime_operator_required"
+    ]
+  ])("rejects %s before paid orchestration", async (_label, input, status, code) => {
+    const result = await handler(input as Record<string, unknown>);
+
+    expect(result.statusCode).toBe(status);
+    expect(result.payload).toEqual({ error: code });
+    expect(mockDdbSend).not.toHaveBeenCalled();
+    expect(mockSfnSend).not.toHaveBeenCalled();
   });
 
   test("rejects unexpected fields before any AWS request", async () => {
