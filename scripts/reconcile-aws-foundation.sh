@@ -184,6 +184,7 @@ declare -A DEPLOY_TEMPLATE_SHA
 declare -A CANARY_POLICY_SHA
 declare -A CANARY_ROLE_BINDING_SHA
 declare -A OPERATIONAL_ROLE_BINDING_SHA
+declare -A OPERATIONAL_ROLE_ARN
 cloud_runtime_publisher_role_arn=""
 application_stack_roles_json='[]'
 application_stack_role_transition_json=''
@@ -1723,6 +1724,8 @@ verify_operational_role() {
             Value: (
               if ($environment | startswith("judge-access-")) then
                 ($environment | sub("^judge-access-"; ""))
+              elif ($environment == "staging" or $environment == "production") then
+                $environment
               else
                 "production"
               end
@@ -1778,6 +1781,7 @@ verify_operational_role() {
     printf '%s' "${role_arn}" | sha256sum | awk '{print $1}'
   )"
   OPERATIONAL_ROLE_BINDING_SHA["${kind}"]="${binding_sha}"
+  OPERATIONAL_ROLE_ARN["${kind}"]="${role_arn}"
   role_evidence="$(
     jq -cnS \
       --arg kind "${kind}" \
@@ -2325,6 +2329,8 @@ for stage in staging production; do
           [
             "CloudRuntimeImagePublisherRoleArn",
             "CloudRuntimeImagePublisherRoleName",
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName",
             "GitHubDeployRoleArn",
             "GitHubDeployRoleName",
             "JudgeUserRoleArn",
@@ -2339,6 +2345,8 @@ for stage in staging production; do
           sort
         else
           [
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName",
             "GitHubDeployRoleArn",
             "GitHubDeployRoleName",
             "JudgeUserRoleArn",
@@ -2456,6 +2464,15 @@ for stage in staging production; do
     "judge-access-${stage}" \
     archon-judge-user-operations \
     judge-user-lifecycle
+  verify_operational_role \
+    "${deploy_stack_json}" \
+    "datahub-cloud-trial-${stage}" \
+    GitHubDataHubCloudTrialRoleArn \
+    GitHubDataHubCloudTrialRoleName \
+    "archon-datahub-github-${stage}-cloud-trial" \
+    "${stage}" \
+    archon-datahub-cloud-trial-transaction \
+    datahub-cloud-trial-control-plane
   if [[ "${stage}" == "production" ]]; then
     verify_cloud_runtime_publisher "${deploy_stack_json}"
     verify_operational_role \
@@ -2675,7 +2692,7 @@ jq -e '
       .iamDeployedTemplateSha256 == $expected
     )
   ) and
-  (.aws.applicationStackRolePreflight | length) == 5 and
+  (.aws.applicationStackRolePreflight | length) == 6 and
   all(.aws.applicationStackRolePreflight[];
     .validation == "passed" or
     .validation == "requires-explicit-deploy-migration"
@@ -2753,7 +2770,9 @@ jq -e '
   all(.aws.governedCanary.roles[]; .validation == "passed") and
   (.aws.operationalRoles | map(.kind)) == [
     "judge-staging",
+    "datahub-cloud-trial-staging",
     "judge-production",
+    "datahub-cloud-trial-production",
     "cloud-runtime-publisher",
     "posture-observer",
     "runtime-read",
@@ -2900,7 +2919,9 @@ combined_canary_binding_sha="$(
 combined_operational_binding_sha="$(
   printf '%s\n' \
     "${OPERATIONAL_ROLE_BINDING_SHA[judge-staging]}" \
+    "${OPERATIONAL_ROLE_BINDING_SHA[datahub-cloud-trial-staging]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[judge-production]}" \
+    "${OPERATIONAL_ROLE_BINDING_SHA[datahub-cloud-trial-production]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[cloud-runtime-publisher]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[posture-observer]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[runtime-read]}" \
@@ -2920,6 +2941,8 @@ combined_operational_binding_sha="$(
   echo "operational_role_binding_sha=${combined_operational_binding_sha}"
   echo "cloud_runtime_publisher_role_arn=${cloud_runtime_publisher_role_arn}"
   echo "cloud_runtime_publisher_binding_sha=${OPERATIONAL_ROLE_BINDING_SHA[cloud-runtime-publisher]}"
+  echo "datahub_cloud_trial_staging_role_arn=${OPERATIONAL_ROLE_ARN[datahub-cloud-trial-staging]}"
+  echo "datahub_cloud_trial_production_role_arn=${OPERATIONAL_ROLE_ARN[datahub-cloud-trial-production]}"
   echo "application_stack_role_transition=${application_stack_role_transition_state}"
   echo "shared_api_gateway_mode=${shared_api_gateway_mode}"
   echo "drift_stack_count=${drift_stack_count}"
