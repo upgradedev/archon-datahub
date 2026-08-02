@@ -763,6 +763,17 @@ async function stopSession(sessionId, identity) {
 exports.handler = async (event) => {
   try {
     if (
+      record(event) &&
+      ["sessionStart", "sessionActivity", "sessionStop"].includes(
+        event.operation
+      ) &&
+      !Object.prototype.hasOwnProperty.call(event, "identity")
+    ) {
+      return response(401, {
+        error: "authenticated_runtime_operator_required"
+      });
+    }
+    if (
       exactKeys(event, ["operation", "requestId"]) &&
       event.operation === "profiles"
     ) {
