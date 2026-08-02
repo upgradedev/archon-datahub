@@ -11,6 +11,10 @@ import { EvidencePack } from "./EvidencePack";
 import { GuidedTour } from "./GuidedTour";
 import { RuntimeControl } from "./RuntimeControl";
 import {
+  loadRuntimeAudit,
+  type RuntimeSessionStatus,
+} from "./runtime-api";
+import {
   beginSignIn,
   getAccessToken,
   getAuthSnapshot,
@@ -1089,6 +1093,8 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [runError, setRunError] = useState<string>();
   const [controlLoop, setControlLoop] = useState<ControlLoopStatus>();
+  const [runtimeSession, setRuntimeSession] =
+    useState<RuntimeSessionStatus>();
   const [selectedId, setSelectedId] = useState(
     findingIdentity(previewAudit.report.findings[0]!),
   );
@@ -1174,10 +1180,7 @@ export function App() {
     setRunError(undefined);
     setControlLoop(undefined);
     try {
-      const result = await loadAudit(
-        scope,
-        nextController.signal,
-        (status, progressAudit) => {
+      const progress = (status: ControlLoopStatus, progressAudit?: LoadedAudit) => {
           setControlLoop(status);
           if (progressAudit) {
             setAudit(progressAudit);
@@ -1191,9 +1194,22 @@ export function App() {
                   : "",
             );
           }
-        },
-      );
-      setAudit(result);
+        };
+      const result =
+        runtimeSession?.canRun === true
+          ? await loadRuntimeAudit(
+              scope,
+              runtimeSession.sessionId,
+              getAccessToken(),
+              nextController.signal,
+              progress,
+            )
+          : await loadAudit(
+              scope,
+              nextController.signal,
+              progress,
+            );      setAudit(result);
+
       setControlLoop(result.controlLoop);
       setSelectedId(
         result.envelope.report.findings[0]
@@ -1467,6 +1483,7 @@ export function App() {
             getAccessToken={
               auth.status === "authenticated" ? getAccessToken : undefined
             }
+            onSessionChange={setRuntimeSession}
           />
 
           <div className="mt-6">

@@ -1,3 +1,5 @@
+import { parseControlLoopStatus } from "./api";
+import type { ControlLoopStatus, LoadedAudit } from "./types";
 export type RuntimeRequest = "auto" | "cloud" | "core";
 export type RuntimeProfileId = "cloud" | "core";
 export type RuntimeProfileAvailability =
@@ -451,5 +453,318 @@ export async function stopRuntimeSession(
       headers: authorizationHeaders(accessToken),
       signal,
     }),
+  );
+}
+
+export interface RuntimeBindingEvidence {
+  schemaVersion: "archon.runtime-binding-evidence/v2";
+  auditId: string;
+  runtimeSessionId: string;
+  runtimeBinding: {
+    schemaVersion: "archon.runtime-binding/v1";
+    profileId: RuntimeProfileId;
+    generation: string;
+    capabilityDigest: string;
+    resolution: "auto" | "explicit";
+    boundAt: string;
+    leaseExpiresAt: string;
+  };
+  capabilities: RuntimeCapabilities;
+  bindingDigest: string;
+  sessionRevision: number;
+  recordedAt: string;
+  digest: string;
+}
+
+export interface RuntimeControlLoopStart {
+  schemaVersion: "archon.control-loop-start/v2";
+  auditId: string;
+  status: "RUNNING";
+  pollUrl: string;
+  submittedAt: string;
+  runtimeEvidence: RuntimeBindingEvidence;
+}
+
+const RUNTIME_CONTROL_LOOP_PATH = "/api/control-loops-v2";
+const AUDIT_ID = /^[a-f0-9]{64}$/u;
+const TERMINAL_AUDIT_STATES = new Set([
+  "SUCCEEDED",
+  "FAILED",
+  "TIMED_OUT",
+  "ABORTED",
+]);
+
+function runtimeBindingEvidence(
+  value: unknown,
+  expectedAuditId: string,
+): value is RuntimeBindingEvidence {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "schemaVersion",
+      "auditId",
+      "runtimeSessionId",
+      "runtimeBinding",
+      "capabilities",
+      "bindingDigest",
+      "sessionRevision",
+      "recordedAt",
+      "digest",
+    ]) ||
+    value.schemaVersion !== "archon.runtime-binding-evidence/v2" ||
+    value.auditId !== expectedAuditId ||
+    typeof value.runtimeSessionId !== "string" ||
+    !SESSION_ID.test(value.runtimeSessionId) ||
+    !record(value.runtimeBinding) ||
+    !exactKeys(value.runtimeBinding, [
+      "schemaVersion",
+      "profileId",
+      "generation",
+      "capabilityDigest",
+      "resolution",
+      "boundAt",
+      "leaseExpiresAt",
+    ]) ||
+    value.runtimeBinding.schemaVersion !== "archon.runtime-binding/v1" ||
+    !PROFILE_IDS.includes(value.runtimeBinding.profileId as RuntimeProfileId) ||
+    typeof value.runtimeBinding.generation !== "string" ||
+    !GENERATION.test(value.runtimeBinding.generation) ||
+    typeof value.runtimeBinding.capabilityDigest !== "string" ||
+    !DIGEST.test(value.runtimeBinding.capabilityDigest) ||
+    (value.runtimeBinding.resolution !== "auto" &&
+      value.runtimeBinding.resolution !== "explicit") ||
+    !instant(value.runtimeBinding.boundAt) ||
+    !instant(value.runtimeBinding.leaseExpiresAt) ||
+    Date.parse(value.runtimeBinding.leaseExpiresAt) <=
+      Date.parse(value.runtimeBinding.boundAt) ||
+    Date.parse(value.runtimeBinding.leaseExpiresAt) -
+      Date.parse(value.runtimeBinding.boundAt) >
+      2 * 60 * 60_000 ||
+    !capabilities(value.capabilities) ||
+    !CAPABILITY_KEYS.every((key) => value.capabilities[key] === true) ||
+    typeof value.bindingDigest !== "string" ||
+    !DIGEST.test(value.bindingDigest) ||
+    !Number.isSafeInteger(value.sessionRevision) ||
+    (value.sessionRevision as number) < 1 ||
+    !instant(value.recordedAt) ||
+    typeof value.digest !== "string" ||
+    !DIGEST.test(value.digest) ||
+    !safePublicValue(value)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function parseRuntimeControlLoopStart(
+  value: unknown,
+): RuntimeControlLoopStart {
+  if (
+    !record(value) ||
+    !exactKeys(value, [
+      "schemaVersion",
+      "auditId",
+      "status",
+      "pollUrl",
+      "submittedAt",
+      "runtimeEvidence",
+    ]) ||
+    value.schemaVersion !== "archon.control-loop-start/v2" ||
+    typeof value.auditId !== "string" ||
+    !AUDIT_ID.test(value.auditId) ||
+    value.status !== "RUNNING" ||
+    value.pollUrl !== RUNTIME_CONTROL_LOOP_PATH + "/" + value.auditId ||
+    !instant(value.submittedAt) ||
+    !runtimeBindingEvidence(value.runtimeEvidence, value.auditId) ||
+    !safePublicValue(value)
+  ) {
+    throw new RuntimeApiError(
+      "The runtime-bound control plane returned an invalid start contract.",
+      502,
+    );
+  }
+  return value as unknown as RuntimeControlLoopStart;
+}
+
+function parseRuntimeControlLoopStatus(
+  value: unknown,
+  expectedAuditId: string,
+): {
+  status: ControlLoopStatus;
+  runtimeEvidence: RuntimeBindingEvidence;
+} {
+  if (
+    !record(value) ||
+    value.schemaVersion !== "archon.control-loop-status/v2" ||
+    !runtimeBindingEvidence(value.runtimeEvidence, expectedAuditId)
+  ) {
+    throw new RuntimeApiError(
+      "The runtime-bound control plane returned an invalid status contract.",
+      502,
+    );
+  }
+  const { runtimeEvidence, ...base } = value;
+  const status = parseControlLoopStatus(
+    {
+      ...base,
+      schemaVersion: "archon.control-loop-status/v1",
+    },
+    expectedAuditId,
+  );
+  return { status, runtimeEvidence };
+}
+
+function narrowRuntimeAuditQuery(query: string): string {
+  const scope = query.trim();
+  if (
+    !scope ||
+    scope !== query ||
+    scope.length > 256 ||
+    /[\x00-\x1f\x7f]/u.test(scope) ||
+    /[*?]/u.test(scope) ||
+    scope === "{}"
+  ) {
+    throw new RuntimeApiError(
+      "Enter the exact configured, non-wildcard dataset scope.",
+      400,
+    );
+  }
+  return scope;
+}
+
+export async function startRuntimeControlLoop(
+  query: string,
+  sessionId: string,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<RuntimeControlLoopStart> {
+  const scope = narrowRuntimeAuditQuery(query);
+  if (!SESSION_ID.test(sessionId)) {
+    throw new RuntimeApiError(
+      "The runtime session capability is invalid.",
+      400,
+    );
+  }
+  return parseRuntimeControlLoopStart(
+    await request(RUNTIME_CONTROL_LOOP_PATH, {
+      method: "POST",
+      body: JSON.stringify({
+        query: scope,
+        mode: "GOVERNED",
+        sessionId,
+      }),
+      headers: authorizationHeaders(accessToken),
+      signal,
+    }),
+  );
+}
+
+export async function getRuntimeControlLoopStatus(
+  start: Pick<RuntimeControlLoopStart, "auditId" | "pollUrl">,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<{
+  status: ControlLoopStatus;
+  runtimeEvidence: RuntimeBindingEvidence;
+}> {
+  if (
+    !AUDIT_ID.test(start.auditId) ||
+    start.pollUrl !==
+      RUNTIME_CONTROL_LOOP_PATH + "/" + start.auditId
+  ) {
+    throw new RuntimeApiError(
+      "The runtime-bound audit polling capability is invalid.",
+      400,
+    );
+  }
+  return parseRuntimeControlLoopStatus(
+    await request(start.pollUrl, {
+      method: "GET",
+      headers: authorizationHeaders(accessToken),
+      signal,
+    }),
+    start.auditId,
+  );
+}
+
+function loadedRuntimeAudit(
+  status: ControlLoopStatus,
+): LoadedAudit | undefined {
+  if (!status.report || !status.releaseSha) return undefined;
+  return {
+    envelope: {
+      requestId: status.auditId,
+      releaseSha: status.releaseSha,
+      report: status.report,
+    },
+    source: "live",
+    controlLoop: status,
+  };
+}
+
+function waitRuntimePoll(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function loadRuntimeAudit(
+  query: string,
+  sessionId: string,
+  accessToken: string,
+  signal?: AbortSignal,
+  onProgress?: (
+    status: ControlLoopStatus,
+    audit?: LoadedAudit,
+  ) => void,
+): Promise<LoadedAudit> {
+  const start = await startRuntimeControlLoop(
+    query,
+    sessionId,
+    accessToken,
+    signal,
+  );
+  let latest: LoadedAudit | undefined;
+  while (!signal?.aborted) {
+    const { status } = await getRuntimeControlLoopStatus(
+      start,
+      accessToken,
+      signal,
+    );
+    const projected = loadedRuntimeAudit(status);
+    latest = projected ?? latest;
+    onProgress?.(status, projected);
+    if (TERMINAL_AUDIT_STATES.has(status.status)) {
+      if (status.status === "SUCCEEDED" && latest) return latest;
+      throw new RuntimeApiError(
+        "The runtime-bound audit ended with status " +
+          status.status.toLowerCase() +
+          ".",
+        502,
+      );
+    }
+    await waitRuntimePoll(
+      status.status === "AWAITING_APPROVAL" ? 3000 : 1200,
+      signal,
+    );
+  }
+  throw (
+    signal?.reason ??
+    new DOMException("The runtime-bound audit was cancelled.", "AbortError")
   );
 }

@@ -554,7 +554,7 @@ function isControlLoopResult(value: unknown): value is ControlLoopResult {
   );
 }
 
-function parseControlLoopStatus(
+export function parseControlLoopStatus(
   value: unknown,
   expectedAuditId: string,
 ): ControlLoopStatus {
