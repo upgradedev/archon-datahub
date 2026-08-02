@@ -376,9 +376,77 @@ jobs:
         run: |
           set -euo pipefail
           : "${DATAHUB_GMS_URL:?DATAHUB_CLOUD_GMS_URL is required}"
-          : "${DATAHUB_GMS_TOKEN:?DATAHUB_CLOUD_GMS_TOKEN is required}"
+          cleanup_cloud_secret() {
+            unset DATAHUB_GMS_TOKEN reader_token reader_secret_arn \
+              reader_secret_json reader_version_id secret_response stack_response
+          }
+          trap cleanup_cloud_secret EXIT
+          stack_response="$(
+            aws cloudformation describe-stacks \
+              --stack-name "Archon-${STAGE}-Judge" \
+              --region "${AWS_REGION_VALUE}" \
+              --output json \
+              --no-cli-pager
+          )"
+          reader_secret_arn="$(
+            jq -er --arg key ArchonCloudReaderSecretArn '
+              .Stacks | select(length == 1) | .[0].Outputs |
+              [.[] | select(.OutputKey == $key)] |
+              select(length == 1) | .[0].OutputValue
+            ' <<<"${stack_response}"
+          )"
+          [[ "${reader_secret_arn}" =~ ^arn:aws:secretsmanager:eu-west-1:${AWS_ACCOUNT_ID}:secret:archon/${STAGE}/datahub-cloud/reader-[A-Za-z0-9]{6}$ ]]
+          secret_response="$(
+            aws secretsmanager get-secret-value \
+              --secret-id "${reader_secret_arn}" \
+              --version-stage AWSCURRENT \
+              --region "${AWS_REGION_VALUE}" \
+              --output json \
+              --no-cli-pager
+          )"
+          jq -e --arg arn "${reader_secret_arn}" '
+            .ARN == $arn and
+            (.VersionId | type == "string" and test("^[A-Za-z0-9-]{32,64}$")) and
+            (.VersionStages | type == "array" and index("AWSCURRENT") != null) and
+            (has("SecretBinary") | not) and
+            (.SecretString | type == "string" and
+              (utf8bytelength >= 1 and utf8bytelength <= 16384))
+          ' <<<"${secret_response}" >/dev/null
+          reader_version_id="$(jq -er .VersionId <<<"${secret_response}")"
+          reader_secret_json="$(jq -er .SecretString <<<"${secret_response}")"
+          jq -e --arg url "${DATAHUB_GMS_URL}" '
+            type == "object" and
+            keys == [
+              "gmsUrl","oauthMasterKey","runHandleFernetKey","schemaVersion","token"
+            ] and
+            .schemaVersion == "archon.datahub-cloud-reader-secret/v1" and
+            .gmsUrl == $url and
+            (.token | type == "string" and length >= 16 and length <= 8192 and
+              test("^[!-~]+$")) and
+            (.runHandleFernetKey | test("^[A-Za-z0-9_-]{43}=$")) and
+            (.oauthMasterKey | test("^[A-Za-z0-9_-]{43}=$")) and
+            .runHandleFernetKey != .oauthMasterKey
+          ' <<<"${reader_secret_json}" >/dev/null
+          reader_token="$(jq -er .token <<<"${reader_secret_json}")"
+          printf '::add-mask::%s\n' "${reader_token}"
+          export DATAHUB_GMS_TOKEN="${reader_token}"
+          credential_binding_digest="sha256:$(
+            jq -cnS \
+              --arg stage "${STAGE}" \
+              --arg releaseSha "${RELEASE_SHA}" \
+              --arg secretArn "${reader_secret_arn}" \
+              --arg versionId "${reader_version_id}" \
+              --arg gmsUrl "${DATAHUB_GMS_URL}" \
+              '{stage:$stage,releaseSha:$releaseSha,secretArn:$secretArn,
+                versionId:$versionId,gmsUrl:$gmsUrl}' |
+              sha256sum | awk '{print $1}'
+          )"
+          unset reader_secret_arn reader_secret_json reader_version_id \
+            secret_response stack_response
           raw="${RUNNER_TEMP}/live-proof/runtime/cloud-semantic-proof.json"
           npm run --silent verify:live >"${raw}"
+          cleanup_cloud_secret
+          trap - EXIT
           query_sha="$(
             jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query:$query}' |
               sha256sum | awk '{print $1}'
