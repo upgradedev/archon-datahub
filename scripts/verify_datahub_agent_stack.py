@@ -248,6 +248,20 @@ def verify_static(lock: dict[str, Any], workspace: Path) -> None:
         "skills/using-datahub/SKILL.md",
     }
 
+    custom_files = skills["customFiles"]
+    assert set(custom_files) == {"contrib/datahub-audit/SKILL.md"}
+    audit_path = "contrib/datahub-audit/SKILL.md"
+    audit_expected = custom_files[audit_path]
+    assert set(audit_expected) == {"gitBlob", "size", "sha256"}
+    assert audit_expected == {
+        "gitBlob": "f417432a93a9f869185b7fe4f9c62a1abb865dc3",
+        "size": 8872,
+        "sha256": "178e1eb8d2f1595992dd00c9c97e9132af244a28e441ed6469c31a378a86e819",
+    }
+    audit_bytes = regular_bytes(workspace / audit_path)
+    assert len(audit_bytes) == audit_expected["size"]
+    assert git_blob(audit_bytes) == audit_expected["gitBlob"]
+    assert sha256(audit_bytes) == audit_expected["sha256"]
     assert lock["executionPolicy"] == {
         "requiredForReady": [
             "mcpServer",
