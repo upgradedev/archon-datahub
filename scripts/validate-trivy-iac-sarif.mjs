@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { constants as fsConstants } from "node:fs";
 import {
   lstat,
-  readFile,
+  open,
   realpath
 } from "node:fs/promises";
 import {
@@ -66,19 +67,35 @@ function exactGetAtt(value, logicalId, attributes) {
 }
 
 async function readRegularJson(filePath, maxBytes, label) {
-  const stat = await lstat(filePath);
-  invariant(stat.isFile() && !stat.isSymbolicLink(),
-    label + " must be a regular, non-symlink file");
-  invariant(stat.size > 0 && stat.size <= maxBytes,
-    label + " size is outside the reviewed boundary");
-  const text = await readFile(filePath, "utf8");
-  let parsed;
+  const handle = await open(
+    filePath,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+  );
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(label + " is not valid JSON");
+    const before = await handle.stat();
+    invariant(before.isFile(),
+      label + " must be a regular, non-symlink file");
+    invariant(before.size > 0 && before.size <= maxBytes,
+      label + " size is outside the reviewed boundary");
+    const text = await handle.readFile("utf8");
+    const after = await handle.stat();
+    invariant(
+      after.isFile() &&
+        after.size === before.size &&
+        after.mtimeMs === before.mtimeMs &&
+        Buffer.byteLength(text, "utf8") === before.size,
+      label + " changed while it was being read"
+    );
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(label + " is not valid JSON");
+    }
+    return { parsed, text };
+  } finally {
+    await handle.close();
   }
-  return { parsed, text };
 }
 
 function validateContract(contract, now) {

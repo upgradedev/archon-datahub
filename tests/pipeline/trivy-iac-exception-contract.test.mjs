@@ -430,7 +430,15 @@ async function mutateTemplate(value, stage, mutate) {
     await readFile(path, "utf8")
   );
   mutate(document, ids(stage));
-  await writeFile(path, render(document), "utf8");
+  const rendered = render(document);
+  await writeFile(path, rendered, "utf8");
+  value.sarif.runs[0].results =
+    value.contract.exceptions.map((exception, index) =>
+      exception.stage === stage
+        ? resultFor(exception, rendered)
+        : value.sarif.runs[0].results[index]
+    );
+  await rewriteSarif(value);
 }
 
 test("accepts only the six exact evidence-bound findings", async () => {

@@ -537,6 +537,11 @@ jobs:
             "${DEPLOYMENT_RUN_ATTEMPT}" "${DEPLOYMENT_ARTIFACT_ID}" \
             "${DEPLOYMENT_ARTIFACT_NAME}" "${DEPLOYMENT_ARTIFACT_DIGEST}"
           deployment_evidence="${deployment_dir}/deployment-evidence.json"
+          deployment_observation="${deployment_dir}/observation.json"
+          test -f "${deployment_observation}"
+          test ! -L "${deployment_observation}"
+          test "$(jq -er .releaseSha "${deployment_observation}")" = 
+            "${RELEASE_SHA}"
           deployment_binding_source="${deployment_verification_dir}/binding.json"
           deployment_predicate_type="$(
             jq -er .predicateType "${deployment_binding_source}"
