@@ -96,15 +96,31 @@ function parseIdentity(value) {
     typeof value.subject !== "string" ||
     value.subject.length < 1 ||
     value.subject.length > 512 ||
-    /[^@-^_\u007f]/u.test(value.subject) ||
+    /[\x00-\x1f\x7f]/u.test(value.subject) ||
     typeof value.issuer !== "string" ||
     value.issuer.length < 8 ||
     value.issuer.length > 2048 ||
     !value.issuer.startsWith("https://") ||
-    /[^@-^_\u007f]/u.test(value.issuer) ||
+    /[\x00-\x1f\x7f]/u.test(value.issuer) ||
     typeof value.groups !== "string" ||
     value.groups.length > 2048 ||
-    /[^@-^_\u007f]/u.test(value.groups)
+    /[\x00-\x1f\x7f]/u.test(value.groups)
+  ) {
+    throw new PublicError(401, "authenticated_runtime_operator_required");
+  }
+  let issuer;
+  try {
+    issuer = new URL(value.issuer);
+  } catch {
+    throw new PublicError(401, "authenticated_runtime_operator_required");
+  }
+  if (
+    issuer.protocol !== "https:" ||
+    issuer.username !== "" ||
+    issuer.password !== "" ||
+    issuer.search !== "" ||
+    issuer.hash !== "" ||
+    issuer.toString() !== value.issuer
   ) {
     throw new PublicError(401, "authenticated_runtime_operator_required");
   }
@@ -281,7 +297,7 @@ async function readCoreLease() {
   if (
     revision === undefined ||
     !state ||
-    !["STARTING", "READY", "DRAINING", "STOPPED", "FAILED"].includes(state)
+    !["STARTING", "READY", "DRAINING", "STOPPED", "EXPIRED", "FAILED"].includes(state)
   ) {
     throw new Error("Core lease is malformed");
   }
@@ -584,10 +600,13 @@ async function startSession(body, identity) {
   await putSession(session, owner);
   if (session.binding.profileId === "core") {
     try {
+      if (!Number.isSafeInteger(selected.coreExpectedRevision)) {
+        throw new Error("Core lease revision is unavailable");
+      }
       await coreCommand(
         "START",
         session,
-        0
+        selected.coreExpectedRevision
       );
     } catch {
       const failed = failSession(session, "PROVISIONING_FAILED", now());
