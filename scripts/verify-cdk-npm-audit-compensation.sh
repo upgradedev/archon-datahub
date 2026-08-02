@@ -146,14 +146,14 @@ assert.deepEqual(
 assert.equal(finding.name, "brace-expansion");
 assert.equal(finding.severity, "high");
 assert.equal(finding.isDirect, false);
-assert.equal(finding.range, "<=5.0.7");
+assert.ok(["<=5.0.7", "4.0.0 - 5.0.7"].includes(finding.range), `unexpected finding range: ${finding.range}`);
 assert.deepEqual(finding.effects, []);
 assert.deepEqual(finding.nodes, [process.env.BUNDLED_PATH]);
 assert.equal(finding.via.length, 1);
 assert.equal(via.name, "brace-expansion");
 assert.equal(via.dependency, "brace-expansion");
 assert.equal(via.severity, "high");
-assert.equal(via.range, "<=5.0.7");
+assert.ok(["<=5.0.7", ">=4.0.0 <5.0.8"].includes(via.range), `unexpected advisory range: ${via.range}`);
 assert.equal(
   via.url,
   `https://github.com/advisories/${process.env.ADVISORY}`

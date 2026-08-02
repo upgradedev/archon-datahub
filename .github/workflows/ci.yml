@@ -2044,21 +2044,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Assert non-root image configuration
-        run: test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{.Config.User}}')" = "node"
+        run: |
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{.Config.User}}')" = "65532"
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{json .Config.Entrypoint}}')" = '["/nodejs/bin/node"]'
+          test "$(docker image inspect "archon-datahub:${GITHUB_SHA}" --format '{{json .Config.Cmd}}')" = '["dist/http/server.js"]'
       - name: Assert isolated worker entrypoints in the exact candidate
         run: |
           docker run --rm \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,size=4m \
             --cap-drop ALL --security-opt no-new-privileges \
             --network none \
-            --entrypoint node \
+            --entrypoint /nodejs/bin/node \
             "archon-datahub:${GITHUB_SHA}" \
-            -e 'const fs=require("node:fs"); for (const file of ["/app/dist/audit-worker.js","/app/dist/remediation-worker.js"]) { if (!fs.statSync(file).isFile()) process.exit(1); }'
+            -e 'const fs=require("node:fs"); if (process.version !== "v22.23.1") process.exit(1); for (const file of ["/app/dist/audit-worker.js","/app/dist/remediation-worker.js"]) { if (!fs.statSync(file).isFile()) process.exit(1); } for (const shell of ["/bin/sh","/bin/bash","/usr/bin/sh","/usr/bin/bash","/busybox","/busybox/sh"]) { if (fs.existsSync(shell)) process.exit(1); } const walk=(dir)=>{ for (const entry of fs.readdirSync(dir,{withFileTypes:true})) { const path=`${dir}/${entry.name}`; if (entry.isDirectory()) walk(path); else if (entry.name.endsWith(".node")) process.exit(1); } }; walk("/app/node_modules");'
       - name: Boot hardened candidate
         run: |
           docker run --detach --name archon-candidate \
             --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
             --cap-drop ALL --security-opt no-new-privileges \
+            --health-interval 1s --health-timeout 3s \
+            --health-start-period 1s --health-retries 10 \
             --publish 127.0.0.1:8080:8080 \
             --env ARCHON_RELEASE_SHA="${GITHUB_SHA}" \
             "archon-datahub:${GITHUB_SHA}"
@@ -2071,6 +2076,16 @@ jobs:
             sleep 1
           done
           grep -F "\"releaseSha\":\"${GITHUB_SHA}\"" "${RUNNER_TEMP}/health.json"
+          health_status=starting
+          for _ in {1..30}; do
+            health_status="$(docker inspect archon-candidate --format '{{.State.Health.Status}}')"
+            if [ "${health_status}" = "healthy" ]; then
+              break
+            fi
+            test "${health_status}" != "unhealthy"
+            sleep 1
+          done
+          test "${health_status}" = "healthy"
       - name: Scan the exact production container
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

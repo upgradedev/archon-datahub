@@ -1338,6 +1338,44 @@ describe("Archon AWS reference architecture", () => {
     expect(outputs.ArchonApprovalOAuthScope.Value).toBe("archon/approve");
   });
 
+  test("enforces a shell-free nonroot runtime contract for every ECS task", () => {
+    const { platform } = templates();
+    const containers = Object.values(
+      platform.findResources("AWS::ECS::TaskDefinition")
+    ).map(
+      (resource: any) => resource.Properties.ContainerDefinitions[0]
+    );
+    expect(containers).toHaveLength(3);
+    for (const container of containers) {
+      expect(container.User).toBe("65532");
+      expect(container.ReadonlyRootFilesystem).toBe(true);
+      expect(container.HealthCheck.Command[0]).toBe("CMD");
+      expect(container.HealthCheck.Command).not.toContain("CMD-SHELL");
+      expect(container.HealthCheck.Command).toContain("/nodejs/bin/node");
+    }
+    const byName = Object.fromEntries(
+      containers.map((container: any) => [container.Name, container])
+    );
+    expect(byName.Api.HealthCheck.Command).toEqual([
+      "CMD",
+      "/nodejs/bin/node",
+      "-e",
+      "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    ]);
+    for (const workerName of ["AuditWorker", "RemediationWorker"]) {
+      expect(byName[workerName].HealthCheck.Command).toEqual([
+        "CMD",
+        "/nodejs/bin/node",
+        "-e",
+        "try{process.kill(1,0)}catch{process.exit(1)}"
+      ]);
+    }
+    expect(byName.Api.Command).toBeUndefined();
+    expect(byName.AuditWorker.Command).toEqual(["dist/audit-worker.js"]);
+    expect(byName.RemediationWorker.Command).toEqual([
+      "dist/remediation-worker.js"
+    ]);
+  });
   test("isolates write credentials from the public API task", () => {
     const { platform } = templates();
     const taskDefinitions = Object.values(
