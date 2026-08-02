@@ -200,8 +200,8 @@ async function getItem(tableName, pk, sk) {
       Key: { pk: { S: pk }, sk: { S: sk } },
       ConsistentRead: true,
       ProjectionExpression:
-        "pk, sk, payload, revision, generation, #status, checkedAt, capabilities, capabilityDigest, sessionId, expiresAt",
-      ExpressionAttributeNames: { "#status": "status" }
+        "pk, sk, payload, revision, generation, #status, #state, checkedAt, capabilities, capabilityDigest, sessionId, expiresAt",
+      ExpressionAttributeNames: { "#status": "status", "#state": "state" }
     })
   );
   return result.Item;
@@ -418,7 +418,11 @@ async function putSession(session) {
 }
 
 async function readSession(sessionId) {
-  validateSessionId(sessionId);
+  try {
+    validateSessionId(sessionId);
+  } catch {
+    throw new PublicError(400, "invalid_runtime_session_id");
+  }
   const item = await getItem(
     runtimeSessionTable,
     "SESSION#" + sessionId,
@@ -512,7 +516,7 @@ async function startSession(body) {
       await coreCommand(
         "START",
         session,
-        selected.coreExpectedRevision ?? 0
+        0
       );
     } catch {
       const failed = failSession(session, "PROVISIONING_FAILED", now());
