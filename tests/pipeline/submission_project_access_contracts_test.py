@@ -319,7 +319,7 @@ def validate_contract(workflow: str, helper: str) -> None:
             "zeroIdleCore",
             "legacyAlwaysOnRuntimeAbsent",
             "attestations/aws-deployment/v2",
-            "availability/evidence.json",
+            'availability_dir / "evidence.json"',
             "archon.production-availability/v2",
             "attestations/production-availability/v2",
             'availability_dir / "observation.json"',

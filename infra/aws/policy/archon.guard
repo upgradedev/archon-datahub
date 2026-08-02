@@ -130,8 +130,9 @@ rule every_vpc_emits_all_traffic_to_cloudwatch when %vpcs !empty {
   %flow_log_count == 1
   %vpc_flow_logs.Properties {
     DeliverLogsPermissionArn exists
-    LogDestination exists
+    LogGroupName exists
     LogDestinationType == 'cloud-watch-logs'
+    MaxAggregationInterval == 600
     ResourceId exists
     ResourceType == 'VPC'
     TrafficType == 'ALL'

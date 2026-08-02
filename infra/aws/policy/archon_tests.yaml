@@ -431,8 +431,9 @@
         Type: AWS::EC2::FlowLog
         Properties:
           DeliverLogsPermissionArn: test-role
-          LogDestination: test-log-group
+          LogGroupName: test-log-group
           LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 600
           ResourceId: core-vpc
           ResourceType: VPC
           TrafficType: ALL
@@ -447,6 +448,47 @@
         Type: AWS::EC2::VPC
         Properties:
           CidrBlock: 10.77.0.0/24
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+- name: a legacy destination ARN without the exact log-group binding is rejected
+  input:
+    Resources:
+      CoreVpc:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogDestination: test-log-group-arn
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 600
+          ResourceId: core-vpc
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
+- name: a one-minute CloudWatch flow-log aggregation interval is rejected
+  input:
+    Resources:
+      CoreVpc:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogGroupName: test-log-group
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 60
+          ResourceId: core-vpc
+          ResourceType: VPC
+          TrafficType: ALL
   expectations:
     rules:
       every_vpc_emits_all_traffic_to_cloudwatch: FAIL
