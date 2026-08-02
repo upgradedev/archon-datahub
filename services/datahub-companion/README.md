@@ -1,105 +1,131 @@
 # Archon DataHub Companion
 
-This private runtime makes the Agent Context Kit and the official Analytics Agent
-substantive parts of the same governed Archon journey.
+This private runtime makes all four DataHub challenge pillars substantive in one governed journey:
 
-- The official DataHub MCP Server is pinned to source and wheel provenance, runs with
-  an exact six-tool read-only surface, and contributes live health evidence.
-- Agent Context Kit tools are loaded read-only and produce bounded provenance receipts.
-- Official DataHub Skills are materialized from the commit pinned in
-  `.github/locks/datahub-agent-stack.json`.
-- Analytics Agent answers the allowlisted synthetic judge question and returns SQL,
-  results, chart, tool trace, and context-quality evidence; readiness separately proves
-  process health and live Bedrock model connectivity.
-- Upstream mutation tools are disabled. Every write remains owned by Archon's isolated
-  remediation worker and requires a fresh digest-bound DataSteward approval.
-- The runtime accepts only a server-resolved `cloud` or `core` binding. It never accepts
-  an endpoint or credential from the browser and never changes profile mid-execution.
+- the official **DataHub MCP Server** supplies live, read-only metadata evidence;
+- **Agent Context Kit** supplies a separate bounded context receipt;
+- pinned official **DataHub Skills** ground analysis without adding write authority;
+- the official **Analytics Agent** must emit a matched MCP `TOOL_CALL` / `TOOL_RESULT` trace before an answer is accepted.
 
-The frozen `uv.lock`, SBOM, vulnerability audit, imports, API contracts, and source
-provenance are generated and verified only in GitHub Actions. Do not build this service
-on a contributor workstation.
+The browser never supplies an endpoint, credential, profile, or tool policy. A server-resolved immutable runtime binding selects `cloud` or `core` for the whole operation.
 
-## Immutable runtime contract
+## Dual DataHub runtime
 
-The CI-built OCI candidate is the only deployable form. Its default process is:
+| Property | Cloud trial / paid | Reproducible Core |
+| --- | --- | --- |
+| DataHub control plane | Managed DataHub Cloud tenant | Ephemeral self-hosted DataHub Core |
+| Official MCP | Managed Streamable HTTP endpoint | Pinned `mcp-server-datahub==0.6.0` image |
+| Identity evidence | Server-reported, explicitly unpinned managed-service identity | Server-reported identity cross-bound to pinned package, source commit, and wheel provenance |
+| Advertised inventory | May contain additional managed tools | Must be exactly the selected six |
+| Selected inventory | Exactly six read tools; all extras disabled | Exactly six read tools |
+| Lifecycle | Existing trial or paid tenant | On-demand runtime with automated teardown |
+| Write authority | None in companion/MCP/Analytics | None in companion/MCP/Analytics |
+
+The selected read surface is exactly:
 
 ```text
-/opt/archon/companion/.venv/bin/python -m uvicorn archon_companion:app --host 0.0.0.0 --port 8080 --no-access-log
+get_dataset_queries
+get_entities
+get_lineage
+get_lineage_paths_between
+list_schema_fields
+search
 ```
 
-The image has no entrypoint and therefore supports explicit immutable process
-commands while retaining the full companion command above as its default `CMD`.
-It contains two isolated virtual environments because their reviewed DataHub SDK
-closures differ:
+Every selected tool must advertise `readOnlyHint=true` and `destructiveHint=false`. Discovery fails closed if a selected tool or annotation is missing. Cloud may advertise extra tools, but Analytics must expose all extras as disabled. Core rejects any extra server tool.
 
-- Analytics Agent:
-  `/opt/archon/companion/.venv/bin/python -m uvicorn analytics_agent.main:app --host 0.0.0.0 --port 8100`.
-- Official read-only MCP:
-  `/opt/archon/mcp/.venv/bin/mcp-server-datahub --transport http`, with mutations,
-  user tools, data-quality extras, document tools, and semantic search disabled so its
-  live protocol inventory is exactly the six tools pinned by the companion. The
-  image bakes only the non-secret fail-closed flags
-  `TOOLS_IS_MUTATION_ENABLED=false`, `TOOLS_IS_USER_ENABLED=false`,
-  `DATA_QUALITY_TOOLS_ENABLED=false`,
-  `DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED=true`, and
-  `SEMANTIC_SEARCH_ENABLED=false`. FastMCP is also pinned to port 8000 with
-  strict input validation, masked tool errors, disabled update checks, and no rich
-  payload logging.
+## Managed Cloud MCP contract
 
-The OCI build runs the existing wheel-only MCP materializer, verifies PyPI provenance
-and the sealed resolved lock, and exercises initialize, ping, annotations, and exact
-tool inventory without DataHub credentials or network tool calls. The image contains
-no governed mutation gateway and no write credential. Core owns that separately as an
-explicitly branded Archon service, separate venv/unit, credential, listener, and
-approval-bound channel.
+For `profileId=cloud`, the companion derives the only accepted MCP endpoint from the server-owned GMS tenant:
 
-`GET /livez` is process liveness only; the orchestrator must never interpret it as
-dependency readiness. The companion publishes
-readiness only when `GET /healthz` returns 200. Its evidence distinguishes MCP process/provenance,
-Analytics process health, and live Bedrock model connectivity; 503 means the runtime
-must not be advertised.
+```text
+DATAHUB_GMS_URL=https://<tenant>.acryl.io[/gms]
+MCP endpoint=https://<tenant>.acryl.io/integrations/ai/mcp
+Authorization: Bearer <DATAHUB_GMS_TOKEN>
+```
 
-Companion configuration is entirely server-owned:
+`<tenant>` is exactly one DNS label. HTTPS port 443 is mandatory. Userinfo, redirects, proxies, alternate ports, IP literals, localhost/private hosts, query strings, fragments, arbitrary paths, and an independent `ARCHON_DATAHUB_MCP_URL` are rejected. The token is a bounded, header-safe, server-owned DataHub service-account token with Reader-level access; it is never placed in a URL or receipt.
 
-- Identity: `ARCHON_RUNTIME_PROFILE_ID`, `ARCHON_RUNTIME_GENERATION`,
-  `ARCHON_RUNTIME_CAPABILITY_DIGEST`.
-- Demo scope: `ARCHON_DEMO_QUERY`, `ARCHON_ANALYTICS_QUESTION`,
-  `ARCHON_ANALYTICS_ENGINE`. The canonical seeded scope is dataset/query
-  `urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)`,
-  question “Which customer segment generated the highest net revenue in Q2 2026,
-  and is customers.customer_email governed as PII?”, governed column
-  `customer_email`, and downstream dataset
-  `archon_demo.customer_segment_revenue`.
-- Private peers: `ARCHON_ANALYTICS_AGENT_URL`,
-  `ARCHON_DATAHUB_MCP_URL`, `ARCHON_DATAHUB_MCP_CONNECTION`, and
-  `DATAHUB_GMS_URL`.
-- Bedrock proof: `ARCHON_ANALYTICS_LLM_PROVIDER=bedrock`,
-  `ARCHON_ANALYTICS_LLM_MODEL`, and `ARCHON_ANALYTICS_AWS_REGION`.
-  The non-mutating, one-token connectivity probe is response-size/time bounded,
-  retains no provider message, uses the task/instance role (never static AWS keys),
-  and reports an explicit generation-bound cache age.
-- Secrets: generation-scoped `ARCHON_RUN_HANDLE_FERNET_KEY` and read-only
-  `DATAHUB_GMS_TOKEN`.
-- Provenance mounts: `ARCHON_AGENT_STACK_LOCK`,
-  `ARCHON_DATAHUB_MCP_LOCK`, `ARCHON_DATAHUB_SKILLS_DIR`, and
-  `ARCHON_CUSTOM_SKILLS_DIR`.
+The adapter performs the MCP `2025-06-18` Streamable HTTP sequence:
 
-Never mount a DataHub write token into the companion, Analytics, or read-only MCP
-containers. Expose only companion port 8080 to the private control plane; keep
-Analytics port 8100 and MCP port 8000 on loopback or service-to-service networking.
-The separately isolated `archon-remediation-worker` is the only write authority;
-its governed-write adapter uses the separately allowlisted MCP listener on port 8001
-and a distinct mutation partition, and must bind the plan, approval, runtime, and
-before/after digests. Run as UID/GID 65532, with a read-only root filesystem,
-all Linux capabilities dropped, `no-new-privileges`, and bounded `noexec,nosuid`
-tmpfs storage only where Analytics Agent needs transient state.
+1. `initialize`, retaining only a bounded server-reported `{name, version}` projection and digest.
+2. `notifications/initialized`, echoing the server session binding when supplied.
+3. Paginated `tools/list`, enforcing the selected read policy.
+4. Substantive `tools/call` requests against the canonical demo scope.
+5. Session `DELETE` when the server issued a session identifier.
 
-Both profiles use these exact bytes. Core starts the three supervised read-only
-processes from the ephemeral AMI and reaches GMS only at the exact loopback endpoint
-`http://127.0.0.1:18080` (or `localhost` on the same port). HTTP is rejected for
-every other profile, host, port, credential form, path, query, or fragment. Cloud uses
-a server-owned HTTPS GMS endpoint on port 443 or 9443. Neither profile becomes
-selectable until the companion readiness proof succeeds. The OSS story makes no claim
-that PII tags automatically propagate downstream; the agent reports only lineage and
-evidence actually returned by the pinned read-only tools.
+The canonical proof calls are:
+
+```text
+search("/q archon_demo+customers", entity_type=dataset)
+get_entities(canonical dataset URN)
+list_schema_fields(canonical dataset URN, keyword=customer_email)
+get_lineage(canonical dataset URN, downstream, max_hops=2)
+get_dataset_queries(canonical dataset URN)
+```
+
+The `search` response must structurally contain the exact canonical URN:
+
+```text
+urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)
+```
+
+A substring or merely successful response is insufficient. A successful empty `get_dataset_queries` result is valid evidence. Receipts retain arguments/result digests, bounded response shape, and byte counts only; provider payloads, raw endpoints, sessions, credentials, and provider errors are not retained.
+
+Reader mutation denial is demonstrated by a separate live bootstrap check and is not performed during health/readiness. Health never invokes a mutation.
+
+## Reproducible Core contract
+
+Core runs the pinned official MCP artifact built and verified by CI. Its internal network contract is exact:
+
+```text
+DATAHUB_GMS_URL=http://archon-gms:8080
+ARCHON_DATAHUB_MCP_URL=http://archon-read-mcp:8000/mcp
+ARCHON_ANALYTICS_AGENT_URL=http://archon-analytics:8100
+```
+
+The read bridge may reach only the read-only GMS alias. The writer alias `archon-writer-gms`, host networking, host gateways, loopback shortcuts, arbitrary RFC1918 addresses, and direct dependency endpoints are rejected. Core live initialize identity is evidence, not an asserted package identity; the receipt cross-binds it to pinned package/version/source-commit provenance.
+
+The CI-built OCI candidate contains isolated companion, Analytics Agent, and MCP environments. Mutation, user, data-quality, document, and semantic-search tools are disabled so the Core live inventory is the exact six-tool surface. The image contains no mutation gateway and no write credential.
+
+## Distinct evidence chains
+
+Agent Context Kit and official MCP receipts remain separate. Every pinned `SKILL.md` is bound to a reviewed execution plan (`phase`, exact `requiredCalls`, and mode) by its locked artifact digest. Grounding fails closed unless every required ACK and official MCP call has a verified digest. Per-skill v2 execution receipts mark search, lineage, quality, audit, and `using-datahub` as `executed`; enrich is `previewed` and never performs a write. The prompt receives these execution fields, not the untrusted Markdown. ACK and MCP digests remain distinct and are never relabeled.
+
+Analytics readiness separately proves process health, the selected MCP connection, the exact enabled tool surface, and live model connectivity. A completed answer must contain ordered, cardinality-matched selected-tool pairs; failed, duplicate-result, unmatched, and out-of-order traces are rejected. Pinned Analytics v0.4.0 has no call ID in these payloads, so matching is intentionally sequence-based. Trace receipts retain event digests only (`tracePayloadStored=false`, `rawProviderPayloadStored=false`) and link to the official MCP preflight receipt.
+
+Unknown or missing evidence remains unknown. Upstream mutation tools are disabled. Every governed write remains owned by the isolated remediation worker and requires fresh digest-bound DataSteward approval.
+
+## Server-owned configuration
+
+- Runtime identity: `ARCHON_RUNTIME_PROFILE_ID`, `ARCHON_RUNTIME_GENERATION`, `ARCHON_RUNTIME_CAPABILITY_DIGEST`.
+- Canonical demo: `ARCHON_DEMO_QUERY`, `ARCHON_ANALYTICS_QUESTION`, `ARCHON_ANALYTICS_ENGINE`.
+- Connections: `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`, `ARCHON_DATAHUB_MCP_CONNECTION`, `ARCHON_ANALYTICS_AGENT_URL`. Analytics is profile-exact: Cloud uses only `http://127.0.0.1:8100` inside its Lambda container; Core uses only `http://archon-analytics:8100`.
+- Core only: `ARCHON_DATAHUB_MCP_URL`.
+- Model proof: `ARCHON_ANALYTICS_LLM_PROVIDER=bedrock`, `ARCHON_ANALYTICS_LLM_MODEL`, `ARCHON_ANALYTICS_AWS_REGION`.
+- Continuation: generation-scoped `ARCHON_RUN_HANDLE_FERNET_KEY`.
+- Provenance: `ARCHON_AGENT_STACK_LOCK`, `ARCHON_DATAHUB_MCP_LOCK`, `ARCHON_DATAHUB_SKILLS_DIR`, `ARCHON_CUSTOM_SKILLS_DIR`.
+
+Never mount a DataHub write token into the companion, Analytics Agent, or read-only MCP process.
+
+## Cloud worker reuse contract
+
+A `profileId=cloud` stream worker can reuse the companion in-process without accepting request-supplied configuration. Its Analytics Agent child process is reachable only on exact loopback `http://127.0.0.1:8100`; redirects and environment proxies remain disabled. For an ANALYZE job it constructs `AnalyzeRequest`, runs `exact_public_input`, and invokes the same sequence as `/v2/analyze`:
+
+```text
+collect_ack_context
+load_skill_receipt
+analytics_preflight
+ground_skills
+run_analytics
+```
+
+Blocking SDK/context functions run in worker threads; preflight and Analytics functions are async. The worker creates one job-scoped `_ModelProbeState` and passes it as `analytics_preflight(..., model_probe_state=state)`, so warm Lambda reuse does not mutate the companion default cache. The worker preserves the `archon.datahub-agent-stack-result/v2` projection and digest links. IMPROVE_CONTEXT reuses `resolve_run_handle`, `analytics_preflight`, `analytics_turn`, and `context_quality` with the same generation/profile binding. There is no Core fallback for a Cloud-bound job.
+
+Reuse the managed MCP adapter, model/health, Analytics boundary, runtime/skills, and API contract tests under `tests/` for the worker.
+
+## CI-only verification
+
+The frozen lock, OCI build, tests, SBOM, vulnerability audit, secret scanning, provenance, and deployment verification run in GitHub Actions. Do not build this service on a contributor workstation and do not leave local build artifacts.
+
+`GET /livez` proves process liveness only. `GET /healthz` returns 200 only after the active profile DataHub, MCP, Agent Context Kit, Skills, Analytics process, and live model evidence all verify; otherwise it returns 503 and the runtime must not be advertised.

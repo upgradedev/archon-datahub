@@ -1,131 +1,639 @@
-# Archon DataHub Companion
+# Archon for DataHub
 
-This private runtime makes all four DataHub challenge pillars substantive in one governed journey:
+> **Audit the catalog itself.** Archon is an evidence-first governance agent that finds
+> contradictions, lineage gaps, and control violations inside DataHub, explains their
+> downstream impact, and permits one narrowly governed remediation only after an exact,
+> expiring human approval.
 
-- the official **DataHub MCP Server** supplies live, read-only metadata evidence;
-- **Agent Context Kit** supplies a separate bounded context receipt;
-- pinned official **DataHub Skills** ground analysis without adding write authority;
-- the official **Analytics Agent** must emit a matched MCP `TOOL_CALL` / `TOOL_RESULT` trace before an answer is accepted.
+Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
-The browser never supplies an endpoint, credential, profile, or tool policy. A server-resolved immutable runtime binding selects `cloud` or `core` for the whole operation.
+## What Archon does
 
-## Dual DataHub runtime
+Most catalog assistants retrieve metadata. Archon tests whether the catalog is internally
+consistent:
 
-| Property | Cloud trial / paid | Reproducible Core |
+- **Cross-source contradictions** — retained aspect versions disagree about ownership,
+  schema, domain, or deprecation. Archon distinguishes a stable ingestion source
+  (`pipelineName`) from an execution (`runId`), so two runs of one pipeline never become a
+  fabricated conflict.
+- **Lineage gaps and blast radius** — declared current `upstreamLineage` is reconciled
+  against resolved MCP topology, and a missing upstream or risky asset is expanded into a
+  bounded, cycle-safe downstream impact graph without treating query scope as absence.
+- **Governance controls G1–G6** — deterministic checks find missing ownership, domains,
+  descriptions, typing, and sensitive-field classification. G6 accepts only exact
+  policy identifiers; an unrelated tag or glossary term never passes the control.
+- **Evidence, not opaque advice** — every result can be exported as JSON, Markdown, or
+  SARIF and carries provenance, policy, and content digests. Model-runtime provenance is
+  a strict union: deterministic fixture runs state that no provider model call occurred;
+  live runs retain only bounded provider/model/response-ID, token-usage, and client-latency
+  metadata. Prompts, credentials, endpoints, raw errors, and provider payloads are never
+  admitted to that contract.
+- **Governed G6 remediation** — only a missing classification tag can become an action.
+  Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
+  optional comment; it never sends a tool name, entity URN, or mutation arguments.
+
+The judge-facing audit APIs are publicly usable only through CloudFront. A generated,
+KMS-encrypted origin credential is never delivered to the browser: CloudFront overwrites
+`x-api-key`, and API Gateway requires it on every method. The HTTP proxy replaces it with
+a static redacted value, while the Lambda custom integrations construct narrow events
+that contain no request headers at all. Direct API Gateway bypass therefore fails closed.
+The SPA starts the durable path with `POST /api/control-loops` and polls a random
+256-bit capability URL; the status projection never exposes a Step Functions ARN,
+workflow input/output, task token, identity, or provider error. The legacy
+`POST /api/audits` route remains an explicitly synchronous, read-only, one-dataset
+diagnostic preview with a 25-second pipeline deadline. A separately deployed worker is
+the only component that may
+receive a distinct write credential. Its action catalog is limited to the official
+`add_tags` / `remove_tags` tools, one entity, one column, and one policy tag.
+
+The environment supplies one exact `DemoQuery` to the SPA, HTTP service, control Lambda,
+and public Archon MCP server; a missing scope, padded equivalents, wildcards, alternate
+catalog queries, and a query resolving to anything other than one dataset fail closed. MCP
+`get_entity` accepts only the URN resolved from that scope and rebuilds a six-field public
+identity projection; descriptions, owners, schema fields, tags, glossary terms, domains,
+lineage, source metadata, and arbitrary aspects never cross that boundary. Public audit
+responses are likewise newly constructed allowlisted projections rather than the immutable
+internal evidence object: arbitrary rich detail and raw contradiction values are excluded,
+provenance drops actor/value fields, and the complete response is recursively rejected if
+it contains forbidden or credential-shaped fields. A shared conformance corpus keeps the
+backend, Lambda, browser, evidence exporter, and deployment validator aligned in CI.
+
+## Why DataHub
+
+DataHub is not an application database or object store. It is the metadata context graph
+and governance control plane across databases, warehouses, BI, ML, and pipelines.
+
+| Product category | What it owns | Relationship to Archon |
 | --- | --- | --- |
-| DataHub control plane | Managed DataHub Cloud tenant | Ephemeral self-hosted DataHub Core |
-| Official MCP | Managed Streamable HTTP endpoint | Pinned `mcp-server-datahub==0.6.0` image |
-| Identity evidence | Server-reported, explicitly unpinned managed-service identity | Server-reported identity cross-bound to pinned package, source commit, and wheel provenance |
-| Advertised inventory | May contain additional managed tools | Must be exactly the selected six |
-| Selected inventory | Exactly six read tools; all extras disabled | Exactly six read tools |
-| Lifecycle | Existing trial or paid tenant | On-demand runtime with automated teardown |
-| Write authority | None in companion/MCP/Analytics | None in companion/MCP/Analytics |
+| DataHub | Cross-platform metadata graph, lineage, governance, MCP context | Archon audits and safely acts on this control plane |
+| AWS Glue / DataZone, Microsoft Purview, Google Dataplex, Alibaba metadata services | Cloud-vendor catalog/governance planes | Alternatives when the estate is concentrated in one cloud |
+| CockroachDB | Transactional SQL data | A governed data source, not a catalog substitute |
+| Backblaze B2 / S3 | Object storage | Evidence or dataset storage, not a metadata graph |
+| Qwen / OpenAI / Gemini | Model inference | Optional narration/reasoning providers, not catalog systems |
 
-The selected read surface is exactly:
+The concise positioning is: **DataHub catalogs the data estate; Archon audits the
+catalog itself.**
 
-```text
-get_dataset_queries
-get_entities
-get_lineage
-get_lineage_paths_between
-list_schema_fields
-search
+## System design
+
+```mermaid
+flowchart LR
+  UI["React + Tailwind judge application"] -->|POST /api/control-loops| CONTROL["Start/status Lambda"]
+  CONTROL --> SFN["Standard Step Functions"]
+  SFN --> WORKER["Isolated private worker"]
+  CONTROL -. safe verified status projection .-> UI
+  IDE["IDE / agent / MCP client"] --> AMCP["Archon read-only MCP surface"]
+  WORKER --> PIPE["Deterministic audit pipeline"]
+  AMCP --> PIPE
+  PIPE --> READ["Official DataHub MCP read adapter"]
+  PIPE --> GMSREAD["Bounded GMS current/history readers"]
+  READ --> DH["DataHub metadata graph"]
+  GMSREAD --> DH
+  PIPE --> FIND["Findings + provenance + blast radius"]
+  FIND --> DOSSIER["G6 evidence dossier + exact plan"]
+  DOSSIER --> APPROVAL["Cognito approver + DynamoDB CAS"]
+  APPROVAL --> SFN
+  WORKER -->|add_tags / remove_tags only| WRITE["Separate DataHub write adapter"]
+  WRITE --> DH
+  WORKER --> RECEIPT["Verified hash-chain receipt + rollback anchor"]
 ```
 
-Every selected tool must advertise `readOnlyHint=true` and `destructiveHint=false`. Discovery fails closed if a selected tool or annotation is missing. Cloud may advertise extra tools, but Analytics must expose all extras as disabled. Core rejects any extra server tool.
+Important trust boundaries:
 
-## Managed Cloud MCP contract
+- DataHub MCP supplies supported discovery, entity, schema-completion, and resolved-topology
+  reads. Complementary bounded direct GMS reads recover declared current lineage (including
+  dangling URNs) and retained aspect history hidden by the latest-write-wins MCP view.
+- Cross-source contradictions cannot fire from the MCP read tools alone: they require the
+  bounded direct GMS version-history recovery path and distinct stable pipeline identities.
+- Unknown or unstable provenance fails closed. It may produce a drift candidate, never a
+  confirmed cross-source contradiction.
+- The model is not an authority for governance state or mutations. Classifier, lineage,
+  G1–G6, blast-radius, dossier, and exact mutation arguments remain deterministic. The
+  optional narrator receives those completed results and returns bounded prose plus
+  fail-closed `archon.model-runtime-provenance/v1` metadata.
+- The approval service has no DataHub or LLM secrets. It rehydrates server-owned state by
+  `approvalId` and releases only a server-held callback token.
+- The control service has no DataHub, write, or LLM secret. It may start/describe only this
+  workflow and read only the audit/execution evidence prefixes. For governed terminal
+  success it accepts only the expected remediation-result contract, re-verifies the
+  content-addressed execution evidence and receipt chain, and returns outcome, evidence
+  digests, completion time, and check counts—not raw orchestration output, identities,
+  mutation responses, or provider errors. The opaque audit id is the unguessable browser
+  polling capability.
+- Write and rollback each require their own fresh, digest-bound approval. Approval is
+  one-use and execution is idempotent. The immutable approval deadline is stored separately
+  from DynamoDB TTL; a decided row is retained for 90 days so terminal proof remains
+  independently verifiable.
+- `dist/audit-worker.js`, the secretless approval-handoff Lambda, and
+  `dist/remediation-worker.js` are independent capabilities. Only the first receives
+  read/LLM credentials; only the last receives the write credential; the write worker
+  and its IAM role cannot read the approval-token table. Callback poison is quarantined,
+  evidence is append-only, and rejection also produces a durable execution receipt.
+- `WorkerDesiredCount` still defaults to `0` and may be promoted to `1` only after CI has
+  built and tested the exact image and the environment supplies distinct read/write
+  credentials plus separate hosted read/write MCP endpoints. No deployed worker is claimed
+  until that release workflow succeeds.
 
-For `profileId=cloud`, the companion derives the only accepted MCP endpoint from the server-owned GMS tenant:
+More detail: [design](docs/DESIGN.md), [DataHub integration research](docs/DATAHUB_RESEARCH.md),
+[temporal-provenance benchmark](docs/BENCHMARK.md), [judge evidence
+pack](docs/JUDGE_EVIDENCE.md), [judge testing guide](docs/JUDGE_TESTING.md),
+[attested submission judge pack](docs/SUBMISSION_JUDGE_PACK.md),
+[production availability](docs/AVAILABILITY.md), [production paging delivery
+proof](docs/PRODUCTION_PAGING_TEST.md), and [protected judge
+access](docs/JUDGE_ACCESS.md), [final submission content
+review](docs/SUBMISSION_CONTENT_REVIEW.md), [post-submit Devpost
+confirmation](docs/SUBMISSION_DEVPOST_CONFIRMATION.md), plus [evidence-based
+readiness](docs/READINESS.md), the [merged-upstream OSS bonus evidence
+contract](docs/SUBMISSION_BONUS_OSS.md), and the [privacy-preserving optional
+feedback evidence contract](docs/SUBMISSION_BONUS_FEEDBACK.md).
 
-```text
-DATAHUB_GMS_URL=https://<tenant>.acryl.io[/gms]
-MCP endpoint=https://<tenant>.acryl.io/integrations/ai/mcp
-Authorization: Bearer <DATAHUB_GMS_TOKEN>
+## Run locally without external services
+
+Node.js 22.15 or newer is recommended.
+
+```bash
+npm ci --ignore-scripts
+npm run typecheck
+npm run build
+npm test
+npm run coverage
+npm run test:security
+npm run load
+npm run audit:demo
+npm start
 ```
 
-`<tenant>` is exactly one DNS label. HTTPS port 443 is mandatory. Userinfo, redirects, proxies, alternate ports, IP literals, localhost/private hosts, query strings, fragments, arbitrary paths, and an independent `ARCHON_DATAHUB_MCP_URL` are rejected. The token is a bounded, header-safe, server-owned DataHub service-account token with Reader-level access; it is never placed in a URL or receipt.
+With no DataHub or model credentials, Archon uses deterministic fixtures. This mode is for
+development and reproducible CI evidence; the UI labels fallback showcase data rather than
+presenting it as a live tenant result.
 
-The adapter performs the MCP `2025-06-18` Streamable HTTP sequence:
+The React application is an independent locked package:
 
-1. `initialize`, retaining only a bounded server-reported `{name, version}` projection and digest.
-2. `notifications/initialized`, echoing the server session binding when supplied.
-3. Paginated `tools/list`, enforcing the selected read policy.
-4. Substantive `tools/call` requests against the canonical demo scope.
-5. Session `DELETE` when the server issued a session identifier.
-
-The canonical proof calls are:
-
-```text
-search("/q archon_demo+customers", entity_type=dataset)
-get_entities(canonical dataset URN)
-list_schema_fields(canonical dataset URN, keyword=customer_email)
-get_lineage(canonical dataset URN, downstream, max_hops=2)
-get_dataset_queries(canonical dataset URN)
+```bash
+npm ci --prefix web --ignore-scripts
+npm --prefix web run typecheck
+npm --prefix web test
+npm --prefix web run test:coverage
+npm --prefix web run coverage:critical
+npm --prefix web run build
 ```
 
-The `search` response must structurally contain the exact canonical URN:
+Generated `dist/`, `coverage/`, `cdk.out/`, `readiness.json`, dependency directories, and
+test reports are ignored and must not be committed.
 
-```text
-urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)
+The ordinary CI web job additionally installs the exact Playwright Chromium revision in
+the ephemeral runner, serves the already-built SPA through Vite preview, and exercises the
+fixture judge journey on desktop Chrome, Pixel 7, and a 320×568 viewport. The journey keeps
+production authentication fail-closed, proves that passive orientation and fixture approval
+emit no API or external request, checks keyboard/overflow behavior, and rejects critical or
+serious WCAG A/AA Axe findings. Coverage HTML/LCOV/JSON, Playwright HTML, screenshots, traces,
+and structured authority/accessibility receipts are retained only as CI artifacts.
+
+## Judge-ready evidence without hand-authored outputs
+
+CI generates three complementary, explicitly labeled evidence products:
+
+- a frozen seven-case DataHub capability benchmark that measures a latest-write-wins
+  current-view boundary against Archon's retained-history path, including negative cases
+  for same-pipeline drift, unknown provenance, source agreement, and a single write;
+- a deterministic synthetic judge pack produced by the real audit, G6 planning, approval,
+  execution-verification, receipt, rollback, JSON, Markdown, and SARIF functions; and
+- a browser-rendered fixture journey with desktop/mobile screenshots, responsive and
+  keyboard checks, Axe evidence, and a zero-mutation-authority request receipt.
+
+These are replayed or contract-checked in CI and retained for 90 days; the benchmark and
+synthetic judge-pack artifact digests are checksum-sealed and bound into the default-branch
+release attestation.
+The browser also offers an on-demand, exactly allowlisted application projection with
+WebCrypto self-consistency checks and an optional, passive three-step judge tour. It does
+not claim origin authenticity; the attested CI artifact is the external provenance path.
+Synthetic packs are never presented as live DataHub or deployment proof.
+
+The primary OSS bonus candidate is a bounded, read-only
+[`get_aspect_history` tool](contrib/mcp-get-aspect-history/) for the official DataHub MCP
+server. CI applies its exact source, tests, and registration patch to a pinned upstream
+revision before running upstream lint, type, and focused test contracts. It remains
+explicitly “staged, not submitted” until a real public upstream PR exists. The
+source-complete bonus evidence workflow intentionally remains blocked until that exact
+candidate is merged by an independent upstream maintainer.
+
+## Connect a real DataHub
+
+Use a sanitized demo tenant and a least-privilege read token.
+
+```bash
+DATAHUB_GMS_URL=https://datahub.example.test
+DATAHUB_GMS_TOKEN=...
+DATAHUB_MCP_URL=https://datahub.example.test/integrations/ai/mcp/
+ARCHON_DEMO_QUERY=domain:Commerce
 ```
 
-A substring or merely successful response is insufficient. A successful empty `get_dataset_queries` result is valid evidence. Receipts retain arguments/result digests, bounded response shape, and byte counts only; provider payloads, raw endpoints, sessions, credentials, and provider errors are not retained.
+`ARCHON_DEMO_QUERY` must already be trimmed, contain no wildcard, and resolve to exactly
+one dataset. It is the only query admitted by the public HTTP and Archon MCP catalog tools.
 
-Reader mutation denial is demonstrated by a separate live bootstrap check and is not performed during health/readiness. Health never invokes a mutation.
+Archon supports two MCP transports:
 
-## Reproducible Core contract
+- **Hosted Streamable HTTP** — set `DATAHUB_MCP_URL`. This is required by the hardened AWS
+  container because it intentionally contains no Python/`uvx` runtime.
+- **Pinned stdio development path** — leave `DATAHUB_MCP_URL` unset and install `uv`.
+  Archon launches the pinned `mcp-server-datahub@0.6.0`, never `@latest`.
 
-Core runs the pinned official MCP artifact built and verified by CI. Its internal network contract is exact:
+Aspect-version contradiction proof additionally requires:
 
-```text
-DATAHUB_GMS_URL=http://archon-gms:8080
-ARCHON_DATAHUB_MCP_URL=http://archon-read-mcp:8000/mcp
-ARCHON_ANALYTICS_AGENT_URL=http://archon-analytics:8100
-```
+1. retained aspect versions (`v0` plus at least one historical version);
+2. two genuinely distinct stable pipeline identities;
+3. a planted, sanitized conflict; and
+4. the credentialed `Live DataHub proof` GitHub Actions workflow.
 
-The read bridge may reach only the read-only GMS alias. The writer alias `archon-writer-gms`, host networking, host gateways, loopback shortcuts, arbitrary RFC1918 addresses, and direct dependency endpoints are rejected. Core live initialize identity is evidence, not an asserted package identity; the receipt cross-binds it to pinned package/version/source-commit provenance.
+The live proof fails on auth, server, network, pagination-bound, retention, or provenance
+uncertainty. Only the expected “no next retained version” response terminates history
+enumeration normally.
 
-The CI-built OCI candidate contains isolated companion, Analytics Agent, and MCP environments. Mutation, user, data-quality, document, and semantic-search tools are disabled so the Core live inventory is the exact six-tool surface. The image contains no mutation gateway and no write credential.
+One pipeline run creates one fresh harvest bundle: its snapshot and fact stream derive from
+the same narrow search roots. Exact entity hydration, full-schema completion, bidirectional
+MCP topology, current declared-lineage reconciliation, and retained history share that URN
+set and run under one deadline. Topology neighbors remain context and never expand the
+governance/history audit scope. Live search fails before hydration when its declared total
+exceeds the execution ceiling; every requested entity must be returned exactly once without
+a per-URN error; schema and lineage totals must remain complete and within policy. MCP
+`isError` responses are failures, never data. Every aspect history must terminate normally
+within its version bound, and a live hosted audit refuses MCP-only configuration without
+direct GMS history/current-lineage capability. The public preview
+allows one URN and two retained versions with an 18-second harvest deadline. The durable
+worker allows at most 25 URNs and 12 retained versions, uses controlled eight-way
+concurrency, and has a 75-minute harvest / 90-minute pipeline budget inside its two-hour
+callback. A broad request is rejected, never converted into an incomplete actionable plan.
 
-## Distinct evidence chains
+## Governed remediation contract
 
-Agent Context Kit and official MCP receipts remain separate. Every pinned `SKILL.md` is bound to a reviewed execution plan (`phase`, exact `requiredCalls`, and mode) by its locked artifact digest. Grounding fails closed unless every required ACK and official MCP call has a verified digest. Per-skill v2 execution receipts mark search, lineage, quality, audit, and `using-datahub` as `executed`; enrich is `previewed` and never performs a write. The prompt receives these execution fields, not the untrusted Markdown. ACK and MCP digests remain distinct and are never relabeled.
+The versioned policy is [policies/archon-remediation.v1.json](policies/archon-remediation.v1.json).
+An actionable result must satisfy all of these conditions:
 
-Analytics readiness separately proves process health, the selected MCP connection, the exact enabled tool surface, and live model connectivity. A completed answer must contain ordered, cardinality-matched selected-tool pairs; failed, duplicate-result, unmatched, and out-of-order traces are rejected. Pinned Analytics v0.4.0 has no call ID in these payloads, so matching is intentionally sequence-based. Trace receipts retain event digests only (`tracePayloadStored=false`, `rawProviderPayloadStored=false`) and link to the official MCP preflight receipt.
+1. the finding is exactly G6 and has one unambiguous target;
+2. the trusted policy allows that dataset prefix and classification tag;
+3. dossier, policy, action catalog, before-state, and plan digests verify;
+4. an authenticated `DataSteward` approves the exact unexpired plan;
+5. the execution journal claims the approval once;
+6. a fresh pre-state still matches the approved state;
+7. the isolated mutation client invokes the exact official tag tool;
+8. read-after-write verification proves the intended postcondition and no unexpected tag;
+9. a content-addressed receipt records the event chain and a separately approvable rollback.
 
-Unknown or missing evidence remains unknown. Upstream mutation tools are disabled. Every governed write remains owned by the isolated remediation worker and requires fresh digest-bound DataSteward approval.
+Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
-## Server-owned configuration
+## Hosted AWS reference architecture
 
-- Runtime identity: `ARCHON_RUNTIME_PROFILE_ID`, `ARCHON_RUNTIME_GENERATION`, `ARCHON_RUNTIME_CAPABILITY_DIGEST`.
-- Canonical demo: `ARCHON_DEMO_QUERY`, `ARCHON_ANALYTICS_QUESTION`, `ARCHON_ANALYTICS_ENGINE`.
-- Connections: `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`, `ARCHON_DATAHUB_MCP_CONNECTION`, `ARCHON_ANALYTICS_AGENT_URL`. Analytics is profile-exact: Cloud uses only `http://127.0.0.1:8100` inside its Lambda container; Core uses only `http://archon-analytics:8100`.
-- Core only: `ARCHON_DATAHUB_MCP_URL`.
-- Model proof: `ARCHON_ANALYTICS_LLM_PROVIDER=bedrock`, `ARCHON_ANALYTICS_LLM_MODEL`, `ARCHON_ANALYTICS_AWS_REGION`.
-- Continuation: generation-scoped `ARCHON_RUN_HANDLE_FERNET_KEY`.
-- Provenance: `ARCHON_AGENT_STACK_LOCK`, `ARCHON_DATAHUB_MCP_LOCK`, `ARCHON_DATAHUB_SKILLS_DIR`, `ARCHON_CUSTOM_SKILLS_DIR`.
+[infra/aws](infra/aws) contains the deployment-grade reference:
 
-Never mount a DataHub write token into the companion, Analytics Agent, or read-only MCP process.
+- a self-contained `Archon-<stage>-Edge` stack in `us-east-1` that creates the
+  CloudFront-scope WAF, its KMS-encrypted retained logs, and an Amazon-issued,
+  DNS-validated P-256 ACM certificate for the exact environment hostname, then hands the
+  Web ACL and certificate ARNs to the regional platform deployment;
+- a private, versioned, KMS-encrypted S3 SPA behind CloudFront OAC, served from the
+  exact Route 53 alias with SNI and the `TLSv1.3_2025` security policy, a canonical-host
+  viewer-request gate on every behavior, CloudFront access logging, and S3 server-access
+  logging;
+- same-origin API Gateway and the exact Cognito user pool bound to one regional WAF,
+  with throttling, strict schemas, access logs, active X-Ray, and a two-second encrypted
+  cache limited to the capability-scoped status GET;
+- private ECS Fargate API/worker services behind an internal NLB and VPC Link;
+- separate DataHub read/write secrets, stage-scoped Bedrock Mantle projects,
+  short-term task-role authentication, KMS keys, IAM roles, and default-deny security
+  groups; Fargate never receives a public IP, public subnets disable automatic public-IP
+  assignment, and inference uses a dedicated PrivateLink endpoint;
+- Cognito Hosted UI with browser PKCE S256, an `archon/approve`-scoped approval
+  Lambda, DynamoDB conditional state, Standard Step Functions, encrypted
+  SQS/DLQs, and an Object-Lock evidence bucket;
+- a deployment-generated `/runtime-config.json` that binds the immutable SPA to
+  each environment without rebuilding it, carries the exact narrow hosted-demo query,
+  and is served no-store through a CloudFront caching-disabled behavior;
+- a strict three-callback async route: audit evidence, durable human-approval handoff, then
+  approved G6 execution; approval alone can never be mistaken for a completed write;
+- a least-privilege control Lambda for public durable start/status, with immutable-evidence
+  and receipt-chain verification plus a sanitized terminal proof panel, with no exposure
+  of callback tokens or raw orchestration data;
+- alarms, dashboards, retained encrypted logs, VPC flow logs, and private AWS endpoints;
+  the production alarm topic records 100% of HTTP/S success feedback plus failures through
+  one least-privilege SNS role into one dedicated KMS-encrypted retained log group.
 
-## Cloud worker reuse contract
+The deployment workflow requires a **successful default-branch CI run ID**, its matching
+full commit SHA, and the exact run ID, run attempt, artifact ID, artifact digest, and inner
+receipt SHA-256 of a successful protected DataHub demo-state run for that release. It
+verifies GitHub's artifact envelope digests plus the inner
+container, deterministic SPA archive, and deterministic Lambda archive digests, deploys
+the `us-east-1` edge stack before the regional platform stack, validates and passes its
+exact CloudFront WAF and ACM certificate outputs into that platform deployment, deploys
+staging via GitHub OIDC,
+runs security/smoke contracts, then waits at the protected `production` environment before
+promoting those same three immutable artifacts. Selecting an older retained CI run is the
+rollback path; no application artifact is rebuilt during deploy.
+Infrastructure is deliberately reconciled from the current default-branch deployment
+control plane only after that exact commit has successful CI, CodeQL, and workflow-security
+push runs. The workflow revalidates the default-branch ref and latest exact-SHA receipts
+after production approval, immediately before each AWS OIDC trust boundary, and immediately
+before the first staging and production mutations. After observing the exact live production
+bytes, it reproduces the original receipt digest once more immediately before sealing
+promotion evidence; the canonical receipt is retained in that evidence. An application
+rollback therefore cannot silently roll back newer IaC security controls, and a mid-promotion
+branch or gate change cannot produce a trusted successful deployment record.
+Staging and production independently re-download, checksum, canonically validate, and
+attestation-verify the exact `datahub-demo-receipt-<run>-<attempt>` artifact. Each
+environment fingerprints its configured DataHub read endpoint without retaining the URL
+or token and requires equality with the sealed seed endpoint.
 
-A `profileId=cloud` stream worker can reuse the companion in-process without accepting request-supplied configuration. Its Analytics Agent child process is reachable only on exact loopback `http://127.0.0.1:8100`; redirects and environment proxies remain disabled. For an ANALYZE job it constructs `AnalyzeRequest`, runs `exact_public_input`, and invokes the same sequence as `/v2/analyze`:
+Manual dispatch has two explicit modes. `staging-bootstrap` performs the same immutable
+source and control-plane gates, deploys and verifies staging, then stops before the governed
+canary and production. It prepares a secretless, checksum-sealed three-file handoff:
+`staging-bootstrap-manifest.json`, `attestation-predicate.json`, and `SHA256SUMS`. The
+manifest binds the release, deployment control plane, run, staging evidence, account,
+region, stack, image, application URL, evidence bucket, Cognito client ID, and Cognito
+Hosted UI origin plus the remotely observed Chrome version and binary digest; the workflow attests that inventory, reverifies it, and retains it for
+90 days. `promote` redeploys/verifies staging from the selected immutable release, requires
+the exact governed write/rollback canary, and only then enters the protected production
+promotion. For a clean account, first configure and run the staging prerequisites in
+`staging-bootstrap`, verify its attestation, configure the six emitted
+`CANARY_*` non-secret values plus the separately protected canary credentials and
+explicit solo-owner reviewer rules, and then run `promote`. The handoff never contains or
+replaces AWS or DataHub credentials. These mode and handoff changes remain source-complete but are not
+deployment-complete: their static/source contracts passed remote CI, while neither
+`staging-bootstrap` nor `promote` has been dispatched against AWS.
 
-```text
-collect_ack_context
-load_skill_receipt
-analytics_preflight
-ground_skills
-run_analytics
-```
+AWS deployment is user-gated until the protected foundation run, environment roles,
+four tenant-scoped DataHub URLs, separate read/write secrets and provider RBAC, the
+DataHub Cloud `ARCHON_DATAHUB_PRIVATE_LINK_SERVICE_NAME`, and a narrow
+`DATAHUB_DEMO_QUERY` that resolves to exactly one
+dataset exist. Both protected environments also require an exact
+`ARCHON_CLOUDFRONT_DOMAIN_NAME` inside the account-owned public Route 53 zone selected by
+`ARCHON_CLOUDFRONT_HOSTED_ZONE_ID`. The edge stack issues the exact-name certificate in
+`us-east-1`; the regional stack creates dual-stack aliases and derives the Cognito callback
+and logout URLs from the canonical hostname. It has no insecure default-certificate
+fallback. The target AWS account must be CDK-bootstrapped in both the workload region and
+`us-east-1` before the edge-first CloudFront-WAF/certificate deployment can run.
+The deployment pipeline preflights the DataHub service, verified provider private DNS,
+external provider ownership, and exact two-AZ coverage before mutation, then drives the
+VPC and one dedicated interface endpoint from those validated AZs. Workloads reach
+DataHub only through its TCP 443 endpoint security group. It resolves the regional
+AWS-managed S3 and DynamoDB prefix-list IDs itself. Bedrock Mantle inference
+is pinned to `eu-west-1` and uses a stack-owned private endpoint, stage project, and
+short-term ECS task-role tokens instead of a configured LLM allowlist or credential.
+Staging and production
+smoke evidence bind the exact query and state digests and reject `{}` / wildcard catalog
+sweeps. Smoke must reproduce exactly the G6 email gap, the dangling upstream plus
+one-hop target blast-radius edge, and the two-source retained owner contradiction; the
+sanitized semantic projection must be identical in staging and production. Each
+SPA reads that same exact query from runtime config and pre-fills the audit scope, so the
+judge path is one click while remaining bounded to the proven single dataset. Each
+deployment receipt also embeds validated edge-security, regional-WAF, and network-egress
+contracts, including the exact canonical viewer hostname, public hosted-zone identity,
+Amazon-issued P-256 certificate and `TLSv1.3_2025` mode, WAF identity,
+KMS-encrypted retained WAF log groups, sampled-data protection, five-minute
+rate windows, exact enabled/rotating customer KMS keys, CDK-output digest, AWS-managed
+prefix-list identities, DataHub service/private-DNS/AZ identity, plus the exact live active IPv4 NLB/workload
+security-group rules. Source code does not imply that a public endpoint has already been
+deployed.
 
-Blocking SDK/context functions run in worker threads; preflight and Analytics functions are async. The worker creates one job-scoped `_ModelProbeState` and passes it as `analytics_preflight(..., model_probe_state=state)`, so warm Lambda reuse does not mutate the companion default cache. The worker preserves the `archon.datahub-agent-stack-result/v2` projection and digest links. IMPROVE_CONTEXT reuses `resolve_run_handle`, `analytics_preflight`, `analytics_turn`, and `context_quality` with the same generation/profile binding. There is no Core fallback for a Cloud-bound job.
+## Pipeline-only security and CI/CD
 
-Reuse the managed MCP adapter, model/health, Analytics boundary, runtime/skills, and API contract tests under `tests/` for the worker.
+Every security claim must be reproduced by GitHub Actions; workstation or manual scanner
+output is not accepted as release evidence:
 
-## CI-only verification
+| Gate | CI/CD evidence |
+| --- | --- |
+| Secret detection | Checksum-pinned Gitleaks |
+| SAST | CodeQL security-and-quality queries |
+| Application abuse cases | AuthZ/tool-boundary, prompt-injection, provenance injection, data-exposure, and remediation-boundary tests |
+| Browser quality | Exact-pinned Chromium fixture journey on desktop, Pixel 7, and 320×568; keyboard and zero-overflow contracts; serious/critical WCAG A/AA Axe gate; global and decision-critical web coverage ratchets |
+| Dependency security | Root, web, approval-Lambda, and control-Lambda fail-closed `npm audit` with bounded registry-transport retries; exact override verification; infra-only checksum-pinned repair and receipt-bound exact-path audit compensation for the immutable `aws-cdk-lib` GHSA; PR dependency review; Dependabot |
+| IaC preventive policy | Unit-tested, project-owned CloudFormation Guard rules against synthesized templates |
+| IaC scanner | Trivy config scan with an all-severity, zero-finding fail gate plus structurally validated SARIF |
+| Container hardening | Non-root/read-only runtime contract and isolated health boot |
+| Supply chain | Exact CI container/SPA/Lambda subjects, non-vacuous Syft SPDX/CycloneDX SBOMs, Grype gates with a required fresh (≤24h), hash-validated DB whose retrieval time and exact file manifest are sealed in a v4 attestation, trusted-main SARIF, exact-run rescans, and a daily read-only-OIDC rescan transitively bound to current ECS image digests, Lambda ZIP/config/content digests, every versioned KMS-encrypted SPA object, exact deployment/CI artifacts, and a second post-scan live-byte TOCTOU observation |
+| Workflow security | actionlint plus zizmor audits for workflow correctness, dangerous triggers, permissions, and unpinned dependencies |
+| Hosted DAST | Digest-pinned OWASP ZAP baseline against staging, with Medium/High findings as a hard gate and retained JSON/HTML/Markdown evidence |
+| Deployment security | OIDC short-lived AWS credentials, account allow-list, exact persisted stage CloudFormation execution-role bindings with an explicit one-time legacy-role migration gate and mandatory exact post-deploy proof, ECR scan, immutable digest promotion, versioned secret refresh, exact no-store auth runtime-config proof, negative AuthZ/schema checks, TLS/security-header checks, and digest-bound IaC/edge/network plus dual API-stage/Cognito regional-WAF contracts |
+| Production availability | Six-hour read-only public-path probe with strict TLS/header/schema checks, exact CI/deployment/runtime-byte provenance, TOCTOU revalidation, and checksum-sealed 90-day evidence |
+| External paging delivery | Protected, release-bound SNS publish correlated to one unique 2xx external HTTPS delivery-status record; no publish-only or human-acknowledgement claim |
 
-The frozen lock, OCI build, tests, SBOM, vulnerability audit, secret scanning, provenance, and deployment verification run in GitHub Actions. Do not build this service on a contributor workstation and do not leave local build artifacts.
+Workflows:
 
-`GET /livez` proves process liveness only. `GET /healthz` returns 200 only after the active profile DataHub, MCP, Agent Context Kit, Skills, Analytics process, and live model evidence all verify; otherwise it returns 503 and the runtime must not be advertised.
+- [CI](.github/workflows/ci.yml) — root, coverage-ratcheted web, Playwright/Axe
+  desktop/mobile browser journey, AWS CDK, policy, security, load, benchmark, reproducible
+  judge evidence, exact-upstream DataHub MCP contribution tests, and immutable artifact
+  gates. Mutable-registry lock refresh is deliberately two-phase: a drift run emits and
+  fully validates short-lived candidate locks, while the immediately following commit may
+  modify only those locks. The producer seals provenance, inventory, and checksums before
+  validating every candidate. The adopter then rechecks the exact parent run/job, public
+  artifact metadata, base/head identity, and a canonical digest over all three manifests
+  and all three committed locks. The public verification path uses no Actions-read token;
+  an absent, expired, unavailable, or ineligible parent receipt falls back to a fresh
+  pipeline resolution.
+- [CodeQL](.github/workflows/codeql.yml) — JavaScript/TypeScript and Python SAST on pull
+  requests, `master`, and schedule.
+- [Workflow security](.github/workflows/workflow-security.yml) — actionlint and zizmor
+  validation of the workflows themselves.
+- [GitHub repository posture](.github/workflows/github-repository-posture.yml) —
+  scheduled/manual, secretless observation using only the automatic `GITHUB_TOKEN`.
+  This public tier verifies only token-visible repository identity and public-state fields,
+  the public `master` protection signal, Apache-2.0 detection, private vulnerability
+  reporting, the exact 17-environment inventory, administrator-bypass state, reviewer
+  posture, and exact `master`-only deployment policies. Repository merge/lifecycle
+  expectations (`allow_*` and `delete_branch_on_merge`), detailed branch-protection rules,
+  the Actions allowlist/SHA-pinning policy, and environment secret-name inventories remain
+  explicitly `unverified-requires-administration-and-environments-read`. The receipt binds
+  the lifecycle expectation only by digest with `verification: not-performed`; it never
+  emits lifecycle values. Protected runtime environments intentionally require live
+  DataHub, Cognito, and deployment secrets, so this tier makes no secret-emptiness claim.
+  Its future least-privilege boundary is `Actions:read`, `Administration:read`,
+  `Environments:read`, and `Metadata:read`. A workstation `gh` token is never copied into
+  CI.
+- [AWS foundation](.github/workflows/aws-foundation.yml) — protected, manual-only
+  reconciliation of the pinned modern `CDKToolkit` stacks in `eu-west-1` and `us-east-1`,
+  a non-administrator CloudFormation execution policy, and the environment-bound
+  deployment role, followed by sanitized 90-day evidence and attestation.
+- [Production supply chain](.github/workflows/supply-chain.yml) — automatic and exact-run
+  rescans plus a daily rescan of the original CI container, SPA, and Lambda bytes for the
+  exact successful deployment currently identified by `Archon-production`; it verifies
+  the deployment-evidence artifact, GitHub artifact metadata digests, inner subject
+  digests, and a canonical ECS/Lambda/S3 live-runtime manifest. It repeats the live AWS
+  observation after scanning, revalidates the sealed observer whole-snapshot receipt before
+  read-only OIDC and again immediately before provenance signing. Immediately before the
+  first attestation it also reads the latest exact historical-source CodeQL and workflow-
+  security receipts twice and requires both snapshots to equal the sealed receipt; the
+  deployed source SHA may be older than the current `master`. The workflow produces
+  fresh-DB gates, self-verifiable 90-day raw evidence, SARIF, and v4 attestations.
+- [Production posture](.github/workflows/production-posture.yml) — scheduled/manual,
+  read-only-OIDC termination-protection, CloudFormation drift, alarm-subscription, and
+  TOCTOU verification for all three production stacks, with signed 90-day evidence.
+- [Production availability](.github/workflows/availability.yml) — scheduled/manual,
+  credentialless observation of the public UI, runtime config, and one bounded read-only
+  audit, bound to the newest successful production promotion and exact runtime bytes.
+- [Production paging delivery](.github/workflows/production-paging-test.yml) —
+  twice weekly (`17 3 * * 1,4`) and manually dispatchable protected, release-bound SNS
+  test whose returned message ID must remain bound to one unique external HTTPS 2xx
+  delivery-status event across a delayed second complete lookup;
+  retained evidence excludes the endpoint, payload, provider response, raw log event, and
+  AWS identifiers. Its exact OIDC/IAM and evidence boundary is documented in
+  [docs/PRODUCTION_PAGING_TEST.md](docs/PRODUCTION_PAGING_TEST.md).
+- [Deploy immutable AWS release](.github/workflows/deploy.yml) — staging verification and
+  a ≤24-hour v4 supply-chain-attestation gate plus digest-pinned OWASP ZAP DAST, then an
+  exact-run governed write/rollback canary whose signed evidence is required before the
+  protected same-artifact production promotion. Its checksum-sealed staging and production
+  evidence use the `staging-deployment/v1` and `production-deployment/v1` predicates and
+  retain the exact sanitized demo-state source binding. `staging-bootstrap` accepts no
+  governed-canary fixture coordinates; `promote` requires one bounded canonical
+  `fixture_coordinates` JSON input containing the exact fixture run/attempt, artifact
+  ID/digest, and inner receipt digest.
+- [Live DataHub proof](.github/workflows/live-datahub-proof.yml) — credentialed proof of the
+  flagship retained-history path plus a fresh deployed G6/dangling-blast-radius proof,
+  with matching pre-secret, post-proof, and immediate pre-attestation exact control-plane
+  gates. Its `live-datahub-proof/v4` predicate binds the original seed run/artifact/
+  attestation, endpoint fingerprint, deployment evidence, semantic projection, and both
+  enforced and enriched control-plane receipts.
+- [DataHub demo state](.github/workflows/datahub-demo-state.yml) — idempotent protected
+  seed/reset of the commit- and SHA-256-bound official showcase baseline plus the exact
+  retained-history contradiction, G6 email gap, and dangling lineage target. Its
+  plan-before-mutation protocol and two-URN delete allowlist are documented in
+  [docs/DEMO_DATA_STATE.md](docs/DEMO_DATA_STATE.md).
+- [Cognito judge access](.github/workflows/judge-user.yml) — solo-owner approved,
+  stage- and target-bound provision, rotation, reactivation, and emergency deactivation
+  of the single immutable judge identity, with no exported credential artifact. Only
+  emergency deactivation can bypass red CI status; it still binds the exact current
+  master workflow/run and recomputes its V3-sealed receipt before and after OIDC. The
+  least-privilege operating contract is documented in
+  [docs/JUDGE_ACCESS.md](docs/JUDGE_ACCESS.md).
+- [Submission judge journey](.github/workflows/submission-judge-journey.yml) —
+  independently exercises the exact production release through the provisioned judge
+  identity and retains a checksum-bound, attested journey receipt without exporting
+  credentials.
+- [Submission project access](.github/workflows/submission-project-access.yml) —
+  reconstructs the ordered judge-account lifecycle and fresh production journey from
+  exact run IDs, verifies their artifacts and attestations, and produces the protected
+  `SQ3`–`SQ5` project-access evidence.
+- [DataHub governed-canary fixture](.github/workflows/datahub-canary-fixture.yml) —
+  plan-before-mutation lifecycle for the exact Snowflake `TEST` dataset and owned domain.
+  Protected seed/reset produces a canonical five-file receipt whose artifact metadata,
+  checksums, state contract, G1-G5/G6 semantics, endpoint/marker fingerprints, and complete
+  GitHub attestation subject set are reverified by the governed canary before AWS trust.
+- [Governed DataHub canary](.github/workflows/governed-canary.yml) — protected
+  `GOVERNED → AWAITING_APPROVAL`, a human gate displaying the sealed plan/recovery
+  digests, then `APPROVE → VERIFIED`, followed by an explicit solo-owner approval of the
+  exact rollback and read-after-rollback proof. Its v3 recovery and final attestation bind
+  the complete verified fixture receipt coordinates and state fingerprint. Its isolation
+  contract is in [docs/GOVERNED_CANARY.md](docs/GOVERNED_CANARY.md).
+- [Independent canary recovery](.github/workflows/governed-canary-recovery.yml) —
+  exact-parent `workflow_run` compensation for failed or cancelled canaries.
+- [Submission operations](.github/workflows/submission-operations.yml) —
+  independently reconstructs SQ10 from exact attested availability, posture,
+  paging, governed-canary, project-access, and live-DataHub runs, then retains
+  and signs the nine-subject operational-readiness inventory.
+- [Submission judge pack](.github/workflows/submission-judge-pack.yml) —
+  converts the exact successful current-release CI judge artifact and its
+  signed release predicate into the optional four-subject SQ9 evidence source,
+  explicitly labeled as sanitized synthetic fixture evidence rather than live
+  proof. Its operating contract is in
+  [docs/SUBMISSION_JUDGE_PACK.md](docs/SUBMISSION_JUDGE_PACK.md).
+- [Submission evidence](.github/workflows/submission-evidence.yml) — fetches only
+  registered same-repository evidence runs, independently verifies their exact artifacts,
+  checksums, attestations, semantics, and freshness, and emits the canonical aggregate
+  without turning missing proof into a pass.
+- [Submission readiness](.github/workflows/submission-readiness.yml) — protected
+  solo-owner approval and fresh revalidation of the exact aggregate followed by a
+  checksum-bound readiness seal; the post-submit `SQ11` confirmation remains deliberately
+  separate.
+- [Submission content review](.github/workflows/submission-content-review.yml) —
+  protected solo-owner review of the exact final Devpost copy, public
+  under-three-minute video, complete repository history, prior-work/media
+  disclosures, and cross-medium claims. It independently reconstructs SQ6,
+  SQ7, and SQ8, retains 16 checksum-sealed subjects for 90 days, and verifies
+  the persisted full-subject GitHub attestation. The fail-closed operating
+  contract is in
+  [docs/SUBMISSION_CONTENT_REVIEW.md](docs/SUBMISSION_CONTENT_REVIEW.md).
+- [Devpost submission confirmation](.github/workflows/submission-devpost-confirmation.yml) —
+  post-submit-only `SQ11` producer that independently revalidates the
+  pre-submit readiness seal, protected reviewer approval, reviewed content,
+  official rules, and all public judging URLs. It retains no Devpost
+  credentials or private confirmation bytes and verifies all six signed
+  subjects both against the returned bundle and through persisted lookup.
+  Its non-circular operating sequence is in
+  [docs/SUBMISSION_DEVPOST_CONFIRMATION.md](docs/SUBMISSION_DEVPOST_CONFIRMATION.md).
+- [Submission bonus OSS](.github/workflows/submission-bonus-oss.yml) —
+  intentionally accepts only a public merged PR for the exact four-path
+  `get_aspect_history` candidate. It reconstructs the complete PR head tree
+  from the immutable CI receipt and pinned upstream base, compares merged path
+  modes and bytes, verifies the signed CI release predicate, retains four
+  checksum-sealed subjects, and verifies the persisted full-subject
+  attestation. Its activation sequence and fail-closed contract are in
+  [docs/SUBMISSION_BONUS_OSS.md](docs/SUBMISSION_BONUS_OSS.md).
+- [Submission bonus feedback](.github/workflows/submission-bonus-feedback.yml) —
+  retains only privacy-preserving commitments and exact public-rules metadata
+  after the protected solo owner privately verifies the
+  real one-per-entrant feedback confirmation. It never receives Devpost
+  credentials, raw feedback, raw entrant identifiers, or private confirmation
+  bytes. Its fail-closed contract is in
+  [docs/SUBMISSION_BONUS_FEEDBACK.md](docs/SUBMISSION_BONUS_FEEDBACK.md).
+
+CI also enforces an intentionally offline core-path SLO through `load/audit.js`: ten
+concurrent virtual users complete 200 deterministic pipeline/MCP iterations with zero
+errors, no dropped work, and audit p95 latency at or below the default 1,500 ms budget.
+This is a reproducible regression gate for Archon's core audit path, not a claim about
+hosted DataHub or internet latency.
+
+Action dependencies are commit-SHA pinned. A workflow definition is not called “green”
+until its remote run succeeds, and a deployment definition is not called “deployed” until
+the hosted smoke evidence exists.
+
+## Current delivery status
+
+The repository contains the application, UI, security boundaries, locked packages,
+reference infrastructure, and CI/CD definitions. The authoritative remaining proof matrix
+is [docs/READINESS.md](docs/READINESS.md). In particular:
+
+- ordinary CI, CodeQL, and workflow-security runs are successful for the reviewed source
+  revision; the retained CI evidence includes readiness, web/browser and coverage,
+  infrastructure/Lambda, DataHub benchmark, judge-pack, OSS-candidate, MCP security/SBOM,
+  container, and security artifacts;
+- the two-mode deployment bootstrap is source CI-validated, but its actual
+  `staging-bootstrap` and `promote` dispatches remain user-gated;
+- the secretless GitHub-posture workflow and contracts are source CI-validated, but a live
+  successful scheduled/manual `master` receipt is still pending; the corrected public tier
+  must label repository lifecycle, Actions policy, detailed branch protection, and secret
+  inventories as unverified unless a separately reviewed least-privilege elevated tier is
+  configured;
+- all 17 named GitHub environments now exist with one exact `master` deployment policy,
+  administrator bypass disabled, and `master` protection enabled; all 12 mutation/approval
+  environments have `upgradedev` as their sole User reviewer with self-review enabled,
+  while the five read-only or automated environments are reviewerless by design. Secret
+  names are deliberately not inventoried by this tier, and protected runtime environments
+  are expected to receive their required live credentials through their dedicated setup;
+- the AWS OIDC provider, protected `aws-foundation` environment, and narrowly scoped
+  foundation role are configured; the protected foundation/bootstrap run, DataHub
+  credentials/endpoints, and hosted deployment are the remaining live operations;
+- a real retained-history contradiction and governed canary write/rollback need sanitized
+  evidence;
+- screenshots, the under-three-minute public video, Devpost copy, and optional public post
+  are intentionally last; the content-review workflow remains fail-closed until
+  its canonical final JSON, public video, and explicit solo-owner environment approval exist;
+- `SQ11` is source-complete but externally blocked until the pre-submit aggregate
+  (which must exclude `SQ11`) is sealed, the real Devpost entry is submitted,
+  its public URL and authoritative private timestamp/commitment are supplied,
+  and the protected solo owner approves the
+  exact binding; only a later reporting aggregate may consume the attested result;
+- the optional OSS workflow remains intentionally blocked until an independent
+  upstream maintainer merges the exact four-path candidate, after which the
+  manifest and contribution README must record the concrete merged identity in
+  a normal CI-reviewed release before the evidence workflow is dispatched;
+- the optional feedback workflow remains undispatchable until a registered
+  entrant submits the real feedback once, commits the privacy-preserving
+  canonical confirmation, and the solo owner can verify its private
+  preimages out of band.
+
+## Prior-work disclosure
+
+This is a new Apache-2.0 project. It reuses selected code patterns from our earlier agents
+while adding a new DataHub client/domain layer, temporal provenance semantics, blast-radius
+analysis, governed remediation contracts, UI, HTTP boundary, and AWS architecture. The
+file-level disclosure is in [NOTICE.md](NOTICE.md).
+
+## License
+
+[Apache License 2.0](LICENSE).
