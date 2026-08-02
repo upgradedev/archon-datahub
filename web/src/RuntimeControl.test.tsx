@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeControl } from "./RuntimeControl";
 
 afterEach(() => {
+  window.sessionStorage.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -24,6 +25,8 @@ function json(value: unknown, status = 200): Response {
     json: async () => value,
   } as unknown as Response;
 }
+
+const getAccessToken = () => "TEST_ONLY_TOKEN_000000000000";
 
 const allCapabilities = {
   mcpRead: true,
@@ -75,6 +78,8 @@ describe("judge runtime control", () => {
     expect(screen.getByRole("option", { name: "DataHub Core sandbox" })).toBeInTheDocument();
     expect(screen.getByText(/Explicit Cloud never falls back/i)).toBeInTheDocument();
     expect(screen.getByText(/DynamoDB is the lease authority/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Launch pinned session" })).toBeDisabled();
+    expect(screen.getByText(/Sign in as the judge or steward/i)).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -122,7 +127,12 @@ describe("judge runtime control", () => {
     const fetchMock = vi.fn().mockResolvedValue(json(session()));
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<RuntimeControl onSessionChange={onSessionChange} />);
+    render(
+      <RuntimeControl
+        getAccessToken={getAccessToken}
+        onSessionChange={onSessionChange}
+      />,
+    );
     fireEvent.change(screen.getByLabelText("DataHub runtime preference"), {
       target: { value: "auto" },
     });
@@ -155,7 +165,7 @@ describe("judge runtime control", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<RuntimeControl />);
+    render(<RuntimeControl getAccessToken={getAccessToken} />);
     fireEvent.change(screen.getByLabelText("DataHub runtime preference"), {
       target: { value: "cloud" },
     });
@@ -185,7 +195,7 @@ describe("judge runtime control", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<RuntimeControl />);
+    render(<RuntimeControl getAccessToken={getAccessToken} />);
     fireEvent.click(
       screen.getByRole("button", { name: "Launch pinned session" }),
     );
@@ -194,6 +204,56 @@ describe("judge runtime control", () => {
     vi.advanceTimersByTime(5000);
 
     expect(screen.getByText("01:00")).toBeInTheDocument();
+  });
+
+  it("recovers only a validated opaque session capability after refresh", async () => {
+    const sessionId = "rs_" + "R".repeat(43);
+    window.sessionStorage.setItem("archon.runtime-session/v1", sessionId);
+    const recovered = session({
+      sessionId,
+      state: "READY",
+      canRun: true,
+      canExtend: true,
+    });
+    const fetchMock = vi.fn().mockResolvedValue(json(recovered));
+    const onSessionChange = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <RuntimeControl
+        getAccessToken={getAccessToken}
+        onSessionChange={onSessionChange}
+      />,
+    );
+
+    expect(await screen.findByText("READY")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runtime-sessions/" + sessionId,
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(onSessionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId, state: "READY" }),
+    );
+    expect(window.sessionStorage.getItem("archon.runtime-session/v1")).toBe(
+      sessionId,
+    );
+  });
+
+  it("discards a malformed saved capability without any request", async () => {
+    window.sessionStorage.setItem(
+      "archon.runtime-session/v1",
+      "https://private.example/session",
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RuntimeControl getAccessToken={getAccessToken} />);
+
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent(/invalid saved runtime capability was discarded/i);
+    expect(window.sessionStorage.getItem("archon.runtime-session/v1")).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("sends awaited explicit activity and teardown requests", async () => {
@@ -234,7 +294,7 @@ describe("judge runtime control", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<RuntimeControl />);
+    render(<RuntimeControl getAccessToken={getAccessToken} />);
     fireEvent.click(
       screen.getByRole("button", { name: "Launch pinned session" }),
     );
