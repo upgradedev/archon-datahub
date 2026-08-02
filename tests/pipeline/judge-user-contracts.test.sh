@@ -26,6 +26,94 @@ approval_verifier="$(
   printf '%s/scripts/verify-judge-environment-approval.sh' \
     "${repository_root}"
 )"
+judge_access_doc="${repository_root}/docs/JUDGE_ACCESS.md"
+judge_testing_doc="${repository_root}/docs/JUDGE_TESTING.md"
+
+contract_stage="documentation"
+contract_case="dual-group and governed-write judge guidance"
+python3 - "${judge_access_doc}" "${judge_testing_doc}" <<'PY'
+from pathlib import Path
+import sys
+
+access = Path(sys.argv[1]).read_text(encoding="utf-8")
+testing = Path(sys.argv[2]).read_text(encoding="utf-8")
+access_required = (
+    "`ArchonApproverGroupName`, and `ArchonRuntimeOperatorGroupName`",
+    "complete authorization membership is exactly the two-group set `archon-approvers` and `archon-runtime-operators`",
+    "complete two-group set: `archon-approvers` plus `archon-runtime-operators`",
+    "removes both exact runtime-authorization groups",
+    "no group memberships",
+    "exact two-group or empty-membership proof",
+)
+testing_required = (
+    "## Recommended quick path",
+    "Select **Reject proposal**",
+    "## Optional governed-write journey",
+    "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+    "field: `customer_email`",
+    "proposed tag: `urn:li:tag:PII`",
+    "Select **Approve exact plan**",
+    "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
+    "ACK context · changed",
+    "Analytics result · changed",
+    "`governed-canary-rollback`",
+    "requires a fresh human approval",
+    "workflow automatically enters the rollback job",
+    "Archon does not mutate autonomously",
+    "distinct, separately approved",
+)
+stale_access = (
+    "One enabled, email-bound",
+    "exactly the `archon-approvers` group",
+    "exactly the approver group",
+    "same sole approver group",
+    "exactly the sole approver group",
+    "has zero groups",
+    "zero-group",
+    "sole-group",
+    "approver-group removal",
+    "removes its approver group",
+    "group-free",
+)
+unsafe_testing = (
+    "automatically approves",
+    "mutates without approval",
+    "clean up the PII tag manually",
+)
+
+def validate(access_text: str, testing_text: str) -> None:
+    missing_access = [item for item in access_required if item not in access_text]
+    missing_testing = [item for item in testing_required if item not in testing_text]
+    stale = [item for item in stale_access if item in access_text]
+    unsafe = [item for item in unsafe_testing if item in testing_text]
+    assert not missing_access, f"missing judge-access contracts: {missing_access}"
+    assert not missing_testing, f"missing judge-testing contracts: {missing_testing}"
+    assert not stale, f"stale single/count-based group language: {stale}"
+    assert not unsafe, f"unsafe governed-write language: {unsafe}"
+
+try:
+    validate(access, testing)
+except AssertionError as error:
+    raise SystemExit(str(error)) from error
+
+negative_cases = (
+    ("single-group regression", access.replace(access_required[1], "authorization membership is exactly the approver group", 1), testing),
+    ("numeric membership regression", access + "\nA zero-group proof is sufficient.\n", testing),
+    ("synthetic tag target removed", access, testing.replace("proposed tag: `urn:li:tag:PII`", "proposed tag: any", 1)),
+    ("autonomous mutation overclaim", access, testing.replace("Archon does not mutate autonomously", "Archon mutates without approval", 1)),
+    ("rollback approval removed", access, testing.replace("requires a fresh human approval", "automatically approves", 1)),
+    ("automatic rollback scheduling removed", access, testing.replace("workflow automatically enters the rollback job", "workflow may eventually consider cleanup", 1)),
+)
+for name, drifted_access, drifted_testing in negative_cases:
+    if drifted_access == access and drifted_testing == testing:
+        raise SystemExit(f"negative fixture did not mutate content: {name}")
+    try:
+        validate(drifted_access, drifted_testing)
+    except AssertionError:
+        continue
+    raise SystemExit(f"negative documentation drift was accepted: {name}")
+PY
+
 test_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/archon-judge-contracts.XXXXXX")"
 state_dir="${test_root}/state"
 bin_dir="${test_root}/bin"
