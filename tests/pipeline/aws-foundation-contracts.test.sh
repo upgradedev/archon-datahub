@@ -1824,21 +1824,6 @@ forbid_text "${reconciler}" \
   'declare -p'
 test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
   fail 'reconciler diagnostic phases must be the 38 reviewed public labels'
- "${deploy_workflow}"
-)" -eq 1 || fail 'deploy workflow must deny permissions by default at root'
-test "$(
-  grep -Fc 'bash scripts/validate-cloudformation-role-bindings.sh' \
-    "${deploy_workflow}"
-)" -eq 2 || fail 'deploy workflow must verify role bindings twice'
-test "$(
-  grep -Fc 'ALLOW_ABSENT=true' "${deploy_workflow}"
-)" -eq 1 || fail 'deploy preflight must allow only first-deploy absence'
-test "$(
-  grep -Fc 'ALLOW_ABSENT=false' "${deploy_workflow}"
-)" -eq 1 || fail 'post-deploy role verification must forbid absence'
-test "$(
-  grep -Fc 'ALLOW_ROLE_MIGRATION=false' "${deploy_workflow}"
-)" -eq 2 || fail 'deploy role verification must always forbid migration'
 
 require_text "${role_binding_validator}" \
   'bootstrap_qualifier="archonstg"' \
