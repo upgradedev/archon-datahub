@@ -101,6 +101,17 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       }
     );
 
+    const llmModelId = new CfnParameter(this, "DataHubCoreBedrockModelId", {
+      type: "String",
+      description:
+        "Exact Bedrock model or inference-profile ID preflighted before Core readiness",
+      minLength: 1,
+      maxLength: 256,
+      allowedPattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    });
+    const bedrockRuntimeServiceName =
+      `com.amazonaws.${Aws.REGION}.bedrock-runtime`;
+
     const dataKey = new kms.Key(this, "DataKey", {
       alias: `alias/archon/${stage}/datahub-core-data`,
       description: "DataHub Core lease, health, job, and receipt encryption",
@@ -184,6 +195,28 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       ec2.Port.tcp(443),
       "DynamoDB gateway endpoint only"
     );
+    const inferenceEndpointSecurityGroup = new ec2.SecurityGroup(
+      this,
+      "CoreInferenceEndpointSecurityGroup",
+      {
+        vpc,
+        description:
+          "Ephemeral Bedrock Runtime endpoint accepts TLS only from the Core host",
+        allowAllOutbound: false,
+        allowAllIpv6Outbound: false,
+        disableInlineRules: true
+      }
+    );
+    inferenceEndpointSecurityGroup.addIngressRule(
+      hostSecurityGroup,
+      ec2.Port.tcp(443),
+      "Core host to ephemeral Bedrock Runtime endpoint"
+    );
+    hostSecurityGroup.addEgressRule(
+      inferenceEndpointSecurityGroup,
+      ec2.Port.tcp(443),
+      "Ephemeral Bedrock Runtime interface endpoint only"
+    );
 
     const instanceRole = new iam.Role(this, "CoreInstanceRole", {
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
@@ -211,6 +244,21 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       })
     );
 
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "InvokeOnlyConfiguredBedrockModel",
+        actions: [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream"
+        ],
+        resources: [
+          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}::foundation-model/${llmModelId.valueAsString}`,
+          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${llmModelId.valueAsString}`,
+          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:application-inference-profile/${llmModelId.valueAsString}`
+        ]
+      })
+    );
+
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
       "set -euo pipefail",
@@ -224,6 +272,8 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       `ARCHON_RUNTIME_GENERATION=${generation.valueAsString}`,
       `ARCHON_RUNTIME_CAPABILITY_DIGEST=${capabilityDigest.valueAsString}`,
       `ARCHON_IMAGE_MANIFEST_DIGEST=${imageManifestDigest.valueAsString}`,
+      "ARCHON_LLM_PROVIDER=bedrock",
+      `ARCHON_LLM_MODEL=${llmModelId.valueAsString}`,
       "ARCHON_COMPANION_URL=http://127.0.0.1:8080",
       "ARCHON_ANALYTICS_AGENT_URL=http://127.0.0.1:8100",
       "ARCHON_DATAHUB_GMS_URL=https://127.0.0.1:9443/gms",
@@ -311,6 +361,11 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
           CORE_CAPABILITY_DIGEST: capabilityDigest.valueAsString,
           CORE_IMAGE_MANIFEST_DIGEST: imageManifestDigest.valueAsString,
           CORE_STAGE: stage,
+          CORE_VPC_ID: vpc.vpcId,
+          CORE_SUBNET_ID: vpc.isolatedSubnets[0]!.subnetId,
+          CORE_INFERENCE_SECURITY_GROUP_ID:
+            inferenceEndpointSecurityGroup.securityGroupId,
+          CORE_BEDROCK_SERVICE_NAME: bedrockRuntimeServiceName,
           CORE_IDLE_SECONDS: "1800",
           CORE_HARD_SECONDS: "7200",
           CORE_OPERATION_SECONDS: "300"
@@ -321,7 +376,13 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     lifecycleFunction.addToRolePolicy(
       new iam.PolicyStatement({
         sid: "VerifyOnlyConfiguredCoreImage",
-        actions: ["ec2:DescribeImages"],
+        actions: [
+          "ec2:CreateTags",
+          "ec2:CreateVpcEndpoint",
+          "ec2:DeleteVpcEndpoints",
+          "ec2:DescribeImages",
+          "ec2:DescribeVpcEndpoints"
+        ],
         resources: ["*"],
         conditions: {
           StringEquals: { "aws:RequestedRegion": "eu-west-1" }
@@ -639,6 +700,17 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       `archon-${stage}-core-capability-digest`
     );
     output(this, "ArchonCoreVpcId", vpc.vpcId);
+    output(
+      this,
+      "ArchonCoreInferenceEndpointSecurityGroupId",
+      inferenceEndpointSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonCoreBedrockModelId",
+      llmModelId.valueAsString,
+      `archon-${stage}-core-bedrock-model-id`
+    );
   }
 }
 
