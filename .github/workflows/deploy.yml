@@ -277,20 +277,26 @@ jobs:
               raise SystemExit("Cloud gates mismatch")
           if not re.fullmatch(r"sha256:[0-9a-f]{64}", receipt.get("imageDigest", "")):
               raise SystemExit("Cloud image digest invalid")
-          if not re.fullmatch(
-              r"[0-9]{12}\.dkr\.ecr\.eu-west-1\.amazonaws\.com/archon-datahub-cloud-runtime-v2",
-              receipt.get("imageUri", ""),
-          ):
-              raise SystemExit("Cloud repository invalid")
+          expected_uri = (
+              r"[0-9]{12}\.dkr\.ecr\.eu-west-1\.amazonaws\.com/"
+              r"archon-datahub-cloud-runtime-v2:cloud-v2-" + re.escape(expected)
+          )
+          if not re.fullmatch(expected_uri, receipt.get("imageUri", "")):
+              raise SystemExit("Cloud tagged image URI invalid")
           PY
           cloud_digest="$(jq -er .digest "${cloud}")"
-          image_uri="$(jq -er '.imageUri+"@"+.imageDigest' "${cloud}")"
+          tagged_image_uri="$(jq -er .imageUri "${cloud}")"
+          repository_uri="${tagged_image_uri%:cloud-v2-${RELEASE_SHA}}"
+          test "${repository_uri}:cloud-v2-${RELEASE_SHA}" = "${tagged_image_uri}"
+          image_uri="${repository_uri}@$(jq -er .imageDigest "${cloud}")"
+          [[ "${image_uri}" =~ ^[0-9]{12}\.dkr\.ecr\.eu-west-1\.amazonaws\.com/archon-datahub-cloud-runtime-v2@sha256:[0-9a-f]{64}$ ]]
 
           core="${ROOT}/core/ami-build-evidence.json"
           test -f "${core}"
           jq -e --arg sha "${RELEASE_SHA}" '
             .schemaVersion == "archon.datahub-core-ami-build/v2" and
-            .releaseSha == $sha and .region == "eu-west-1" and
+            .releaseSha == $sha and .companionSourceSha == $sha and
+            .region == "eu-west-1" and
             (.amiId|test("^ami-[0-9a-f]{8,17}$")) and
             (.generation|test("^[A-Za-z0-9._-]{1,128}$")) and
             (.capabilityDigest|test("^sha256:[0-9a-f]{64}$")) and
@@ -324,16 +330,26 @@ jobs:
             >/dev/null
 
           verify_run() {
-            local id="$1" path="$2" event="$3" artifact run
+            local id="$1" path="$2" events_json="$3" artifact run
             artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}")"
             run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/$(jq -er .workflow_run.id <<<"${artifact}")")"
-            jq -e --arg path "${path}" --arg event "${event}" --arg sha "${RELEASE_SHA}" '
-              .path == $path and .event == $event and .head_branch == "master" and
-              .head_sha == $sha and .conclusion == "success"
-            ' <<<"${run}" >/dev/null
+            jq -e \
+              --arg path "${path}" \
+              --argjson events "${events_json}" \
+              --arg sha "${RELEASE_SHA}" '
+                .event as $actual_event |
+                .path == $path and
+                ($events | index($actual_event)) != null and
+                .head_branch == "master" and .head_sha == $sha and
+                .status == "completed" and .conclusion == "success"
+              ' <<<"${run}" >/dev/null
           }
-          verify_run "${CLOUD_ID}" ".github/workflows/datahub-cloud-runtime-image.yml" "push"
-          verify_run "${CORE_ID}" ".github/workflows/datahub-core-ami.yml" "workflow_dispatch"
+          verify_run "${CLOUD_ID}" \
+            ".github/workflows/datahub-cloud-runtime-image.yml" \
+            '["push","workflow_dispatch"]'
+          verify_run "${CORE_ID}" \
+            ".github/workflows/datahub-core-ami.yml" \
+            '["workflow_dispatch"]'
 
           if [[ "${STAGE}" == production ]]; then
             staging="${ROOT}/staging/deployment-evidence.json"
