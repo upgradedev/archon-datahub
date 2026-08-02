@@ -946,4 +946,117 @@ async def run_analytics(
     return {**projection, "digest": digest(projection)}
 
 
-# __ARCHON_APPEND__
+async def component_health() -> tuple[dict[str, bool], bool]:
+    runtime_ready = True
+    try:
+        configured_runtime_identity()
+        handle_cipher()
+    except Exception:
+        runtime_ready = False
+    results = await asyncio.gather(
+        asyncio.to_thread(test_datahub_connection),
+        asyncio.to_thread(load_skill_receipt),
+        analytics_preflight(),
+        return_exceptions=True,
+    )
+    components = {
+        "runtimeBinding": runtime_ready,
+        "agentContextKit": not isinstance(results[0], BaseException),
+        "dataHubSkills": not isinstance(results[1], BaseException),
+        "analyticsAgent": not isinstance(results[2], BaseException),
+    }
+    return components, all(components.values())
+
+
+@app.get("/healthz")
+async def health() -> JSONResponse:
+    components, ready = await component_health()
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "starting",
+            "components": components,
+        },
+    )
+
+
+@app.post("/v2/analyze")
+async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
+    exact_public_input(request)
+    try:
+        context, skills, preflight = await asyncio.gather(
+            asyncio.to_thread(collect_ack_context, request.query),
+            asyncio.to_thread(load_skill_receipt),
+            analytics_preflight(),
+        )
+        grounding = ground_skills(skills, context)
+        analytics = await run_analytics(
+            request.question,
+            request.runtimeBinding,
+            context,
+            grounding,
+            preflight,
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(503, "DataHub companion is not ready") from error
+    result = {
+        "schemaVersion": "archon.datahub-agent-stack-result/v2",
+        "runtimeBinding": binding_value(request.runtimeBinding),
+        "context": context,
+        "skills": skills,
+        "skillGrounding": grounding,
+        "analytics": analytics,
+        "enrichment": {
+            "status": "preview-only",
+            "writeAuthority": "archon-remediation-worker",
+            "requiresFreshDigestBoundApproval": True,
+        },
+    }
+    return {**result, "digest": digest(result)}
+
+
+@app.post("/v2/improve-context")
+async def improve_context(request: ImproveRequest) -> dict[str, Any]:
+    handle = resolve_run_handle(request.runHandle, request.runtimeBinding)
+    try:
+        preflight = await analytics_preflight()
+        prompt = canonical({
+            "schemaVersion": "archon.analytics-improve-context/v1",
+            "command": "/improve-context",
+            "runtimeBindingDigest": handle["bindingDigest"],
+            "contextDigest": handle["contextDigest"],
+            "skillGroundingDigest": handle["skillGroundingDigest"],
+            "policy": {
+                "mode": "proposal-only",
+                "mutationsEnabled": False,
+                "requiresFreshDigestBoundApproval": True,
+            },
+        }).decode("utf-8")
+        events = await analytics_turn(handle["conversationId"], prompt)
+        quality = await context_quality(handle["conversationId"])
+        rotated_handle = issue_run_handle(
+            handle["conversationId"],
+            request.runtimeBinding,
+            handle["contextDigest"],
+            handle["skillGroundingDigest"],
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(503, "Analytics Agent is not ready") from error
+    result = {
+        "schemaVersion": "archon.datahub-improve-context/v2",
+        "runtimeBinding": binding_value(request.runtimeBinding),
+        "events": events,
+        "contextQuality": quality,
+        "runHandle": rotated_handle,
+        "preflightDigest": preflight["digest"],
+        "contextDigest": handle["contextDigest"],
+        "skillGroundingDigest": handle["skillGroundingDigest"],
+        "status": "proposal-only",
+        "writeAuthority": "archon-remediation-worker",
+        "requiresFreshDigestBoundApproval": True,
+    }
+    return {**result, "digest": digest(result)}
