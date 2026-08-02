@@ -1,0 +1,164 @@
+{
+  "schemaVersion": "archon.datahub-cloud-runtime-image-lock/v1",
+  "platform": "linux/amd64",
+  "architecture": "x86_64",
+  "dockerfileFrontend": {
+    "reference": "docker/dockerfile:1.7",
+    "digest": "sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+  },
+  "baseImage": {
+    "reference": "public.ecr.aws/lambda/python:3.11",
+    "digest": "sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8"
+  },
+  "buildTool": {
+    "reference": "ghcr.io/astral-sh/uv",
+    "digest": "sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437",
+    "version": "0.11.31"
+  },
+  "dependencyLock": {
+    "path": "services/datahub-companion/uv.lock",
+    "blobSha": "8b0cad8671a9cab4386ec0a4e517ca129bf5bf71",
+    "pyprojectPath": "services/datahub-companion/pyproject.toml",
+    "pyprojectBlobSha": "9f8d6d1d5653af5c703eb325d73d64e261eb7f20",
+    "exactPackages": {
+      "datahub-agent-context": "1.6.0.17",
+      "datahub-analytics-agent": "0.4.0",
+      "cryptography": "50.0.0",
+      "httpx": "0.28.1",
+      "pytest": "9.1.1"
+    }
+  },
+  "immutableInputs": {
+    "companion": {
+      "path": "services/datahub-companion/archon_companion.py",
+      "blobSha": "b6de2d8518b480d36351b7f6ed4411915e6daa16"
+    },
+    "demoSql": {
+      "path": "services/datahub-companion/demo/archon_demo.sql",
+      "blobSha": "f48260f6d8a681fd8ecb44d8d4363caefbf9def5"
+    },
+    "mutationGolden": {
+      "path": "contracts/datahub-core-mutation-authorization-golden.json",
+      "blobSha": "a24e519bbc9b85f245c756bc2b9cf7b1e91a38e7"
+    },
+    "agentStackLock": {
+      "path": ".github/locks/datahub-agent-stack.json",
+      "blobSha": "44ab363b1865c6f28f0c3145172350bf73e903d8"
+    },
+    "mcpLock": {
+      "path": ".github/locks/datahub-mcp-v0.6.0.json",
+      "blobSha": "bea9e864e71150e79c8dd6d8b4a841eb83f8586d"
+    },
+    "customSkill": {
+      "path": "contrib/datahub-audit/SKILL.md",
+      "blobSha": "f417432a93a9f869185b7fe4f9c62a1abb865dc3"
+    }
+  },
+  "officialSkills": {
+    "repository": "datahub-project/datahub-skills",
+    "commit": "f7c7c53648b71dc0841742781e108051d46fa360",
+    "archiveSha256": "1db5f8f88b7e13e9eac23b89363a0e2bbe0ea76a73f524f2364577d081564ad6",
+    "required": [
+      "datahub-search",
+      "datahub-lineage",
+      "datahub-quality",
+      "datahub-enrich",
+      "using-datahub"
+    ]
+  },
+  "sourceBlobs": [
+    {
+      "path": ".github/workflows/datahub-cloud-runtime-image.yml",
+      "blobSha": "a887e6160c4f039281a194f6df3ad078bad223c9"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/Dockerfile",
+      "blobSha": "d2e6dbac00d43cccb99a50f28e59d6ae7561bf85"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/Dockerfile.dockerignore",
+      "blobSha": "aa85d8af9e7564f4c4724ec609a3ffcb26be255d"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/analytics_runtime.py",
+      "blobSha": "01549d5625ad664454904a3ffd862cf0f2fe4e01"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/contracts.py",
+      "blobSha": "57453b7c0205c8a065e87e512a60fd69e82c59b1"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/fixture_reset.py",
+      "blobSha": "d1e3b1ad07cbff359d25812df2589b0f4c08f1d6"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/handlers.py",
+      "blobSha": "61855e77598d9c5434589c79dbbff5b7d465a8f0"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/managed_mcp.py",
+      "blobSha": "3685088ffd73b42094b42e67df4367c14884bde2"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/mutation_runtime.py",
+      "blobSha": "8dc7ccff7c52459788fdfd5e540d8110ac9c2629"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/runtime_store.py",
+      "blobSha": "33a77fcab85761efede401badca2381c559e284d"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/conftest.py",
+      "blobSha": "a8d0c405362238104d3cf4431a0208b2b49092af"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_analytics_runtime.py",
+      "blobSha": "09033888d066c182572d51c858640acfdb62f7cf"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_contracts.py",
+      "blobSha": "3cd95f6cdb1efa422f5e8e0ba66b661a936c22de"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_fixture_reset.py",
+      "blobSha": "aa352dc2e6626e69389ffaf256930c800e433e29"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_handlers.py",
+      "blobSha": "93ee8930c8d0c90e9acdd5dc2df2ddb8f6c6f9f2"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_managed_mcp.py",
+      "blobSha": "08d8f17cdb9b599220341a063f5f031372bc1eea"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_mutation_runtime.py",
+      "blobSha": "ff8e9fba126e5d2e0940545ad50e03776bed7267"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_runtime_store.py",
+      "blobSha": "79136b0414a47930155dcbec986f0238ebfda4d5"
+    },
+    {
+      "path": "services/datahub-cloud-runtime/tests/test_static_boundaries.py",
+      "blobSha": "98e5468068eb5754d279a4fce8de00715a435f57"
+    },
+    {
+      "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",
+      "blobSha": "6b4a04fde232ddc0093b46c879f00a920bf04089"
+    }
+  ],
+  "handlers": {
+    "read": "handlers.read_handler",
+    "mutation": "handlers.mutation_handler",
+    "fixtureReset": "handlers.fixture_reset_handler"
+  },
+  "prohibited": {
+    "vpc": true,
+    "natGateway": true,
+    "permanentCompute": true,
+    "staticAwsCredentials": true,
+    "tokenPersistence": true,
+    "writerBedrockPermission": true
+  }
+}

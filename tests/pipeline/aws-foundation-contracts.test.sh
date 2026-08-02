@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+report_contract_failure() {
+  local status="$?"
+  local line="$1"
+  printf '::error file=tests/pipeline/aws-foundation-contracts.test.sh,line=%s,title=AWS foundation contract failed::sanitized contract assertion failed (exit=%s)\n' \
+    "${line}" "${status}" >&2
+  exit "${status}"
+}
+trap 'report_contract_failure "${LINENO}"' ERR
 repository_root="$(
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." &&
     pwd
