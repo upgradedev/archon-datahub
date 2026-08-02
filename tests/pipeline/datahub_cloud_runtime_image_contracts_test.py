@@ -81,8 +81,8 @@ def test_cleanup_is_prefix_scoped_bounded_and_runner_material_is_removed():
 def test_dockerfile_is_exact_lambda_amd64_input_without_secret_values():
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     assert (
-        "public.ecr.aws/lambda/python:3.11@sha256:"
-        "9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8"
+        "public.ecr.aws/lambda/python:3.12@sha256:"
+        "182ce4c13bce31bc9fcff9a2705f2f946b59e2d32e10cdf7700883d8a59c25da"
     ) in dockerfile
     assert (
         "ghcr.io/astral-sh/uv@sha256:"

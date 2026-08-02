@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-ARG LAMBDA_IMAGE=public.ecr.aws/lambda/python:3.11@sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8
+ARG LAMBDA_IMAGE=public.ecr.aws/lambda/python:3.12@sha256:182ce4c13bce31bc9fcff9a2705f2f946b59e2d32e10cdf7700883d8a59c25da
 ARG UV_IMAGE=ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437
 
 FROM ${UV_IMAGE} AS uv
@@ -14,18 +14,18 @@ COPY --from=uv /uv /uvx /bin/
 COPY services/datahub-companion/pyproject.toml services/datahub-companion/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project \
-      --python /var/lang/bin/python3.11
+      --python /var/lang/bin/python3.12
 
 FROM runtime-dependencies AS test-dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --group test --no-install-project \
-      --python /var/lang/bin/python3.11
+      --python /var/lang/bin/python3.12
 
 FROM ${LAMBDA_IMAGE} AS runtime
 ARG ARCHON_RELEASE_SHA=dev
 ENV HOME=/tmp \
     PATH=/opt/archon/runtime/.venv/bin:${PATH} \
-    PYTHONPATH=/var/task:/opt/archon/runtime/.venv/lib/python3.11/site-packages \
+    PYTHONPATH=/var/task:/opt/archon/runtime/.venv/lib/python3.12/site-packages \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     AWS_STS_REGIONAL_ENDPOINTS=regional \
@@ -74,7 +74,7 @@ RUN test -x /opt/archon/runtime/.venv/bin/python \
 CMD ["handlers.read_handler"]
 
 FROM runtime AS test
-ENV PYTHONPATH=/var/task:/opt/archon/test/.venv/lib/python3.11/site-packages
+ENV PYTHONPATH=/var/task:/opt/archon/test/.venv/lib/python3.12/site-packages
 COPY --from=test-dependencies /build/.venv /opt/archon/test/.venv
 COPY services/datahub-cloud-runtime/tests /opt/archon/cloud-runtime-tests
 COPY tests/pipeline/datahub_cloud_runtime_image_contracts_test.py /opt/archon/repo/tests/pipeline/datahub_cloud_runtime_image_contracts_test.py

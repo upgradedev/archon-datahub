@@ -7,8 +7,8 @@
     "digest": "sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
   },
   "baseImage": {
-    "reference": "public.ecr.aws/lambda/python:3.11",
-    "digest": "sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8"
+    "reference": "public.ecr.aws/lambda/python:3.12",
+    "digest": "sha256:182ce4c13bce31bc9fcff9a2705f2f946b59e2d32e10cdf7700883d8a59c25da"
   },
   "buildTool": {
     "reference": "ghcr.io/astral-sh/uv",
@@ -69,11 +69,11 @@
   "sourceBlobs": [
     {
       "path": ".github/workflows/datahub-cloud-runtime-image.yml",
-      "blobSha": "b6e9493afa2f9cf65cb71d7b1fd78ac2e567e35e"
+      "blobSha": "7619042323ebd08131f59bfcde830e8ceddfc481"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile",
-      "blobSha": "d2e6dbac00d43cccb99a50f28e59d6ae7561bf85"
+      "blobSha": "65e3d10e232f0af6d1b8355cb7b22d20899853fe"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile.dockerignore",
@@ -145,7 +145,7 @@
     },
     {
       "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",
-      "blobSha": "6b4a04fde232ddc0093b46c879f00a920bf04089"
+      "blobSha": "6e2cfe0b79df2ae84b43fc754693e9200319bb50"
     }
   ],
   "handlers": {

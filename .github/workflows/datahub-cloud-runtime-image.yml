@@ -83,7 +83,7 @@ jobs:
           )
           test "$(git hash-object services/datahub-companion/uv.lock)" =             "$(jq -r .dependencyLock.blobSha "$LOCK_PATH")"
           test "$(git hash-object services/datahub-companion/pyproject.toml)" =             "$(jq -r .dependencyLock.pyprojectBlobSha "$LOCK_PATH")"
-          grep -F             'public.ecr.aws/lambda/python:3.11@sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8'             services/datahub-cloud-runtime/Dockerfile
+          grep -F             'public.ecr.aws/lambda/python:3.12@sha256:182ce4c13bce31bc9fcff9a2705f2f946b59e2d32e10cdf7700883d8a59c25da'             services/datahub-cloud-runtime/Dockerfile
           grep -F             'ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437'             services/datahub-cloud-runtime/Dockerfile
           if ! git diff --quiet --; then
             echo "::error title=Cloud runtime source boundary::tracked source changed before build"
