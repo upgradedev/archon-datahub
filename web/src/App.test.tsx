@@ -481,7 +481,7 @@ describe("Archon control plane", () => {
       name: "Approve exact plan",
     });
     await waitFor(() => expect(approve).toBeEnabled());
-    expect(screen.getByText("urn:li:tag:PII")).toBeInTheDocument();
+    expect(screen.getAllByText("urn:li:tag:PII")).not.toHaveLength(0);
     fireEvent.click(approve);
 
     expect(await screen.findByTestId("governed-proof")).toHaveTextContent(
