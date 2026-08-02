@@ -286,8 +286,9 @@ jobs:
           PY
           cloud_digest="$(jq -er .digest "${cloud}")"
           tagged_image_uri="$(jq -er .imageUri "${cloud}")"
-          repository_uri="${tagged_image_uri%:cloud-v2-${RELEASE_SHA}}"
-          test "${repository_uri}:cloud-v2-${RELEASE_SHA}" = "${tagged_image_uri}"
+          tag_suffix=":cloud-v2-${RELEASE_SHA}"
+          repository_uri="${tagged_image_uri%"${tag_suffix}"}"
+          test "${repository_uri}${tag_suffix}" = "${tagged_image_uri}"
           image_uri="${repository_uri}@$(jq -er .imageDigest "${cloud}")"
           [[ "${image_uri}" =~ ^[0-9]{12}\.dkr\.ecr\.eu-west-1\.amazonaws\.com/archon-datahub-cloud-runtime-v2@sha256:[0-9a-f]{64}$ ]]
 
