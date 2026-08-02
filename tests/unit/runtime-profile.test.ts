@@ -163,7 +163,7 @@ test("a pinned binding rejects profile, generation, or capability drift", () => 
       capabilityDigest:
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
     },
-    { ...expected, resolution: "explicit" as const },
+    { ...expected, resolution: "auto" as const },
   ]) {
     assert.throws(
       () => assertPinnedRuntime(expected, actual),
@@ -227,6 +227,14 @@ test("runtime binding validation rejects extra fields and malformed leases", () 
         error.code === "INVALID_RUNTIME_BINDING"
     );
   }
+  const symbolBinding = { ...binding } as RuntimeBinding & Record<symbol, boolean>;
+  symbolBinding[Symbol("hidden")] = true;
+  assert.throws(
+    () => validateRuntimeBinding(symbolBinding),
+    (error: unknown) =>
+      error instanceof RuntimeSelectionError &&
+      error.code === "INVALID_RUNTIME_BINDING"
+  );
 });
 
 test("pinned runtime rejects resolution drift and identical malformed bindings", () => {
@@ -238,7 +246,7 @@ test("pinned runtime rejects resolution drift and identical malformed bindings",
     () =>
       assertPinnedRuntime(expected, {
         ...expected,
-        resolution: "explicit",
+        resolution: "auto",
       }),
     (error: unknown) =>
       error instanceof RuntimeSelectionError &&
