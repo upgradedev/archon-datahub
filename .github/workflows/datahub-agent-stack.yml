@@ -48,7 +48,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          uv --version | grep --extended-regexp '^uv 0\.11\.31(?: |$)'
+          uv --version | grep --extended-regexp '^uv 0\.11\.31( |$)'
           uv python install 3.11.15
           CI=true GITHUB_ACTIONS=true             python3 scripts/verify_datahub_agent_stack.py --network
       - name: Resolve the frozen companion lock
