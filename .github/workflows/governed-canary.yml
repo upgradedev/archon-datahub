@@ -165,14 +165,36 @@ jobs:
           mkdir -p "$(dirname "${OUTPUT_PATH}")"
           bash scripts/verify-github-control-plane.sh
           echo "gates_digest=sha256:$(sha256sum "${OUTPUT_PATH}"|awk '{print $1}')" >>"${GITHUB_OUTPUT}"
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - name: Validate exact canary prepare identity before OIDC
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_CANARY_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_CANARY_REGION }}
+          AWS_ROLE_ARN: ${{ vars.AWS_CANARY_PREPARE_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${AWS_REGION}" = "eu-west-1"
+          test "${AWS_ROLE_ARN}" = \
+            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-governed-canary-prepare"
+      - name: Configure step-scoped canary prepare AWS credentials
+        id: canary-prepare-aws
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_CANARY_REGION }}
           role-to-assume: ${{ vars.AWS_CANARY_PREPARE_ROLE_ARN }}
           role-session-name: archon-canary-prepare-${{ github.run_id }}
+          allowed-account-ids: ${{ vars.AWS_CANARY_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          output-env-credentials: false
+          output-credentials: true
       - name: Verify exact Judge stack bindings
         id: stack
         env:
+          AWS_ACCESS_KEY_ID: ${{ steps.canary-prepare-aws.outputs.aws-access-key-id }}
+          AWS_REGION: ${{ vars.AWS_CANARY_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.canary-prepare-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.canary-prepare-aws.outputs.aws-session-token }}
           CLOUD_IMAGE_DIGEST: ${{ steps.evidence.outputs.cloud_image_digest }}
         run: |
           set -euo pipefail
@@ -263,13 +285,24 @@ jobs:
         run: |
           export EXPECTED_GATE_SHA256="${EXPECTED_GATE#sha256:}"
           bash scripts/verify-github-control-plane.sh
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - name: Configure step-scoped canary approval AWS credentials
+        id: canary-approval-aws
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: ${{ vars.AWS_REGION }}
           role-to-assume: ${{ vars.AWS_CANARY_APPROVAL_ROLE_ARN }}
           role-session-name: archon-canary-execute-${{ github.run_id }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          output-env-credentials: false
+          output-credentials: true
       - name: Revalidate dual-authority Judge and install Chromium
         env:
+          AWS_ACCESS_KEY_ID: ${{ steps.canary-approval-aws.outputs.aws-access-key-id }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.canary-approval-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.canary-approval-aws.outputs.aws-session-token }}
           USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
         run: |
           set -euo pipefail
@@ -282,6 +315,10 @@ jobs:
           npm exec -- playwright install --with-deps chromium
       - name: Execute explicit Cloud Agent Stack and seal proof
         env:
+          AWS_ACCESS_KEY_ID: ${{ steps.canary-approval-aws.outputs.aws-access-key-id }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.canary-approval-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.canary-approval-aws.outputs.aws-session-token }}
           JUDGE_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
           JUDGE_PASSWORD: ${{ secrets.CANARY_COGNITO_PASSWORD }}
           ARCHON_EXPECTED_LIFECYCLE_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
