@@ -30,11 +30,15 @@ grep -Fq 'assert_retired_stack_absent "Archon-${ARCHON_STAGE}"' \
   scripts/observe-aws-live-runtime.sh
 grep -Fq 'assert_retired_stack_absent "Archon-Registry"' \
   scripts/observe-aws-live-runtime.sh
+grep -Fq 'An error occurred (ValidationError)' \
+  scripts/observe-aws-live-runtime.sh
+grep -Fq 'Stack with id ${stack_name} does not exist' \
+  scripts/observe-aws-live-runtime.sh
 grep -Fq 'legacyAlwaysOnRuntimeAbsent:$legacyAlwaysOnRuntimeAbsent' \
   scripts/observe-aws-live-runtime.sh
 if grep -Fq 'legacyAlwaysOnRuntimeAbsent:true' \
   scripts/observe-aws-live-runtime.sh; then
-  echo "::error::Legacy-runtime absence must be observed, not hardcoded" >&2
+  echo "::error::legacy runtime absence must be observed, not hardcoded" >&2
   exit 1
 fi
 grep -Fq 'CloudFrontDomainName' .github/workflows/deploy.yml

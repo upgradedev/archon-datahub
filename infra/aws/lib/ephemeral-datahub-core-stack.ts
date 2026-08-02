@@ -44,6 +44,10 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
   readonly sessionStateMachine: sfn.StateMachine;
   readonly autoScalingGroup: autoscaling.AutoScalingGroup;
 
+  public override get availabilityZones(): string[] {
+    return [Fn.select(0, Fn.getAzs(""))];
+  }
+
   constructor(
     scope: Construct,
     id: string,

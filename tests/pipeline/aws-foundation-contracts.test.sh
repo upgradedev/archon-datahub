@@ -1402,7 +1402,8 @@ require_text "${deploy_workflow}" \
 forbid_text "${deploy_workflow}" \
   'role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}'
 test "$(
-  grep -Ec '^permissions: \{\}
+  grep -Ec '^permissions: \{\}$' "${deploy_workflow}"
+)" -eq 1 || fail 'deploy workflow must deny permissions by default at root'
 test "$(
   grep -Fc 'bash scripts/validate-cloudformation-role-bindings.sh' \
     "${deploy_workflow}"
@@ -1468,25 +1469,76 @@ require_text "${deploy_role}" \
   'ProductionPostureObserverRoleArn:' \
   'ProductionRuntimeReadRoleArn:' \
   'ProductionPagingTestRoleArn:' \
-  'acm:DescribeCertificate' \
-  'cloudfront:GetDistributionConfig' \
-  'cloudfront:DescribeFunction' \
-  'route53:GetHostedZone' \
-  'route53:ListResourceRecordSets' \
-  'ec2:DescribeAvailabilityZones' \
-  'ec2:DescribeSecurityGroupRules' \
-  'ec2:DescribeSecurityGroups' \
-  'ec2:DescribeSubnets' \
-  'ec2:DescribeVpcEndpointServices' \
-  'ec2:DescribeVpcEndpoints' \
+  'CloudRuntimeImagePublisherRoleArn:' \
+  'CloudRuntimeImagePublisherRoleName:' \
+  'token.actions.githubusercontent.com:workflow: DataHub Cloud runtime OCI v2' \
+  'ProveRetiredStacksAbsent' \
+  'ResolveExactDeploymentAndRuntimeInputs' \
+  'ReadExactCloudRuntimeImage' \
+  'ReadExactStageRuntimeTables' \
+  'ReadExactStageBucketPosture' \
+  'PublishExactStageSpaBucket' \
+  'PublishExactStageSpaObjects' \
+  'UseExactStageSpaKeyViaS3' \
+  'ReadExactStageFunctionConfiguration' \
+  'ReadExactStageImageFunctions' \
+  'ReadAndInvalidateTaggedStageDistribution' \
+  'ReadExactStageRegionalWebAcl' \
+  'ReadTaggedStageCognitoWebAclAssociation' \
+  'ReadExactStageRuntimeAlarms' \
+  'autoscaling:DescribeAutoScalingGroups' \
+  'ec2:DescribeImages' \
+  'ec2:DescribeManagedPrefixLists' \
+  'ecr:DescribeRepositories' \
+  'repository/archon-datahub-cloud-runtime-v2' \
+  'dynamodb:DescribeContinuousBackups' \
+  's3:GetBucketPublicAccessBlock' \
+  'lambda:GetFunctionConcurrency' \
+  'cloudfront:GetDistribution' \
+  'cognito-idp:GetWebACLForResource' \
+  'cloudwatch:DescribeAlarms' \
+  'alias/archon/${DeploymentEnvironment}/judge-spa' \
+  'archon-${DeploymentEnvironment}-cloud-checkpoints-${AWS::AccountId}-eu-west-1' \
   'stack/Archon-${DeploymentEnvironment}-Core/*' \
   'stack/Archon-${DeploymentEnvironment}-Judge/*' \
   'stack/Archon-${DeploymentEnvironment}-Edge/*'
-forbid_text "${deploy_role}" \
-  'stack/Archon-${DeploymentEnvironment}/*'
+
+github_deploy_role_block="$(
+  awk '
+    /^  GitHubDeployRole:$/ { inside=1 }
+    /^  CloudRuntimeImagePublisherRole:$/ { inside=0 }
+    inside { print }
+  ' "${deploy_role}"
+)"
+for stale in \
+  'ecs:' \
+  'elasticloadbalancing:' \
+  'route53:' \
+  'acm:' \
+  'secretsmanager:' \
+  'iam:SimulatePrincipalPolicy'; do
+  if grep -Fq -- "${stale}" <<<"${github_deploy_role_block}"; then
+    fail "GitHub deploy role retains unused permission: ${stale}"
+  fi
+done
+if grep -Eq 'repository/archon-datahub[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains the retired ECR repository'
+fi
+if grep -Eq 'alias/archon/\${DeploymentEnvironment\}/(data|secrets|spa)[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains a legacy runtime KMS alias'
+fi
+test "$(
+  grep -Fc 'stack/Archon-${DeploymentEnvironment}/*' \
+    <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'legacy monolith read must exist only for absence proof'
+test "$(
+  grep -Fc 'stack/Archon-Registry/*' <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'retired Registry read must exist only for absence proof'
 test "$(
   grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
-)" -eq 6
+)" -eq 7
 if grep -Eq \
   "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
   "${deploy_role}"; then
@@ -1839,25 +1891,76 @@ require_text "${deploy_role}" \
   'ProductionPostureObserverRoleArn:' \
   'ProductionRuntimeReadRoleArn:' \
   'ProductionPagingTestRoleArn:' \
-  'acm:DescribeCertificate' \
-  'cloudfront:GetDistributionConfig' \
-  'cloudfront:DescribeFunction' \
-  'route53:GetHostedZone' \
-  'route53:ListResourceRecordSets' \
-  'ec2:DescribeAvailabilityZones' \
-  'ec2:DescribeSecurityGroupRules' \
-  'ec2:DescribeSecurityGroups' \
-  'ec2:DescribeSubnets' \
-  'ec2:DescribeVpcEndpointServices' \
-  'ec2:DescribeVpcEndpoints' \
+  'CloudRuntimeImagePublisherRoleArn:' \
+  'CloudRuntimeImagePublisherRoleName:' \
+  'token.actions.githubusercontent.com:workflow: DataHub Cloud runtime OCI v2' \
+  'ProveRetiredStacksAbsent' \
+  'ResolveExactDeploymentAndRuntimeInputs' \
+  'ReadExactCloudRuntimeImage' \
+  'ReadExactStageRuntimeTables' \
+  'ReadExactStageBucketPosture' \
+  'PublishExactStageSpaBucket' \
+  'PublishExactStageSpaObjects' \
+  'UseExactStageSpaKeyViaS3' \
+  'ReadExactStageFunctionConfiguration' \
+  'ReadExactStageImageFunctions' \
+  'ReadAndInvalidateTaggedStageDistribution' \
+  'ReadExactStageRegionalWebAcl' \
+  'ReadTaggedStageCognitoWebAclAssociation' \
+  'ReadExactStageRuntimeAlarms' \
+  'autoscaling:DescribeAutoScalingGroups' \
+  'ec2:DescribeImages' \
+  'ec2:DescribeManagedPrefixLists' \
+  'ecr:DescribeRepositories' \
+  'repository/archon-datahub-cloud-runtime-v2' \
+  'dynamodb:DescribeContinuousBackups' \
+  's3:GetBucketPublicAccessBlock' \
+  'lambda:GetFunctionConcurrency' \
+  'cloudfront:GetDistribution' \
+  'cognito-idp:GetWebACLForResource' \
+  'cloudwatch:DescribeAlarms' \
+  'alias/archon/${DeploymentEnvironment}/judge-spa' \
+  'archon-${DeploymentEnvironment}-cloud-checkpoints-${AWS::AccountId}-eu-west-1' \
   'stack/Archon-${DeploymentEnvironment}-Core/*' \
   'stack/Archon-${DeploymentEnvironment}-Judge/*' \
   'stack/Archon-${DeploymentEnvironment}-Edge/*'
-forbid_text "${deploy_role}" \
-  'stack/Archon-${DeploymentEnvironment}/*'
+
+github_deploy_role_block="$(
+  awk '
+    /^  GitHubDeployRole:$/ { inside=1 }
+    /^  CloudRuntimeImagePublisherRole:$/ { inside=0 }
+    inside { print }
+  ' "${deploy_role}"
+)"
+for stale in \
+  'ecs:' \
+  'elasticloadbalancing:' \
+  'route53:' \
+  'acm:' \
+  'secretsmanager:' \
+  'iam:SimulatePrincipalPolicy'; do
+  if grep -Fq -- "${stale}" <<<"${github_deploy_role_block}"; then
+    fail "GitHub deploy role retains unused permission: ${stale}"
+  fi
+done
+if grep -Eq 'repository/archon-datahub[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains the retired ECR repository'
+fi
+if grep -Eq 'alias/archon/\${DeploymentEnvironment\}/(data|secrets|spa)[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains a legacy runtime KMS alias'
+fi
+test "$(
+  grep -Fc 'stack/Archon-${DeploymentEnvironment}/*' \
+    <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'legacy monolith read must exist only for absence proof'
+test "$(
+  grep -Fc 'stack/Archon-Registry/*' <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'retired Registry read must exist only for absence proof'
 test "$(
   grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
-)" -eq 6
+)" -eq 7
 if grep -Eq \
   "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
   "${deploy_role}"; then
