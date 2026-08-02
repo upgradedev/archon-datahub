@@ -772,9 +772,12 @@ jobs:
              then .proof.level == "credentialed-live-semantic" and
                   (.proof.semanticProofDigest |
                     test("^sha256:[0-9a-f]{64}$")) and
+                  (.proof.credentialBindingDigest |
+                    test("^sha256:[0-9a-f]{64}$")) and
                   .runtimeBinding.sessionIdDigest == null
              else .proof.level == "active-session-capability" and
                   .proof.semanticProofDigest == null and
+                  .proof.credentialBindingDigest == null and
                   (.runtimeBinding.sessionIdDigest |
                     test("^sha256:[0-9a-f]{64}$"))
              end)
