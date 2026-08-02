@@ -68,8 +68,17 @@ The deterministic answer is `enterprise`, `1,850,000` net-revenue cents. `custom
 `.github/workflows/datahub-core-ami.yml` is manual and billable. It requires:
 
 1. exact confirmation `BUILD_EPHEMERAL_DATAHUB_CORE_AMI`;
-2. one successful `DataHub companion OCI` run ID and its exact source SHA;
-3. protected `staging` environment approval.
+2. dispatch ref, workflow SHA, companion source SHA, and the current remote
+   `master` SHA all resolving to the same exact commit;
+3. one completed-success `DataHub companion OCI` run from
+   `.github/workflows/datahub-companion-image.yml`, produced by a `push` on
+   `master` in this same repository at that exact SHA;
+4. protected `staging` environment approval.
+
+Before any billable work, the downloaded companion archive checksums are
+verified and `gh attestation verify` binds the repository, signer workflow and
+digest, source digest, source ref `refs/heads/master`, exact companion predicate
+type, and denial of self-hosted runners.
 
 Before any billable build, CI validates the Python contracts, CDK stack, shell source, and Packer template. It then:
 
