@@ -308,10 +308,10 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         blockDevices: [
           {
             deviceName: "/dev/xvda",
-            volume: ec2.BlockDeviceVolume.ebs(50, {
+            volume: autoscaling.BlockDeviceVolume.ebs(50, {
               encrypted: true,
               deleteOnTermination: true,
-              volumeType: ec2.EbsDeviceVolumeType.GP3,
+              volumeType: autoscaling.EbsDeviceVolumeType.GP3,
               iops: 3000,
               throughput: 125
             })
@@ -349,7 +349,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         code: lambda.Code.fromAsset(
           join(__dirname, "../lambda/core-lifecycle")
         ),
-        timeout: Duration.seconds(30),
+        timeout: Duration.minutes(4),
         memorySize: 256,
         reservedConcurrentExecutions: 5,
         tracing: lambda.Tracing.ACTIVE,
@@ -409,6 +409,12 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       payloadResponseOnly: true,
       resultPath: "$.lifecycle",
       retryOnServiceExceptions: true
+    });
+    prepare.addRetry({
+      errors: ["Lambda.Unknown", "States.TaskFailed"],
+      interval: Duration.seconds(5),
+      backoffRate: 2,
+      maxAttempts: 2
     });
     const scaleUp = new tasks.CallAwsService(this, "ScaleCoreUp", {
       service: "autoscaling",
