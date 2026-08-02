@@ -81,7 +81,7 @@
     },
     {
       "path": "services/datahub-cloud-runtime/analytics_runtime.py",
-      "blobSha": "01549d5625ad664454904a3ffd862cf0f2fe4e01"
+      "blobSha": "f3ada71d9570fc3b1b2550206eb93010de9b4f79"
     },
     {
       "path": "services/datahub-cloud-runtime/contracts.py",
@@ -93,7 +93,7 @@
     },
     {
       "path": "services/datahub-cloud-runtime/handlers.py",
-      "blobSha": "61855e77598d9c5434589c79dbbff5b7d465a8f0"
+      "blobSha": "de6752fd1facd46e8c1a9895b56bda5a45cb7aff"
     },
     {
       "path": "services/datahub-cloud-runtime/managed_mcp.py",
@@ -141,7 +141,7 @@
     },
     {
       "path": "services/datahub-cloud-runtime/tests/test_static_boundaries.py",
-      "blobSha": "98e5468068eb5754d279a4fce8de00715a435f57"
+      "blobSha": "23229e986c3c729f2cfa79b3372307f6879bf586"
     },
     {
       "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",
