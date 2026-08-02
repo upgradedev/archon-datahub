@@ -2,7 +2,7 @@
 name = "archon-datahub-companion"
 version = "0.2.0"
 description = "Private, read-only ACK and Analytics Agent runtime for Archon's governed DataHub flow"
-requires-python = "==3.11.*"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "acryl-datahub[datahub-rest]==1.6.0.6",
   "cryptography==50.0.0",

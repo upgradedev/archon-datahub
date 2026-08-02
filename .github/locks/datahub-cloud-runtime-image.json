@@ -17,9 +17,9 @@
   },
   "dependencyLock": {
     "path": "services/datahub-companion/uv.lock",
-    "blobSha": "8b0cad8671a9cab4386ec0a4e517ca129bf5bf71",
+    "blobSha": "905242f65f746e16b007480df92db83284474bec",
     "pyprojectPath": "services/datahub-companion/pyproject.toml",
-    "pyprojectBlobSha": "9f8d6d1d5653af5c703eb325d73d64e261eb7f20",
+    "pyprojectBlobSha": "df8c27f55e6a835c322e5cf369df18e84b7a6418",
     "exactPackages": {
       "datahub-agent-context": "1.6.0.17",
       "datahub-analytics-agent": "0.4.0",
