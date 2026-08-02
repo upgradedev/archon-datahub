@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path("/var/task") if Path("/var/task").is_dir() else Path(__file__).resolve().parents[1]
 
 
 def _source(name):

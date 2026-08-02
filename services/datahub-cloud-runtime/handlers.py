@@ -97,8 +97,10 @@ def _tag_state(value: Any, *, require_pii: bool = False) -> dict[str, Any]:
     if (
         not exact_keys(
             value,
-            {"entityUrn", "columnPath", "tagUrns", "stateDigest"},
+            {"schemaVersion", "entityUrn", "columnPath", "tagUrns", "stateDigest"},
         )
+        or value.get("schemaVersion")
+            != "archon.core-tag-read-result/v1"
         or value.get("entityUrn") != DATASET_URN
         or value.get("columnPath") != COLUMN_PATH
         or not isinstance(tag_urns, list)

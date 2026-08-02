@@ -485,8 +485,10 @@ def validate_post_analysis(
         ) is None
         or not exact_keys(
             tag_state,
-            {"entityUrn", "columnPath", "tagUrns", "stateDigest"},
+            {"schemaVersion", "entityUrn", "columnPath", "tagUrns", "stateDigest"},
         )
+        or tag_state.get("schemaVersion")
+            != "archon.core-tag-read-result/v1"
         or tag_state.get("entityUrn") != DATASET_URN
         or tag_state.get("columnPath") != COLUMN_PATH
         or not isinstance(tag_urns, list)
