@@ -2,6 +2,7 @@ export {};
 
 const mockDdbSend = jest.fn();
 const mockSfnSend = jest.fn();
+const { createHash } = require("node:crypto") as typeof import("node:crypto");
 
 jest.mock(
   "@aws-sdk/client-dynamodb",
@@ -52,13 +53,15 @@ const { handler } = require("../lambda/runtime-control/index.js") as {
   }>;
 };
 const {
-  capabilityDigest
+  capabilityDigest,
+  createSession
 } = require("../lambda/runtime-control/session.js") as {
   capabilityDigest: (
     profileId: "cloud" | "core",
     generation: string,
     capabilities: Record<string, boolean>
   ) => string;
+  createSession: (input: Record<string, unknown>) => Record<string, any>;
 };
 
 const capabilities = {
@@ -344,6 +347,111 @@ describe("runtime session control Lambda", () => {
     expect(result.payload).toEqual({ error: "invalid_runtime_request" });
     expect(mockDdbSend).not.toHaveBeenCalled();
     expect(mockSfnSend).not.toHaveBeenCalled();
+  });
+
+  test("awaits durable Core STOP dispatch before projecting an expired session", async () => {
+    jest.setSystemTime(new Date("2026-08-02T08:31:00.000Z"));
+    const sessionId = "rs_" + "E".repeat(43);
+    const binding = {
+      schemaVersion: "archon.runtime-binding/v1",
+      profileId: "core",
+      generation: "ami-2026-08-02.1",
+      capabilityDigest: capabilityDigest(
+        "core",
+        "ami-2026-08-02.1",
+        capabilities
+      ),
+      resolution: "explicit",
+      boundAt: "2026-08-02T08:00:00.000Z",
+      leaseExpiresAt: "2026-08-02T10:00:00.000Z"
+    };
+    const stored = createSession({
+      sessionId,
+      requestedProfile: "core",
+      binding,
+      state: "ACTIVE"
+    });
+    const principalHash =
+      "sha256:" +
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            issuer: identity.issuer,
+            subject: identity.subject
+          }),
+          "utf8"
+        )
+        .digest("hex");
+    mockDdbSend.mockImplementation(async (command: any) => {
+      if (command.kind === "GetItemCommand") {
+        const pk = command.input.Key.pk.S;
+        if (pk === "SESSION#" + sessionId) {
+          return {
+            Item: {
+              pk: { S: pk },
+              sk: { S: "RUNTIME" },
+              payload: { S: JSON.stringify(stored) },
+              revision: { N: "0" },
+              principalHash: { S: principalHash }
+            }
+          };
+        }
+        if (pk === "CORE#LEASE") {
+          return {
+            Item: {
+              state: { S: "READY" },
+              revision: { N: "8" },
+              sessionId: { S: sessionId }
+            }
+          };
+        }
+      }
+      if (command.kind === "UpdateItemCommand") return {};
+      throw new Error("unexpected command " + command.kind);
+    });
+    let releaseStop!: () => void;
+    const stopAccepted = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    mockSfnSend.mockImplementation(async () => stopAccepted);
+
+    let settled = false;
+    const resultPromise = handler(
+      event("sessionStatus", { sessionId })
+    ).finally(() => {
+      settled = true;
+    });
+    for (let index = 0; index < 8; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(mockSfnSend).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    const stopCommand = mockSfnSend.mock.calls[0]![0] as any;
+    expect(JSON.parse(stopCommand.input.input)).toMatchObject({
+      schema: "archon.core-runtime-command/v1",
+      action: "STOP",
+      sessionId,
+      expectedRevision: 8
+    });
+
+    releaseStop();
+    const result = await resultPromise;
+
+    expect(result.statusCode).toBe(200);
+    expect(result.payload).toMatchObject({
+      state: "EXPIRED",
+      remainingSeconds: 0,
+      canRun: false
+    });
+    const update = mockDdbSend.mock.calls
+      .map(([command]) => command)
+      .find((command) => command.kind === "UpdateItemCommand");
+    expect(JSON.parse(update.input.ExpressionAttributeValues[":payload"].S))
+      .toMatchObject({
+        state: "EXPIRED",
+        endReason: "IDLE_TIMEOUT"
+      });
   });
 
   test("rejects malformed session capabilities without reading a broad key", async () => {
