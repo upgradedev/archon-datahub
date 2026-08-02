@@ -1,12 +1,24 @@
 [project]
 name = "archon-datahub-companion"
-version = "0.1.0"
+version = "0.2.0"
 description = "Private, read-only ACK and Analytics Agent runtime for Archon's governed DataHub flow"
 requires-python = "==3.11.*"
 dependencies = [
   "acryl-datahub[datahub-rest]==1.6.0.6",
+  "cryptography==50.0.0",
   "datahub-agent-context[langchain]==1.6.0.17",
   "datahub-analytics-agent==0.4.0",
+  "fastapi==0.141.1",
+  "httpx==0.28.1",
+  "pydantic==2.13.4",
+  "uvicorn==0.52.1",
+]
+
+[dependency-groups]
+test = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
 ]
 
 [tool.uv]
@@ -19,3 +31,8 @@ constraint-dependencies = [
   # CI-validated OpenVEX statement; production installs are Linux wheels only.
   "setuptools==81.0.0",
 ]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
