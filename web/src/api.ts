@@ -139,7 +139,7 @@ function narrowAuditQuery(value: string): string {
   if (
     query.length < 1 ||
     query.length > 256 ||
-    /[\u0000-\u001F\u007F]/u.test(query)
+    /[*?]/u.test(query) ||
     query === "{}" ||
     /[\u0000-\u001F\u007F]/u.test(query)
   ) {
@@ -193,7 +193,7 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
 
 function isPublicOutputSafe(value: unknown): boolean {
   if (typeof value === "string") {
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    return !PUBLIC_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(value));
   }
   if (Array.isArray(value)) return value.every(isPublicOutputSafe);
   if (!isRecord(value)) return true;
@@ -210,17 +210,17 @@ function isPublicOutputSafe(value: unknown): boolean {
 function isSafeModelId(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    MODEL_ID_PATTERN.test(value) &&
     !value.includes("://") &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
   );
 }
 
 function isSafeProviderResponseId(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    RESPONSE_ID_PATTERN.test(value) &&
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
   );
 }
 
@@ -453,7 +453,7 @@ function parseAuditEnvelope(value: unknown): AuditEnvelope {
 function isInstant(value: unknown): value is string {
   return (
     isBoundedText(value, 128) &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    RFC3339_INSTANT.test(value) &&
     Number.isFinite(Date.parse(value))
   );
 }

@@ -152,7 +152,7 @@ function instant(value) {
   return (
     typeof value === "string" &&
     value.length <= 64 &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    RFC3339_INSTANT.test(value) &&
     Number.isFinite(Date.parse(value))
   );
 }
@@ -173,7 +173,7 @@ function configuredDemoQuery() {
     demoQuery.length < 1 ||
     demoQuery.length > 256 ||
     /[\u0000-\u001F\u007F]/u.test(demoQuery) ||
-    /[\u0000-\u001F\u007F]/u.test(demoQuery) ||
+    /[*?]/u.test(demoQuery) ||
     demoQuery === "{}"
   ) {
     throw new Error("invalid demo query configuration");
@@ -1043,9 +1043,9 @@ function validCountMap(value) {
 function validModelId(value) {
   return (
     typeof value === "string" &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u.test(value) &&
     !value.includes("://") &&
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
   );
 }
 
@@ -1264,7 +1264,7 @@ function auditCheckpointBindsEvidence(checkpoint, evidence) {
 
 function assertPublicOutputSafe(value) {
   if (typeof value === "string") {
-    !/[\u0000-\u001F\u007F]/u.test(value)
+    if (PUBLIC_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(value))) {
       throw new Error("unsafe public audit value");
     }
     return;
