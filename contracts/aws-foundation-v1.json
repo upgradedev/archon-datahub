@@ -138,6 +138,17 @@
           "ArchonCloudWriterSecretArn",
           "ArchonSecretsKeyArn"
         ],
+        "foundationRole": {
+          "stackNameTemplate": "Archon-GitHub-<stage>-Deploy-Role",
+          "stackOutputs": [
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName"
+          ],
+          "workflowOutputs": {
+            "staging": "steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn",
+            "production": "steps.reconcile.outputs.datahub_cloud_trial_production_role_arn"
+          }
+        },
         "permissions": {
           "describeStack": "exact stage Judge stack",
           "getSecretValue": "exact retained reader secret only",
@@ -598,6 +609,8 @@
       "githubBuildRole": {
         "roleName": "archon-datahub-core-ami-build-staging",
         "variable": "AWS_CORE_AMI_BUILD_ROLE_ARN",
+        "stackOutput": "GitHubCoreAmiBuildRoleArn",
+        "foundationWorkflowOutput": "steps.core_ami_foundation.outputs.build_role_arn",
         "environment": "staging",
         "maxSessionDurationSeconds": 7200,
         "workflowRequestedSessionSeconds": 7200,
@@ -655,6 +668,12 @@
         "roleName": "archon-datahub-core-ami-builder-staging",
         "instanceProfileName": "archon-datahub-core-ami-builder-staging",
         "instanceProfileVariable": "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE",
+        "stackOutputs": [
+          "CoreAmiBuilderRoleArn",
+          "CoreAmiBuilderInstanceProfileName",
+          "CoreAmiBuilderInstanceProfileArn"
+        ],
+        "instanceProfileFoundationWorkflowOutput": "steps.core_ami_foundation.outputs.instance_profile",
         "maxSessionDurationSeconds": 3600,
         "attachedManagedPolicies": [
           "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
