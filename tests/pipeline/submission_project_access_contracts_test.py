@@ -174,7 +174,7 @@ def validate_actions(workflow: str) -> None:
 
 def validate_helper(helper: str) -> None:
     require("\t" not in helper, "helper must not contain tabs")
-    require(helper.startswith("#!/usr/bin/env bash\nset -euo pipefail\n"),
+    require(helper.startswith("#!/usr/bin/env bash\n\nset -euo pipefail\n"),
             "helper shell safety prelude changed")
     require_tokens(
         helper,
