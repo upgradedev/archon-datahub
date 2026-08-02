@@ -1,6 +1,6 @@
 {
   "schemaVersion": "archon.datahub-agent-stack-lock/v1",
-  "generatedAt": "2026-08-02T00:00:00.000Z",
+  "generatedAt": "2026-08-02T00:00:00Z",
   "runtime": {
     "pythonVersion": "3.11.15",
     "uvVersion": "0.11.31",
@@ -50,7 +50,56 @@
           "frozen-transitive-uv-lock"
         ]
       },
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "sdist": {
+        "filename": "datahub_agent_context-1.6.0.17.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/2a/23/ad2d8c5a463de084d0bfbc21ce4a2d406ca62e124c04cd4b38094000bb44/datahub_agent_context-1.6.0.17.tar.gz",
+        "size": 106307,
+        "sha256": "0bfd6614fd68e130104df7d079d56665c3f8660e9b549e71fcf8edb5947f2dc8"
+      },
+      "files": {
+        "datahub-agent-context/LICENSE": {
+          "gitBlob": "5e8a14cef59b4c4bbdc79c65e94625317f27a7a2",
+          "size": 11365,
+          "sha256": "f71347a6c0f4b9817938dcd7b0a0c2b871c1fb16e20ab49bb9e597aab4cdb319"
+        },
+        "datahub-agent-context/src/datahub_agent_context/context.py": {
+          "gitBlob": "ddae3cbe73a7e38d93db0706e7610dc16e36922a",
+          "size": 3163,
+          "sha256": "c23f6af6119fef6abaa1aae77c4147cea812fafc2d30eefd8618f3f06342d104",
+          "wheelPath": "datahub_agent_context/context.py"
+        },
+        "datahub-agent-context/src/datahub_agent_context/langchain_tools/builder.py": {
+          "gitBlob": "6a5f64953bc022bf447f6019cc68c3edc4deb992",
+          "size": 5512,
+          "sha256": "23a73a64765335350a2c95141100247599ce84e9d687e102f6fb7c92a112dbd7",
+          "wheelPath": "datahub_agent_context/langchain_tools/builder.py"
+        },
+        "datahub-agent-context/src/datahub_agent_context/mcp_tools/assertions.py": {
+          "gitBlob": "13db42aee488205d60245d4059737ee53c62b941",
+          "size": 15837,
+          "sha256": "38a6b0721c898a53b2fafb4464e27f29f3ba1e0d41d7a0bf78352400c1f043db",
+          "wheelPath": "datahub_agent_context/mcp_tools/assertions.py"
+        },
+        "datahub-agent-context/src/datahub_agent_context/mcp_tools/entities.py": {
+          "gitBlob": "152bd7832a45ebe54273b2635c313799aa9fcc74",
+          "size": 12807,
+          "sha256": "f3034134d9e5e4204e1f790fcb8aad9db3add288bee6726aad88138a0b23ee99",
+          "wheelPath": "datahub_agent_context/mcp_tools/entities.py"
+        },
+        "datahub-agent-context/src/datahub_agent_context/mcp_tools/lineage.py": {
+          "gitBlob": "f77635fa60c3d38f83e3342cf81215bbc50bb045",
+          "size": 27086,
+          "sha256": "9843f16862f2d734118fb8197e0c6496bed6e5ca40533136c58c9b3febac35af",
+          "wheelPath": "datahub_agent_context/mcp_tools/lineage.py"
+        },
+        "datahub-agent-context/src/datahub_agent_context/mcp_tools/search.py": {
+          "gitBlob": "526834bf723d523ba7e200abb281b5007a4321a3",
+          "size": 6427,
+          "sha256": "b18568e9659f9f9f9853c4bcc6b263c4b838353a8de3eb5c20884f8e0623bc70",
+          "wheelPath": "datahub_agent_context/mcp_tools/search.py"
+        }
+      }
     },
     "dataHubSkills": {
       "name": "datahub-skills",
@@ -118,11 +167,13 @@
         },
         "backend/src/analytics_agent/context/datahub.py": {
           "gitBlob": "7deeb69ea277aabf8bb8794c0ddb013d5e054955",
-          "size": 11258
+          "size": 11258,
+          "wheelPath": "analytics_agent/context/datahub.py"
         },
         "backend/src/analytics_agent/skills/loader.py": {
           "gitBlob": "78dee917be6ab2fe109ae59a7b27e36b4cc5f48f",
-          "size": 5337
+          "size": 5337,
+          "wheelPath": "analytics_agent/skills/loader.py"
         }
       },
       "compatibility": {
@@ -166,4 +217,4 @@
     "runtimeBindingImmutableAfterStart": true,
     "silentMutationFailover": false
   }
-}
+}`n
