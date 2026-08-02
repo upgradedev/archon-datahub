@@ -345,7 +345,9 @@
           "roleName": "archon-datahub-github-governed-canary-recovery",
           "variable": "AWS_CANARY_RECOVERY_ROLE_ARN",
           "permissions": [
-            "cloudformation:DescribeStacks"
+            "cloudformation:DescribeStacks",
+            "secretsmanager:GetSecretValue",
+            "kms:Decrypt"
           ]
         }
       }
