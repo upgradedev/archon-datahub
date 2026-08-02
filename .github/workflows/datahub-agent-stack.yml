@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/locks/datahub-agent-stack.json"
       - ".github/workflows/datahub-agent-stack.yml"
+      - ".github/workflows/ci.yml"
       - "services/datahub-companion/**"
       - "scripts/verify_datahub_agent_stack.py"
       - "scripts/evaluate_datahub_agent_stack_audit.py"
@@ -14,6 +15,7 @@ on:
     paths:
       - ".github/locks/datahub-agent-stack.json"
       - ".github/workflows/datahub-agent-stack.yml"
+      - ".github/workflows/ci.yml"
       - "services/datahub-companion/**"
       - "scripts/verify_datahub_agent_stack.py"
       - "scripts/evaluate_datahub_agent_stack_audit.py"
@@ -143,7 +145,8 @@ jobs:
             scripts/evaluate_datahub_agent_stack_audit.py \
             --sarif "$RUNNER_TEMP/datahub-agent-stack.sarif" \
             --vex ".github/security/datahub-agent-stack.openvex.json" \
-            --decision "$RUNNER_TEMP/datahub-agent-stack-vex-decision.json"
+            --decision "$RUNNER_TEMP/datahub-agent-stack-vex-decision.json" \
+            --projection "$RUNNER_TEMP/datahub-agent-stack.code-scanning.sarif"
       - name: Export the frozen CycloneDX inventory
         if: steps.lock.outputs.adopted == 'true'
         run: |
@@ -155,11 +158,11 @@ jobs:
             any(.components[]; .name == "datahub-agent-context" and .version == "1.6.0.17") and
             any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0")
           ' "${RUNNER_TEMP}/datahub-agent-stack.cdx.json" >/dev/null
-      - name: Upload Python SARIF
+      - name: Upload VEX-dispositioned Python SARIF
         if: always() && steps.lock.outputs.adopted == 'true'
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          sarif_file: ${{ runner.temp }}/datahub-agent-stack.sarif
+          sarif_file: ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
           category: uv-datahub-agent-stack
       - name: Retain immutable agent stack evidence
         if: always() && steps.lock.outputs.adopted == 'true'
@@ -168,6 +171,7 @@ jobs:
           name: datahub-agent-stack-security-${{ github.sha }}
           path: |
             ${{ runner.temp }}/datahub-agent-stack.sarif
+            ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
             ${{ runner.temp }}/datahub-agent-stack.cdx.json
             .github/security/datahub-agent-stack.openvex.json
             ${{ runner.temp }}/datahub-agent-stack-vex-decision.json
