@@ -1353,7 +1353,7 @@ rejects_sq10_cross_mutation(
 rejects_sq10_cross_mutation(
     lambda value: value["availability"].update(
         runId=205,
-        artifactName=f"production-availability-{RELEASE}-203",
+        artifactName=f"production-availability-{RELEASE}-205",
     ),
     "SQ10 accepted availability evidence different from SQ3",
 )
