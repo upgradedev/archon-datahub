@@ -849,25 +849,25 @@ def resolve_run_handle(
 ) -> dict[str, Any]:
     validate_binding(binding)
     if not RUN_HANDLE.fullmatch(handle):
-        raise HTTPException(400, "invalid run handle")
+        raise HTTPException(404, "run handle not found")
     try:
         raw = handle_cipher().decrypt(handle[4:].encode("ascii"))
         if len(raw) > 4096:
             raise ValueError("oversized")
         payload = json.loads(raw)
     except (InvalidToken, UnicodeEncodeError, ValueError, json.JSONDecodeError) as error:
-        raise HTTPException(400, "invalid run handle") from error
+        raise HTTPException(404, "run handle not found") from error
     expected_keys = {
         "schemaVersion", "conversationId", "bindingDigest", "profileId",
         "generation", "capabilityDigest", "contextDigest",
         "skillGroundingDigest", "issuedAt", "expiresAt",
     }
     if not isinstance(payload, dict) or set(payload) != expected_keys:
-        raise HTTPException(400, "invalid run handle")
+        raise HTTPException(404, "run handle not found")
     try:
         canonical_id = canonical_conversation_id(payload["conversationId"])
     except RuntimeError as error:
-        raise HTTPException(400, "invalid run handle") from error
+        raise HTTPException(404, "run handle not found") from error
     now_epoch = int(utc_now().timestamp())
     if (
         payload["schemaVersion"] != "archon.analytics-run-handle/v1"
@@ -883,7 +883,7 @@ def resolve_run_handle(
         or not DIGEST.fullmatch(str(payload["contextDigest"]))
         or not DIGEST.fullmatch(str(payload["skillGroundingDigest"]))
     ):
-        raise HTTPException(400, "expired or invalid run handle")
+        raise HTTPException(404, "run handle not found")
     expected = {
         "bindingDigest": binding_digest(binding),
         "profileId": binding.profileId,
@@ -895,7 +895,7 @@ def resolve_run_handle(
         or not hmac.compare_digest(payload[key], value)
         for key, value in expected.items()
     ):
-        raise HTTPException(409, "run handle is bound to another runtime")
+        raise HTTPException(404, "run handle not found")
     return {**payload, "conversationId": canonical_id}
 
 
