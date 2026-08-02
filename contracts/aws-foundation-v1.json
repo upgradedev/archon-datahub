@@ -115,6 +115,49 @@
       "production": {
         "roleName": "archon-datahub-github-production-deploy",
         "stackName": "Archon-GitHub-Production-Deploy-Role"
+      },
+      "dataHubCloudTrial": {
+        "workflow": ".github/workflows/datahub-cloud-trial.yml",
+        "stackNameTemplate": "Archon-<stage>-Judge",
+        "stackOutputs": [
+          "ArchonCloudReaderSecretArn",
+          "ArchonCloudWriterSecretArn",
+          "ArchonSecretsKeyArn"
+        ],
+        "permissions": {
+          "describeStack": "exact stage Judge stack",
+          "getSecretValue": "exact retained reader secret only",
+          "putSecretValue": "exact reader and writer secrets only",
+          "describeKey": "alias/archon/<stage>/judge-secrets",
+          "cryptoActions": [
+            "kms:Decrypt",
+            "kms:GenerateDataKey"
+          ],
+          "viaService": "secretsmanager.eu-west-1.amazonaws.com",
+          "encryptionContext": "exact reader or writer secret ARN",
+          "describeSecret": "exact reader and writer secrets, version labels only",
+          "updateSecretVersionStage": "exact reader and writer secrets only"
+        },
+        "forbidden": [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:GetSecretValue on writer",
+          "kms:Encrypt",
+          "iam:*",
+          "broad deployment role reuse",
+          "sts:AssumeRole"
+        ],
+        "roleNameTemplate": "archon-datahub-github-<stage>-cloud-trial",
+        "roleVariable": "AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN",
+        "dedicatedRoleRequired": true,
+        "oidcSubjectTemplate": "repo:upgradedev/archon-datahub:environment:<stage>",
+        "versionCommit": {
+          "stagingLabel": "archon-trial-<run-id>-<run-attempt>",
+          "stageBothBeforePromotion": true,
+          "verifyVersionIdsBeforeAndAfterPromotion": true,
+          "rollbackAndRevokeGeneratedTokensOnFailure": true,
+          "finalProviderTokenInventoryRequired": true
+        }
       }
     },
     "operationalRoles": {

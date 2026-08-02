@@ -506,6 +506,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
           "eu-west-1": imageId.valueAsString
         }),
         minCapacity: 0,
+        desiredCapacity: 0,
         maxCapacity: 1,
         associatePublicIpAddress: false,
         requireImdsv2: true,
@@ -544,7 +545,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       {
         logGroupName: `/archon/${stage}/datahub-core/lifecycle`,
         encryptionKey: logsKey,
-        retention: logs.RetentionDays.ONE_MONTH,
+        retention: logs.RetentionDays.ONE_YEAR,
         removalPolicy: RemovalPolicy.RETAIN
       }
     );
@@ -677,7 +678,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       {
         logGroupName: `/archon/${stage}/datahub-core/state-machine`,
         encryptionKey: logsKey,
-        retention: logs.RetentionDays.ONE_MONTH,
+        retention: logs.RetentionDays.ONE_YEAR,
         removalPolicy: RemovalPolicy.RETAIN
       }
     );
@@ -829,7 +830,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         timeout: Duration.hours(3),
         logs: {
           destination: stateMachineLogGroup,
-          level: sfn.LogLevel.ERROR,
+          level: sfn.LogLevel.ALL,
           includeExecutionData: false
         },
         tracingEnabled: true,
@@ -859,7 +860,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       {
         logGroupName: `/archon/${stage}/datahub-core/observer`,
         encryptionKey: logsKey,
-        retention: logs.RetentionDays.ONE_MONTH,
+        retention: logs.RetentionDays.ONE_YEAR,
         removalPolicy: RemovalPolicy.RETAIN
       }
     );

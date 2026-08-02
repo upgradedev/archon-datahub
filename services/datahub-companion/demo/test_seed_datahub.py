@@ -64,6 +64,25 @@ class PortableDemoSeedTests(TestCase):
         self.assertIn(plan["source"]["urn"], plan["query"]["subjects"])
         self.assertIn("ORDER BY net_revenue_cents DESC", plan["query"]["statement"])
 
+    def test_cloud_emitter_requires_exact_explicit_tenant_binding(self) -> None:
+        seed._validate_emitter_target("http://127.0.0.1:18080", None)
+        seed._validate_emitter_target(
+            "https://demo.acryl.io/gms",
+            "demo.acryl.io",
+        )
+        invalid = (
+            ("https://demo.acryl.io/gms", None),
+            ("https://demo.acryl.io/gms", "other.acryl.io"),
+            ("https://demo.acryl.io:443/gms", "demo.acryl.io"),
+            ("https://demo.acryl.io/gms?token=x", "demo.acryl.io"),
+            ("https://demo.acryl.io.evil.invalid/gms", "demo.acryl.io"),
+            ("http://127.0.0.1:18080", "demo.acryl.io"),
+        )
+        for gms_url, tenant_host in invalid:
+            with self.subTest(gms_url=gms_url, tenant_host=tenant_host):
+                with self.assertRaises(RuntimeError):
+                    seed._validate_emitter_target(gms_url, tenant_host)
+
     def test_metadata_entities_are_defined_before_dataset_references(self) -> None:
         source = path.read_text("utf-8")
         owner = source.index("aspect=CorpUserInfoClass(")

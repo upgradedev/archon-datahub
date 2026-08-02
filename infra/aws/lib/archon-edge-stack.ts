@@ -182,7 +182,7 @@ export class ArchonEdgeStack extends Stack {
       visibilityConfig: {
         cloudWatchMetricsEnabled: true,
         metricName: `archon-${stage}-cloudfront-waf`,
-        sampledRequestsEnabled: true
+        sampledRequestsEnabled: false
       },
       rules: [
         managedWafRule("AWSManagedRulesAmazonIpReputationList", 0),
@@ -202,7 +202,7 @@ export class ArchonEdgeStack extends Stack {
           visibilityConfig: {
             cloudWatchMetricsEnabled: true,
             metricName: `archon-${stage}-cloudfront-rate-limit`,
-            sampledRequestsEnabled: true
+            sampledRequestsEnabled: false
           }
         }
       ]
@@ -273,7 +273,7 @@ function managedWafRule(
     visibilityConfig: {
       cloudWatchMetricsEnabled: true,
       metricName: name,
-      sampledRequestsEnabled: true
+      sampledRequestsEnabled: false
     }
   };
 }

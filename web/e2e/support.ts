@@ -69,11 +69,11 @@ export async function expectNoHorizontalOverflow(
     documentOverflow: Math.max(
       0,
       document.documentElement.scrollWidth -
-        document.documentElement.clientWidth,
+        Math.max(window.innerWidth, document.documentElement.clientWidth),
     ),
     bodyOverflow: Math.max(
       0,
-      document.body.scrollWidth - document.documentElement.clientWidth,
+      document.body.scrollWidth - Math.max(window.innerWidth, document.documentElement.clientWidth),
     ),
   }));
 

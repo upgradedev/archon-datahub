@@ -1,736 +1,105 @@
-# Archon project-owned preventive controls for synthesized CloudFormation.
-# These rules intentionally encode the security invariants of this reference
-# architecture instead of applying a generic pack with blanket suppressions.
+# Archon lean-runtime preventive controls for synthesized CloudFormation.
+# Security is enforced in CI/CD. The rules intentionally reject the retired
+# always-on ECS/NLB/VpcLink/EKS topology and validate the zero-idle judge design.
 
-let platform_markers = Resources.*[
-  Type == 'AWS::ECS::Cluster'
+let legacy_resources = Resources.*[
+  Type IN [
+    'AWS::ECS::Cluster',
+    'AWS::ECS::Service',
+    'AWS::ECS::TaskDefinition',
+    'AWS::EKS::Cluster',
+    'AWS::EC2::NatGateway',
+    'AWS::ElasticLoadBalancingV2::LoadBalancer',
+    'AWS::ApiGateway::VpcLink'
+  ]
 ]
 
 let ecr_repositories = Resources.*[
   Type == 'AWS::ECR::Repository'
 ]
 
-let s3_buckets = Resources.*[
+let buckets = Resources.*[
   Type == 'AWS::S3::Bucket'
 ]
 
-let application_s3_buckets = Resources.*[
-  Type == 'AWS::S3::Bucket'
-  some Properties.Tags[*] {
-    Key == 'ArchonBucketRole'
-    Value == 'application'
-  }
-]
-
-let access_log_sink_buckets = Resources.*[
-  Type == 'AWS::S3::Bucket'
-  some Properties.Tags[*] {
-    Key == 'ArchonBucketRole'
-    Value == 'access-log-sink'
-  }
-]
-
-let object_locked_buckets = Resources.*[
-  Type == 'AWS::S3::Bucket'
-  Properties.ObjectLockEnabled == true
-]
-
-let evidence_buckets = Resources.*[
-  Type == 'AWS::S3::Bucket'
-  some Properties.Tags[*] {
-    Key == 'ArchonBucketPurpose'
-    Value == 'evidence'
-  }
-]
-
-let kms_keys = Resources.*[
+let keys = Resources.*[
   Type == 'AWS::KMS::Key'
 ]
 
-let log_groups = Resources.*[
-  Type == 'AWS::Logs::LogGroup'
-]
-
-let iam_roles = Resources.*[
+let roles = Resources.*[
   Type == 'AWS::IAM::Role'
 ]
 
-let archon_alarm_topics = Resources.*[
-  Type == 'AWS::SNS::Topic'
-  Properties.TopicName == /^archon-(staging|production)-alarms$/
-]
-
-let sns_topics = Resources.*[
-  Type == 'AWS::SNS::Topic'
-]
-
-let staging_archon_alarm_topics = %archon_alarm_topics[
-  Properties.TopicName == 'archon-staging-alarms'
-]
-
-let production_archon_alarm_topics = %archon_alarm_topics[
-  Properties.TopicName == 'archon-production-alarms'
-]
-
-let archon_alarm_delivery_log_groups = Resources.*[
+let logs = Resources.*[
   Type == 'AWS::Logs::LogGroup'
-  Properties.LogGroupName.'Fn::Join'[0] == ''
-  Properties.LogGroupName.'Fn::Join'[1][0] == 'sns/'
-  Properties.LogGroupName.'Fn::Join'[1][1].Ref == 'AWS::Region'
-  Properties.LogGroupName.'Fn::Join'[1][2] == '/'
-  Properties.LogGroupName.'Fn::Join'[1][3].Ref == 'AWS::AccountId'
-  Properties.LogGroupName.'Fn::Join'[1][4] == /^\/archon-(staging|production)-alarms$/
 ]
 
-let staging_archon_alarm_delivery_log_groups =
-  %archon_alarm_delivery_log_groups[
-    Properties.LogGroupName.'Fn::Join'[1][4] == '/archon-staging-alarms'
-  ]
-
-let production_archon_alarm_delivery_log_groups =
-  %archon_alarm_delivery_log_groups[
-    Properties.LogGroupName.'Fn::Join'[1][4] == '/archon-production-alarms'
-  ]
-
-let archon_alarm_delivery_status_logging =
-  %archon_alarm_topics.Properties.DeliveryStatusLogging.*
-
-let archon_alarm_http_delivery_status_logging =
-  %archon_alarm_topics.Properties.DeliveryStatusLogging[
-    Protocol == 'http/s'
-  ]
-
-let archon_alarm_success_feedback_role_refs =
-  %archon_alarm_http_delivery_status_logging.SuccessFeedbackRoleArn.'Fn::GetAtt'[0]
-
-let archon_alarm_failure_feedback_role_refs =
-  %archon_alarm_http_delivery_status_logging.FailureFeedbackRoleArn.'Fn::GetAtt'[0]
-
-# Guard 3.2 map-key filters cannot be followed by a predicate filter without an
-# engine panic. Resolve the exact referenced role by key and assert its type and
-# trust policy in the rule instead.
-let referenced_archon_alarm_feedback_roles =
-  Resources[
-    KEYS IN %archon_alarm_success_feedback_role_refs
-  ]
-
-let archon_alarm_feedback_policies = Resources.*[
-  Type == 'AWS::IAM::Policy'
-  some Properties.Roles[*].Ref ==
-    %archon_alarm_success_feedback_role_refs
-]
-
-let archon_alarm_feedback_literal_role_policies = Resources.*[
-  Type == 'AWS::IAM::Policy'
-  some Properties.Roles[*] ==
-    /^archon-(staging|production)-sns-delivery-status$/
-]
-
-let archon_alarm_feedback_managed_policies = Resources.*[
-  Type == 'AWS::IAM::ManagedPolicy'
-  some Properties.Roles[*].Ref ==
-    %archon_alarm_success_feedback_role_refs
-]
-
-let archon_alarm_feedback_literal_role_managed_policies = Resources.*[
-  Type == 'AWS::IAM::ManagedPolicy'
-  some Properties.Roles[*] ==
-    /^archon-(staging|production)-sns-delivery-status$/
-]
-
-let archon_alarm_feedback_create_group_statements =
-  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
-    Sid == 'CreateOnlyArchonAlarmDeliveryLogGroups'
-  ]
-
-let archon_alarm_feedback_policy_role_refs =
-  %archon_alarm_feedback_policies.Properties.Roles[*].Ref
-
-let archon_alarm_feedback_write_stream_statements =
-  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
-    Sid == 'WriteOnlyArchonAlarmDeliveryLogStreams'
-  ]
-
-let archon_alarm_feedback_kms_statements =
-  %archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[
-    Sid == 'UseExactLogsKeyOnlyThroughCloudWatchLogs'
-  ]
-
-let archon_alarm_feedback_trust_statements =
-  %referenced_archon_alarm_feedback_roles.Properties.AssumeRolePolicyDocument.Statement[
-    Effect == 'Allow'
-    Action == 'sts:AssumeRole'
-    Principal.Service == 'sns.amazonaws.com'
-  ]
-
-let archon_alarm_topic_kms_key_refs =
-  %archon_alarm_topics.Properties.KmsMasterKeyId.'Fn::GetAtt'[0]
-
-let archon_alarm_delivery_log_kms_key_refs =
-  %archon_alarm_delivery_log_groups.Properties.KmsKeyId.'Fn::GetAtt'[0]
-
-let archon_alarm_feedback_kms_key_refs =
-  %archon_alarm_feedback_kms_statements.Resource.'Fn::GetAtt'[0]
-
-let referenced_archon_alarm_kms_keys =
-  Resources[
-    KEYS IN %archon_alarm_topic_kms_key_refs
-  ]
-
-let archon_alarm_kms_cloudwatch_publish_statements =
-  %referenced_archon_alarm_kms_keys.Properties.KeyPolicy.Statement[
-    Sid == 'AllowAccountCloudWatchAlarmsToPublishEncryptedAlerts'
-  ]
-
-let archon_alarm_kms_cloudwatch_allow_statements =
-  %referenced_archon_alarm_kms_keys.Properties.KeyPolicy.Statement[
-    Effect == 'Allow'
-    Principal.Service == 'cloudwatch.amazonaws.com'
-  ]
-
-let sns_topic_policies = Resources.*[
-  Type == 'AWS::SNS::TopicPolicy'
-]
-
-let archon_alarm_topic_policies = %sns_topic_policies[
-  some Properties.PolicyDocument.Statement[*] {
-    Sid == 'AllowAccountCloudWatchAlarmsToPublishAlerts'
-  }
-]
-
-let archon_alarm_cloudwatch_publish_statements =
-  %archon_alarm_topic_policies.Properties.PolicyDocument.Statement[
-    Sid == 'AllowAccountCloudWatchAlarmsToPublishAlerts'
-  ]
-
-let archon_alarm_topic_policy_allow_statements =
-  %archon_alarm_topic_policies.Properties.PolicyDocument.Statement[
-    Effect == 'Allow'
-  ]
-
-let archon_alarm_topic_policy_topic_refs =
-  %archon_alarm_topic_policies.Properties.Topics[*].Ref
-
-let referenced_archon_alarm_topic_policy_topics =
-  Resources[
-    KEYS IN %archon_alarm_topic_policy_topic_refs
-  ]
-
-let archon_alarm_topic_policy_resource_refs =
-  %archon_alarm_cloudwatch_publish_statements.Resource.Ref
-
-let waf_data_protections = Resources.*[
-  Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections.*
-
-let waf_authorization_data_protections = Resources.*[
-  Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections[
-  Field.FieldKeys == ['authorization']
-]
-
-let waf_cookie_data_protections = Resources.*[
-  Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections[
-  Field.FieldKeys == ['cookie']
-]
-
-let waf_api_key_data_protections = Resources.*[
-  Type == 'AWS::WAFv2::WebACL'
-].Properties.DataProtectionConfig.DataProtections[
-  Field.FieldKeys == ['x-api-key']
-]
-
-let waf_logging_filters = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters.*
-
-let waf_logging_conditions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters.*.Conditions.*
-
-let waf_block_logging_conditions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*].Conditions[
-  ActionCondition.Action == 'BLOCK'
-]
-
-let waf_count_logging_conditions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.LoggingFilter.Filters[*].Conditions[
-  ActionCondition.Action == 'COUNT'
-]
-
-let waf_redacted_fields = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields.*
-
-let waf_authorization_redactions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields[
-  SingleHeader.Name == 'authorization'
-]
-
-let waf_cookie_redactions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields[
-  SingleHeader.Name == 'cookie'
-]
-
-let waf_api_key_redactions = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-].Properties.RedactedFields[
-  SingleHeader.Name == 'x-api-key'
-]
-
-let dynamodb_tables = Resources.*[
+let tables = Resources.*[
   Type == 'AWS::DynamoDB::Table'
 ]
 
-let sqs_queues = Resources.*[
+let queues = Resources.*[
   Type == 'AWS::SQS::Queue'
-]
-
-let source_queues = Resources.*[
-  Type == 'AWS::SQS::Queue'
-  Properties.QueueName == /-(audit-jobs|approval-events|remediation-jobs)$/
-]
-
-let dead_letter_queues = Resources.*[
-  Type == 'AWS::SQS::Queue'
-  Properties.QueueName == /-(audit|approval|remediation)-dlq$/
-]
-
-let ecs_task_definitions = Resources.*[
-  Type == 'AWS::ECS::TaskDefinition'
-]
-
-let forbidden_static_llm_secrets =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Secrets[
-    Name IN [
-      'LLM_API_KEY',
-      'AWS_BEARER_TOKEN_BEDROCK',
-      'DASHSCOPE_API_KEY',
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY'
-    ]
-  ]
-
-let forbidden_static_llm_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name IN [
-      'LLM_API_KEY',
-      'AWS_BEARER_TOKEN_BEDROCK',
-      'DASHSCOPE_API_KEY',
-      'GEMINI_API_KEY',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY'
-    ]
-  ]
-
-let forbidden_task_role_credential_secrets =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Secrets[
-    Name IN [
-      'AWS_ACCESS_KEY_ID',
-      'AWS_SECRET_ACCESS_KEY',
-      'AWS_SESSION_TOKEN',
-      'AWS_PROFILE',
-      'AWS_DEFAULT_PROFILE',
-      'AWS_SHARED_CREDENTIALS_FILE',
-      'AWS_CONFIG_FILE',
-      'AWS_WEB_IDENTITY_TOKEN_FILE',
-      'AWS_ROLE_ARN',
-      'AWS_ROLE_SESSION_NAME',
-      'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
-      'AWS_CONTAINER_CREDENTIALS_FULL_URI',
-      'AWS_CONTAINER_AUTHORIZATION_TOKEN',
-      'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE'
-    ]
-  ]
-
-let forbidden_task_role_credential_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name IN [
-      'AWS_ACCESS_KEY_ID',
-      'AWS_SECRET_ACCESS_KEY',
-      'AWS_SESSION_TOKEN',
-      'AWS_PROFILE',
-      'AWS_DEFAULT_PROFILE',
-      'AWS_SHARED_CREDENTIALS_FILE',
-      'AWS_CONFIG_FILE',
-      'AWS_WEB_IDENTITY_TOKEN_FILE',
-      'AWS_ROLE_ARN',
-      'AWS_ROLE_SESSION_NAME',
-      'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
-      'AWS_CONTAINER_CREDENTIALS_FULL_URI',
-      'AWS_CONTAINER_AUTHORIZATION_TOKEN',
-      'AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE'
-    ]
-  ]
-
-let bedrock_mantle_endpoints = Resources.*[
-  Type == 'AWS::EC2::VPCEndpoint'
-  some Properties.PolicyDocument.Statement[*] {
-    Sid == 'OnlyInferenceRolesMayInvokeApprovedModel'
-  }
-]
-
-let datahub_private_link_endpoints = Resources.*[
-  Type == 'AWS::EC2::VPCEndpoint'
-  Properties.ServiceName.Ref == 'DataHubPrivateLinkServiceName'
-]
-
-let datahub_private_link_endpoint_security_groups =
-  %datahub_private_link_endpoints.Properties.SecurityGroupIds[*]
-
-let bedrock_mantle_endpoint_security_groups =
-  %bedrock_mantle_endpoints.Properties.SecurityGroupIds[*]
-
-let bedrock_mantle_endpoint_policy_statements =
-  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[*]
-
-let bedrock_mantle_inference_endpoint_statements =
-  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[
-    Sid == 'OnlyInferenceRolesMayInvokeApprovedModel'
-  ]
-
-let bedrock_mantle_token_endpoint_statements =
-  %bedrock_mantle_endpoints.Properties.PolicyDocument.Statement[
-    Sid == 'OnlyInferenceRolesMayUseShortTermTokens'
-  ]
-
-let bedrock_mantle_projects = Resources.*[
-  Type == 'AWS::BedrockMantle::Project'
-]
-
-let bedrock_mantle_project_application_tags =
-  %bedrock_mantle_projects.Properties.Tags[
-    Key == 'Application'
-    Value == 'archon-datahub'
-  ]
-
-let bedrock_mantle_project_environment_tags =
-  %bedrock_mantle_projects.Properties.Tags[
-    Key == 'Environment'
-    Value IN ['staging', 'production']
-  ]
-
-let bedrock_mantle_project_managed_by_tags =
-  %bedrock_mantle_projects.Properties.Tags[
-    Key == 'ManagedBy'
-    Value == 'aws-cdk'
-  ]
-
-let bedrock_mantle_project_cost_center_tags =
-  %bedrock_mantle_projects.Properties.Tags[
-    Key == 'CostCenter'
-    Value == 'DataHub-Agent-Hackathon'
-  ]
-
-let bedrock_mantle_provider_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name == 'LLM_PROVIDER'
-    Value == 'bedrock-mantle'
-  ]
-
-let bedrock_mantle_region_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name == 'AWS_REGION'
-    Value == 'eu-west-1'
-  ]
-
-let bedrock_mantle_base_url_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name == 'LLM_BASE_URL'
-    Value == 'https://bedrock-mantle.eu-west-1.api.aws/v1'
-  ]
-
-let bedrock_mantle_model_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name == 'LLM_MODEL'
-    Value == 'qwen.qwen3-235b-a22b-2507'
-  ]
-
-let bedrock_mantle_project_environment =
-  %ecs_task_definitions.Properties.ContainerDefinitions.*.Environment[
-    Name == 'LLM_PROJECT_ID'
-  ]
-
-let bedrock_mantle_inference_role_statements =
-  Resources.*[
-    Type == 'AWS::IAM::Policy'
-  ].Properties.PolicyDocument.Statement[
-    Sid == 'InvokeOnlyApprovedBedrockMantleModel'
-  ]
-
-let bedrock_mantle_short_term_role_statements =
-  Resources.*[
-    Type == 'AWS::IAM::Policy'
-  ].Properties.PolicyDocument.Statement[
-    Sid == 'MintOnlyShortTermBedrockMantleBearerTokens'
-  ]
-
-let bedrock_mantle_long_term_deny_statements =
-  Resources.*[
-    Type == 'AWS::IAM::Policy'
-  ].Properties.PolicyDocument.Statement[
-    Sid == 'DenyLongTermBedrockMantleBearerTokens'
-  ]
-
-let approval_lambdas = Resources.*[
-  Type == 'AWS::Lambda::Function'
-  Properties.Environment.Variables.APPROVER_GROUP exists
 ]
 
 let lambda_functions = Resources.*[
   Type == 'AWS::Lambda::Function'
 ]
 
-let subnets = Resources.*[
-  Type == 'AWS::EC2::Subnet'
+let image_functions = %lambda_functions[
+  Properties.PackageType == 'Image'
 ]
 
-let api_gateway_stages = Resources.*[
+let api_stages = Resources.*[
   Type == 'AWS::ApiGateway::Stage'
 ]
 
-let api_gateway_rest_apis = Resources.*[
-  Type == 'AWS::ApiGateway::RestApi'
-]
-
-let api_gateway_methods = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-]
-
-let lambda_api_methods = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-  Properties.Integration.Type == 'AWS'
-]
-
-let lambda_api_request_templates = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-  Properties.Integration.Type == 'AWS'
-].Properties.Integration.RequestTemplates.*
-
-let http_proxy_api_methods = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-  Properties.Integration.Type == 'HTTP_PROXY'
-]
-
-let http_proxy_request_parameters = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-  Properties.Integration.Type == 'HTTP_PROXY'
-].Properties.Integration.RequestParameters.*
-
-let public_api_methods = Resources.*[
-  Type == 'AWS::ApiGateway::Method'
-  Properties.AuthorizationType == 'NONE'
-]
-
-let api_gateway_api_keys = Resources.*[
-  Type == 'AWS::ApiGateway::ApiKey'
-]
-
-let api_gateway_usage_plans = Resources.*[
-  Type == 'AWS::ApiGateway::UsagePlan'
-]
-
-let api_gateway_usage_plan_keys = Resources.*[
-  Type == 'AWS::ApiGateway::UsagePlanKey'
-]
-
-let api_method_settings = Resources.*[
-  Type == 'AWS::ApiGateway::Stage'
-].Properties.MethodSettings.*
-
-let cached_api_method_settings = Resources.*[
-  Type == 'AWS::ApiGateway::Stage'
-].Properties.MethodSettings[
-  CachingEnabled == true
-]
-
-let cloudfront_distributions = Resources.*[
+let distributions = Resources.*[
   Type == 'AWS::CloudFront::Distribution'
 ]
 
-let cloudfront_aliases = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Aliases.*
-
-let cloudfront_functions = Resources.*[
-  Type == 'AWS::CloudFront::Function'
+let oacs = Resources.*[
+  Type == 'AWS::CloudFront::OriginAccessControl'
 ]
 
-let cloudfront_cache_behaviors = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.CacheBehaviors.*
-
-let cloudfront_runtime_config_behaviors = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.CacheBehaviors[
-  PathPattern == 'runtime-config.json'
+let web_acls = Resources.*[
+  Type == 'AWS::WAFv2::WebACL'
 ]
 
-let cloudfront_default_function_associations = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.DefaultCacheBehavior.FunctionAssociations.*
-
-let cloudfront_cache_function_associations = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.CacheBehaviors.*.FunctionAssociations.*
-
-let cloudfront_default_function_refs =
-  %cloudfront_default_function_associations.FunctionARN.'Fn::GetAtt'[0]
-
-let cloudfront_cache_function_refs =
-  %cloudfront_cache_function_associations.FunctionARN.'Fn::GetAtt'[0]
-
-let referenced_cloudfront_default_functions =
-  Resources[
-    KEYS IN %cloudfront_default_function_refs
-  ]
-
-let referenced_cloudfront_cache_functions =
-  Resources[
-    KEYS IN %cloudfront_cache_function_refs
-  ]
-
-let cloudfront_origin_request_policies = Resources.*[
-  Type == 'AWS::CloudFront::OriginRequestPolicy'
+let waf_logs = Resources.*[
+  Type == 'AWS::WAFv2::LoggingConfiguration'
 ]
 
-let cloudfront_origin_custom_headers = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  OriginCustomHeaders exists
-].OriginCustomHeaders.*
-
-let cloudfront_api_origins = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
+let user_pools = Resources.*[
+  Type == 'AWS::Cognito::UserPool'
 ]
 
-let cloudfront_api_origin_domain_join_arguments = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
-].DomainName.'Fn::Join'[*]
-
-let cloudfront_api_origin_domain_parts = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
-].DomainName.'Fn::Join'[1][*]
-
-let cloudfront_api_origin_rest_api_refs = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
-  DomainName.'Fn::Join'[1][0].Ref exists
-].DomainName.'Fn::Join'[1][0].Ref
-
-# Guard 3.2 map-key filters cannot be followed by a predicate filter without an
-# engine panic. Keep only KEYS here and assert resource predicates in the rules.
-let referenced_cloudfront_origin_rest_apis =
-  Resources[
-    KEYS IN %cloudfront_api_origin_rest_api_refs
-  ]
-
-let cloudfront_api_origin_custom_headers = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
-].OriginCustomHeaders.*
-
-let cloudfront_api_key_origin_headers = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.Origins[
-  CustomOriginConfig exists
-].OriginCustomHeaders[
-  HeaderName == 'x-api-key'
+let user_pool_clients = Resources.*[
+  Type == 'AWS::Cognito::UserPoolClient'
 ]
-
-let api_cache_behaviors = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.CacheBehaviors[
-  PathPattern == 'api/*'
-]
-
-let api_origin_request_policy_refs = Resources.*[
-  Type == 'AWS::CloudFront::Distribution'
-].Properties.DistributionConfig.CacheBehaviors[
-  PathPattern == 'api/*'
-  OriginRequestPolicyId.Ref exists
-].OriginRequestPolicyId.Ref
-
-let referenced_cloudfront_origin_request_policies =
-  Resources[
-    KEYS IN %api_origin_request_policy_refs
-  ]
 
 let secrets = Resources.*[
   Type == 'AWS::SecretsManager::Secret'
 ]
 
-let origin_api_key_secrets = Resources.*[
-  Type == 'AWS::SecretsManager::Secret'
-  Properties.Name == /^archon\/(staging|production)\/cloudfront-origin-api-key$/
-  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
+let launch_templates = Resources.*[
+  Type == 'AWS::EC2::LaunchTemplate'
 ]
 
-let secrets_kms_keys = Resources.*[
-  Type == 'AWS::KMS::Key'
-  some Properties.Tags[*] {
-    Key == 'ArchonKeyPurpose'
-    Value == 'secrets'
-  }
+let auto_scaling_groups = Resources.*[
+  Type == 'AWS::AutoScaling::AutoScalingGroup'
 ]
 
-let origin_api_key_secret_kms_key_refs =
-  %origin_api_key_secrets.Properties.KmsKeyId.'Fn::GetAtt'[0]
-
-let referenced_origin_api_key_secret_kms_keys =
-  Resources[
-    KEYS IN %origin_api_key_secret_kms_key_refs
-  ]
-
-let staging_origin_api_key_secrets = Resources.*[
-  Type == 'AWS::SecretsManager::Secret'
-  Properties.Name == 'archon/staging/cloudfront-origin-api-key'
-  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
+let state_machines = Resources.*[
+  Type == 'AWS::StepFunctions::StateMachine'
 ]
 
-let production_origin_api_key_secrets = Resources.*[
-  Type == 'AWS::SecretsManager::Secret'
-  Properties.Name == 'archon/production/cloudfront-origin-api-key'
-  Properties.GenerateSecretString.GenerateStringKey == 'apiKey'
-]
+rule retired_always_on_topology_is_absent {
+  let legacy_count = count(%legacy_resources)
+  %legacy_count == 0
+}
 
-let staging_api_gateway_api_keys = Resources.*[
-  Type == 'AWS::ApiGateway::ApiKey'
-  Properties.Value == /^\{\{resolve:secretsmanager:archon\/staging\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
-]
-
-let production_api_gateway_api_keys = Resources.*[
-  Type == 'AWS::ApiGateway::ApiKey'
-  Properties.Value == /^\{\{resolve:secretsmanager:archon\/production\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
-]
-
-let waf_associations = Resources.*[
-  Type == 'AWS::WAFv2::WebACLAssociation'
-]
-
-let waf_web_acls = Resources.*[
-  Type == 'AWS::WAFv2::WebACL'
-]
-
-let waf_logging_configurations = Resources.*[
-  Type == 'AWS::WAFv2::LoggingConfiguration'
-]
-
-rule ecr_repositories_are_hardened when %ecr_repositories !empty {
+rule ecr_release_registries_are_immutable when %ecr_repositories !empty {
   %ecr_repositories.Properties {
     ImageTagMutability == 'IMMUTABLE'
     ImageScanningConfiguration.ScanOnPush == true
@@ -739,456 +108,46 @@ rule ecr_repositories_are_hardened when %ecr_repositories !empty {
   }
 }
 
-rule s3_buckets_are_private_and_encrypted when %s3_buckets !empty {
-  %s3_buckets.Properties {
-    PublicAccessBlockConfiguration exists
+rule s3_state_is_private_versioned_and_encrypted when %buckets !empty {
+  %buckets.Properties {
     PublicAccessBlockConfiguration {
       BlockPublicAcls == true
       BlockPublicPolicy == true
       IgnorePublicAcls == true
       RestrictPublicBuckets == true
     }
-    BucketEncryption.ServerSideEncryptionConfiguration !empty
-    BucketEncryption.ServerSideEncryptionConfiguration[*] {
-      ServerSideEncryptionByDefault.SSEAlgorithm IN [
-        'AES256',
-        'aws:kms'
-      ]
-    }
     VersioningConfiguration.Status == 'Enabled'
-  }
-}
-
-rule platform_has_s3_server_access_logging
-  when %platform_markers !empty {
-  let s3_bucket_count = count(%s3_buckets)
-  let application_s3_bucket_count = count(%application_s3_buckets)
-  let access_log_sink_bucket_count = count(%access_log_sink_buckets)
-
-  %application_s3_buckets !empty
-  %access_log_sink_buckets !empty
-  %s3_bucket_count == 3
-  %application_s3_bucket_count == 2
-  %access_log_sink_bucket_count == 1
-  %application_s3_buckets.Properties {
-    some OwnershipControls.Rules[*] {
-      ObjectOwnership == 'BucketOwnerEnforced'
-    }
+    BucketEncryption.ServerSideEncryptionConfiguration !empty
     BucketEncryption.ServerSideEncryptionConfiguration[*] {
       BucketKeyEnabled == true
       ServerSideEncryptionByDefault.SSEAlgorithm == 'aws:kms'
       ServerSideEncryptionByDefault.KMSMasterKeyID exists
     }
-    LoggingConfiguration exists
-    LoggingConfiguration {
-      DestinationBucketName exists
-      LogFilePrefix exists
-      LogFilePrefix != ''
-    }
-  }
-  %access_log_sink_buckets.Properties {
-    some OwnershipControls.Rules[*] {
-      ObjectOwnership == 'ObjectWriter'
-    }
-    LoggingConfiguration not exists
   }
 }
 
-rule platform_has_versioned_object_locked_evidence_store
-  when %platform_markers !empty {
-  let evidence_bucket_count = count(%evidence_buckets)
-  let object_locked_bucket_count = count(%object_locked_buckets)
-  %evidence_bucket_count == 1
-  %object_locked_bucket_count == 1
-  %object_locked_buckets !empty
-  %evidence_buckets.Properties {
-    ObjectLockEnabled == true
-    VersioningConfiguration.Status == 'Enabled'
-    ObjectLockConfiguration.ObjectLockEnabled == 'Enabled'
-    ObjectLockConfiguration.Rule.DefaultRetention.Mode IN [
-      'GOVERNANCE',
-      'COMPLIANCE'
-    ]
-  }
-}
-
-rule kms_keys_rotate when %kms_keys !empty {
-  %kms_keys.Properties {
+rule kms_keys_rotate_and_are_not_immediately_deletable when %keys !empty {
+  %keys.Properties {
     EnableKeyRotation == true
+    PendingWindowInDays >= 7
     KeyPolicy exists
   }
 }
 
-rule iam_roles_require_a_permissions_boundary when %iam_roles !empty {
-  %iam_roles.Properties {
-    PermissionsBoundary exists
-  }
+rule every_runtime_role_has_the_stage_boundary when %roles !empty {
+  %roles.Properties.PermissionsBoundary exists
 }
 
-rule retained_logs_are_encrypted when %log_groups !empty {
-  %log_groups.Properties {
+rule retained_logs_are_kms_encrypted when %logs !empty {
+  %logs.Properties {
     KmsKeyId exists
     RetentionInDays >= 365
   }
 }
 
-rule archon_alarm_topics_have_exact_http_s_delivery_feedback
-  when %platform_markers !empty OR %archon_alarm_topics !empty {
-  let alarm_topic_count = count(%archon_alarm_topics)
-  let sns_topic_count = count(%sns_topics)
-  let delivery_status_logging_count =
-    count(%archon_alarm_delivery_status_logging)
-  let http_delivery_status_logging_count =
-    count(%archon_alarm_http_delivery_status_logging)
-  let success_feedback_role_ref_count =
-    count(%archon_alarm_success_feedback_role_refs)
-  let failure_feedback_role_ref_count =
-    count(%archon_alarm_failure_feedback_role_refs)
-  let referenced_feedback_role_count =
-    count(%referenced_archon_alarm_feedback_roles)
-  let feedback_policy_count =
-    count(%archon_alarm_feedback_policies)
-  let feedback_literal_role_policy_count =
-    count(%archon_alarm_feedback_literal_role_policies)
-  let feedback_managed_policy_count =
-    count(%archon_alarm_feedback_managed_policies)
-  let feedback_literal_role_managed_policy_count =
-    count(%archon_alarm_feedback_literal_role_managed_policies)
-  let feedback_policy_statement_count =
-    count(%archon_alarm_feedback_policies.Properties.PolicyDocument.Statement[*])
-  let feedback_policy_role_ref_count =
-    count(%archon_alarm_feedback_policy_role_refs)
-  let feedback_role_trust_statement_count =
-    count(%referenced_archon_alarm_feedback_roles.Properties.AssumeRolePolicyDocument.Statement[*])
-  let feedback_trust_statement_count =
-    count(%archon_alarm_feedback_trust_statements)
-  let feedback_create_group_statement_count =
-    count(%archon_alarm_feedback_create_group_statements)
-  let feedback_create_group_resource_part_count =
-    count(%archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][*])
-  let feedback_write_stream_statement_count =
-    count(%archon_alarm_feedback_write_stream_statements)
-  let feedback_write_stream_resource_part_count =
-    count(%archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][*])
-  let feedback_kms_statement_count =
-    count(%archon_alarm_feedback_kms_statements)
-  let feedback_kms_via_service_part_count =
-    count(%archon_alarm_feedback_kms_statements.Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][*])
-  let topic_kms_key_ref_count =
-    count(%archon_alarm_topic_kms_key_refs)
-  let delivery_log_kms_key_ref_count =
-    count(%archon_alarm_delivery_log_kms_key_refs)
-  let feedback_kms_key_ref_count =
-    count(%archon_alarm_feedback_kms_key_refs)
-  let referenced_alarm_kms_key_count =
-    count(%referenced_archon_alarm_kms_keys)
-  let kms_cloudwatch_publish_statement_count =
-    count(%archon_alarm_kms_cloudwatch_publish_statements)
-  let kms_cloudwatch_allow_statement_count =
-    count(%archon_alarm_kms_cloudwatch_allow_statements)
-  let kms_cloudwatch_source_arn_part_count =
-    count(%archon_alarm_kms_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*])
-  let kms_topic_context_arn_part_count =
-    count(%archon_alarm_kms_cloudwatch_publish_statements.Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][*])
-  let alarm_topic_policy_count =
-    count(%archon_alarm_topic_policies)
-  let sns_topic_policy_count =
-    count(%sns_topic_policies)
-  let alarm_topic_policy_allow_statement_count =
-    count(%archon_alarm_topic_policy_allow_statements)
-  let alarm_topic_policy_topic_count =
-    count(%archon_alarm_topic_policies.Properties.Topics[*])
-  let alarm_topic_policy_topic_ref_count =
-    count(%archon_alarm_topic_policy_topic_refs)
-  let referenced_alarm_topic_policy_topic_count =
-    count(%referenced_archon_alarm_topic_policy_topics)
-  let alarm_topic_policy_resource_ref_count =
-    count(%archon_alarm_topic_policy_resource_refs)
-  let cloudwatch_publish_statement_count =
-    count(%archon_alarm_cloudwatch_publish_statements)
-  let topic_policy_cloudwatch_source_arn_part_count =
-    count(%archon_alarm_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*])
-  let feedback_trust_source_arn_part_count =
-    count(%archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][*])
-  let delivery_log_group_count =
-    count(%archon_alarm_delivery_log_groups)
-  let staging_alarm_topic_count =
-    count(%staging_archon_alarm_topics)
-  let production_alarm_topic_count =
-    count(%production_archon_alarm_topics)
-  let staging_delivery_log_group_count =
-    count(%staging_archon_alarm_delivery_log_groups)
-  let production_delivery_log_group_count =
-    count(%production_archon_alarm_delivery_log_groups)
-
-  %alarm_topic_count == 1
-  %sns_topic_count == 1
-  %delivery_status_logging_count == 1
-  %http_delivery_status_logging_count == 1
-  %success_feedback_role_ref_count == 1
-  %failure_feedback_role_ref_count == 1
-  %referenced_feedback_role_count == 1
-  %feedback_policy_count == 1
-  %feedback_literal_role_policy_count == 0
-  %feedback_managed_policy_count == 0
-  %feedback_literal_role_managed_policy_count == 0
-  %feedback_policy_statement_count == 3
-  %feedback_policy_role_ref_count == 1
-  %feedback_role_trust_statement_count == 1
-  %feedback_trust_statement_count == 1
-  %feedback_create_group_statement_count == 1
-  %feedback_create_group_resource_part_count == 5
-  %feedback_write_stream_statement_count == 1
-  %feedback_write_stream_resource_part_count == 5
-  %feedback_kms_statement_count == 1
-  %feedback_kms_via_service_part_count == 4
-  %topic_kms_key_ref_count == 1
-  %delivery_log_kms_key_ref_count == 1
-  %feedback_kms_key_ref_count == 1
-  %referenced_alarm_kms_key_count == 1
-  %kms_cloudwatch_publish_statement_count == 1
-  %kms_cloudwatch_allow_statement_count == 1
-  %kms_cloudwatch_source_arn_part_count == 7
-  %kms_topic_context_arn_part_count == 7
-  %alarm_topic_policy_count == 1
-  %sns_topic_policy_count == 1
-  %alarm_topic_policy_allow_statement_count == 1
-  %alarm_topic_policy_topic_count == 1
-  %alarm_topic_policy_topic_ref_count == 1
-  %referenced_alarm_topic_policy_topic_count == 1
-  %alarm_topic_policy_resource_ref_count == 1
-  %cloudwatch_publish_statement_count == 1
-  %topic_policy_cloudwatch_source_arn_part_count == 7
-  %feedback_trust_source_arn_part_count == 7
-  %delivery_log_group_count == 1
-  %staging_alarm_topic_count == 0 OR
-  %staging_delivery_log_group_count == 1
-  %staging_alarm_topic_count == 0 OR
-  %referenced_archon_alarm_feedback_roles.Properties.RoleName ==
-    'archon-staging-sns-delivery-status'
-  %staging_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
-    ':archon-staging-alarms'
-  %staging_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][4] ==
-    '/archon-staging-alarms'
-  %staging_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][4] ==
-    '/archon-staging-alarms:log-stream:*'
-  %production_alarm_topic_count == 0 OR
-  %production_delivery_log_group_count == 1
-  %production_alarm_topic_count == 0 OR
-  %referenced_archon_alarm_feedback_roles.Properties.RoleName ==
-    'archon-production-sns-delivery-status'
-  %production_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
-    ':archon-production-alarms'
-  %production_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_create_group_statements.Resource.'Fn::Join'[1][4] ==
-    '/archon-production-alarms'
-  %production_alarm_topic_count == 0 OR
-  %archon_alarm_feedback_write_stream_statements.Resource.'Fn::Join'[1][4] ==
-    '/archon-production-alarms:log-stream:*'
-  %archon_alarm_topics {
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      KmsMasterKeyId.'Fn::GetAtt'[0] exists
-      KmsMasterKeyId.'Fn::GetAtt'[1] == 'Arn'
-      DeliveryStatusLogging !empty
-    }
-  }
-  %archon_alarm_http_delivery_status_logging {
-    Protocol == 'http/s'
-    FailureFeedbackRoleArn.'Fn::GetAtt'[0] exists
-    FailureFeedbackRoleArn.'Fn::GetAtt'[1] == 'Arn'
-    SuccessFeedbackRoleArn.'Fn::GetAtt'[0] exists
-    SuccessFeedbackRoleArn.'Fn::GetAtt'[1] == 'Arn'
-    SuccessFeedbackSampleRate == '100'
-  }
-  %archon_alarm_failure_feedback_role_refs == %archon_alarm_success_feedback_role_refs
-  %archon_alarm_feedback_policy_role_refs ==
-    %archon_alarm_success_feedback_role_refs
-  %archon_alarm_feedback_policies.Properties {
-    Groups not exists
-    Users not exists
-  }
-  %archon_alarm_delivery_log_groups {
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      KmsKeyId.'Fn::GetAtt'[0] exists
-      KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
-      RetentionInDays >= 365
-    }
-  }
-  %referenced_archon_alarm_feedback_roles {
-    Type == 'AWS::IAM::Role'
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      RoleName == /^archon-(staging|production)-sns-delivery-status$/
-      ManagedPolicyArns not exists
-      Policies not exists
-      some AssumeRolePolicyDocument.Statement[*] {
-        Effect == 'Allow'
-        Action == 'sts:AssumeRole'
-        Principal.Service == 'sns.amazonaws.com'
-        Condition.StringEquals.'aws:SourceAccount'.Ref ==
-          'AWS::AccountId'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[0] == ''
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][0] ==
-          'arn:'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
-          'AWS::Partition'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][2] ==
-          ':sns:'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
-          'AWS::Region'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][4] ==
-          ':'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
-          'AWS::AccountId'
-        Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][6] ==
-          /^:archon-(staging|production)-alarms$/
-      }
-    }
-  }
-  %archon_alarm_feedback_create_group_statements {
-    Effect == 'Allow'
-    Action == 'logs:CreateLogGroup'
-    Resource.'Fn::Join'[0] == ''
-    Resource.'Fn::Join'[1][0] ==
-      /^arn:(aws|aws-cn|aws-us-gov):logs:[a-z0-9-]+:[0-9]{12}:log-group:sns\/$/
-    Resource.'Fn::Join'[1][1].Ref == 'AWS::Region'
-    Resource.'Fn::Join'[1][2] == '/'
-    Resource.'Fn::Join'[1][3].Ref == 'AWS::AccountId'
-    Resource.'Fn::Join'[1][4] ==
-      /^\/archon-(staging|production)-alarms$/
-  }
-  %archon_alarm_feedback_write_stream_statements {
-    Effect == 'Allow'
-    Action == [
-      'logs:CreateLogStream',
-      'logs:PutLogEvents'
-    ]
-    Resource.'Fn::Join'[0] == ''
-    Resource.'Fn::Join'[1][0] ==
-      /^arn:(aws|aws-cn|aws-us-gov):logs:[a-z0-9-]+:[0-9]{12}:log-group:sns\/$/
-    Resource.'Fn::Join'[1][1].Ref == 'AWS::Region'
-    Resource.'Fn::Join'[1][2] == '/'
-    Resource.'Fn::Join'[1][3].Ref == 'AWS::AccountId'
-    Resource.'Fn::Join'[1][4] ==
-      /^\/archon-(staging|production)-alarms:log-stream:\*$/
-  }
-  %archon_alarm_feedback_kms_statements {
-    Effect == 'Allow'
-    Action == [
-      'kms:Decrypt',
-      'kms:Describe*',
-      'kms:Encrypt',
-      'kms:GenerateDataKey*',
-      'kms:ReEncrypt*'
-    ]
-    Resource.'Fn::GetAtt'[0] exists
-    Resource.'Fn::GetAtt'[1] == 'Arn'
-    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[0] == ''
-    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][0] == 'logs.'
-    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][1].Ref ==
-      'AWS::Region'
-    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][2] == '.'
-    Condition.StringEquals.'kms:ViaService'.'Fn::Join'[1][3].Ref ==
-      'AWS::URLSuffix'
-  }
-  %referenced_archon_alarm_kms_keys {
-    Type == 'AWS::KMS::Key'
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      EnableKeyRotation == true
-      KeyPolicy exists
-    }
-  }
-  %archon_alarm_kms_cloudwatch_publish_statements {
-    Effect == 'Allow'
-    Action == [
-      'kms:Decrypt',
-      'kms:GenerateDataKey*'
-    ]
-    Principal.Service == 'cloudwatch.amazonaws.com'
-    Resource == '*'
-    Condition.StringEquals.'aws:SourceAccount'.Ref ==
-      'AWS::AccountId'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[0] ==
-      ''
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][0] ==
-      'arn:'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][1].Ref ==
-      'AWS::Partition'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][2] ==
-      ':sns:'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][3].Ref ==
-      'AWS::Region'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][4] ==
-      ':'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][5].Ref ==
-      'AWS::AccountId'
-    Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][6] ==
-      /^:archon-(staging|production)-alarms$/
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[0] == ''
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][0] == 'arn:'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
-      'AWS::Partition'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][2] ==
-      ':cloudwatch:'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
-      'AWS::Region'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][4] == ':'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
-      'AWS::AccountId'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][6] == ':alarm:*'
-  }
-  %referenced_archon_alarm_topic_policy_topics {
-    Type == 'AWS::SNS::Topic'
-    Properties.TopicName == /^archon-(staging|production)-alarms$/
-  }
-  %archon_alarm_cloudwatch_publish_statements {
-    Effect == 'Allow'
-    Action == 'sns:Publish'
-    Principal.Service == 'cloudwatch.amazonaws.com'
-    Resource.Ref exists
-    Condition.StringEquals.'aws:SourceAccount'.Ref ==
-      'AWS::AccountId'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[0] == ''
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][0] == 'arn:'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][1].Ref ==
-      'AWS::Partition'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][2] ==
-      ':cloudwatch:'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][3].Ref ==
-      'AWS::Region'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][4] == ':'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][5].Ref ==
-      'AWS::AccountId'
-    Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][6] == ':alarm:*'
-  }
-  %archon_alarm_topic_kms_key_refs ==
-    %archon_alarm_delivery_log_kms_key_refs
-  %archon_alarm_topic_kms_key_refs ==
-    %archon_alarm_feedback_kms_key_refs
-  %archon_alarm_topic_policy_topic_refs ==
-    %archon_alarm_topic_policy_resource_refs
-  %referenced_archon_alarm_topic_policy_topics.Properties.TopicName ==
-    %archon_alarm_topics.Properties.TopicName
-  %archon_alarm_feedback_trust_statements.Condition.ArnEqualsIfExists.'aws:SourceArn'.'Fn::Join'[1][*] ==
-    %archon_alarm_kms_cloudwatch_publish_statements.Condition.StringEquals.'kms:EncryptionContext:aws:sns:topicArn'.'Fn::Join'[1][*]
-  %archon_alarm_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*] ==
-    %archon_alarm_kms_cloudwatch_publish_statements.Condition.ArnLike.'aws:SourceArn'.'Fn::Join'[1][*]
-}
-
-rule dynamodb_tables_are_resilient_and_encrypted
-  when %dynamodb_tables !empty {
-  %dynamodb_tables.Properties {
+rule dynamodb_state_is_resilient when %tables !empty {
+  %tables.Properties {
+    BillingMode == 'PAY_PER_REQUEST'
     DeletionProtectionEnabled == true
     PointInTimeRecoverySpecification.PointInTimeRecoveryEnabled == true
     SSESpecification {
@@ -1199,617 +158,89 @@ rule dynamodb_tables_are_resilient_and_encrypted
   }
 }
 
-rule sqs_queues_are_encrypted when %sqs_queues !empty {
-  %sqs_queues.Properties {
+rule failure_queues_are_customer_key_encrypted when %queues !empty {
+  %queues.Properties {
     KmsMasterKeyId exists
+    MessageRetentionPeriod >= 1209600
   }
 }
 
-rule platform_source_queues_use_dead_letter_queues
-  when %platform_markers !empty {
-  let sqs_queue_count = count(%sqs_queues)
-  let source_queue_count = count(%source_queues)
-  let dead_letter_queue_count = count(%dead_letter_queues)
-
-  %source_queues !empty
-  %dead_letter_queues !empty
-  %sqs_queue_count == 6
-  %source_queue_count == 3
-  %dead_letter_queue_count == 3
-  %source_queues.Properties.RedrivePolicy {
-    deadLetterTargetArn exists
-    maxReceiveCount >= 1
-  }
-  %dead_letter_queues.Properties.RedrivePolicy not exists
-}
-
-rule ecs_task_containers_are_hardened
-  when %ecs_task_definitions !empty {
-  %ecs_task_definitions.Properties {
-    ContainerDefinitions !empty
-    ContainerDefinitions[*] {
-      ReadonlyRootFilesystem == true
-      User exists
-      User != '0'
-      User != 'root'
-      LogConfiguration.LogDriver == 'awslogs'
-    }
-  }
-}
-
-rule ecs_tasks_never_receive_static_llm_credentials
-  when %ecs_task_definitions !empty {
-  let forbidden_secret_count = count(%forbidden_static_llm_secrets)
-  let forbidden_environment_count = count(%forbidden_static_llm_environment)
-  %forbidden_secret_count == 0
-  %forbidden_environment_count == 0
-}
-
-rule ecs_tasks_do_not_override_aws_task_role_credentials
-  when %ecs_task_definitions !empty {
-  let forbidden_secret_count = count(%forbidden_task_role_credential_secrets)
-  let forbidden_environment_count =
-    count(%forbidden_task_role_credential_environment)
-  %forbidden_secret_count == 0
-  %forbidden_environment_count == 0
-}
-
-rule bedrock_mantle_projects_are_retained
-  when %bedrock_mantle_projects !empty {
-  %bedrock_mantle_projects {
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-  }
-}
-
-rule platform_uses_one_private_dns_datahub_interface_endpoint
-  when %platform_markers !empty {
-  let endpoint_count = count(%datahub_private_link_endpoints)
-  let endpoint_security_group_count =
-    count(%datahub_private_link_endpoint_security_groups)
-  %endpoint_count == 1
-  %endpoint_security_group_count == 1
-  %datahub_private_link_endpoints.Properties {
-    VpcEndpointType == 'Interface'
-    PrivateDnsEnabled == true
-    SubnetIds !empty
-    PolicyDocument not exists
-    ServiceName.Ref == 'DataHubPrivateLinkServiceName'
-  }
-}
-
-rule bedrock_mantle_endpoint_is_private_and_least_privilege
-  when %bedrock_mantle_endpoints !empty {
-  let endpoint_count = count(%bedrock_mantle_endpoints)
-  let endpoint_security_group_count =
-    count(%bedrock_mantle_endpoint_security_groups)
-  let endpoint_statement_count =
-    count(%bedrock_mantle_endpoint_policy_statements)
-  let inference_statement_count =
-    count(%bedrock_mantle_inference_endpoint_statements)
-  let token_statement_count =
-    count(%bedrock_mantle_token_endpoint_statements)
-  let project_count = count(%bedrock_mantle_projects)
-  let application_tag_count =
-    count(%bedrock_mantle_project_application_tags)
-  let environment_tag_count =
-    count(%bedrock_mantle_project_environment_tags)
-  let managed_by_tag_count =
-    count(%bedrock_mantle_project_managed_by_tags)
-  let cost_center_tag_count =
-    count(%bedrock_mantle_project_cost_center_tags)
-  let provider_environment_count =
-    count(%bedrock_mantle_provider_environment)
-  let region_environment_count =
-    count(%bedrock_mantle_region_environment)
-  let base_url_environment_count =
-    count(%bedrock_mantle_base_url_environment)
-  let model_environment_count =
-    count(%bedrock_mantle_model_environment)
-  let project_environment_count =
-    count(%bedrock_mantle_project_environment)
-  let inference_role_statement_count =
-    count(%bedrock_mantle_inference_role_statements)
-  let short_term_role_statement_count =
-    count(%bedrock_mantle_short_term_role_statements)
-  let long_term_deny_statement_count =
-    count(%bedrock_mantle_long_term_deny_statements)
-
-  %endpoint_count == 1
-  %endpoint_security_group_count == 1
-  %endpoint_statement_count == 2
-  %inference_statement_count == 1
-  %token_statement_count == 1
-  %project_count == 1
-  %application_tag_count == 1
-  %environment_tag_count == 1
-  %managed_by_tag_count == 1
-  %cost_center_tag_count == 1
-  %provider_environment_count == 2
-  %region_environment_count == 2
-  %base_url_environment_count == 2
-  %model_environment_count == 2
-  %project_environment_count == 2
-  %inference_role_statement_count == 2
-  %short_term_role_statement_count == 2
-  %long_term_deny_statement_count == 2
-  %bedrock_mantle_projects.Properties {
-    Name == /^Archon-(staging|production)$/
-    Tags !empty
-  }
-  %bedrock_mantle_project_environment {
-    Value.'Fn::GetAtt'[1] == 'Id'
-  }
-  %bedrock_mantle_endpoints.Properties {
-    VpcEndpointType == 'Interface'
-    PrivateDnsEnabled == true
-    SubnetIds !empty
-    ServiceName.'Fn::Join'[0] == ''
-    ServiceName.'Fn::Join'[1][0] == 'com.amazonaws.'
-    ServiceName.'Fn::Join'[1][1].Ref == 'AWS::Region'
-    ServiceName.'Fn::Join'[1][2] == '.bedrock-mantle'
-  }
-  %bedrock_mantle_inference_endpoint_statements {
-    Effect == 'Allow'
-    Action == 'bedrock-mantle:CreateInference'
-    Principal.AWS exists
-    Resource.'Fn::GetAtt'[1] == 'Arn'
-    Condition.StringEquals.'bedrock-mantle:Model' ==
-      'qwen.qwen3-235b-a22b-2507'
-  }
-  %bedrock_mantle_token_endpoint_statements {
-    Effect == 'Allow'
-    Action == 'bedrock-mantle:CallWithBearerToken'
-    Principal.AWS exists
-    Resource == '*'
-    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
-      'SHORT_TERM'
-  }
-  %bedrock_mantle_inference_role_statements {
-    Effect == 'Allow'
-    Action == 'bedrock-mantle:CreateInference'
-    Resource.'Fn::GetAtt'[1] == 'Arn'
-    Condition.StringEquals.'bedrock-mantle:Model' ==
-      'qwen.qwen3-235b-a22b-2507'
-  }
-  %bedrock_mantle_short_term_role_statements {
-    Effect == 'Allow'
-    Action == 'bedrock-mantle:CallWithBearerToken'
-    Resource == '*'
-    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
-      'SHORT_TERM'
-  }
-  %bedrock_mantle_long_term_deny_statements {
-    Effect == 'Deny'
-    Action == 'bedrock-mantle:CallWithBearerToken'
-    Resource == '*'
-    Condition.StringEquals.'bedrock-mantle:BearerTokenType' ==
-      'LONG_TERM'
-  }
-}
-
-rule platform_approval_lambda_is_hardened
-  when %platform_markers !empty {
-  %approval_lambdas !empty
-  %approval_lambdas.Properties {
-    Runtime == 'nodejs24.x'
+rule lambdas_are_bounded_observable_and_not_vpc_attached
+  when %lambda_functions !empty {
+  %lambda_functions.Properties {
     ReservedConcurrentExecutions >= 1
     TracingConfig.Mode == 'Active'
-    Environment.Variables.APPROVAL_TABLE exists
-    Environment.Variables.APPROVER_GROUP == 'archon-approvers'
+    VpcConfig not exists
   }
 }
 
-rule lambda_functions_enable_active_xray when %lambda_functions !empty {
-  %lambda_functions.Properties.TracingConfig.Mode == 'Active'
+rule cloud_runtime_images_are_digest_parameter_bound
+  when %image_functions !empty {
+  %image_functions.Properties {
+    Architectures == ['x86_64']
+    Code.ImageUri.Ref == 'CloudRuntimeImageUri'
+    ImageConfig.Command !empty
+    EphemeralStorage.Size >= 512
+    Timeout <= 900
+  }
 }
 
-rule subnets_never_auto_assign_public_ips when %subnets !empty {
-  %subnets.Properties.MapPublicIpOnLaunch == false
-}
-
-rule api_gateway_stages_are_observable when %api_gateway_stages !empty {
-  let api_method_setting_count = count(%api_method_settings)
-  let cached_api_method_count = count(%cached_api_method_settings)
-
-  %api_method_settings !empty
-  %api_method_setting_count == 1
-  %cached_api_method_settings !empty
-  %cached_api_method_count == 1
-  %api_gateway_stages.Properties {
+rule api_stages_are_traced_throttled_and_non_verbose when %api_stages !empty {
+  %api_stages.Properties {
     AccessLogSetting.DestinationArn exists
     AccessLogSetting.Format exists
+    CacheClusterEnabled == false
     TracingEnabled == true
-    CacheClusterEnabled == true
     MethodSettings !empty
-    some MethodSettings[*] {
-      LoggingLevel IN [
-        'ERROR',
-        'INFO'
-      ]
-      MetricsEnabled == true
+    MethodSettings[*] {
       DataTraceEnabled == false
+      MetricsEnabled == true
+      ThrottlingBurstLimit > 0
+      ThrottlingRateLimit > 0
     }
-  }
-  %cached_api_method_settings {
-    ResourcePath == '/~1api~1control-loops~1{auditId}'
-    HttpMethod == 'GET'
-    CachingEnabled == true
-    CacheDataEncrypted == true
-    CacheTtlInSeconds > 0
-    CacheTtlInSeconds <= 5
   }
 }
 
-rule public_api_methods_require_cloudfront_origin_gate
-  when %public_api_methods !empty {
-  let api_key_count = count(%api_gateway_api_keys)
-  let usage_plan_count = count(%api_gateway_usage_plans)
-  let usage_plan_key_count = count(%api_gateway_usage_plan_keys)
-  let cloudfront_distribution_count = count(%cloudfront_distributions)
-  let all_origin_custom_header_count =
-    count(%cloudfront_origin_custom_headers)
-  let api_origin_count = count(%cloudfront_api_origins)
-  let origin_custom_header_count =
-    count(%cloudfront_api_origin_custom_headers)
-  let api_key_origin_header_count = count(%cloudfront_api_key_origin_headers)
-  let origin_request_policy_count = count(%cloudfront_origin_request_policies)
-  let api_origin_request_policy_ref_count =
-    count(%api_origin_request_policy_refs)
-  let referenced_origin_request_policy_count =
-    count(%referenced_cloudfront_origin_request_policies)
-  let origin_api_key_secret_count = count(%origin_api_key_secrets)
-  let api_method_count = count(%api_gateway_methods)
-  let public_api_method_count = count(%public_api_methods)
-  let lambda_api_method_count = count(%lambda_api_methods)
-  let lambda_request_template_count = count(%lambda_api_request_templates)
-  let http_proxy_api_method_count = count(%http_proxy_api_methods)
-  let http_proxy_request_parameter_count =
-    count(%http_proxy_request_parameters)
-  let api_cache_behavior_count = count(%api_cache_behaviors)
-
-  %api_gateway_rest_apis !empty
-  %api_gateway_rest_apis.Properties.ApiKeySourceType == 'HEADER'
-  %api_method_count == 4
-  %public_api_method_count == 3
-  %api_gateway_methods.Properties.ApiKeyRequired == true
-  %lambda_api_method_count == 3
-  %lambda_api_methods.Properties.Integration {
-    PassthroughBehavior == 'NEVER'
-    RequestParameters not exists
-    RequestTemplates !empty
-  }
-  %lambda_request_template_count == 3
-  some %lambda_api_request_templates == /"operation"\s*:\s*"start"/
-  some %lambda_api_request_templates == /"operation"\s*:\s*"status"/
-  some %lambda_api_request_templates == /"operation"\s*:\s*"decide"/
-  %lambda_api_request_templates != /(?i)(x-api-key|authorization|cookie)/
-  %http_proxy_api_method_count == 1
-  %http_proxy_request_parameter_count == 1
-  %http_proxy_request_parameters == /^'redacted'$/
-  %api_gateway_api_keys !empty
-  %api_key_count == 1
-  %api_gateway_api_keys.Properties {
+rule cloudfront_uses_oac_custom_tls_and_waf when %distributions !empty {
+  let distribution_count = count(%distributions)
+  let oac_count = count(%oacs)
+  %distribution_count == 1
+  %oac_count == 1
+  %distributions.Properties.DistributionConfig {
     Enabled == true
-    Value exists
-    Value is_string
-    Value == /^\{\{resolve:secretsmanager:archon\/(staging|production)\/cloudfront-origin-api-key:SecretString:apiKey::\}\}$/
-  }
-  %api_gateway_usage_plans !empty
-  %usage_plan_count == 1
-  %api_gateway_usage_plans.Properties {
-    ApiStages !empty
-    Quota.Limit > 0
-    Quota.Limit <= 250000
-    Quota.Period == 'DAY'
-    Throttle.BurstLimit > 0
-    Throttle.BurstLimit <= 100
-    Throttle.RateLimit > 0
-    Throttle.RateLimit <= 50
-  }
-  %api_gateway_usage_plan_keys !empty
-  %usage_plan_key_count == 1
-  %api_gateway_usage_plan_keys.Properties {
-    KeyId exists
-    KeyType == 'API_KEY'
-    UsagePlanId exists
-  }
-  %cloudfront_distributions !empty
-  %cloudfront_distribution_count == 1
-  %all_origin_custom_header_count == 1
-  %cloudfront_api_origins !empty
-  %api_origin_count == 1
-  %cloudfront_api_origins {
-    Id exists
-    CustomOriginConfig.OriginProtocolPolicy == 'https-only'
-  }
-  %cloudfront_api_origin_custom_headers !empty
-  %origin_custom_header_count == 1
-  %cloudfront_api_key_origin_headers !empty
-  %api_key_origin_header_count == 1
-  %cloudfront_api_key_origin_headers.HeaderValue exists
-  %api_gateway_api_keys.Properties.Value == %cloudfront_api_key_origin_headers.HeaderValue
-  %origin_api_key_secrets !empty
-  %origin_api_key_secret_count == 1
-  %origin_api_key_secrets {
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      Name == /^archon\/(staging|production)\/cloudfront-origin-api-key$/
-      KmsKeyId.'Fn::GetAtt'[0] exists
-      KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
-      GenerateSecretString.ExcludePunctuation == true
-      GenerateSecretString.GenerateStringKey == 'apiKey'
-      GenerateSecretString.IncludeSpace == false
-      GenerateSecretString.PasswordLength == 64
-      GenerateSecretString.SecretStringTemplate == '{}'
-    }
-  }
-  %cloudfront_origin_request_policies !empty
-  %origin_request_policy_count == 1
-  %api_origin_request_policy_ref_count == 1
-  %referenced_origin_request_policy_count == 1
-  %referenced_cloudfront_origin_request_policies.Type == 'AWS::CloudFront::OriginRequestPolicy'
-  %referenced_cloudfront_origin_request_policies.Properties.OriginRequestPolicyConfig {
-    CookiesConfig.CookieBehavior == 'all'
-    HeadersConfig.HeaderBehavior == 'allExcept'
-    HeadersConfig.Headers == ['host']
-    QueryStringsConfig.QueryStringBehavior == 'all'
-  }
-  %api_cache_behaviors !empty
-  %api_cache_behavior_count == 1
-  %api_cache_behaviors {
-    OriginRequestPolicyId.Ref exists
-    TargetOriginId exists
-  }
-  %api_cache_behaviors.TargetOriginId == %cloudfront_api_origins.Id
-}
-
-rule cloudfront_api_origin_is_rest_api_bound
-  when %cloudfront_api_origins !empty {
-  let rest_api_count = count(%api_gateway_rest_apis)
-  let cloudfront_distribution_count = count(%cloudfront_distributions)
-  let api_origin_count = count(%cloudfront_api_origins)
-  let domain_join_argument_count =
-    count(%cloudfront_api_origin_domain_join_arguments)
-  let domain_part_count = count(%cloudfront_api_origin_domain_parts)
-  let rest_api_ref_count = count(%cloudfront_api_origin_rest_api_refs)
-  let referenced_rest_api_count =
-    count(%referenced_cloudfront_origin_rest_apis)
-
-  %rest_api_count == 1
-  %cloudfront_distribution_count == 1
-  %api_origin_count == 1
-  %domain_join_argument_count == 2
-  %domain_part_count == 5
-  %rest_api_ref_count == 1
-  %referenced_rest_api_count == 1
-  %referenced_cloudfront_origin_rest_apis.Type == 'AWS::ApiGateway::RestApi'
-  %cloudfront_api_origins {
-    DomainName.'Fn::Join'[0] == ''
-    DomainName.'Fn::Join'[1][0].Ref exists
-    DomainName.'Fn::Join'[1][1] == '.execute-api.'
-    DomainName.'Fn::Join'[1][2].Ref == 'AWS::Region'
-    DomainName.'Fn::Join'[1][3] == '.'
-    DomainName.'Fn::Join'[1][4].Ref == 'AWS::URLSuffix'
-  }
-}
-
-rule cloudfront_origin_custom_headers_are_api_key_only
-  when %cloudfront_origin_custom_headers !empty {
-  let cloudfront_distribution_count = count(%cloudfront_distributions)
-  let all_origin_custom_header_count =
-    count(%cloudfront_origin_custom_headers)
-  let api_origin_count = count(%cloudfront_api_origins)
-  let api_origin_custom_header_count =
-    count(%cloudfront_api_origin_custom_headers)
-  let api_key_origin_header_count = count(%cloudfront_api_key_origin_headers)
-
-  %cloudfront_distribution_count == 1
-  %all_origin_custom_header_count == 1
-  %api_origin_count == 1
-  %api_origin_custom_header_count == 1
-  %api_key_origin_header_count == 1
-}
-
-rule cloudfront_origin_key_is_stage_bound
-  when %api_gateway_api_keys !empty {
-  let api_key_count = count(%api_gateway_api_keys)
-  let origin_api_key_secret_count = count(%origin_api_key_secrets)
-  let staging_api_key_count = count(%staging_api_gateway_api_keys)
-  let staging_origin_api_key_secret_count =
-    count(%staging_origin_api_key_secrets)
-  let production_api_key_count = count(%production_api_gateway_api_keys)
-  let production_origin_api_key_secret_count =
-    count(%production_origin_api_key_secrets)
-
-  %api_key_count == 1
-  %origin_api_key_secret_count == 1
-  %staging_api_key_count == 1 OR
-  %production_api_key_count == 1
-  %staging_api_key_count == 0 OR
-  %staging_origin_api_key_secret_count == 1
-  %production_api_key_count == 0 OR
-  %production_origin_api_key_secret_count == 1
-}
-
-rule cloudfront_origin_key_uses_dedicated_cmk
-  when %origin_api_key_secrets !empty {
-  let origin_api_key_secret_count = count(%origin_api_key_secrets)
-  let secrets_kms_key_count = count(%secrets_kms_keys)
-  let origin_kms_key_ref_count =
-    count(%origin_api_key_secret_kms_key_refs)
-  let referenced_origin_kms_key_count =
-    count(%referenced_origin_api_key_secret_kms_keys)
-
-  %origin_api_key_secret_count == 1
-  %secrets_kms_key_count == 1
-  %origin_kms_key_ref_count == 1
-  %referenced_origin_kms_key_count == 1
-  %origin_api_key_secrets.Properties.KmsKeyId.'Fn::GetAtt'[1] == 'Arn'
-  %referenced_origin_api_key_secret_kms_keys {
-    Type == 'AWS::KMS::Key'
-    DeletionPolicy == 'Retain'
-    UpdateReplacePolicy == 'Retain'
-    Properties {
-      EnableKeyRotation == true
-      PendingWindowInDays == 30
-      KeyPolicy exists
-      some Tags[*] {
-        Key == 'ArchonKeyPurpose'
-        Value == 'secrets'
-      }
-    }
-  }
-}
-
-rule cloudfront_distributions_enforce_tls_logging_and_oac
-  when %cloudfront_distributions !empty {
-  let cloudfront_distribution_count = count(%cloudfront_distributions)
-  let cloudfront_alias_count = count(%cloudfront_aliases)
-  let cloudfront_function_count = count(%cloudfront_functions)
-  let cloudfront_cache_behavior_count = count(%cloudfront_cache_behaviors)
-  let api_cache_behavior_count = count(%api_cache_behaviors)
-  let runtime_config_behavior_count =
-    count(%cloudfront_runtime_config_behaviors)
-  let default_function_association_count =
-    count(%cloudfront_default_function_associations)
-  let cache_function_association_count =
-    count(%cloudfront_cache_function_associations)
-  let referenced_default_function_count =
-    count(%referenced_cloudfront_default_functions)
-  let referenced_cache_function_count =
-    count(%referenced_cloudfront_cache_functions)
-
-  %cloudfront_distribution_count == 1
-  %cloudfront_alias_count == 1
-  %cloudfront_function_count == 1
-  %cloudfront_cache_behavior_count == 2
-  %api_cache_behavior_count == 1
-  %runtime_config_behavior_count == 1
-  %default_function_association_count == 1
-  %cache_function_association_count == 2
-  %referenced_default_function_count == 1
-  %referenced_cache_function_count == 1
-  %cloudfront_functions {
-    Properties {
-      Name == /^archon-(staging|production)-canonical-host$/
-      AutoPublish == true
-      FunctionConfig.Runtime == 'cloudfront-js-2.0'
-      FunctionCode exists
-    }
-  }
-  %referenced_cloudfront_default_functions {
-    Type == 'AWS::CloudFront::Function'
-  }
-  %referenced_cloudfront_cache_functions {
-    Type == 'AWS::CloudFront::Function'
-  }
-  %cloudfront_distributions.Properties.DistributionConfig {
-    Enabled == true
-    Logging.Bucket exists
-    Aliases exists
-    Aliases !empty
     WebACLId exists
-    ViewerCertificate.CloudFrontDefaultCertificate not exists
-    ViewerCertificate.AcmCertificateArn exists
-    ViewerCertificate.MinimumProtocolVersion == 'TLSv1.3_2025'
-    ViewerCertificate.SslSupportMethod == 'sni-only'
-    DefaultCacheBehavior.FunctionAssociations !empty
-    DefaultCacheBehavior.FunctionAssociations[*] {
-      EventType == 'viewer-request'
-      FunctionARN.'Fn::GetAtt'[1] == 'FunctionARN'
+    Aliases !empty
+    ViewerCertificate {
+      AcmCertificateArn exists
+      CloudFrontDefaultCertificate not exists
+      MinimumProtocolVersion == 'TLSv1.3_2025'
+      SslSupportMethod == 'sni-only'
+    }
+    DefaultCacheBehavior {
+      ViewerProtocolPolicy IN ['redirect-to-https', 'https-only']
+      FunctionAssociations !empty
+      ResponseHeadersPolicyId exists
     }
     CacheBehaviors[*] {
       ViewerProtocolPolicy == 'https-only'
       FunctionAssociations !empty
-      FunctionAssociations[*] {
-        EventType == 'viewer-request'
-        FunctionARN.'Fn::GetAtt'[1] == 'FunctionARN'
-      }
+      ResponseHeadersPolicyId exists
     }
-    DefaultCacheBehavior.ViewerProtocolPolicy IN [
-      'https-only',
-      'redirect-to-https'
-    ]
     some Origins[*] {
       OriginAccessControlId exists
     }
   }
-}
-
-rule secrets_use_customer_managed_kms when %secrets !empty {
-  %secrets.Properties {
-    KmsKeyId exists
+  %oacs.Properties.OriginAccessControlConfig {
+    OriginAccessControlOriginType == 's3'
+    SigningBehavior == 'always'
+    SigningProtocol == 'sigv4'
   }
 }
 
-rule waf_web_acls_protect_sensitive_sampled_data
-  when %waf_web_acls !empty {
-  let waf_data_protection_count = count(%waf_data_protections)
-  let waf_authorization_data_protection_count =
-    count(%waf_authorization_data_protections)
-  let waf_cookie_data_protection_count =
-    count(%waf_cookie_data_protections)
-  let waf_api_key_data_protection_count =
-    count(%waf_api_key_data_protections)
-  %waf_data_protection_count == 3
-  %waf_authorization_data_protection_count == 1
-  %waf_cookie_data_protection_count == 1
-  %waf_api_key_data_protection_count == 1
-  %waf_web_acls.Properties {
-    DataProtectionConfig.DataProtections !empty
-    DataProtectionConfig.DataProtections[*] {
-      Action == 'SUBSTITUTION'
-      ExcludeRateBasedDetails == false
-      ExcludeRuleMatchDetails == false
-      Field.FieldType == 'SINGLE_HEADER'
-    }
-    some DataProtectionConfig.DataProtections[*] {
-      Field.FieldKeys == ['authorization']
-    }
-    some DataProtectionConfig.DataProtections[*] {
-      Field.FieldKeys == ['cookie']
-    }
-    some DataProtectionConfig.DataProtections[*] {
-      Field.FieldKeys == ['x-api-key']
-    }
-  }
-}
-
-rule waf_logging_is_filtered_and_redacted
-  when %waf_logging_configurations !empty {
-  let waf_logging_configuration_count = count(%waf_logging_configurations)
-  let waf_logging_filter_count = count(%waf_logging_filters)
-  let waf_logging_condition_count = count(%waf_logging_conditions)
-  let waf_block_logging_condition_count =
-    count(%waf_block_logging_conditions)
-  let waf_count_logging_condition_count =
-    count(%waf_count_logging_conditions)
-  let waf_redacted_field_count = count(%waf_redacted_fields)
-  let waf_authorization_redaction_count =
-    count(%waf_authorization_redactions)
-  let waf_cookie_redaction_count = count(%waf_cookie_redactions)
-  let waf_api_key_redaction_count = count(%waf_api_key_redactions)
-  %waf_logging_configuration_count == 1
-  %waf_logging_filter_count == 1
-  %waf_logging_condition_count == 2
-  %waf_block_logging_condition_count == 1
-  %waf_count_logging_condition_count == 1
-  %waf_redacted_field_count == 3
-  %waf_authorization_redaction_count == 1
-  %waf_cookie_redaction_count == 1
-  %waf_api_key_redaction_count == 1
-  %waf_logging_configurations.Properties {
-    ResourceArn exists
-    LogDestinationConfigs !empty
+rule waf_never_logs_authentication_material
+  when %waf_logs !empty {
+  %waf_logs.Properties {
     LoggingFilter.DefaultBehavior == 'DROP'
-    LoggingFilter.Filters[*] {
-      Behavior == 'KEEP'
-      Requirement == 'MEETS_ANY'
-      Conditions !empty
-      Conditions[*].ActionCondition.Action IN ['BLOCK', 'COUNT']
-    }
     RedactedFields !empty
     some RedactedFields[*] {
       SingleHeader.Name == 'authorization'
@@ -1823,23 +254,72 @@ rule waf_logging_is_filtered_and_redacted
   }
 }
 
-rule platform_has_regional_waf when %platform_markers !empty {
-  let waf_association_count = count(%waf_associations)
-  let waf_web_acl_count = count(%waf_web_acls)
-  let waf_logging_configuration_count = count(%waf_logging_configurations)
-  # One shared regional ACL must be bound independently to the API Gateway
-  # stage and the Cognito user pool.
-  %waf_association_count == 2
-  %waf_web_acl_count == 1
-  %waf_logging_configuration_count == 1
-  %waf_associations !empty
-  %waf_web_acls !empty
-  %waf_logging_configurations !empty
-  %waf_web_acls.Properties {
-    Scope == 'REGIONAL'
+rule waf_acls_fail_closed_on_sensitive_fields when %web_acls !empty {
+  %web_acls.Properties {
+    Scope IN ['REGIONAL', 'CLOUDFRONT']
+    VisibilityConfig.SampledRequestsEnabled == false
+    Rules !empty
+    Rules[*].VisibilityConfig.SampledRequestsEnabled == false
   }
-  %waf_associations.Properties {
-    ResourceArn exists
-    WebACLArn exists
+}
+
+rule cognito_is_admin_created_and_threat_protected
+  when %user_pools !empty {
+  %user_pools.Properties {
+    AdminCreateUserConfig.AllowAdminCreateUserOnly == true
+    DeletionProtection == 'ACTIVE'
+    MfaConfiguration == 'OPTIONAL'
+    EnabledMfas == ['SOFTWARE_TOKEN_MFA']
+    Policies.PasswordPolicy {
+      MinimumLength >= 14
+      PasswordHistorySize >= 24
+      TemporaryPasswordValidityDays <= 3
+    }
+    UserPoolAddOns.AdvancedSecurityMode == 'ENFORCED'
+  }
+}
+
+rule cognito_public_clients_use_short_lived_tokens
+  when %user_pool_clients !empty {
+  %user_pool_clients.Properties {
+    GenerateSecret == false
+    PreventUserExistenceErrors == 'ENABLED'
+    AccessTokenValidity <= 15
+    IdTokenValidity <= 15
+    RefreshTokenValidity <= 1
+  }
+}
+
+rule secrets_are_customer_key_encrypted when %secrets !empty {
+  %secrets.Properties.KmsKeyId exists
+}
+
+rule core_launch_templates_require_imdsv2
+  when %launch_templates !empty {
+  %launch_templates.Properties.LaunchTemplateData {
+    MetadataOptions {
+      HttpEndpoint == 'enabled'
+      HttpTokens == 'required'
+    }
+    NetworkInterfaces[*].AssociatePublicIpAddress == false
+    BlockDeviceMappings[*].Ebs.Encrypted == true
+  }
+}
+
+rule core_is_zero_idle_single_host
+  when %auto_scaling_groups !empty {
+  %auto_scaling_groups.Properties {
+    MinSize == '0'
+    DesiredCapacity == '0'
+    MaxSize == '1'
+  }
+}
+
+rule core_lifecycle_is_traced_and_logged
+  when %state_machines !empty {
+  %state_machines.Properties {
+    TracingConfiguration.Enabled == true
+    LoggingConfiguration.Level == 'ALL'
+    LoggingConfiguration.IncludeExecutionData == false
   }
 }

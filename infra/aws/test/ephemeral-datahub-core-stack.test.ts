@@ -68,8 +68,8 @@ describe("ephemeral DataHub Core stack", () => {
     ) as any[];
     expect(groups).toHaveLength(1);
     expect(groups[0].Properties.MinSize).toBe("0");
+    expect(groups[0].Properties.DesiredCapacity).toBe("0");
     expect(groups[0].Properties.MaxSize).toBe("1");
-    expect(groups[0].Properties.DesiredCapacity).toBeUndefined();
 
     const launchDefinitions = [
       ...Object.values(resources(template, "AWS::EC2::LaunchTemplate")),
@@ -286,6 +286,24 @@ describe("ephemeral DataHub Core stack", () => {
     ) as any[];
     expect(machines).toHaveLength(1);
     expect(machines[0].Properties.StateMachineType).toBe("STANDARD");
+    expect(machines[0].Properties.TracingConfiguration).toEqual({
+      Enabled: true
+    });
+    expect(machines[0].Properties.LoggingConfiguration).toEqual(
+      expect.objectContaining({
+        IncludeExecutionData: false,
+        Level: "ALL"
+      })
+    );
+
+    const logGroups = Object.values(
+      resources(template, "AWS::Logs::LogGroup")
+    ) as any[];
+    expect(logGroups).toHaveLength(3);
+    for (const logGroup of logGroups) {
+      expect(logGroup.Properties.KmsKeyId).toBeDefined();
+      expect(logGroup.Properties.RetentionInDays).toBe(365);
+    }
   });
 
   test("limits host writes to health publication and existing transitions", () => {

@@ -141,7 +141,7 @@
     },
     {
       "path": "services/datahub-cloud-runtime/tests/test_static_boundaries.py",
-      "blobSha": "23229e986c3c729f2cfa79b3372307f6879bf586"
+      "blobSha": "0e166899448ec74c39a24749e682eceeeeebcf09"
     },
     {
       "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",

@@ -1,0 +1,250 @@
+{
+  "schemaVersion": "archon.datahub-cloud-trial/v1",
+  "repository": "upgradedev/archon-datahub",
+  "workflow": {
+    "path": ".github/workflows/datahub-cloud-trial.yml",
+    "trigger": "workflow_dispatch",
+    "allowedBranches": [
+      "master"
+    ],
+    "actions": [
+      "plan",
+      "bootstrap",
+      "reconcile",
+      "rotate",
+      "cleanup"
+    ],
+    "deploymentEnvironments": [
+      "staging",
+      "production"
+    ],
+    "adminCredential": {
+      "githubEnvironmentSecret": "DATAHUB_CLOUD_ADMIN_PAT",
+      "commandLineAllowed": false,
+      "stdoutAllowed": false,
+      "artifactAllowed": false
+    }
+  },
+  "officialGraphqlContract": {
+    "repository": "https://github.com/datahub-project/datahub",
+    "commit": "53064c2d9b41f77a141736ad6eb037966174329b",
+    "files": [
+      "datahub-web-react/src/graphql/auth.graphql",
+      "datahub-web-react/src/graphql/mutations.graphql",
+      "datahub-web-react/src/graphql/policy.graphql",
+      "datahub-web-react/src/graphql/role.graphql",
+      "datahub-graphql-core/src/main/resources/auth.graphql",
+      "datahub-graphql-core/src/main/resources/entity.graphql"
+    ],
+    "serviceAccountInput": [
+      "displayName",
+      "description"
+    ],
+    "accessTokenInput": {
+      "type": "SERVICE_ACCOUNT",
+      "duration": "ONE_MONTH",
+      "fields": [
+        "actorUrn",
+        "name",
+        "description"
+      ]
+    },
+    "readerRoleQuery": "listRoles",
+    "roleAssignmentMutation": "batchAssignRole",
+    "policyConstraintField": "privilegeConstraints"
+  },
+  "officialMcpContract": {
+    "repository": "https://github.com/acryldata/mcp-server-datahub",
+    "version": "0.6.0",
+    "commit": "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9",
+    "sourceFile": "src/mcp_server_datahub/tools/tags.py",
+    "tools": [
+      "add_tags",
+      "remove_tags"
+    ]
+  },
+  "scope": {
+    "canonicalDatasetUrn": "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+    "columnPath": "customer_email",
+    "piiTagUrn": "urn:li:tag:PII",
+    "readerRole": "Reader",
+    "writerPrivilege": "EDIT_DATASET_COL_TAGS",
+    "resourceFilter": {
+      "field": "URN",
+      "condition": "EQUALS"
+    },
+    "privilegeConstraint": {
+      "field": "URN",
+      "condition": "EQUALS"
+    }
+  },
+  "identities": {
+    "serviceAccountsPerStage": {
+      "reader": "Archon <stage> DataHub reader",
+      "writer": "Archon <stage> DataHub writer"
+    },
+    "readerRoleAssignedTo": [
+      "reader",
+      "writer"
+    ],
+    "writerPolicyName": "Archon <stage> exact PII column writer",
+    "effectiveWriterPrivilegeExpansion": {
+      "directUser": "fail-closed",
+      "allUsers": "fail-closed",
+      "readerRole": "fail-closed"
+    }
+  },
+  "credentials": {
+    "serviceAccountTokens": 2,
+    "distinct": true,
+    "duration": "ONE_MONTH",
+    "generation": "per-successful-verified-bootstrap-or-reconciliation",
+    "supersededTokens": "revoke-and-relist-after-both-version-id-bound-secret-promotions",
+    "aws": {
+      "region": "eu-west-1",
+      "stackName": "Archon-<stage>-Judge",
+      "readSecretOutput": "ArchonCloudReaderSecretArn",
+      "writeSecretOutput": "ArchonCloudWriterSecretArn",
+      "secretNamePrefixes": [
+        "archon/<stage>/datahub-cloud/reader",
+        "archon/<stage>/datahub-cloud/writer"
+      ],
+      "transport": "aws-cli-stdin",
+      "plaintextFileAllowed": false,
+      "commandLineValueAllowed": false,
+      "readBackByWorkflowAllowed": "reader-only-for-exact-stable-key-preservation",
+      "secretsKeyOutput": "ArchonSecretsKeyArn",
+      "secretsKeyAlias": "alias/archon/<stage>/judge-secrets",
+      "readerSecretSchema": {
+        "schemaVersion": "archon.datahub-cloud-reader-secret/v1",
+        "exactKeys": [
+          "schemaVersion",
+          "gmsUrl",
+          "token",
+          "runHandleFernetKey",
+          "oauthMasterKey"
+        ],
+        "stableFernetKeys": [
+          "runHandleFernetKey",
+          "oauthMasterKey"
+        ]
+      },
+      "writerSecretSchema": {
+        "schemaVersion": "archon.datahub-cloud-writer-secret/v1",
+        "exactKeys": [
+          "schemaVersion",
+          "gmsUrl",
+          "token"
+        ]
+      },
+      "requiredBootstrapActions": {
+        "cloudFormation": [
+          "cloudformation:DescribeStacks"
+        ],
+        "readerSecret": [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:UpdateSecretVersionStage"
+        ],
+        "writerSecret": [
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:UpdateSecretVersionStage"
+        ],
+        "kms": [
+          "kms:DescribeKey",
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ],
+        "sts": [
+          "sts:GetCallerIdentity"
+        ]
+      },
+      "roleVariable": "AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN",
+      "roleNameTemplate": "archon-datahub-github-<stage>-cloud-trial",
+      "initialEmptySecretState": "zero versions and no AWSCURRENT is valid only for first bootstrap",
+      "versionCommit": {
+        "stagingLabel": "archon-trial-<run-id>-<run-attempt>",
+        "writerAndReaderStagedBeforePromotion": true,
+        "versionIdsVerified": true,
+        "rollbackOnAnyFailure": true,
+        "generatedTokensRevokedOnAnyFailure": true,
+        "finalScopedTokenInventoryExact": true
+      }
+    },
+    "stableReaderCryptoMaterial": "generate-on-first-bootstrap-preserve-byte-for-byte-thereafter"
+  },
+  "liveCanary": {
+    "transport": "managed DataHub MCP streamable HTTP",
+    "protocolVersion": "2025-06-18",
+    "healthRead": {
+      "tool": "search",
+      "mustResolveCanonicalDataset": true
+    },
+    "readerMutationProbe": {
+      "tool": "add_tags",
+      "expected": "denied",
+      "transportFailureCountsAsDenial": false,
+      "postProbeState": "PII tag absent",
+      "acceptedProofs": [
+        "add_tags absent from reader tools/list",
+        "HTTP 403",
+        "explicit provider authorization-denial text"
+      ],
+      "genericJsonRpcErrorCountsAsDenial": false,
+      "genericToolErrorCountsAsDenial": false
+    },
+    "writerRoundTrip": [
+      "remove_tags baseline",
+      "add_tags",
+      "observe PII",
+      "remove_tags",
+      "observe absent"
+    ],
+    "mutationArguments": {
+      "tag_urns": [
+        "urn:li:tag:PII"
+      ],
+      "entity_urns": [
+        "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+      ],
+      "column_paths": [
+        "customer_email"
+      ]
+    },
+    "finalState": "PII tag absent"
+  },
+  "evidence": {
+    "schemaVersion": "archon.datahub-cloud-trial-receipt/v1",
+    "pathRoot": "RUNNER_TEMP",
+    "containsProviderPayload": false,
+    "containsCredentials": false,
+    "retentionDays": 90,
+    "githubAttestation": true
+  },
+  "continuity": {
+    "plannedActivationDate": "2026-08-04",
+    "trialDays": 21,
+    "nominalExpiryDate": "2026-08-25",
+    "judgingAccessTargetThrough": "2026-08-31",
+    "ossCoreRemainsCanonical": true,
+    "cloudProfile": "optional scored managed-service companion",
+    "silentFailover": false
+  },
+  "security": {
+    "securityChecksRunInCiCd": true,
+    "localBuilds": false,
+    "localGeneratedArtifacts": false,
+    "rawErrorsRetained": false,
+    "secretOutputNames": [],
+    "credentialRedactionStrategy": "never serialize or print"
+  },
+  "cleanup": {
+    "partialOwnedAccountState": "recoverable",
+    "exactOwnedPolicyWithoutAccounts": "recoverable",
+    "tokenRevocationFinalVerification": true,
+    "finalAccountAndPolicyAbsenceVerification": true,
+    "runtimeSecrets": "verified revoked markers"
+  }
+}

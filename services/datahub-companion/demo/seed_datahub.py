@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import stat
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 SOURCE_URN = (
     "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
@@ -29,6 +31,9 @@ TERM_URN = "urn:li:glossaryTerm:net-revenue"
 QUERY_URN = "urn:li:query:archon-q2-segment-net-revenue"
 SQL_PATH = Path(__file__).with_name("archon_demo.sql")
 AUDIT_TIME_MS = 1775001600000
+CLOUD_TENANT_HOST = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.acryl\.io$"
+)
 
 
 def create_database(database: Path) -> None:
@@ -186,9 +191,43 @@ def _schema(name: str, fields: list[tuple[str, str, str]]) -> Any:
     )
 
 
-def emit_metadata(gms_url: str, credential_file: Path) -> int:
-    if gms_url != "http://127.0.0.1:18080":
-        raise RuntimeError("Core seeder may target only the loopback GMS")
+def _validate_emitter_target(
+    gms_url: str,
+    cloud_tenant_host: str | None,
+) -> None:
+    if gms_url == "http://127.0.0.1:18080":
+        if cloud_tenant_host is not None:
+            raise RuntimeError("Core seeder must not carry a Cloud tenant binding")
+        return
+    parsed = urlparse(gms_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise RuntimeError("metadata emitter target is invalid") from None
+    if (
+        cloud_tenant_host is None
+        or CLOUD_TENANT_HOST.fullmatch(cloud_tenant_host) is None
+        or parsed.scheme != "https"
+        or port not in (None, 443)
+        or parsed.hostname != cloud_tenant_host
+        or parsed.netloc != cloud_tenant_host
+        or parsed.path != "/gms"
+        or parsed.username
+        or parsed.password
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("Cloud seeder target failed exact tenant binding")
+
+
+def emit_metadata(
+    gms_url: str,
+    credential_file: Path,
+    *,
+    cloud_tenant_host: str | None = None,
+) -> int:
+    _validate_emitter_target(gms_url, cloud_tenant_host)
     from datahub.emitter.mce_builder import datahub_guid, make_assertion_urn
     from datahub.emitter.mcp import MetadataChangeProposalWrapper
     from datahub.emitter.rest_emitter import DatahubRestEmitter

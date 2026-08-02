@@ -698,6 +698,7 @@ jobs:
             infra/aws/package-lock.json
             infra/aws/lambda/approval/package-lock.json
             infra/aws/lambda/control/package-lock.json
+            infra/aws/lambda/runtime-control/package-lock.json
       - name: Install locked infrastructure dependencies
         working-directory: infra/aws
         run: npm ci --ignore-scripts
@@ -721,6 +722,9 @@ jobs:
       - name: Package locked control Lambda dependencies
         working-directory: infra/aws/lambda/control
         run: npm ci --omit=dev --ignore-scripts
+      - name: Package locked runtime-control Lambda dependencies
+        working-directory: infra/aws/lambda/runtime-control
+        run: npm ci --omit=dev --ignore-scripts
       - name: Typecheck CDK and Lambda contract tests
         working-directory: infra/aws
         run: npm run build
@@ -733,6 +737,10 @@ jobs:
           node -e "require('./lambda/approval/handoff.js')"
           node --check lambda/control/index.js
           node -e "require('./lambda/control/index.js')"
+          node --check lambda/runtime-control/index.js
+          node -e "require('./lambda/runtime-control/index.js')"
+          node --check lambda/runtime-control/session.js
+          node -e "require('./lambda/runtime-control/session.js')"
       - name: CDK assertion tests and coverage gate
         working-directory: infra/aws
         run: npm test -- --ci --coverage
@@ -758,13 +766,23 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
           --omit=dev
           --audit-level=moderate
+      - name: Runtime-control Lambda SCA gate
+        working-directory: infra/aws/lambda/runtime-control
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --omit=dev
+          --audit-level=moderate
       - name: Package deterministic Lambda release candidate
         shell: bash
         run: |
           set -euo pipefail
-          for directory in \
-            infra/aws/lambda/approval \
-            infra/aws/lambda/control; do
+          lambda_stage="${RUNNER_TEMP}/lambda-release"
+          archive="${RUNNER_TEMP}/archon-lambdas.tar.gz"
+          members="${RUNNER_TEMP}/archon-lambdas.members"
+          rm -rf -- "${lambda_stage}"
+          mkdir -p "${lambda_stage}"
+          for name in control runtime-control; do
+            directory="infra/aws/lambda/${name}"
             test -f "${directory}/package.json"
             test -f "${directory}/package-lock.json"
             test -d "${directory}/node_modules"
@@ -773,18 +791,54 @@ jobs:
               echo "::error::Lambda release inputs may contain only regular files and directories"
               exit 1
             fi
+            cp --archive -- "${directory}" "${lambda_stage}/${name}"
           done
+          if find "${lambda_stage}" \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Staged Lambda release may contain only regular files and directories"
+            exit 1
+          fi
           tar \
             --sort=name \
             --mtime='@0' \
             --owner=0 \
             --group=0 \
             --numeric-owner \
-            --directory infra/aws/lambda \
+            --directory "${lambda_stage}" \
             --create \
             --file - \
-            approval control |
-            gzip --no-name --best >"${RUNNER_TEMP}/archon-lambdas.tar.gz"
+            control runtime-control |
+            gzip --no-name --best >"${archive}"
+          tar --list --gzip --file "${archive}" >"${members}"
+          test -s "${members}"
+          while IFS= read -r member; do
+            case "${member}" in
+              control|control/*|runtime-control|runtime-control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda release archive member: ${member}"
+                exit 1
+                ;;
+            esac
+            if [[ "${member}" == /* || "${member}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe Lambda release archive member: ${member}"
+              exit 1
+            fi
+          done <"${members}"
+          if LC_ALL=C sort "${members}" | uniq --repeated | grep -q .; then
+            echo "::error::Duplicate Lambda release archive member"
+            exit 1
+          fi
+          for entry in \
+            control/index.js \
+            control/remediation.js \
+            control/package.json \
+            control/package-lock.json \
+            runtime-control/index.js \
+            runtime-control/session.js \
+            runtime-control/package.json \
+            runtime-control/package-lock.json; do
+            grep --fixed-strings --line-regexp --quiet "${entry}" "${members}"
+          done
           (
             cd "${RUNNER_TEMP}"
             sha256sum archon-lambdas.tar.gz >archon-lambdas.tar.gz.sha256
@@ -825,7 +879,7 @@ jobs:
             )
             case "${stage}" in
               staging) expected_template_count=3 ;;
-              production) expected_template_count=2 ;;
+              production) expected_template_count=3 ;;
               *) exit 1 ;;
             esac
             test "${#templates[@]}" -eq "${expected_template_count}"

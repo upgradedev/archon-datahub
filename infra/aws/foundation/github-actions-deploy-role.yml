@@ -117,6 +117,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${BootstrapStackName}/*
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Judge/*
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Edge/*
               - Sid: DetectExactStageIamFoundationDrift
                 Effect: Allow
@@ -335,6 +336,101 @@ Resources:
           Value: cloudformation
         - Key: Purpose
           Value: immutable-deployment
+        - Key: Environment
+          Value: !Ref DeploymentEnvironment
+
+  GitHubDataHubCloudTrialRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub archon-datahub-github-${DeploymentEnvironment}-cloud-trial
+      Description: !Sub >-
+        Short-lived GitHub OIDC role for the protected ${DeploymentEnvironment}
+        DataHub Cloud trial credential transaction only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubDataHubCloudTrialEnvironmentOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:${DeploymentEnvironment}
+      Policies:
+        - PolicyName: archon-datahub-cloud-trial-transaction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: VerifyCloudTrialCaller
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: ReadExactJudgeStackOutputBindings
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Judge/*
+              - Sid: DescribeExactCloudRuntimeSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+              - Sid: ReadOnlyRetainedCloudReaderSecretForStableKeys
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+              - Sid: StageAndPromoteExactCloudRuntimeSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:UpdateSecretVersionStage
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+              - Sid: DescribeOnlyExactJudgeSecretsKey
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases:
+                      - !Sub alias/archon/${DeploymentEnvironment}/judge-secrets
+              - Sid: UseOnlyExactJudgeSecretsKeyThroughSecretsManager
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases:
+                      - !Sub alias/archon/${DeploymentEnvironment}/judge-secrets
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService: secretsmanager.eu-west-1.amazonaws.com
+                  StringLike:
+                    "kms:EncryptionContext:SecretARN":
+                      - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                      - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Purpose
+          Value: datahub-cloud-trial-control-plane
         - Key: Environment
           Value: !Ref DeploymentEnvironment
 

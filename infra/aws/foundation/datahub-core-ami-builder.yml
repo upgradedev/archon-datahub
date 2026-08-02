@@ -87,8 +87,8 @@ Resources:
                   ${GitHubOrganization}/${GitHubRepository}
                 token.actions.githubusercontent.com:environment: !Ref GitHubEnvironment
                 token.actions.githubusercontent.com:ref: !Sub refs/heads/${GitHubBranch}
-                token.actions.githubusercontent.com:workflow_ref: !Sub >-
-                  ${GitHubOrganization}/${GitHubRepository}/.github/workflows/datahub-core-ami.yml@refs/heads/${GitHubBranch}
+                token.actions.githubusercontent.com:workflow_ref: >-
+                  upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master
       Tags:
         - Key: Application
           Value: archon-datahub

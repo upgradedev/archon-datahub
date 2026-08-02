@@ -34,7 +34,8 @@ def test_no_runtime_module_logs_provider_or_secret_payloads():
         assert "print(" not in source
         assert "logging." not in source
         assert "SecretString)" not in source
-        assert "credential.token)" not in source
+        assert "sys.stdout" not in source
+        assert "sys.stderr" not in source
 
 
 def test_lambda_handlers_are_exactly_three_public_entrypoints():

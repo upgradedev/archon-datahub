@@ -1502,7 +1502,7 @@ jobs:
 
           while IFS= read -r member; do
             case "$member" in
-              approval|approval/*|control|control/*) ;;
+              control|control/*|runtime-control|runtime-control/*) ;;
               *)
                 echo "::error::Unexpected Lambda archive member: $member"
                 exit 1
@@ -1537,13 +1537,14 @@ jobs:
             exit 1
           fi
           for entry in \
-            approval/index.js approval/handoff.js approval/package.json \
-            approval/package-lock.json control/index.js control/package.json \
-            control/package-lock.json; do
+            control/index.js control/remediation.js control/package.json \
+            control/package-lock.json runtime-control/index.js \
+            runtime-control/session.js runtime-control/package.json \
+            runtime-control/package-lock.json; do
             test -f "$LAMBDA_CONTENT_DIR/$entry"
           done
-          test -d "$LAMBDA_CONTENT_DIR/approval/node_modules"
           test -d "$LAMBDA_CONTENT_DIR/control/node_modules"
+          test -d "$LAMBDA_CONTENT_DIR/runtime-control/node_modules"
 
           if [[ -f "$EVIDENCE_DIR/live-runtime-manifest.json" ]]; then
             jq -e \
@@ -1633,19 +1634,19 @@ jobs:
             runtime_compare_dir="${RUNNER_TEMP}/runtime-ci-comparison"
             mkdir -p "${runtime_compare_dir}"
             emit_content_manifest \
-              "$LAMBDA_CONTENT_DIR/approval" \
-              "${runtime_compare_dir}/approval.json"
-            emit_content_manifest \
               "$LAMBDA_CONTENT_DIR/control" \
               "${runtime_compare_dir}/control.json"
+            emit_content_manifest \
+              "$LAMBDA_CONTENT_DIR/runtime-control" \
+              "${runtime_compare_dir}/runtime-control.json"
             emit_content_manifest \
               "$WEB_CONTENT_DIR" \
               "${runtime_compare_dir}/spa.json"
 
             for lambda_binding in \
-              "archon-production-approval:approval.json" \
-              "archon-production-approval-handoff:approval.json" \
-              "archon-production-control:control.json"; do
+              "archon-production-runtime-control:runtime-control.json" \
+              "archon-production-control:control.json" \
+              "archon-production-runtime-remediation:control.json"; do
               function_name="${lambda_binding%%:*}"
               ci_manifest="${lambda_binding#*:}"
               jq -cS \

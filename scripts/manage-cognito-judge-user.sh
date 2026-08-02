@@ -463,7 +463,7 @@ jq -e \
   ' "${identity_document}" >/dev/null ||
   fail "The assumed principal is not the exact stage-specific judge role session"
 
-stack_name="Archon-${ARCHON_STAGE}"
+stack_name="Archon-${ARCHON_STAGE}-Judge"
 stack_document="$(
   aws cloudformation describe-stacks \
     --region "${AWS_REGION}" \
