@@ -32,18 +32,6 @@
       "rationale": "The control API is intentionally dynamic and authenticated; API Gateway caching is disabled and CloudFront forwards Authorization through a dedicated zero-TTL cache policy."
     },
     {
-      "stage": "staging",
-      "ruleId": "AWS-0089",
-      "sarifLevel": "note",
-      "severity": "LOW",
-      "template": "staging/Archon-staging-Judge.template.json",
-      "resourceLogicalIdPattern": "^AccessLogBucket[A-F0-9]{8}$",
-      "resourcePath": "Archon-staging-Judge/AccessLogBucket/Resource",
-      "resourceType": "AWS::S3::Bucket",
-      "evidenceKind": "terminal-nonrecursive-log-sink",
-      "rationale": "AWS requires the terminal S3 server-access-log destination to remain unlogged; self-logging recursively creates unbounded objects. All source buckets, including the KMS-encrypted CloudFront log bucket, deliver server-access logs to bounded stage-scoped prefixes in this sink."
-    },
-    {
       "stage": "production",
       "ruleId": "AWS-0011",
       "sarifLevel": "error",
@@ -66,18 +54,6 @@
       "resourceType": "AWS::ApiGateway::Stage",
       "evidenceKind": "authenticated-zero-ttl-control-api",
       "rationale": "The control API is intentionally dynamic and authenticated; API Gateway caching is disabled and CloudFront forwards Authorization through a dedicated zero-TTL cache policy."
-    },
-    {
-      "stage": "production",
-      "ruleId": "AWS-0089",
-      "sarifLevel": "note",
-      "severity": "LOW",
-      "template": "production/Archon-production-Judge.template.json",
-      "resourceLogicalIdPattern": "^AccessLogBucket[A-F0-9]{8}$",
-      "resourcePath": "Archon-production-Judge/AccessLogBucket/Resource",
-      "resourceType": "AWS::S3::Bucket",
-      "evidenceKind": "terminal-nonrecursive-log-sink",
-      "rationale": "AWS requires the terminal S3 server-access-log destination to remain unlogged; self-logging recursively creates unbounded objects. All source buckets, including the KMS-encrypted CloudFront log bucket, deliver server-access logs to bounded stage-scoped prefixes in this sink."
     }
   ]
 }

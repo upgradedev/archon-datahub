@@ -441,13 +441,14 @@ async function mutateTemplate(value, stage, mutate) {
   await rewriteSarif(value);
 }
 
-test("accepts only the six exact evidence-bound findings", async () => {
+test("accepts only the four exact evidence-bound findings", async () => {
   await withFixture(async (value) => {
     const summary = await validate(value);
     assert.deepEqual(summary, {
       scanner: "Trivy 0.72.0",
-      reviewedExceptions: 6,
-      stages: ["staging", "production"]
+      reviewedExceptions: 4,
+      stages: ["staging", "production"],
+      validatedTerminalSinks: 2
     });
   });
 });

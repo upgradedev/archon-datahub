@@ -31,13 +31,8 @@ const REVIEWED_RULES = Object.freeze({
     resourceType: "AWS::ApiGateway::Stage",
     sarifLevel: "note",
     severity: "LOW"
-  },
-  "AWS-0089": {
-    evidenceKind: "terminal-nonrecursive-log-sink",
-    resourceType: "AWS::S3::Bucket",
-    sarifLevel: "note",
-    severity: "LOW"
   }
+
 });
 
 function invariant(condition, message) {
@@ -121,8 +116,8 @@ function validateContract(contract, now) {
   invariant(now.getTime() <= reviewDeadline.getTime(),
     "Trivy exceptions passed reviewBy and require re-review");
   invariant(Array.isArray(contract.exceptions) &&
-    contract.exceptions.length === 6,
-  "the reviewed exception set must contain exactly six entries");
+    contract.exceptions.length === 4,
+  "the reviewed exception set must contain exactly four entries");
 
   const seen = new Set();
   const stageRules = new Set();
@@ -193,8 +188,7 @@ function expectedResourcePath(stage, ruleId) {
     return "Archon-" + stage +
       "-Judge/JudgeApi/DeploymentStage." + stage + "/Resource";
   }
-  return "Archon-" + stage +
-    "-Judge/AccessLogBucket/Resource";
+  throw new Error("unsupported reviewed Trivy rule");
 }
 
 async function resolveTemplate(rootReal, uri) {
@@ -574,12 +568,7 @@ function verifyEvidence(
     );
     return;
   }
-  verifyTerminalSink(
-    template,
-    resource,
-    logicalId,
-    exception.stage
-  );
+  throw new Error("unsupported reviewed Trivy evidence rule");
 }
 
 function verifyResultMessage(result, exception, uri) {
@@ -716,11 +705,41 @@ export async function validateSarif({
     invariant(matched.has(key),
       "expected reviewed SARIF finding is missing: " + key);
   }
+
+  let validatedTerminalSinks = 0;
+  for (const stage of ["staging", "production"]) {
+    const uri = stage + "/Archon-" + stage +
+      "-Judge.template.json";
+    const templatePath = await resolveTemplate(rootReal, uri);
+    let cached = templateCache.get(templatePath);
+    if (!cached) {
+      cached = await readRegularJson(
+        templatePath,
+        MAX_TEMPLATE_BYTES,
+        "synthesized template"
+      );
+      templateCache.set(templatePath, cached);
+    }
+    const sink = resourceByPath(
+      cached.parsed,
+      "Archon-" + stage + "-Judge/AccessLogBucket/Resource"
+    );
+    invariant(sink.resource?.Type === "AWS::S3::Bucket",
+      "terminal access-log sink resource type drifted");
+    verifyTerminalSink(
+      cached.parsed,
+      sink.resource,
+      sink.logicalId,
+      stage
+    );
+    validatedTerminalSinks += 1;
+  }
   return {
     scanner: contract.scanner.name + " " +
       contract.scanner.version,
     reviewedExceptions: matched.size,
-    stages: ["staging", "production"]
+    stages: ["staging", "production"],
+    validatedTerminalSinks
   };
 }
 
