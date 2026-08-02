@@ -218,4 +218,235 @@ def exact_public_input(request: AnalyzeRequest) -> None:
         raise HTTPException(400, "question is outside the configured analytics scope")
 
 
+def datahub_client() -> DataHubClient:
+    server = os.environ.get("DATAHUB_GMS_URL", "")
+    token = os.environ.get("DATAHUB_GMS_TOKEN", "")
+    parsed = urlparse(server)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/", "/gms")
+        or parsed.port not in (None, 443, 9443)
+    ):
+        raise RuntimeError("DATAHUB_GMS_URL is outside the server policy")
+    if not token or len(token) > 8192:
+        raise RuntimeError("a bounded server-owned DataHub token is required")
+    return DataHubClient(server=server.rstrip("/"), token=token)
+
+
+def test_datahub_connection() -> None:
+    result = datahub_client()._graph.test_connection()
+    if result is False:
+        raise RuntimeError("DataHub connection check failed")
+
+
+def dataset_urns(search_result: Any) -> list[str]:
+    if not isinstance(search_result, dict):
+        return []
+    selected: set[str] = set()
+    results = search_result.get("searchResults")
+    if not isinstance(results, list):
+        return []
+    for entry in results[:50]:
+        if not isinstance(entry, dict):
+            continue
+        entity = entry.get("entity")
+        if not isinstance(entity, dict):
+            continue
+        entity_type = entity.get("type")
+        urn = entity.get("urn")
+        if (
+            isinstance(entity_type, str)
+            and entity_type.upper() == "DATASET"
+            and isinstance(urn, str)
+            and DATASET_URN.fullmatch(urn)
+        ):
+            selected.add(urn)
+    return sorted(selected)[:5]
+
+
+def tool_receipt(
+    name: str,
+    arguments: dict[str, Any],
+    result: Any,
+    status_value: Literal["verified", "unknown"] = "verified",
+) -> dict[str, Any]:
+    safe_result = sanitized(result)
+    return {
+        "tool": name,
+        "provider": "datahub-agent-context",
+        "status": status_value,
+        "argumentsDigest": digest(arguments),
+        "resultDigest": digest(safe_result),
+        "result": safe_result,
+    }
+
+
+def guarded_tool(
+    name: str,
+    arguments: dict[str, Any],
+    operation: Any,
+) -> dict[str, Any]:
+    try:
+        return tool_receipt(name, arguments, operation(**arguments))
+    except Exception as error:
+        return tool_receipt(
+            name,
+            arguments,
+            {"reason": "tool unavailable", "errorType": type(error).__name__},
+            "unknown",
+        )
+
+
+def collect_ack_context(query: str) -> dict[str, Any]:
+    receipts: list[dict[str, Any]] = []
+    with DataHubContext(datahub_client()):
+        search_args = {
+            "query": query,
+            "filter": "entity_type = dataset",
+            "num_results": 5,
+        }
+        search_result = search(**search_args)
+        receipts.append(tool_receipt("search", search_args, search_result))
+        selected = dataset_urns(search_result)
+        if not selected:
+            for name in (
+                "get_entities", "list_schema_fields", "get_lineage_upstream",
+                "get_lineage_downstream", "get_dataset_assertions",
+            ):
+                receipts.append(tool_receipt(
+                    name, {}, {"reason": "no resolved dataset"}, "unknown",
+                ))
+        else:
+            entity_args = {"urns": selected}
+            receipts.append(guarded_tool("get_entities", entity_args, get_entities))
+            root = selected[0]
+            schema_args = {"urn": root, "limit": 50, "offset": 0}
+            receipts.append(
+                guarded_tool("list_schema_fields", schema_args, list_schema_fields)
+            )
+            for upstream, label in (
+                (True, "get_lineage_upstream"),
+                (False, "get_lineage_downstream"),
+            ):
+                lineage_args = {
+                    "urn": root,
+                    "upstream": upstream,
+                    "max_hops": 2,
+                    "max_results": 30,
+                }
+                receipts.append(guarded_tool(label, lineage_args, get_lineage))
+            quality_args = {"urn": root, "start": 0, "count": 20}
+            receipts.append(guarded_tool(
+                "get_dataset_assertions", quality_args, get_dataset_assertions,
+            ))
+    envelope = {
+        "schemaVersion": "archon.datahub-context/v2",
+        "query": query,
+        "entityUrns": selected,
+        "receipts": receipts,
+        "unknownPreserved": any(r["status"] == "unknown" for r in receipts),
+    }
+    return {**envelope, "digest": digest(envelope)}
+
+
+def verify_locked_file(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
+    data = read_regular(path)
+    if (
+        len(data) != expected["size"]
+        or git_blob(data) != expected["gitBlob"]
+        or (
+            "sha256" in expected
+            and hashlib.sha256(data).hexdigest() != expected["sha256"]
+        )
+    ):
+        raise RuntimeError(f"DataHub Skill drift: {path.name}")
+    return {
+        "artifactDigest": "sha256:" + hashlib.sha256(data).hexdigest(),
+        "gitBlob": expected["gitBlob"],
+        "bytes": expected["size"],
+    }
+
+
+def load_skill_receipt() -> dict[str, Any]:
+    lock_path = Path(os.environ.get(
+        "ARCHON_AGENT_STACK_LOCK",
+        "/opt/archon/.github/locks/datahub-agent-stack.json",
+    ))
+    skills_root = Path(os.environ.get(
+        "ARCHON_DATAHUB_SKILLS_DIR", "/opt/archon/datahub-skills",
+    ))
+    custom_root = Path(os.environ.get(
+        "ARCHON_CUSTOM_SKILLS_DIR", "/opt/archon/contrib",
+    ))
+    lock = json.loads(read_regular(lock_path))
+    if lock.get("schemaVersion") != "archon.datahub-agent-stack-lock/v1":
+        raise RuntimeError("agent stack lock schema drift")
+    component = lock["components"]["dataHubSkills"]
+    official: list[dict[str, Any]] = []
+    for skill in OFFICIAL_SKILLS:
+        relative = f"skills/{skill}/SKILL.md"
+        verified = verify_locked_file(
+            skills_root / relative, component["files"][relative],
+        )
+        official.append({"skill": skill, **verified})
+    custom_relative = "contrib/datahub-audit/SKILL.md"
+    custom = verify_locked_file(
+        custom_root / "datahub-audit" / "SKILL.md",
+        component["customFiles"][custom_relative],
+    )
+    receipt = {
+        "schemaVersion": "archon.datahub-skills-receipt/v2",
+        "sourceCommit": component["source"]["commit"],
+        "official": official,
+        "custom": [{"skill": CUSTOM_SKILL, **custom}],
+        "workflow": [
+            "datahub-search", "datahub-lineage", "datahub-quality",
+            "datahub-audit", "datahub-enrich",
+        ],
+        "mutationAuthority": "archon-remediation-worker",
+    }
+    return {**receipt, "digest": digest(receipt)}
+
+
+def ground_skills(
+    skills: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    receipt_digests = {
+        receipt["tool"]: receipt["resultDigest"] for receipt in context["receipts"]
+    }
+    by_skill = {
+        "datahub-search": ("search", "get_entities", "list_schema_fields"),
+        "datahub-lineage": ("get_lineage_upstream", "get_lineage_downstream"),
+        "datahub-quality": ("get_dataset_assertions",),
+        "datahub-audit": tuple(receipt_digests),
+        "datahub-enrich": tuple(receipt_digests),
+        "using-datahub": tuple(receipt_digests),
+    }
+    artifacts = {
+        item["skill"]: item["artifactDigest"]
+        for item in skills["official"] + skills["custom"]
+    }
+    grounding = [{
+        "skill": name,
+        "sourceArtifactDigest": artifacts[name],
+        "ackReceiptDigests": [
+            receipt_digests[tool] for tool in by_skill[name]
+            if tool in receipt_digests
+        ],
+        "mode": "read-only" if name != "datahub-enrich" else "preview-only",
+    } for name in (*OFFICIAL_SKILLS, CUSTOM_SKILL)]
+    envelope = {
+        "schemaVersion": "archon.datahub-skill-grounding/v1",
+        "contextDigest": context["digest"],
+        "receipts": grounding,
+    }
+    return {**envelope, "digest": digest(envelope)}
+
+
 # __ARCHON_APPEND__
