@@ -313,7 +313,7 @@ def validate_contract(workflow: str, helper: str) -> None:
         (
             "deployment/deployment-evidence.json",
             "archon.aws-deployment-evidence/v2",
-            "deployment/observation.json",
+            'deployment_dir / "observation.json"',
             "archon.lean-runtime-observation/v1",
             "build-once-promote-exact-artifacts",
             "zeroIdleCore",
@@ -322,7 +322,7 @@ def validate_contract(workflow: str, helper: str) -> None:
             "availability/evidence.json",
             "archon.production-availability/v2",
             "attestations/production-availability/v2",
-            "availability/observation.json",
+            'availability_dir / "observation.json"',
             '["openid", "email", "profile", "archon/approve"]',
             "dt.timedelta(hours=7)",
             "availability_binding",
@@ -507,6 +507,23 @@ tamper_cases: dict[str, tuple[str, str]] = {
             workflow_text,
             "verify-lean-submission-runtime-source.sh",
             "verify-obsolete-runtime-source.sh",
+        ),
+        helper_text,
+    ),
+    "producer drops deployment observation binding": (
+        replace_exact(
+            workflow_text,
+            'deployment_dir / "observation.json"',
+            'deployment_dir / "deployment-evidence.json"',
+            count=2,
+        ),
+        helper_text,
+    ),
+    "producer drops availability observation binding": (
+        replace_exact(
+            workflow_text,
+            'availability_dir / "observation.json"',
+            'availability_dir / "evidence.json"',
         ),
         helper_text,
     ),
