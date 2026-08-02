@@ -417,6 +417,7 @@ async function recover(): Promise<void> {
     }
   }
   const after = await reader.readTagProjection(target);
+  exactProjection(after, manifest.target);
   const evidence = await createRecoveryEvidence({
     manifest, endpointBindingSha256: endpoints.digest, before, after, mutation,
     recoveredAt: new Date().toISOString(),
