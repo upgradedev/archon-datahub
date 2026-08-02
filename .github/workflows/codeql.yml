@@ -17,23 +17,42 @@ concurrency:
 
 jobs:
   analyze:
+    name: Analyze (${{ matrix.language }})
     permissions:
       contents: read
       security-events: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - javascript-typescript
+          - python
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - name: Initialize JavaScript and TypeScript CodeQL
+        if: matrix.language == 'javascript-typescript'
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          languages: javascript-typescript,python
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-and-quality
+      - name: Initialize Python CodeQL
+        if: matrix.language == 'python'
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: python
+          build-mode: none
+          config-file: ./.github/codeql/python.yml
           queries: security-and-quality
       - name: Analyze and upload CodeQL SARIF
         id: codeql
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
+          category: /language:${{ matrix.language }}
           output: ${{ runner.temp }}/codeql-results
           upload: always
       - name: Fail on any CodeQL finding or malformed scan evidence
@@ -88,7 +107,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codeql-${{ github.sha }}-${{ github.run_attempt }}
+          name: codeql-${{ matrix.language }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/codeql-results/**/*.sarif
           if-no-files-found: error
           retention-days: 30

@@ -14,6 +14,7 @@ import math
 import os
 import re
 import stat
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,8 +54,8 @@ MUTATION_TOOLS = frozenset({
 READ_ONLY_TOOLS = frozenset({
     "execute_sql", "list_tables", "get_schema", "preview_table", "create_chart",
     "search_documents", "grep_documents", "search", "get_entities",
-    "list_schema_fields", "get_lineage", "get_dataset_queries",
-    "search_business_context",
+    "list_schema_fields", "get_lineage", "get_lineage_paths_between",
+    "get_dataset_queries", "search_business_context",
 })
 EVENT_TYPES = frozenset({
     "TEXT", "TOOL_CALL", "TOOL_RESULT", "SQL", "CHART", "USAGE", "COMPLETE",
@@ -68,6 +69,34 @@ MAX_PROMPT_BYTES = 65_536
 MAX_PROMPT_CONTEXT_BYTES = 48_000
 QUALITY_ATTEMPTS = 8
 QUALITY_DELAY_SECONDS = 0.5
+MODEL_PROBE_SUCCESS_TTL_SECONDS = 300
+MODEL_PROBE_FAILURE_TTL_SECONDS = 15
+BEDROCK_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z0-9-]+-[0-9]$")
+MCP_PACKAGE = "mcp-server-datahub"
+MCP_VERSION = "0.6.0"
+MCP_SOURCE_COMMIT = "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9"
+MCP_TOOLS = tuple(sorted({
+    "get_dataset_queries",
+    "get_entities",
+    "get_lineage",
+    "get_lineage_paths_between",
+    "list_schema_fields",
+    "search",
+}))
+PRIVATE_ANALYTICS_URLS = frozenset({
+    "http://analytics-agent:8100",
+    "http://127.0.0.1:8100",
+    "http://localhost:8100",
+})
+PRIVATE_MCP_ENDPOINTS = {
+    "http://datahub-mcp:8000/mcp": "http://datahub-mcp:8000",
+    "http://127.0.0.1:8000/mcp": "http://127.0.0.1:8000",
+    "http://localhost:8000/mcp": "http://localhost:8000",
+}
+_model_probe_lock = asyncio.Lock()
+_model_probe_cache: tuple[str, float, dict[str, Any]] | None = None
+_model_probe_failure: tuple[str, float] | None = None
 
 
 class RuntimeBinding(BaseModel):
@@ -152,7 +181,7 @@ def sanitized(value: Any, depth: int = 0) -> Any:
             if not FORBIDDEN_KEY.search(key):
                 result[key] = sanitized(value[raw_key], depth + 1)
         return result
-    return str(value)[:512]
+    return "[unsupported]"
 
 
 def binding_value(binding: RuntimeBinding) -> dict[str, Any]:
@@ -221,27 +250,63 @@ def exact_public_input(request: AnalyzeRequest) -> None:
 def datahub_client() -> DataHubClient:
     server = os.environ.get("DATAHUB_GMS_URL", "")
     token = os.environ.get("DATAHUB_GMS_TOKEN", "")
+    profile = configured_runtime_identity()["profileId"]
     parsed = urlparse(server)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
+    try:
+        parsed_port = parsed.port
+    except ValueError as error:
+        raise RuntimeError(
+            "DATAHUB_GMS_URL is outside the server policy"
+        ) from error
+    common_policy_drift = (
+        not parsed.hostname
         or parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
         or parsed.path not in ("", "/", "/gms")
-        or parsed.port not in (None, 443, 9443)
-    ):
+    )
+    secure_server = (
+        parsed.scheme == "https"
+        and parsed_port in (None, 443, 9443)
+    )
+    isolated_core_loopback = (
+        profile == "core"
+        and parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and parsed_port == 18080
+        and parsed.path in ("", "/")
+    )
+    if common_policy_drift or not (secure_server or isolated_core_loopback):
         raise RuntimeError("DATAHUB_GMS_URL is outside the server policy")
     if not token or len(token) > 8192:
         raise RuntimeError("a bounded server-owned DataHub token is required")
     return DataHubClient(server=server.rstrip("/"), token=token)
 
 
-def test_datahub_connection() -> None:
+def test_datahub_connection() -> dict[str, Any]:
     result = datahub_client()._graph.test_connection()
     if result is False:
         raise RuntimeError("DataHub connection check failed")
+    profile = configured_runtime_identity()["profileId"]
+    receipt = {
+        "schemaVersion": "archon.agent-context-kit-health/v1",
+        "status": "verified",
+        "transport": (
+            "isolated-loopback-http"
+            if profile == "core"
+            and urlparse(os.environ["DATAHUB_GMS_URL"]).scheme == "http"
+            else "https"
+        ),
+        "endpointClass": (
+            "isolated-core-loopback"
+            if profile == "core"
+            and urlparse(os.environ["DATAHUB_GMS_URL"]).scheme == "http"
+            else "server-owned"
+        ),
+        "mutationsEnabled": False,
+    }
+    return {**receipt, "digest": digest(receipt)}
 
 
 def dataset_urns(search_result: Any) -> list[str]:
@@ -293,11 +358,11 @@ def guarded_tool(
 ) -> dict[str, Any]:
     try:
         return tool_receipt(name, arguments, operation(**arguments))
-    except Exception as error:
+    except Exception:
         return tool_receipt(
             name,
             arguments,
-            {"reason": "tool unavailable", "errorType": type(error).__name__},
+            {"reason": "tool unavailable"},
             "unknown",
         )
 
@@ -372,20 +437,78 @@ def verify_locked_file(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_skill_receipt() -> dict[str, Any]:
+def load_agent_stack_lock() -> dict[str, Any]:
     lock_path = Path(os.environ.get(
         "ARCHON_AGENT_STACK_LOCK",
         "/opt/archon/.github/locks/datahub-agent-stack.json",
     ))
+    lock = json.loads(read_regular(lock_path))
+    if (
+        not isinstance(lock, dict)
+        or lock.get("schemaVersion") != "archon.datahub-agent-stack-lock/v1"
+        or not isinstance(lock.get("components"), dict)
+    ):
+        raise RuntimeError("agent stack lock schema drift")
+    return lock
+
+
+def load_mcp_provenance() -> dict[str, Any]:
+    stack = load_agent_stack_lock()
+    component = stack["components"].get("mcpServer")
+    if not isinstance(component, dict):
+        raise RuntimeError("DataHub MCP component is missing from the lock")
+    delegated = component.get("delegatedLock")
+    if (
+        component.get("name") != MCP_PACKAGE
+        or component.get("version") != MCP_VERSION
+        or not isinstance(delegated, dict)
+        or delegated.get("path") != ".github/locks/datahub-mcp-v0.6.0.json"
+        or not isinstance(delegated.get("size"), int)
+        or not isinstance(delegated.get("sha256"), str)
+    ):
+        raise RuntimeError("DataHub MCP delegation drift")
+
+    delegated_path = Path(os.environ.get(
+        "ARCHON_DATAHUB_MCP_LOCK",
+        "/opt/archon/.github/locks/datahub-mcp-v0.6.0.json",
+    ))
+    data = read_regular(delegated_path)
+    if (
+        len(data) != delegated["size"]
+        or hashlib.sha256(data).hexdigest() != delegated["sha256"]
+    ):
+        raise RuntimeError("DataHub MCP delegated lock drift")
+    lock = json.loads(data)
+    if (
+        not isinstance(lock, dict)
+        or lock.get("schemaVersion") != "archon.datahub-mcp-lock/v5"
+        or lock.get("package", {}).get("name") != MCP_PACKAGE
+        or lock.get("package", {}).get("version") != MCP_VERSION
+        or lock.get("source", {}).get("commit") != MCP_SOURCE_COMMIT
+        or lock.get("resolution", {}).get("sourceBuilds") != "deny"
+    ):
+        raise RuntimeError("DataHub MCP provenance drift")
+    receipt = {
+        "schemaVersion": "archon.datahub-mcp-provenance/v1",
+        "package": MCP_PACKAGE,
+        "version": MCP_VERSION,
+        "sourceCommit": MCP_SOURCE_COMMIT,
+        "delegatedLockDigest": "sha256:" + delegated["sha256"],
+        "wheelDigest": "sha256:" + lock["package"]["wheel"]["sha256"],
+        "toolSurfaceDigest": digest(list(MCP_TOOLS)),
+        "mutationsEnabled": False,
+    }
+    return {**receipt, "digest": digest(receipt)}
+
+
+def load_skill_receipt() -> dict[str, Any]:
     skills_root = Path(os.environ.get(
         "ARCHON_DATAHUB_SKILLS_DIR", "/opt/archon/datahub-skills",
     ))
     custom_root = Path(os.environ.get(
         "ARCHON_CUSTOM_SKILLS_DIR", "/opt/archon/contrib",
     ))
-    lock = json.loads(read_regular(lock_path))
-    if lock.get("schemaVersion") != "archon.datahub-agent-stack-lock/v1":
-        raise RuntimeError("agent stack lock schema drift")
+    lock = load_agent_stack_lock()
     component = lock["components"]["dataHubSkills"]
     official: list[dict[str, Any]] = []
     for skill in OFFICIAL_SKILLS:
@@ -453,19 +576,18 @@ def analytics_url() -> str:
     configured = os.environ.get(
         "ARCHON_ANALYTICS_AGENT_URL", "http://analytics-agent:8100",
     )
-    parsed = urlparse(configured)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in {"analytics-agent", "127.0.0.1", "localhost"}
-        or parsed.port != 8100
-        or parsed.username
-        or parsed.password
-        or parsed.path not in ("", "/")
-        or parsed.query
-        or parsed.fragment
-    ):
+    if configured not in PRIVATE_ANALYTICS_URLS:
         raise RuntimeError("Analytics Agent URL is outside the private allowlist")
-    return configured.rstrip("/")
+    return configured
+
+
+def mcp_endpoint() -> str:
+    configured = os.environ.get(
+        "ARCHON_DATAHUB_MCP_URL", "http://datahub-mcp:8000/mcp",
+    )
+    if configured not in PRIVATE_MCP_ENDPOINTS:
+        raise RuntimeError("DataHub MCP URL is outside the private allowlist")
+    return configured
 
 
 def analytics_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -477,6 +599,43 @@ def analytics_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
     )
 
 
+def mcp_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url=PRIVATE_MCP_ENDPOINTS[mcp_endpoint()],
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+async def bounded_service_json(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    service: Literal["Analytics Agent", "DataHub MCP"],
+    body: dict[str, Any] | None = None,
+) -> Any:
+    request = client.build_request(method, path, json=body)
+    response = await client.send(request, stream=True)
+    try:
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError(f"{service} returned a non-success status")
+        media_type = response.headers.get("content-type", "").split(";", 1)[0]
+        if media_type != "application/json":
+            raise RuntimeError(f"{service} returned an unexpected media type")
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > MAX_JSON_BYTES:
+                raise RuntimeError(f"{service} JSON exceeded policy")
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
+    finally:
+        await response.aclose()
+
+
 async def bounded_json(
     client: httpx.AsyncClient,
     method: str,
@@ -484,24 +643,41 @@ async def bounded_json(
     *,
     body: dict[str, Any] | None = None,
 ) -> Any:
-    request = client.build_request(method, path, json=body)
-    response = await client.send(request, stream=True)
-    try:
-        if response.status_code < 200 or response.status_code >= 300:
-            raise RuntimeError("Analytics Agent returned a non-success status")
-        media_type = response.headers.get("content-type", "").split(";", 1)[0]
-        if media_type != "application/json":
-            raise RuntimeError("Analytics Agent returned an unexpected media type")
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > MAX_JSON_BYTES:
-                raise RuntimeError("Analytics Agent JSON exceeded policy")
-            chunks.append(chunk)
-        return json.loads(b"".join(chunks))
-    finally:
-        await response.aclose()
+    return await bounded_service_json(
+        client,
+        method,
+        path,
+        service="Analytics Agent",
+        body=body,
+    )
+
+
+async def mcp_preflight() -> dict[str, Any]:
+    provenance = load_mcp_provenance()
+    async with mcp_client(httpx.Timeout(5.0, connect=2.0)) as client:
+        health = await bounded_service_json(
+            client,
+            "GET",
+            "/health",
+            service="DataHub MCP",
+        )
+    if health != {"status": "ok"}:
+        raise RuntimeError("DataHub MCP health contract drift")
+    receipt = {
+        "schemaVersion": "archon.datahub-mcp-preflight/v1",
+        "status": "verified",
+        "health": "ok",
+        "transport": "streamable-http",
+        "endpointClass": "private-runtime",
+        "provenanceDigest": provenance["digest"],
+        "package": provenance["package"],
+        "version": provenance["version"],
+        "sourceCommit": provenance["sourceCommit"],
+        "toolSurface": list(MCP_TOOLS),
+        "toolSurfaceDigest": provenance["toolSurfaceDigest"],
+        "mutationsEnabled": False,
+    }
+    return {**receipt, "digest": digest(receipt)}
 
 
 def validate_connections(
@@ -510,7 +686,11 @@ def validate_connections(
 ) -> dict[str, Any]:
     if not isinstance(connections, list) or len(connections) > 100:
         raise RuntimeError("Analytics Agent connection inventory drift")
+    mcp_name = os.environ.get("ARCHON_DATAHUB_MCP_CONNECTION", "")
+    if not GENERATION.fullmatch(mcp_name):
+        raise RuntimeError("DataHub MCP connection is not configured")
     active_datahub: list[str] = []
+    active_mcp: list[str] = []
     engine_connected = False
     for item in connections:
         if not isinstance(item, dict):
@@ -522,27 +702,59 @@ def validate_connections(
             engine_connected = True
         if connection_type not in {"datahub", "datahub-mcp"} or not active:
             continue
+        if not isinstance(name, str) or not GENERATION.fullmatch(name):
+            raise RuntimeError("DataHub connection identity drift")
         tools = item.get("tools")
-        if not isinstance(tools, list):
-            raise RuntimeError("DataHub mutation policy is not observable")
+        if not isinstance(tools, list) or len(tools) > 100:
+            raise RuntimeError("DataHub tool policy is not observable")
         toggles: dict[str, bool] = {}
         for tool in tools:
             if not isinstance(tool, dict):
                 raise RuntimeError("DataHub tool policy schema drift")
             tool_name = tool.get("name")
             enabled = tool.get("enabled")
-            if isinstance(tool_name, str) and isinstance(enabled, bool):
-                toggles[tool_name] = enabled
-        for mutation in ("publish_analysis", "save_correction"):
-            if mutation not in toggles or toggles[mutation] is not False:
-                raise RuntimeError("Analytics Agent mutation tools are not disabled")
-        active_datahub.append(str(name))
+            if (
+                not isinstance(tool_name, str)
+                or not isinstance(enabled, bool)
+                or tool_name in toggles
+            ):
+                raise RuntimeError("DataHub tool policy schema drift")
+            toggles[tool_name] = enabled
+
+        if connection_type == "datahub-mcp":
+            if name != mcp_name:
+                raise RuntimeError("unreviewed DataHub MCP connection is active")
+            if (
+                set(toggles) != set(MCP_TOOLS)
+                or any(toggles[tool] is not True for tool in MCP_TOOLS)
+            ):
+                raise RuntimeError("DataHub MCP read-only tool surface drift")
+            fields = item.get("fields")
+            if not isinstance(fields, list):
+                raise RuntimeError("DataHub MCP endpoint is not observable")
+            endpoints = [
+                field.get("value")
+                for field in fields
+                if isinstance(field, dict) and field.get("key") == "url"
+            ]
+            if endpoints != [mcp_endpoint()]:
+                raise RuntimeError("Analytics Agent MCP endpoint binding drift")
+            active_mcp.append(name)
+        else:
+            for mutation in ("publish_analysis", "save_correction"):
+                if mutation not in toggles or toggles[mutation] is not False:
+                    raise RuntimeError("Analytics Agent mutation tools are not disabled")
+        active_datahub.append(name)
     if not active_datahub:
         raise RuntimeError("no connected DataHub context platform")
+    if active_mcp != [mcp_name]:
+        raise RuntimeError("configured DataHub MCP connection is not active")
     if not engine_connected:
         raise RuntimeError("configured Analytics engine is not connected")
     return {
         "activeDataHubConnections": sorted(active_datahub),
+        "mcpConnectionName": mcp_name,
+        "mcpToolSurfaceDigest": digest(list(MCP_TOOLS)),
         "engineName": engine_name,
         "mutationTools": {
             "publish_analysis": False,
@@ -551,7 +763,7 @@ def validate_connections(
     }
 
 
-async def analytics_preflight() -> dict[str, Any]:
+async def analytics_contract_preflight() -> dict[str, Any]:
     engine_name = os.environ.get("ARCHON_ANALYTICS_ENGINE", "")
     if not GENERATION.fullmatch(engine_name):
         raise RuntimeError("Analytics engine is not configured")
@@ -576,11 +788,188 @@ async def analytics_preflight() -> dict[str, Any]:
         raise RuntimeError("configured Analytics engine is unavailable")
     policy = validate_connections(connections, engine_name)
     receipt = {
-        "schemaVersion": "archon.analytics-agent-preflight/v1",
+        "schemaVersion": "archon.analytics-agent-process-preflight/v1",
         "status": "verified",
         "health": "ok",
         "engine": {"name": engine_name, "type": matching[0]["type"]},
         **policy,
+    }
+    return {**receipt, "digest": digest(receipt)}
+
+
+def analytics_model_identity() -> dict[str, Any]:
+    provider = os.environ.get("ARCHON_ANALYTICS_LLM_PROVIDER", "")
+    model = os.environ.get("ARCHON_ANALYTICS_LLM_MODEL", "")
+    region = os.environ.get("ARCHON_ANALYTICS_AWS_REGION", "")
+    if provider != "bedrock":
+        raise RuntimeError("Analytics model provider is outside policy")
+    if not BEDROCK_MODEL.fullmatch(model):
+        raise RuntimeError("Analytics model is not configured")
+    if not AWS_REGION.fullmatch(region):
+        raise RuntimeError("Analytics model region is not configured")
+    credential_mode = {
+        "usesIamRoleCredentials": True,
+        "usesStaticAwsKeys": False,
+    }
+    return {
+        "provider": provider,
+        "model": model,
+        "region": region,
+        **credential_mode,
+        "credentialModeDigest": digest(credential_mode),
+    }
+
+
+async def probe_analytics_model(identity: dict[str, Any]) -> dict[str, Any]:
+    async with analytics_client(httpx.Timeout(35.0, connect=3.0)) as client:
+        configured = await bounded_json(
+            client,
+            "GET",
+            "/api/settings/llm",
+        )
+        if (
+            not isinstance(configured, dict)
+            or configured.get("provider") != identity["provider"]
+            or configured.get("model") != identity["model"]
+            or configured.get("aws_region") != identity["region"]
+            or configured.get("has_key") is not True
+            or configured.get("has_aws_keys") is not False
+        ):
+            raise RuntimeError("Analytics model configuration drift")
+        tested = await bounded_json(
+            client,
+            "POST",
+            "/api/settings/llm/test",
+            body={
+                "provider": identity["provider"],
+                "model": identity["model"],
+                "aws_region": identity["region"],
+            },
+        )
+    if (
+        not isinstance(tested, dict)
+        or tested.get("ok") is not True
+        or not isinstance(tested.get("message", ""), str)
+    ):
+        raise RuntimeError("Analytics model connectivity probe failed")
+    verified_at = utc_now()
+    receipt = {
+        "schemaVersion": "archon.analytics-model-connectivity/v1",
+        "status": "verified",
+        "provider": identity["provider"],
+        "model": identity["model"],
+        "region": identity["region"],
+        "usesIamRoleCredentials": True,
+        "usesStaticAwsKeys": False,
+        "credentialModeDigest": identity["credentialModeDigest"],
+        "runtimeIdentityDigest": digest(configured_runtime_identity()),
+        "probeAttempts": 1,
+        "providerResponseStored": False,
+        "verifiedAt": verified_at.isoformat(),
+        "validUntil": (
+            verified_at + timedelta(seconds=MODEL_PROBE_SUCCESS_TTL_SECONDS)
+        ).isoformat(),
+    }
+    return {**receipt, "probeDigest": digest(receipt)}
+
+
+def aged_model_receipt(
+    receipt: dict[str, Any],
+    verified_monotonic: float,
+) -> dict[str, Any]:
+    age = max(0, int(time.monotonic() - verified_monotonic))
+    envelope = {
+        **receipt,
+        "cacheAgeSeconds": age,
+        "cacheTtlSeconds": MODEL_PROBE_SUCCESS_TTL_SECONDS,
+    }
+    return {**envelope, "digest": digest(envelope)}
+
+
+async def analytics_model_preflight() -> dict[str, Any]:
+    global _model_probe_cache, _model_probe_failure
+    identity = analytics_model_identity()
+    key = digest({
+        "runtime": configured_runtime_identity(),
+        "model": identity,
+    })
+    now = time.monotonic()
+    cached = _model_probe_cache
+    if cached is not None and cached[0] == key and now - cached[1] < MODEL_PROBE_SUCCESS_TTL_SECONDS:
+        return aged_model_receipt(cached[2], cached[1])
+    failed = _model_probe_failure
+    if failed is not None and failed[0] == key and now < failed[1]:
+        raise RuntimeError("Analytics model connectivity probe is unavailable")
+
+    async with _model_probe_lock:
+        now = time.monotonic()
+        cached = _model_probe_cache
+        if (
+            cached is not None
+            and cached[0] == key
+            and now - cached[1] < MODEL_PROBE_SUCCESS_TTL_SECONDS
+        ):
+            return aged_model_receipt(cached[2], cached[1])
+        failed = _model_probe_failure
+        if failed is not None and failed[0] == key and now < failed[1]:
+            raise RuntimeError("Analytics model connectivity probe is unavailable")
+        try:
+            receipt = await probe_analytics_model(identity)
+        except Exception as error:
+            _model_probe_cache = None
+            _model_probe_failure = (
+                key,
+                time.monotonic() + MODEL_PROBE_FAILURE_TTL_SECONDS,
+            )
+            raise RuntimeError(
+                "Analytics model connectivity probe is unavailable"
+            ) from error
+        verified_monotonic = time.monotonic()
+        _model_probe_cache = (key, verified_monotonic, receipt)
+        _model_probe_failure = None
+        return aged_model_receipt(receipt, verified_monotonic)
+
+
+async def analytics_preflight(
+    binding: RuntimeBinding | None = None,
+) -> dict[str, Any]:
+    mcp, process, model = await asyncio.gather(
+        mcp_preflight(),
+        analytics_contract_preflight(),
+        analytics_model_preflight(),
+    )
+    receipt = {
+        "schemaVersion": "archon.analytics-agent-preflight/v2",
+        "status": "verified",
+        "runtimeBindingDigest": (
+            binding_digest(binding)
+            if binding is not None
+            else digest(configured_runtime_identity())
+        ),
+        "dataHubMcpServer": {
+            "status": "verified",
+            "receiptDigest": mcp["digest"],
+            "toolSurfaceDigest": mcp["toolSurfaceDigest"],
+        },
+        "analyticsAgentProcess": {
+            "status": "verified",
+            "receiptDigest": process["digest"],
+        },
+        "analyticsModelConnectivity": {
+            "status": "verified",
+            "provider": model["provider"],
+            "model": model["model"],
+            "region": model["region"],
+            "usesIamRoleCredentials": model["usesIamRoleCredentials"],
+            "credentialModeDigest": model["credentialModeDigest"],
+            "cacheAgeSeconds": model["cacheAgeSeconds"],
+            "receiptDigest": model["digest"],
+        },
+        "engine": process["engine"],
+        "activeDataHubConnections": process["activeDataHubConnections"],
+        "mcpConnectionName": process["mcpConnectionName"],
+        "mcpToolSurfaceDigest": process["mcpToolSurfaceDigest"],
+        "mutationTools": process["mutationTools"],
     }
     return {**receipt, "digest": digest(receipt)}
 
@@ -599,8 +988,13 @@ def canonical_conversation_id(value: Any) -> str:
     return canonical_id
 
 
-def safe_conversation_path(conversation_id: str, suffix: str) -> str:
+def safe_conversation_path(
+    conversation_id: str,
+    suffix: Literal["messages", "quality"],
+) -> str:
     canonical_id = canonical_conversation_id(conversation_id)
+    if suffix not in {"messages", "quality"}:
+        raise RuntimeError("Analytics Agent conversation path is outside policy")
     return f"/api/conversations/{quote(canonical_id, safe='')}/{suffix}"
 
 
@@ -836,7 +1230,7 @@ def issue_run_handle(
         "issuedAt": int(now.timestamp()),
         "expiresAt": int(expires.timestamp()),
     }
-    token = handle_cipher().encrypt(canonical(payload)).decode("ascii")
+    token = handle_cipher().encrypt(canonical(payload)).decode("ascii").rstrip("=")
     handle = "run_" + token
     if not RUN_HANDLE.fullmatch(handle):
         raise RuntimeError("generated run handle is outside policy")
@@ -851,7 +1245,9 @@ def resolve_run_handle(
     if not RUN_HANDLE.fullmatch(handle):
         raise HTTPException(404, "run handle not found")
     try:
-        raw = handle_cipher().decrypt(handle[4:].encode("ascii"))
+        encoded = handle[4:]
+        padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+        raw = handle_cipher().decrypt(padded.encode("ascii"))
         if len(raw) > 4096:
             raise ValueError("oversized")
         payload = json.loads(raw)
@@ -946,36 +1342,109 @@ async def run_analytics(
     return {**projection, "digest": digest(projection)}
 
 
-async def component_health() -> tuple[dict[str, bool], bool]:
+async def component_health() -> tuple[
+    dict[str, bool],
+    dict[str, dict[str, Any]],
+    bool,
+]:
     runtime_ready = True
+    runtime_evidence: dict[str, Any] = {"status": "unknown"}
     try:
-        configured_runtime_identity()
+        identity = configured_runtime_identity()
         handle_cipher()
+        runtime_evidence = {
+            "status": "verified",
+            "identityDigest": digest(identity),
+        }
     except Exception:
         runtime_ready = False
     results = await asyncio.gather(
         asyncio.to_thread(test_datahub_connection),
         asyncio.to_thread(load_skill_receipt),
-        analytics_preflight(),
+        mcp_preflight(),
+        analytics_contract_preflight(),
+        analytics_model_preflight(),
         return_exceptions=True,
     )
+    mcp_ready = not isinstance(results[2], BaseException)
+    analytics_process_ready = not isinstance(results[3], BaseException)
+    analytics_model_ready = not isinstance(results[4], BaseException)
     components = {
         "runtimeBinding": runtime_ready,
+        "dataHubMcpServer": mcp_ready,
         "agentContextKit": not isinstance(results[0], BaseException),
         "dataHubSkills": not isinstance(results[1], BaseException),
-        "analyticsAgent": not isinstance(results[2], BaseException),
+        "analyticsAgentProcess": analytics_process_ready,
+        "analyticsModelConnectivity": analytics_model_ready,
+        "analyticsAgent": analytics_process_ready and analytics_model_ready,
     }
-    return components, all(components.values())
+    evidence: dict[str, dict[str, Any]] = {
+        "runtimeBinding": runtime_evidence,
+        "dataHubMcpServer": {"status": "unknown"},
+        "agentContextKit": {"status": "unknown"},
+        "dataHubSkills": {"status": "unknown"},
+        "analyticsAgentProcess": {"status": "unknown"},
+        "analyticsModelConnectivity": {"status": "unknown"},
+    }
+    if not isinstance(results[0], BaseException):
+        ack = results[0]
+        evidence["agentContextKit"] = {
+            "status": "verified",
+            "receiptDigest": ack["digest"],
+        }
+    if not isinstance(results[1], BaseException):
+        skills = results[1]
+        evidence["dataHubSkills"] = {
+            "status": "verified",
+            "sourceCommit": skills["sourceCommit"],
+            "receiptDigest": skills["digest"],
+        }
+    if mcp_ready:
+        mcp = results[2]
+        evidence["dataHubMcpServer"] = {
+            "status": "verified",
+            "package": mcp["package"],
+            "version": mcp["version"],
+            "sourceCommit": mcp["sourceCommit"],
+            "toolSurfaceDigest": mcp["toolSurfaceDigest"],
+            "receiptDigest": mcp["digest"],
+        }
+    if analytics_process_ready:
+        process = results[3]
+        evidence["analyticsAgentProcess"] = {
+            "status": "verified",
+            "engine": process["engine"],
+            "receiptDigest": process["digest"],
+        }
+    if analytics_model_ready:
+        model = results[4]
+        evidence["analyticsModelConnectivity"] = {
+            "status": "verified",
+            "provider": model["provider"],
+            "model": model["model"],
+            "region": model["region"],
+            "usesIamRoleCredentials": model["usesIamRoleCredentials"],
+            "credentialModeDigest": model["credentialModeDigest"],
+            "cacheAgeSeconds": model["cacheAgeSeconds"],
+            "receiptDigest": model["digest"],
+        }
+    return components, evidence, all(components.values())
+
+
+@app.get("/livez")
+async def live() -> dict[str, str]:
+    return {"status": "alive"}
 
 
 @app.get("/healthz")
 async def health() -> JSONResponse:
-    components, ready = await component_health()
+    components, evidence, ready = await component_health()
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
             "status": "ready" if ready else "starting",
             "components": components,
+            "evidence": evidence,
         },
     )
 
@@ -987,7 +1456,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         context, skills, preflight = await asyncio.gather(
             asyncio.to_thread(collect_ack_context, request.query),
             asyncio.to_thread(load_skill_receipt),
-            analytics_preflight(),
+            analytics_preflight(request.runtimeBinding),
         )
         grounding = ground_skills(skills, context)
         analytics = await run_analytics(
@@ -1021,7 +1490,7 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
 async def improve_context(request: ImproveRequest) -> dict[str, Any]:
     handle = resolve_run_handle(request.runHandle, request.runtimeBinding)
     try:
-        preflight = await analytics_preflight()
+        preflight = await analytics_preflight(request.runtimeBinding)
         prompt = canonical({
             "schemaVersion": "archon.analytics-improve-context/v1",
             "command": "/improve-context",

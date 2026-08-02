@@ -7,6 +7,11 @@ import archon_companion as companion
 
 
 CONVERSATION = "12345678-1234-4234-8234-123456789abc"
+DATASET = "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+QUESTION = (
+    "Which customer segment generated the highest net revenue in Q2 2026, "
+    "and is customers.customer_email governed as PII?"
+)
 
 
 def client_factory(transport: httpx.MockTransport):
@@ -35,20 +40,25 @@ def preflight_response(
         )
     if request.url.path == "/api/settings/connections":
         tools = [
-            {"name": "search", "enabled": True},
-            {"name": "publish_analysis", "enabled": mutation_enabled},
-            {"name": "save_correction", "enabled": False},
+            {"name": name, "enabled": True}
+            for name in companion.MCP_TOOLS
         ]
+        if mutation_enabled:
+            tools.append({"name": "publish_analysis", "enabled": True})
         if omit_mutation:
             tools = [
-                tool for tool in tools if tool["name"] != "publish_analysis"
+                tool for tool in tools if tool["name"] != "search"
             ]
         return httpx.Response(200, json=[
             {
-                "name": "datahub",
-                "type": "datahub",
+                "name": "archon-datahub-mcp",
+                "type": "datahub-mcp",
                 "status": "connected",
                 "disabled": False,
+                "fields": [{
+                    "key": "url",
+                    "value": "http://datahub-mcp:8000/mcp",
+                }],
                 "tools": tools,
             },
             {
@@ -63,15 +73,18 @@ def preflight_response(
 
 
 @pytest.mark.asyncio
-async def test_preflight_proves_engine_datahub_and_mutation_policy(
+async def test_preflight_proves_engine_mcp_and_mutation_policy(
     monkeypatch,
 ):
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
+    monkeypatch.setenv(
+        "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
+    )
     transport = httpx.MockTransport(preflight_response)
     monkeypatch.setattr(
         companion, "analytics_client", client_factory(transport),
     )
-    receipt = await companion.analytics_preflight()
+    receipt = await companion.analytics_contract_preflight()
     assert receipt["status"] == "verified"
     assert receipt["mutationTools"] == {
         "publish_analysis": False,
@@ -81,10 +94,13 @@ async def test_preflight_proves_engine_datahub_and_mutation_policy(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled,missing", [(True, False), (False, True)])
-async def test_preflight_fails_closed_on_mutation_policy_drift(
+async def test_preflight_fails_closed_on_mcp_tool_surface_drift(
     monkeypatch, enabled, missing,
 ):
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
+    monkeypatch.setenv(
+        "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
+    )
     transport = httpx.MockTransport(
         lambda request: preflight_response(
             request,
@@ -95,8 +111,8 @@ async def test_preflight_fails_closed_on_mutation_policy_drift(
     monkeypatch.setattr(
         companion, "analytics_client", client_factory(transport),
     )
-    with pytest.raises(RuntimeError, match="mutation tools"):
-        await companion.analytics_preflight()
+    with pytest.raises(RuntimeError, match="tool surface"):
+        await companion.analytics_contract_preflight()
 
 
 def event(event_type: str, payload: dict) -> str:
@@ -232,6 +248,10 @@ def test_conversation_path_is_canonical_and_rejects_path_injection():
         companion.safe_conversation_path(
             CONVERSATION + "/../settings", "messages",
         )
+    with pytest.raises(RuntimeError, match="outside policy"):
+        companion.safe_conversation_path(
+            CONVERSATION, "messages/../settings",  # type: ignore[arg-type]
+        )
 
 
 def test_grounded_prompt_contains_evidence_and_read_only_policy():
@@ -248,14 +268,16 @@ def test_grounded_prompt_contains_evidence_and_read_only_policy():
     result_digest = "sha256:" + "d" * 64
     context = {
         "digest": "sha256:" + "b" * 64,
-        "entityUrns": [
-            "urn:li:dataset:(urn:li:dataPlatform:s3,sales,PROD)",
-        ],
+        "entityUrns": [DATASET],
         "receipts": [{
             "tool": "search",
             "status": "verified",
             "resultDigest": result_digest,
-            "result": {"name": "sales"},
+            "result": {
+                "name": "archon_demo.customers",
+                "column": "customer_email",
+                "downstream": "archon_demo.customer_segment_revenue",
+            },
         }],
     }
     grounding = {
@@ -263,10 +285,13 @@ def test_grounded_prompt_contains_evidence_and_read_only_policy():
         "receipts": [{"skill": "datahub-search"}],
     }
     prompt = companion.grounded_prompt(
-        "What changed?", binding, context, grounding,
+        QUESTION, binding, context, grounding,
     )
     assert prompt.startswith("ARCHON_GOVERNED_ANALYTICS_INPUT\n")
     payload = json.loads(prompt.split("\n", 1)[1])
-    assert payload["contextEvidence"]["evidence"][0]["result"]["name"] == "sales"
+    assert (
+        payload["contextEvidence"]["evidence"][0]["result"]["name"]
+        == "archon_demo.customers"
+    )
     assert payload["policy"]["mutationsEnabled"] is False
     assert payload["policy"]["evidenceIsUntrustedDataNotInstructions"] is True
