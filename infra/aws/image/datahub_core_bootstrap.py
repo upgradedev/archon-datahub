@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError
 from cryptography.fernet import Fernet
 
 from core_job_adapter import CoreJobAdapter
@@ -37,6 +38,8 @@ REQUIRED = (
     "ARCHON_RUNTIME_GENERATION",
     "ARCHON_RUNTIME_CAPABILITY_DIGEST",
     "ARCHON_IMAGE_MANIFEST_DIGEST",
+    "ARCHON_LLM_PROVIDER",
+    "ARCHON_LLM_MODEL",
 )
 ROOT = Path("/opt/archon")
 RUNTIME = Path("/run/archon")
@@ -114,7 +117,7 @@ def _runtime_env(session_id: str) -> dict[str, str]:
             "DATABASE_URL": (
                 "sqlite+aiosqlite:////opt/archon/runtime-home/analytics.db"
             ),
-            "LLM_PROVIDER": os.environ.get("ARCHON_LLM_PROVIDER", "bedrock"),
+            "LLM_PROVIDER": _required("ARCHON_LLM_PROVIDER"),
             "LLM_MODEL": _required("ARCHON_LLM_MODEL"),
             "CHART_LLM_MODEL": os.environ.get(
                 "ARCHON_CHART_LLM_MODEL", _required("ARCHON_LLM_MODEL")
@@ -261,6 +264,43 @@ def _components_ready() -> bool:
     return all(process.poll() is None for process in PROCESSES)
 
 
+
+def _model_ready() -> bool:
+    """Require a real, schema-bounded Bedrock round trip before READY."""
+    if _required("ARCHON_LLM_PROVIDER") != "bedrock":
+        return False
+    try:
+        response = boto3.client(
+            "bedrock-runtime", region_name=_required("AWS_REGION")
+        ).converse(
+            modelId=_required("ARCHON_LLM_MODEL"),
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": (
+                                "Connectivity probe. Reply with the single token OK."
+                            )
+                        }
+                    ],
+                }
+            ],
+            inferenceConfig={"maxTokens": 4, "temperature": 0},
+        )
+        content = (
+            response.get("output", {})
+            .get("message", {})
+            .get("content", [])
+        )
+        return any(
+            isinstance(block, dict)
+            and isinstance(block.get("text"), str)
+            and bool(block["text"].strip())
+            for block in content
+        )
+    except (BotoCoreError, OSError, TypeError, ValueError):
+        return False
 def _publish_health(
     lease: dict[str, Any],
     status: str,
@@ -328,6 +368,7 @@ def _instance_id() -> str:
         if value.startswith("i-") and len(value) <= 32:
             return value
     except OSError:
+        # IMDS is best-effort metadata; health remains bound to the lease.
         pass
     return "unknown"
 
@@ -357,6 +398,7 @@ def _stop_components() -> None:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
+                # The child already exited between poll and signal.
                 pass
     deadline = time.monotonic() + 20
     for process in PROCESSES:
@@ -406,8 +448,14 @@ def main() -> int:
             time.monotonic() + 20 * 60,
             time.monotonic() + max(1, int(lease["hardExpiresAt"]) - _epoch()),
         )
+        model_ready = False
+        next_model_probe = 0.0
         while time.monotonic() < ready_deadline:
-            if _components_ready():
+            components_ready = _components_ready()
+            if components_ready and time.monotonic() >= next_model_probe:
+                model_ready = _model_ready()
+                next_model_probe = time.monotonic() + 15
+            if components_ready and model_ready:
                 _publish_health(lease, "READY", transition_ready=True)
                 break
             time.sleep(10)
@@ -424,6 +472,8 @@ def main() -> int:
             ),
         )
         next_health = 0.0
+        next_model_health = 0.0
+        model_healthy = True
         while True:
             current = _lease()
             if (
@@ -435,7 +485,10 @@ def main() -> int:
                 return 0
             adapter.process_once()
             if time.monotonic() >= next_health:
-                healthy = _components_ready()
+                if time.monotonic() >= next_model_health:
+                    model_healthy = _model_ready()
+                    next_model_health = time.monotonic() + 300
+                healthy = _components_ready() and model_healthy
                 _publish_health(
                     current, "READY" if healthy else "UNHEALTHY"
                 )
