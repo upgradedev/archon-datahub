@@ -48,6 +48,20 @@ OFFICIAL_SKILLS = (
     "datahub-enrich", "using-datahub",
 )
 CUSTOM_SKILL = "datahub-audit"
+SKILLS_VERSION = "1.4.1"
+SKILLS_SOURCE_COMMIT = "f7c7c53648b71dc0841742781e108051d46fa360"
+SKILL_WORKFLOW = (
+    "datahub-search", "datahub-lineage", "datahub-quality",
+    "datahub-audit", "datahub-enrich",
+)
+ACK_CANONICAL_READ_TOOLS = (
+    "search",
+    "get_entities",
+    "list_schema_fields",
+    "get_lineage_upstream",
+    "get_lineage_downstream",
+    "get_dataset_assertions",
+)
 MUTATION_TOOLS = frozenset({
     "publish_analysis", "save_correction", "add_tags", "add_owners",
     "set_domains", "update_description",
@@ -68,12 +82,25 @@ MAX_LINE_BYTES = 65_536
 MAX_JSON_BYTES = 262_144
 MAX_PROMPT_BYTES = 65_536
 MAX_PROMPT_CONTEXT_BYTES = 48_000
+MAX_MCP_PAGES = 10
+MAX_MCP_TOOLS = 100
+MAX_MCP_SSE_EVENTS = 4
+MAX_MCP_CONTENT_ITEMS = 20
+MAX_MCP_SEARCH_NODES = 10_000
 QUALITY_ATTEMPTS = 8
 QUALITY_DELAY_SECONDS = 0.5
 MODEL_PROBE_SUCCESS_TTL_SECONDS = 300
 MODEL_PROBE_FAILURE_TTL_SECONDS = 15
 BEDROCK_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z0-9-]+-[0-9]$")
+CLOUD_TENANT_HOST = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.acryl\.io$"
+)
+MCP_SESSION_ID = re.compile(r"^[A-Za-z0-9._~-]{1,256}$")
+MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+MCP_SERVER_INFO_VALUE = re.compile(r"^[ -~]{1,128}$")
+MCP_PROTOCOL_VERSION = "2025-06-18"
+CLOUD_MCP_PATH = "/integrations/ai/mcp"
 MCP_PACKAGE = "mcp-server-datahub"
 MCP_VERSION = "0.6.0"
 MCP_SOURCE_COMMIT = "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9"
@@ -85,15 +112,24 @@ MCP_TOOLS = tuple(sorted({
     "list_schema_fields",
     "search",
 }))
-PRIVATE_ANALYTICS_URLS = frozenset({
-    "http://analytics-agent:8100",
-    "http://127.0.0.1:8100",
-    "http://localhost:8100",
-})
+MCP_CANONICAL_READ_TOOLS = (
+    "search",
+    "get_entities",
+    "list_schema_fields",
+    "get_lineage",
+    "get_dataset_queries",
+)
+CANONICAL_DATASET_URN = (
+    "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+)
+CANONICAL_MCP_SEARCH_QUERY = "/q archon_demo+customers"
+CANONICAL_GOVERNED_COLUMN = "customer_email"
+PRIVATE_ANALYTICS_ENDPOINTS = {
+    "cloud": "http://127.0.0.1:8100",
+    "core": "http://archon-analytics:8100",
+}
 PRIVATE_MCP_ENDPOINTS = {
-    "http://datahub-mcp:8000/mcp": "http://datahub-mcp:8000",
-    "http://127.0.0.1:8000/mcp": "http://127.0.0.1:8000",
-    "http://localhost:8000/mcp": "http://localhost:8000",
+    "http://archon-read-mcp:8000/mcp": "http://archon-read-mcp:8000",
 }
 @dataclass
 class _ModelProbeState:
@@ -132,7 +168,7 @@ class ImproveRequest(BaseModel):
 
 
 app = FastAPI(
-    title="Archon DataHub Companion", version="0.2.0",
+    title="Archon DataHub Companion", version="0.3.0",
     docs_url=None, redoc_url=None, openapi_url=None,
 )
 
@@ -273,19 +309,26 @@ def datahub_client() -> DataHubClient:
         or parsed.path not in ("", "/", "/gms")
     )
     secure_server = (
-        parsed.scheme == "https"
-        and parsed_port in (None, 443, 9443)
+        profile == "cloud"
+        and parsed.scheme == "https"
+        and parsed_port in (None, 443)
+        and isinstance(parsed.hostname, str)
+        and CLOUD_TENANT_HOST.fullmatch(parsed.hostname) is not None
     )
-    isolated_core_loopback = (
+    isolated_core_read_bridge = (
         profile == "core"
         and parsed.scheme == "http"
-        and parsed.hostname in {"127.0.0.1", "localhost"}
-        and parsed_port == 18080
+        and parsed.hostname == "archon-gms"
+        and parsed_port == 8080
         and parsed.path in ("", "/")
     )
-    if common_policy_drift or not (secure_server or isolated_core_loopback):
+    if common_policy_drift or not (secure_server or isolated_core_read_bridge):
         raise RuntimeError("DATAHUB_GMS_URL is outside the server policy")
-    if not token or len(token) > 8192:
+    if (
+        not token
+        or len(token) > 8192
+        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in token)
+    ):
         raise RuntimeError("a bounded server-owned DataHub token is required")
     return DataHubClient(server=server.rstrip("/"), token=token)
 
@@ -299,13 +342,13 @@ def test_datahub_connection() -> dict[str, Any]:
         "schemaVersion": "archon.agent-context-kit-health/v1",
         "status": "verified",
         "transport": (
-            "isolated-loopback-http"
+            "isolated-bridge-http"
             if profile == "core"
             and urlparse(os.environ["DATAHUB_GMS_URL"]).scheme == "http"
             else "https"
         ),
         "endpointClass": (
-            "isolated-core-loopback"
+            "isolated-core-read-bridge"
             if profile == "core"
             and urlparse(os.environ["DATAHUB_GMS_URL"]).scheme == "http"
             else "server-owned"
@@ -347,7 +390,7 @@ def tool_receipt(
     status_value: Literal["verified", "unknown"] = "verified",
 ) -> dict[str, Any]:
     safe_result = sanitized(result)
-    return {
+    receipt = {
         "tool": name,
         "provider": "datahub-agent-context",
         "status": status_value,
@@ -355,6 +398,7 @@ def tool_receipt(
         "resultDigest": digest(safe_result),
         "result": safe_result,
     }
+    return {**receipt, "digest": digest(receipt)}
 
 
 def guarded_tool(
@@ -507,6 +551,77 @@ def load_mcp_provenance() -> dict[str, Any]:
     return {**receipt, "digest": digest(receipt)}
 
 
+def skill_execution_plan(skill: str) -> dict[str, Any]:
+    all_ack = ACK_CANONICAL_READ_TOOLS
+    all_mcp = MCP_CANONICAL_READ_TOOLS
+    specifications = {
+        "datahub-search": (
+            "metadata-discovery",
+            ("search", "get_entities", "list_schema_fields"),
+            ("search", "get_entities", "list_schema_fields"),
+            "read-only",
+        ),
+        "datahub-lineage": (
+            "impact-analysis",
+            ("get_lineage_upstream", "get_lineage_downstream"),
+            ("get_lineage",),
+            "read-only",
+        ),
+        "datahub-quality": (
+            "quality-evidence",
+            ("get_dataset_assertions",),
+            ("get_dataset_queries",),
+            "read-only",
+        ),
+        "datahub-audit": (
+            "governance-audit",
+            all_ack,
+            all_mcp,
+            "read-only",
+        ),
+        "datahub-enrich": (
+            "governed-enrichment-preview",
+            all_ack,
+            all_mcp,
+            "preview-only",
+        ),
+        "using-datahub": (
+            "datahub-operation-policy",
+            all_ack,
+            all_mcp,
+            "read-only",
+        ),
+    }
+    if skill not in specifications:
+        raise RuntimeError("DataHub Skill execution policy drift")
+    phase, ack_calls, mcp_calls, mode = specifications[skill]
+    return {
+        "phase": phase,
+        "requiredCalls": {
+            "ack": list(ack_calls),
+            "officialMcp": list(mcp_calls),
+        },
+        "mode": mode,
+    }
+
+
+def reviewed_skill_execution(
+    skill: str,
+    artifact_digest: str,
+) -> dict[str, Any]:
+    if DIGEST.fullmatch(artifact_digest) is None:
+        raise RuntimeError("DataHub Skill artifact digest drift")
+    plan = skill_execution_plan(skill)
+    binding = {
+        "sourceArtifactDigest": artifact_digest,
+        "executionPlan": plan,
+    }
+    return {
+        "executionPlan": plan,
+        "executionPlanDigest": digest(binding),
+    }
+
+
 def load_skill_receipt() -> dict[str, Any]:
     skills_root = Path(os.environ.get(
         "ARCHON_DATAHUB_SKILLS_DIR", "/opt/archon/datahub-skills",
@@ -515,85 +630,300 @@ def load_skill_receipt() -> dict[str, Any]:
         "ARCHON_CUSTOM_SKILLS_DIR", "/opt/archon/contrib",
     ))
     lock = load_agent_stack_lock()
-    component = lock["components"]["dataHubSkills"]
+    component = lock["components"].get("dataHubSkills")
+    if (
+        not isinstance(component, dict)
+        or component.get("name") != "datahub-skills"
+        or component.get("version") != SKILLS_VERSION
+        or not isinstance(component.get("source"), dict)
+        or component["source"].get("commit") != SKILLS_SOURCE_COMMIT
+        or not isinstance(component.get("files"), dict)
+        or not isinstance(component.get("customFiles"), dict)
+    ):
+        raise RuntimeError("DataHub Skills component drift")
     official: list[dict[str, Any]] = []
     for skill in OFFICIAL_SKILLS:
         relative = f"skills/{skill}/SKILL.md"
-        verified = verify_locked_file(
-            skills_root / relative, component["files"][relative],
+        expected = component["files"].get(relative)
+        if not isinstance(expected, dict):
+            raise RuntimeError("DataHub Skill lock entry drift")
+        verified = verify_locked_file(skills_root / relative, expected)
+        artifact = {"skill": skill, **verified}
+        artifact["reviewedExecution"] = reviewed_skill_execution(
+            skill, artifact["artifactDigest"],
         )
-        official.append({"skill": skill, **verified})
+        official.append(artifact)
     custom_relative = "contrib/datahub-audit/SKILL.md"
-    custom = verify_locked_file(
+    expected_custom = component["customFiles"].get(custom_relative)
+    if not isinstance(expected_custom, dict):
+        raise RuntimeError("DataHub Skill lock entry drift")
+    custom_verified = verify_locked_file(
         custom_root / "datahub-audit" / "SKILL.md",
-        component["customFiles"][custom_relative],
+        expected_custom,
+    )
+    custom_artifact = {"skill": CUSTOM_SKILL, **custom_verified}
+    custom_artifact["reviewedExecution"] = reviewed_skill_execution(
+        CUSTOM_SKILL, custom_artifact["artifactDigest"],
     )
     receipt = {
         "schemaVersion": "archon.datahub-skills-receipt/v2",
-        "sourceCommit": component["source"]["commit"],
+        "sourceCommit": SKILLS_SOURCE_COMMIT,
         "official": official,
-        "custom": [{"skill": CUSTOM_SKILL, **custom}],
-        "workflow": [
-            "datahub-search", "datahub-lineage", "datahub-quality",
-            "datahub-audit", "datahub-enrich",
-        ],
+        "custom": [custom_artifact],
+        "workflow": list(SKILL_WORKFLOW),
+        "reviewedSkillCount": len(OFFICIAL_SKILLS) + 1,
         "mutationAuthority": "archon-remediation-worker",
     }
     return {**receipt, "digest": digest(receipt)}
 
 
+def validated_skill_artifacts(
+    skills: Any,
+) -> dict[str, dict[str, Any]]:
+    if (
+        not isinstance(skills, dict)
+        or skills.get("schemaVersion") != "archon.datahub-skills-receipt/v2"
+        or skills.get("sourceCommit") != SKILLS_SOURCE_COMMIT
+        or skills.get("workflow") != list(SKILL_WORKFLOW)
+        or skills.get("reviewedSkillCount") != len(OFFICIAL_SKILLS) + 1
+        or skills.get("mutationAuthority") != "archon-remediation-worker"
+        or not DIGEST.fullmatch(str(skills.get("digest")))
+        or not isinstance(skills.get("official"), list)
+        or not isinstance(skills.get("custom"), list)
+    ):
+        raise RuntimeError("DataHub Skills receipt drift")
+    body = {key: value for key, value in skills.items() if key != "digest"}
+    if not hmac.compare_digest(skills["digest"], digest(body)):
+        raise RuntimeError("DataHub Skills receipt digest drift")
+    items = [*skills["official"], *skills["custom"]]
+    expected_names = [*OFFICIAL_SKILLS, CUSTOM_SKILL]
+    if (
+        len(items) != len(expected_names)
+        or any(not isinstance(item, dict) for item in items)
+        or [item.get("skill") for item in items] != expected_names
+    ):
+        raise RuntimeError("DataHub Skills artifact inventory drift")
+    artifacts: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise RuntimeError("DataHub Skill artifact receipt drift")
+        name = item["skill"]
+        artifact_digest = item.get("artifactDigest")
+        if (
+            not isinstance(artifact_digest, str)
+            or DIGEST.fullmatch(artifact_digest) is None
+            or item.get("reviewedExecution")
+            != reviewed_skill_execution(name, artifact_digest)
+        ):
+            raise RuntimeError("DataHub Skill artifact binding drift")
+        artifacts[name] = item
+    return artifacts
+
+
+def validated_ack_receipt_digests(
+    context: Any,
+) -> dict[str, str]:
+    if (
+        not isinstance(context, dict)
+        or not DIGEST.fullmatch(str(context.get("digest")))
+        or not isinstance(context.get("receipts"), list)
+    ):
+        raise RuntimeError("Agent Context Kit receipt drift")
+    receipts: dict[str, str] = {}
+    for receipt in context["receipts"]:
+        if not isinstance(receipt, dict):
+            raise RuntimeError("Agent Context Kit receipt drift")
+        name = receipt.get("tool")
+        receipt_digest = receipt.get("digest")
+        result_digest = receipt.get("resultDigest")
+        if (
+            name not in ACK_CANONICAL_READ_TOOLS
+            or name in receipts
+            or receipt.get("provider") != "datahub-agent-context"
+            or receipt.get("status") != "verified"
+            or not DIGEST.fullmatch(str(result_digest))
+            or not DIGEST.fullmatch(str(receipt_digest))
+        ):
+            raise RuntimeError("Agent Context Kit required call drift")
+        body = {key: value for key, value in receipt.items() if key != "digest"}
+        if not hmac.compare_digest(receipt_digest, digest(body)):
+            raise RuntimeError("Agent Context Kit receipt digest drift")
+        receipts[name] = receipt_digest
+    if set(receipts) != set(ACK_CANONICAL_READ_TOOLS):
+        raise RuntimeError("Agent Context Kit required calls missing")
+    return receipts
+
+
+def validated_mcp_receipt_digests(
+    official_mcp_reads: Any,
+) -> tuple[dict[str, str], str]:
+    if (
+        not isinstance(official_mcp_reads, dict)
+        or official_mcp_reads.get("schemaVersion")
+        != "archon.official-datahub-mcp-read-receipts/v1"
+        or official_mcp_reads.get("status") != "verified"
+        or official_mcp_reads.get("sequence")
+        != list(MCP_CANONICAL_READ_TOOLS)
+        or not DIGEST.fullmatch(str(official_mcp_reads.get("digest")))
+        or not isinstance(official_mcp_reads.get("receipts"), list)
+    ):
+        raise RuntimeError("official DataHub MCP receipts drift")
+    envelope_body = {
+        key: value for key, value in official_mcp_reads.items()
+        if key != "digest"
+    }
+    if not hmac.compare_digest(
+        official_mcp_reads["digest"], digest(envelope_body),
+    ):
+        raise RuntimeError("official DataHub MCP receipts digest drift")
+    receipts: dict[str, str] = {}
+    for receipt in official_mcp_reads["receipts"]:
+        if not isinstance(receipt, dict):
+            raise RuntimeError("official DataHub MCP receipt drift")
+        name = receipt.get("tool")
+        receipt_digest = receipt.get("digest")
+        if (
+            name not in MCP_CANONICAL_READ_TOOLS
+            or name in receipts
+            or receipt.get("status") != "verified"
+            or not DIGEST.fullmatch(str(receipt.get("resultDigest")))
+            or not DIGEST.fullmatch(str(receipt_digest))
+        ):
+            raise RuntimeError("official DataHub MCP receipt drift")
+        body = {key: value for key, value in receipt.items() if key != "digest"}
+        if not hmac.compare_digest(receipt_digest, digest(body)):
+            raise RuntimeError("official DataHub MCP receipt digest drift")
+        receipts[name] = receipt_digest
+    if set(receipts) != set(MCP_CANONICAL_READ_TOOLS):
+        raise RuntimeError("official DataHub MCP read sequence drift")
+    return receipts, official_mcp_reads["digest"]
+
+
 def ground_skills(
     skills: dict[str, Any],
     context: dict[str, Any],
+    official_mcp_reads: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    receipt_digests = {
-        receipt["tool"]: receipt["resultDigest"] for receipt in context["receipts"]
-    }
-    by_skill = {
-        "datahub-search": ("search", "get_entities", "list_schema_fields"),
-        "datahub-lineage": ("get_lineage_upstream", "get_lineage_downstream"),
-        "datahub-quality": ("get_dataset_assertions",),
-        "datahub-audit": tuple(receipt_digests),
-        "datahub-enrich": tuple(receipt_digests),
-        "using-datahub": tuple(receipt_digests),
-    }
-    artifacts = {
-        item["skill"]: item["artifactDigest"]
-        for item in skills["official"] + skills["custom"]
-    }
-    grounding = [{
-        "skill": name,
-        "sourceArtifactDigest": artifacts[name],
-        "ackReceiptDigests": [
-            receipt_digests[tool] for tool in by_skill[name]
-            if tool in receipt_digests
-        ],
-        "mode": "read-only" if name != "datahub-enrich" else "preview-only",
-    } for name in (*OFFICIAL_SKILLS, CUSTOM_SKILL)]
+    artifacts = validated_skill_artifacts(skills)
+    ack_digests = validated_ack_receipt_digests(context)
+    mcp_digests, mcp_envelope_digest = validated_mcp_receipt_digests(
+        official_mcp_reads,
+    )
+    grounding: list[dict[str, Any]] = []
+    for name in (*OFFICIAL_SKILLS, CUSTOM_SKILL):
+        artifact = artifacts[name]
+        reviewed = artifact["reviewedExecution"]
+        plan = reviewed["executionPlan"]
+        required_ack = plan["requiredCalls"]["ack"]
+        required_mcp = plan["requiredCalls"]["officialMcp"]
+        if (
+            any(tool not in ack_digests for tool in required_ack)
+            or any(tool not in mcp_digests for tool in required_mcp)
+        ):
+            raise RuntimeError("DataHub Skill required calls missing")
+        satisfied_ack = [
+            {"tool": tool, "receiptDigest": ack_digests[tool]}
+            for tool in required_ack
+        ]
+        satisfied_mcp = [
+            {"tool": tool, "receiptDigest": mcp_digests[tool]}
+            for tool in required_mcp
+        ]
+        execution = {
+            "schemaVersion": "archon.datahub-skill-execution-receipt/v2",
+            "skill": name,
+            "sourceArtifactDigest": artifact["artifactDigest"],
+            "executionPlan": plan,
+            "executionPlanDigest": reviewed["executionPlanDigest"],
+            "status": "previewed" if name == "datahub-enrich" else "executed",
+            "satisfiedAckCalls": satisfied_ack,
+            "satisfiedOfficialMcpCalls": satisfied_mcp,
+            "ackReceiptDigests": [
+                item["receiptDigest"] for item in satisfied_ack
+            ],
+            "officialMcpReadReceiptDigests": [
+                item["receiptDigest"] for item in satisfied_mcp
+            ],
+            "mode": plan["mode"],
+            "requiredCallsSatisfied": True,
+            "mutationsEnabled": False,
+            "providerPayloadStored": False,
+        }
+        grounding.append({**execution, "digest": digest(execution)})
     envelope = {
-        "schemaVersion": "archon.datahub-skill-grounding/v1",
-        "contextDigest": context["digest"],
+        "schemaVersion": "archon.datahub-skill-grounding/v2",
+        "skillsReceiptDigest": skills["digest"],
+        "ackContextDigest": context["digest"],
+        "officialMcpReadReceiptsDigest": mcp_envelope_digest,
+        "executionOrder": list(SKILL_WORKFLOW),
+        "allRequiredCallsSatisfied": True,
         "receipts": grounding,
     }
     return {**envelope, "digest": digest(envelope)}
 
 
 def analytics_url() -> str:
-    configured = os.environ.get(
-        "ARCHON_ANALYTICS_AGENT_URL", "http://analytics-agent:8100",
-    )
-    if configured not in PRIVATE_ANALYTICS_URLS:
+    profile = configured_runtime_identity()["profileId"]
+    expected = PRIVATE_ANALYTICS_ENDPOINTS[profile]
+    configured = os.environ.get("ARCHON_ANALYTICS_AGENT_URL", expected)
+    if configured != expected:
         raise RuntimeError("Analytics Agent URL is outside the private allowlist")
     return configured
 
 
+def cloud_mcp_endpoint() -> str:
+    server = os.environ.get("DATAHUB_GMS_URL", "")
+    parsed = urlparse(server)
+    try:
+        parsed_port = parsed.port
+    except ValueError as error:
+        raise RuntimeError("Cloud DataHub MCP endpoint policy drift") from None
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or parsed_port not in (None, 443)
+        or not isinstance(host, str)
+        or CLOUD_TENANT_HOST.fullmatch(host) is None
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/", "/gms")
+    ):
+        raise RuntimeError("Cloud DataHub MCP endpoint policy drift")
+    return f"https://{host}{CLOUD_MCP_PATH}"
+
+
+def cloud_mcp_token() -> str:
+    token = os.environ.get("DATAHUB_GMS_TOKEN", "")
+    if (
+        not token
+        or len(token) > 8192
+        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in token)
+    ):
+        raise RuntimeError("Cloud DataHub MCP credential policy drift")
+    return token
+
+
 def mcp_endpoint() -> str:
+    profile = configured_runtime_identity()["profileId"]
+    if profile == "cloud":
+        if os.environ.get("ARCHON_DATAHUB_MCP_URL"):
+            raise RuntimeError("Cloud DataHub MCP endpoint must be derived")
+        return cloud_mcp_endpoint()
     configured = os.environ.get(
-        "ARCHON_DATAHUB_MCP_URL", "http://datahub-mcp:8000/mcp",
+        "ARCHON_DATAHUB_MCP_URL", "http://archon-read-mcp:8000/mcp",
     )
     if configured not in PRIVATE_MCP_ENDPOINTS:
         raise RuntimeError("DataHub MCP URL is outside the private allowlist")
     return configured
+
+
+def mcp_request_path() -> str:
+    path = urlparse(mcp_endpoint()).path
+    if path not in {"/mcp", CLOUD_MCP_PATH}:
+        raise RuntimeError("DataHub MCP request path policy drift")
+    return path
 
 
 def analytics_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -606,6 +936,16 @@ def analytics_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
 
 
 def mcp_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    profile = configured_runtime_identity()["profileId"]
+    if profile == "cloud":
+        endpoint = urlparse(mcp_endpoint())
+        return httpx.AsyncClient(
+            base_url=f"https://{endpoint.hostname}",
+            headers={"Authorization": f"Bearer {cloud_mcp_token()}"},
+            timeout=timeout,
+            trust_env=False,
+            follow_redirects=False,
+        )
     return httpx.AsyncClient(
         base_url=PRIVATE_MCP_ENDPOINTS[mcp_endpoint()],
         timeout=timeout,
@@ -637,7 +977,10 @@ async def bounded_service_json(
             if total > MAX_JSON_BYTES:
                 raise RuntimeError(f"{service} JSON exceeded policy")
             chunks.append(chunk)
-        return json.loads(b"".join(chunks))
+        try:
+            return json.loads(b"".join(chunks))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError(f"{service} returned malformed JSON") from None
     finally:
         await response.aclose()
 
@@ -658,32 +1001,653 @@ async def bounded_json(
     )
 
 
-async def mcp_preflight() -> dict[str, Any]:
+async def bounded_mcp_bytes(response: httpx.Response) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_JSON_BYTES:
+            raise RuntimeError("DataHub MCP response exceeded policy")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def decode_mcp_sse(data: bytes) -> Any:
+    if not data or not (data.endswith(b"\n\n") or data.endswith(b"\r\n\r\n")):
+        raise RuntimeError("DataHub MCP SSE framing drift")
+    if any(len(line) > MAX_LINE_BYTES for line in data.splitlines()):
+        raise RuntimeError("DataHub MCP SSE framing exceeded policy")
+    try:
+        text = data.decode("utf-8", errors="strict").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        raise RuntimeError("DataHub MCP SSE encoding drift") from None
+    if "\r" in text:
+        raise RuntimeError("DataHub MCP SSE framing drift")
+    messages: list[Any] = []
+    for block in text.split("\n\n"):
+        if not block:
+            continue
+        event_name: str | None = None
+        data_lines: list[str] = []
+        for line in block.split("\n"):
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                if event_name is not None or value != "message":
+                    raise RuntimeError("DataHub MCP SSE event drift")
+                event_name = value
+            elif field == "data":
+                data_lines.append(value)
+            else:
+                raise RuntimeError("DataHub MCP SSE field drift")
+        if not data_lines:
+            continue
+        if event_name not in (None, "message"):
+            raise RuntimeError("DataHub MCP SSE event drift")
+        try:
+            messages.append(json.loads("\n".join(data_lines)))
+        except json.JSONDecodeError:
+            raise RuntimeError("DataHub MCP SSE payload drift") from None
+        if len(messages) > MAX_MCP_SSE_EVENTS:
+            raise RuntimeError("DataHub MCP SSE event count exceeded policy")
+    if len(messages) != 1:
+        raise RuntimeError("DataHub MCP SSE response count drift")
+    return messages[0]
+
+
+def decode_mcp_response(data: bytes, media_type: str, request_id: int) -> Any:
+    if media_type == "application/json":
+        try:
+            message = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise RuntimeError("DataHub MCP JSON response drift") from None
+    elif media_type == "text/event-stream":
+        message = decode_mcp_sse(data)
+    else:
+        raise RuntimeError("DataHub MCP response media type drift")
+    if (
+        not isinstance(message, dict)
+        or message.get("jsonrpc") != "2.0"
+        or type(message.get("id")) is not int
+        or message.get("id") != request_id
+        or "error" in message
+        or "result" not in message
+    ):
+        raise RuntimeError("DataHub MCP JSON-RPC response drift")
+    return message["result"]
+
+
+def mcp_headers(session_id: str | None = None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if session_id is not None:
+        headers["Mcp-Session-Id"] = session_id
+    return headers
+
+
+async def mcp_rpc(
+    client: httpx.AsyncClient,
+    request_id: int,
+    method: str,
+    params: dict[str, Any],
+    *,
+    session_id: str | None = None,
+) -> tuple[Any, str | None]:
+    if (
+        type(request_id) is not int
+        or not 1 <= request_id <= 10_000
+        or method not in {"initialize", "tools/list", "tools/call"}
+        or not isinstance(params, dict)
+    ):
+        raise RuntimeError("DataHub MCP request policy drift")
+    if method == "tools/call" and (
+        params.get("name") not in MCP_TOOLS
+        or not isinstance(params.get("arguments"), dict)
+    ):
+        raise RuntimeError("DataHub MCP tool call policy drift")
+    headers = mcp_headers(session_id)
+    if method != "initialize":
+        headers["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
+    request = client.build_request(
+        "POST",
+        mcp_request_path(),
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        },
+    )
+    response = await client.send(request, stream=True)
+    try:
+        data = await bounded_mcp_bytes(response)
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError("DataHub MCP returned a non-success status")
+        media_type = response.headers.get("content-type", "").split(";", 1)[0]
+        result = decode_mcp_response(data, media_type, request_id)
+        assigned = response.headers.get("mcp-session-id")
+        if assigned is not None and MCP_SESSION_ID.fullmatch(assigned) is None:
+            raise RuntimeError("DataHub MCP session policy drift")
+        if method != "initialize" and assigned is not None and (
+            session_id is None or not hmac.compare_digest(assigned, session_id)
+        ):
+            raise RuntimeError("DataHub MCP session binding drift")
+        return result, assigned if method == "initialize" else session_id
+    finally:
+        await response.aclose()
+
+
+async def mcp_initialized(
+    client: httpx.AsyncClient,
+    session_id: str | None,
+) -> None:
+    headers = mcp_headers(session_id)
+    headers["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
+    request = client.build_request(
+        "POST",
+        mcp_request_path(),
+        headers=headers,
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
+    response = await client.send(request, stream=True)
+    try:
+        data = await bounded_mcp_bytes(response)
+        if response.status_code not in {202, 204} or data:
+            raise RuntimeError("DataHub MCP initialized notification drift")
+    finally:
+        await response.aclose()
+
+
+async def close_mcp_session(
+    client: httpx.AsyncClient,
+    session_id: str,
+) -> None:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Mcp-Session-Id": session_id,
+        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+    }
+    response = await client.send(
+        client.build_request("DELETE", mcp_request_path(), headers=headers),
+        stream=True,
+    )
+    try:
+        await bounded_mcp_bytes(response)
+        if not (
+            200 <= response.status_code < 300
+            or response.status_code in {404, 405}
+        ):
+            raise RuntimeError("DataHub MCP session close drift")
+    finally:
+        await response.aclose()
+
+
+def validate_mcp_initialize(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise RuntimeError("DataHub MCP initialize contract drift")
+    capabilities = result.get("capabilities")
+    server_info = result.get("serverInfo")
+    if (
+        result.get("protocolVersion") != MCP_PROTOCOL_VERSION
+        or not isinstance(capabilities, dict)
+        or not isinstance(capabilities.get("tools"), dict)
+        or not isinstance(server_info, dict)
+        or not isinstance(server_info.get("name"), str)
+        or MCP_SERVER_INFO_VALUE.fullmatch(server_info["name"]) is None
+        or not isinstance(server_info.get("version"), str)
+        or MCP_SERVER_INFO_VALUE.fullmatch(server_info["version"]) is None
+    ):
+        raise RuntimeError("DataHub MCP initialize contract drift")
+    server_projection = {
+        "name": server_info["name"],
+        "version": server_info["version"],
+    }
+    projection = {
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": {"tools": True},
+        "serverInfo": server_projection,
+    }
+    return {
+        "serverInfo": server_projection,
+        "source": "server-reported",
+        "digest": digest(projection),
+    }
+
+
+def validate_mcp_tool_page(
+    result: Any,
+) -> tuple[list[dict[str, Any]], str | None]:
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        raise RuntimeError("DataHub MCP tool inventory drift")
+    if len(result["tools"]) > MAX_MCP_TOOLS:
+        raise RuntimeError("DataHub MCP tool inventory exceeded policy")
+    inventory: list[dict[str, Any]] = []
+    for tool in result["tools"]:
+        if not isinstance(tool, dict):
+            raise RuntimeError("DataHub MCP tool schema drift")
+        name = tool.get("name")
+        annotations = tool.get("annotations")
+        if (
+            not isinstance(name, str)
+            or MCP_TOOL_NAME.fullmatch(name) is None
+            or not isinstance(annotations, dict)
+        ):
+            raise RuntimeError("DataHub MCP tool schema drift")
+        for hint in ("readOnlyHint", "destructiveHint", "idempotentHint"):
+            if hint in annotations and not isinstance(annotations[hint], bool):
+                raise RuntimeError("DataHub MCP tool annotation drift")
+        inventory.append({
+            "name": name,
+            "readOnlyHint": annotations.get("readOnlyHint"),
+            "destructiveHint": annotations.get("destructiveHint"),
+        })
+    cursor = result.get("nextCursor")
+    if cursor is not None and (
+        not isinstance(cursor, str)
+        or not 1 <= len(cursor) <= 512
+        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in cursor)
+    ):
+        raise RuntimeError("DataHub MCP pagination cursor drift")
+    return inventory, cursor
+
+
+async def mcp_tool_inventory(
+    client: httpx.AsyncClient,
+    session_id: str | None,
+) -> tuple[list[dict[str, Any]], int]:
+    inventory: dict[str, dict[str, Any]] = {}
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    request_id = 2
+    for _ in range(MAX_MCP_PAGES):
+        params = {} if cursor is None else {"cursor": cursor}
+        result, _ = await mcp_rpc(
+            client,
+            request_id,
+            "tools/list",
+            params,
+            session_id=session_id,
+        )
+        page, next_cursor = validate_mcp_tool_page(result)
+        for tool in page:
+            if tool["name"] in inventory:
+                raise RuntimeError("DataHub MCP tool inventory contains duplicates")
+            inventory[tool["name"]] = tool
+            if len(inventory) > MAX_MCP_TOOLS:
+                raise RuntimeError("DataHub MCP tool inventory exceeded policy")
+        request_id += 1
+        if next_cursor is None:
+            return [inventory[name] for name in sorted(inventory)], request_id
+        if next_cursor in seen_cursors:
+            raise RuntimeError("DataHub MCP pagination cursor repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("DataHub MCP pagination exceeded policy")
+
+
+def validated_mcp_inventory(
+    inventory: list[dict[str, Any]],
+    *,
+    exact_surface: bool,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    by_name = {tool["name"]: tool for tool in inventory}
+    missing = set(MCP_TOOLS) - set(by_name)
+    incorrect = [
+        name for name in MCP_TOOLS
+        if name in by_name and (
+            by_name[name]["readOnlyHint"] is not True
+            or by_name[name]["destructiveHint"] is not False
+        )
+    ]
+    names = sorted(by_name)
+    if missing or incorrect or (exact_surface and names != list(MCP_TOOLS)):
+        raise RuntimeError("DataHub MCP required read-only tool surface drift")
+    additional = sorted(set(names) - set(MCP_TOOLS))
+    inventory_projection = {
+        "count": len(names),
+        "names": names,
+        "annotations": inventory,
+    }
+    receipt = {
+        "count": len(names),
+        "names": names,
+        "digest": digest(inventory_projection),
+        "matchesSelectedSurface": names == list(MCP_TOOLS),
+        "additionalToolsAdvertised": additional,
+    }
+    return by_name, receipt
+
+
+def canonical_mcp_read_plan() -> tuple[tuple[str, dict[str, Any]], ...]:
+    dataset = os.environ.get("ARCHON_DEMO_QUERY", "")
+    if not hmac.compare_digest(dataset, CANONICAL_DATASET_URN):
+        raise RuntimeError("canonical DataHub MCP dataset scope drift")
+    return (
+        ("search", {
+            "query": CANONICAL_MCP_SEARCH_QUERY,
+            "filter": "entity_type = dataset",
+            "num_results": 5,
+            "offset": 0,
+        }),
+        ("get_entities", {"urns": [dataset]}),
+        ("list_schema_fields", {
+            "urn": dataset,
+            "keywords": [CANONICAL_GOVERNED_COLUMN],
+            "limit": 50,
+            "offset": 0,
+        }),
+        ("get_lineage", {
+            "urn": dataset,
+            "upstream": False,
+            "max_hops": 2,
+            "max_results": 30,
+            "offset": 0,
+        }),
+        ("get_dataset_queries", {
+            "urn": dataset,
+            "start": 0,
+            "count": 10,
+        }),
+    )
+
+
+def structured_value_contains_exact(value: Any, expected: str) -> bool:
+    pending = [value]
+    reviewed = 0
+    while pending:
+        current = pending.pop()
+        reviewed += 1
+        if reviewed > MAX_MCP_SEARCH_NODES:
+            raise RuntimeError("DataHub MCP search result exceeded policy")
+        if isinstance(current, str):
+            if hmac.compare_digest(current, expected):
+                return True
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+    return False
+
+
+def mcp_search_resolves_canonical_dataset(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    candidates: list[Any] = []
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        candidates.append(structured)
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            try:
+                candidates.append(json.loads(item["text"]))
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return any(
+        structured_value_contains_exact(candidate, CANONICAL_DATASET_URN)
+        for candidate in candidates
+    )
+
+
+def official_mcp_tool_receipt(
+    name: str,
+    arguments: dict[str, Any],
+    result: Any,
+    *,
+    canonical_dataset_resolved: bool | None = None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise RuntimeError("DataHub MCP tool result schema drift")
+    is_error = result.get("isError", False)
+    content = result.get("content")
+    if (
+        not isinstance(is_error, bool)
+        or is_error
+        or not isinstance(content, list)
+        or not 1 <= len(content) <= MAX_MCP_CONTENT_ITEMS
+    ):
+        raise RuntimeError("DataHub MCP tool result contract drift")
+    content_digests: list[str] = []
+    for item in content:
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "text"
+            or not isinstance(item.get("text"), str)
+        ):
+            raise RuntimeError("DataHub MCP tool content contract drift")
+        content_digests.append(digest({
+            "type": "text",
+            "text": item["text"],
+        }))
+    structured = result.get("structuredContent")
+    if structured is not None and not isinstance(structured, dict):
+        raise RuntimeError("DataHub MCP structured content drift")
+    response_shape = {
+        "contentTypes": ["text"] * len(content),
+        "contentDigests": content_digests,
+        "hasStructuredContent": structured is not None,
+        "structuredContentDigest": (
+            digest(structured) if structured is not None else None
+        ),
+    }
+    receipt = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipt/v1",
+        "provider": "official-datahub-mcp",
+        "tool": name,
+        "status": "verified",
+        "argumentsDigest": digest(arguments),
+        "resultDigest": digest(result),
+        "resultBytes": len(canonical(result)),
+        "responseShape": response_shape,
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
+    }
+    if name == "search":
+        if canonical_dataset_resolved is not True:
+            raise RuntimeError("DataHub MCP search did not resolve canonical dataset")
+        receipt["canonicalDatasetResolved"] = True
+        receipt["canonicalDatasetUrnDigest"] = digest(CANONICAL_DATASET_URN)
+    elif canonical_dataset_resolved is not None:
+        raise RuntimeError("DataHub MCP read receipt scope drift")
+    return {**receipt, "digest": digest(receipt)}
+
+
+async def official_mcp_read_sequence(
+    client: httpx.AsyncClient,
+    session_id: str | None,
+    inventory: dict[str, dict[str, Any]],
+    request_id: int,
+) -> dict[str, Any]:
+    receipts: list[dict[str, Any]] = []
+    for name, arguments in canonical_mcp_read_plan():
+        definition = inventory.get(name)
+        if (
+            name not in MCP_TOOLS
+            or definition is None
+            or definition["readOnlyHint"] is not True
+            or definition["destructiveHint"] is not False
+        ):
+            raise RuntimeError("DataHub MCP read call policy drift")
+        result, _ = await mcp_rpc(
+            client,
+            request_id,
+            "tools/call",
+            {"name": name, "arguments": arguments},
+            session_id=session_id,
+        )
+        canonical_resolved = (
+            mcp_search_resolves_canonical_dataset(result)
+            if name == "search"
+            else None
+        )
+        receipts.append(official_mcp_tool_receipt(
+            name,
+            arguments,
+            result,
+            canonical_dataset_resolved=canonical_resolved,
+        ))
+        request_id += 1
+    envelope = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipts/v1",
+        "status": "verified",
+        "profileId": configured_runtime_identity()["profileId"],
+        "sequence": list(MCP_CANONICAL_READ_TOOLS),
+        "receipts": receipts,
+        "allRequiredReadsVerified": True,
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
+    }
+    return {**envelope, "digest": digest(envelope)}
+
+
+async def mcp_protocol_proof(
+    client: httpx.AsyncClient,
+    *,
+    exact_surface: bool,
+) -> dict[str, Any]:
+    initialized, session_id = await mcp_rpc(
+        client,
+        1,
+        "initialize",
+        {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {
+                "name": "archon-datahub-companion",
+                "version": "0.3.0",
+            },
+        },
+    )
+    initialize_receipt = validate_mcp_initialize(initialized)
+    try:
+        await mcp_initialized(client, session_id)
+        inventory, request_id = await mcp_tool_inventory(client, session_id)
+        selected, inventory_receipt = validated_mcp_inventory(
+            inventory,
+            exact_surface=exact_surface,
+        )
+        reads = await official_mcp_read_sequence(
+            client,
+            session_id,
+            selected,
+            request_id,
+        )
+    finally:
+        if session_id is not None:
+            await close_mcp_session(client, session_id)
+    return {
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "sessionMode": (
+            "server-assigned" if session_id is not None else "stateless"
+        ),
+        "initializeDigest": initialize_receipt["digest"],
+        "serverInfo": initialize_receipt["serverInfo"],
+        "serverInfoSource": initialize_receipt["source"],
+        "serverInventory": inventory_receipt,
+        "officialMcpReadReceipts": reads,
+    }
+
+
+async def core_mcp_preflight() -> dict[str, Any]:
     provenance = load_mcp_provenance()
-    async with mcp_client(httpx.Timeout(5.0, connect=2.0)) as client:
+    async with mcp_client(httpx.Timeout(30.0, connect=2.0)) as client:
         health = await bounded_service_json(
             client,
             "GET",
             "/health",
             service="DataHub MCP",
         )
-    if health != {"status": "ok"}:
-        raise RuntimeError("DataHub MCP health contract drift")
+        if health != {"status": "ok"}:
+            raise RuntimeError("DataHub MCP health contract drift")
+        proof = await mcp_protocol_proof(client, exact_surface=True)
+    identity_binding = {
+        "reportingMode": "server-reported-cross-bound-to-pinned-artifact",
+        "serverInfo": proof["serverInfo"],
+        "serverInfoDigest": digest(proof["serverInfo"]),
+        "pinnedArtifact": {
+            "package": provenance["package"],
+            "version": provenance["version"],
+            "sourceCommit": provenance["sourceCommit"],
+            "provenanceDigest": provenance["digest"],
+        },
+    }
+    server_identity = {
+        **identity_binding,
+        "digest": digest(identity_binding),
+    }
     receipt = {
-        "schemaVersion": "archon.datahub-mcp-preflight/v1",
+        "schemaVersion": "archon.datahub-mcp-preflight/v2",
         "status": "verified",
+        "deployment": "self-hosted-core",
         "health": "ok",
         "transport": "streamable-http",
-        "endpointClass": "private-runtime",
+        "endpointClass": "isolated-core-read-bridge",
+        "authentication": "isolated-read-mcp-peer",
         "provenanceDigest": provenance["digest"],
         "package": provenance["package"],
         "version": provenance["version"],
         "sourceCommit": provenance["sourceCommit"],
+        **proof,
+        "serverIdentity": server_identity,
         "toolSurface": list(MCP_TOOLS),
+        "selectedToolSurface": list(MCP_TOOLS),
         "toolSurfaceDigest": provenance["toolSurfaceDigest"],
+        "requiredReadOnlyAnnotationsVerified": True,
         "mutationsEnabled": False,
+        "selectedMutationsEnabled": False,
+        "providerPayloadStored": False,
     }
     return {**receipt, "digest": digest(receipt)}
+
+
+async def managed_cloud_mcp_preflight() -> dict[str, Any]:
+    async with mcp_client(httpx.Timeout(30.0, connect=3.0)) as client:
+        proof = await mcp_protocol_proof(client, exact_surface=False)
+    identity_projection = {
+        "reportingMode": "server-reported-unpinned-managed-service",
+        "serverInfo": proof["serverInfo"],
+        "serverInfoDigest": digest(proof["serverInfo"]),
+    }
+    server_identity = {
+        **identity_projection,
+        "digest": digest(identity_projection),
+    }
+    receipt = {
+        "schemaVersion": "archon.datahub-managed-mcp-preflight/v2",
+        "status": "verified",
+        "deployment": "managed-datahub-cloud",
+        "transport": "streamable-http",
+        "endpointClass": "datahub-cloud-tenant",
+        "endpointDerivedFrom": "server-owned-gms-tenant-host",
+        "authentication": "server-owned-service-account-bearer-header",
+        **proof,
+        "serverIdentity": server_identity,
+        "toolSurface": list(MCP_TOOLS),
+        "selectedToolSurface": list(MCP_TOOLS),
+        "toolSurfaceDigest": digest(list(MCP_TOOLS)),
+        "requiredReadOnlyAnnotationsVerified": True,
+        "mutationsEnabled": False,
+        "selectedMutationsEnabled": False,
+        "mutationNegativeProbePerformed": False,
+        "readerMutationDenialProof": "required-separate-live-bootstrap",
+        "providerPayloadStored": False,
+    }
+    return {**receipt, "digest": digest(receipt)}
+
+
+async def mcp_preflight() -> dict[str, Any]:
+    if configured_runtime_identity()["profileId"] == "cloud":
+        return await managed_cloud_mcp_preflight()
+    return await core_mcp_preflight()
 
 
 def validate_connections(
@@ -692,6 +1656,7 @@ def validate_connections(
 ) -> dict[str, Any]:
     if not isinstance(connections, list) or len(connections) > 100:
         raise RuntimeError("Analytics Agent connection inventory drift")
+    profile = configured_runtime_identity()["profileId"]
     mcp_name = os.environ.get("ARCHON_DATAHUB_MCP_CONNECTION", "")
     if not GENERATION.fullmatch(mcp_name):
         raise RuntimeError("DataHub MCP connection is not configured")
@@ -730,9 +1695,18 @@ def validate_connections(
         if connection_type == "datahub-mcp":
             if name != mcp_name:
                 raise RuntimeError("unreviewed DataHub MCP connection is active")
+            selected_ready = all(
+                toggles.get(tool) is True for tool in MCP_TOOLS
+            )
+            unselected_enabled = any(
+                enabled is True
+                for tool, enabled in toggles.items()
+                if tool not in MCP_TOOLS
+            )
             if (
-                set(toggles) != set(MCP_TOOLS)
-                or any(toggles[tool] is not True for tool in MCP_TOOLS)
+                not selected_ready
+                or unselected_enabled
+                or (profile == "core" and set(toggles) != set(MCP_TOOLS))
             ):
                 raise RuntimeError("DataHub MCP read-only tool surface drift")
             fields = item.get("fields")
@@ -892,8 +1866,10 @@ def aged_model_receipt(
     return {**envelope, "digest": digest(envelope)}
 
 
-async def analytics_model_preflight() -> dict[str, Any]:
-    state = _model_probe_state
+async def analytics_model_preflight(
+    state: _ModelProbeState | None = None,
+) -> dict[str, Any]:
+    state = state if state is not None else _model_probe_state
     identity = analytics_model_identity()
     key = digest({
         "runtime": configured_runtime_identity(),
@@ -938,11 +1914,18 @@ async def analytics_model_preflight() -> dict[str, Any]:
 
 async def analytics_preflight(
     binding: RuntimeBinding | None = None,
+    *,
+    model_probe_state: _ModelProbeState | None = None,
 ) -> dict[str, Any]:
+    model_probe = (
+        analytics_model_preflight()
+        if model_probe_state is None
+        else analytics_model_preflight(model_probe_state)
+    )
     mcp, process, model = await asyncio.gather(
         mcp_preflight(),
         analytics_contract_preflight(),
-        analytics_model_preflight(),
+        model_probe,
     )
     receipt = {
         "schemaVersion": "archon.analytics-agent-preflight/v2",
@@ -956,6 +1939,10 @@ async def analytics_preflight(
             "status": "verified",
             "receiptDigest": mcp["digest"],
             "toolSurfaceDigest": mcp["toolSurfaceDigest"],
+            "officialMcpReadReceipts": mcp["officialMcpReadReceipts"],
+            "officialMcpReadReceiptsDigest": (
+                mcp["officialMcpReadReceipts"]["digest"]
+            ),
         },
         "analyticsAgentProcess": {
             "status": "verified",
@@ -1028,15 +2015,44 @@ def project_event(
     payload = event.get("payload")
     if not isinstance(payload, dict):
         raise RuntimeError("Analytics Agent event payload drift")
+    projected_payload = sanitized(payload)
     if event_type in {"TOOL_CALL", "TOOL_RESULT"}:
         tool_name = payload.get("tool_name")
         if tool_name in MUTATION_TOOLS:
             raise RuntimeError("Analytics Agent attempted a mutation")
         if tool_name not in READ_ONLY_TOOLS:
             raise RuntimeError("Analytics Agent invoked an unreviewed tool")
+        if event_type == "TOOL_CALL":
+            if (
+                set(payload) != {"tool_name", "tool_input"}
+                or not isinstance(payload.get("tool_input"), dict)
+            ):
+                raise RuntimeError("Analytics Agent tool-call schema drift")
+            safe_input = sanitized(payload["tool_input"])
+            projected_payload = {
+                "tool_name": tool_name,
+                "toolInputDigest": digest(safe_input),
+                "tracePayloadStored": False,
+            }
+        else:
+            if (
+                set(payload) != {"tool_name", "result", "is_error"}
+                or not isinstance(payload.get("result"), str)
+                or not isinstance(payload.get("is_error"), bool)
+            ):
+                raise RuntimeError("Analytics Agent tool-result schema drift")
+            if payload["is_error"]:
+                raise RuntimeError("Analytics Agent read tool reported an error")
+            projected_payload = {
+                "tool_name": tool_name,
+                "isError": False,
+                "resultDigest": digest(payload["result"]),
+                "resultBytes": len(payload["result"].encode("utf-8")),
+                "tracePayloadStored": False,
+            }
     return {
         "event": event_type,
-        "payload": sanitized(payload),
+        "payload": projected_payload,
     }, event_type == "COMPLETE"
 
 
@@ -1094,6 +2110,70 @@ async def analytics_turn(conversation_id: str, text: str) -> list[dict[str, Any]
     ) != 1:
         raise RuntimeError("Analytics Agent did not complete exactly once")
     return projected
+
+
+def analytics_mcp_trace_receipt(events: list[dict[str, Any]]) -> dict[str, Any]:
+    pending: list[dict[str, Any]] = []
+    pairs: list[dict[str, Any]] = []
+    for event in events:
+        event_type = event.get("event")
+        if event_type not in {"TOOL_CALL", "TOOL_RESULT"}:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Analytics Agent MCP trace schema drift")
+        name = payload.get("tool_name")
+        if name not in MCP_TOOLS:
+            continue
+        if event_type == "TOOL_CALL":
+            if (
+                set(payload)
+                != {"tool_name", "toolInputDigest", "tracePayloadStored"}
+                or not DIGEST.fullmatch(str(payload.get("toolInputDigest")))
+                or payload.get("tracePayloadStored") is not False
+            ):
+                raise RuntimeError("Analytics Agent MCP trace schema drift")
+            pending.append({
+                "tool": name,
+                "eventDigest": digest(event),
+            })
+            continue
+        if (
+            set(payload)
+            != {
+                "tool_name", "isError", "resultDigest",
+                "resultBytes", "tracePayloadStored",
+            }
+            or payload.get("isError") is not False
+            or not DIGEST.fullmatch(str(payload.get("resultDigest")))
+            or not isinstance(payload.get("resultBytes"), int)
+            or isinstance(payload.get("resultBytes"), bool)
+            or payload["resultBytes"] < 0
+            or payload.get("tracePayloadStored") is not False
+        ):
+            raise RuntimeError("Analytics Agent MCP tool result was not successful")
+        if not pending or pending[0]["tool"] != name:
+            raise RuntimeError("Analytics Agent MCP trace is not ordered and matched")
+        call = pending.pop(0)
+        pairs.append({
+            "tool": name,
+            "callEventDigest": call["eventDigest"],
+            "resultEventDigest": digest(event),
+        })
+    if pending or not pairs:
+        raise RuntimeError("Analytics Agent did not prove official MCP use")
+    receipt = {
+        "schemaVersion": "archon.analytics-agent-mcp-trace/v1",
+        "status": "verified",
+        "tools": sorted({item["tool"] for item in pairs}),
+        "matchedPairs": len(pairs),
+        "pairs": pairs,
+        "selectedToolSurfaceDigest": digest(list(MCP_TOOLS)),
+        "mutationsEnabled": False,
+        "tracePayloadStored": False,
+        "rawProviderPayloadStored": False,
+    }
+    return {**receipt, "digest": digest(receipt)}
 
 
 def pending_quality(value: Any) -> bool:
@@ -1330,6 +2410,7 @@ async def run_analytics(
         conversation_id,
         grounded_prompt(question, binding, context, grounding),
     )
+    mcp_trace = analytics_mcp_trace_receipt(events)
     quality = await context_quality(conversation_id)
     handle = issue_run_handle(
         conversation_id, binding, context["digest"], grounding["digest"],
@@ -1342,6 +2423,10 @@ async def run_analytics(
         "preflightDigest": preflight["digest"],
         "contextDigest": context["digest"],
         "skillGroundingDigest": grounding["digest"],
+        "officialMcpReadReceiptsDigest": (
+            preflight["dataHubMcpServer"]["officialMcpReadReceiptsDigest"]
+        ),
+        "analyticsMcpTrace": mcp_trace,
         "mutationsEnabled": False,
         "improveContextCommandAvailable": True,
     }
@@ -1407,14 +2492,28 @@ async def component_health() -> tuple[
         }
     if mcp_ready:
         mcp = results[2]
-        evidence["dataHubMcpServer"] = {
+        mcp_evidence = {
             "status": "verified",
-            "package": mcp["package"],
-            "version": mcp["version"],
-            "sourceCommit": mcp["sourceCommit"],
+            "deployment": mcp.get("deployment", "self-hosted-core"),
             "toolSurfaceDigest": mcp["toolSurfaceDigest"],
             "receiptDigest": mcp["digest"],
         }
+        for key in ("package", "version", "sourceCommit"):
+            if key in mcp:
+                mcp_evidence[key] = mcp[key]
+        if "serverInventory" in mcp:
+            mcp_evidence["serverInventoryDigest"] = mcp["serverInventory"]["digest"]
+            mcp_evidence["serverInventoryCount"] = mcp["serverInventory"]["count"]
+            mcp_evidence["serverAdvertisesAdditionalTools"] = bool(
+                mcp["serverInventory"]["additionalToolsAdvertised"]
+            )
+        mcp_evidence["officialMcpReadReceiptsDigest"] = (
+            mcp["officialMcpReadReceipts"]["digest"]
+        )
+        mcp_evidence["officialMcpReadsVerified"] = len(
+            mcp["officialMcpReadReceipts"]["receipts"]
+        )
+        evidence["dataHubMcpServer"] = mcp_evidence
     if analytics_process_ready:
         process = results[3]
         evidence["analyticsAgentProcess"] = {
@@ -1464,7 +2563,11 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
             asyncio.to_thread(load_skill_receipt),
             analytics_preflight(request.runtimeBinding),
         )
-        grounding = ground_skills(skills, context)
+        grounding = ground_skills(
+            skills,
+            context,
+            preflight["dataHubMcpServer"]["officialMcpReadReceipts"],
+        )
         analytics = await run_analytics(
             request.question,
             request.runtimeBinding,

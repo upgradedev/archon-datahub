@@ -14,6 +14,14 @@ QUESTION = (
 )
 
 
+def configure_core(monkeypatch) -> None:
+    monkeypatch.setenv("ARCHON_RUNTIME_PROFILE_ID", "core")
+    monkeypatch.setenv("ARCHON_RUNTIME_GENERATION", "generation-1")
+    monkeypatch.setenv(
+        "ARCHON_RUNTIME_CAPABILITY_DIGEST", "sha256:" + "a" * 64,
+    )
+
+
 def client_factory(transport: httpx.MockTransport):
     def factory(timeout: httpx.Timeout) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -57,7 +65,7 @@ def preflight_response(
                 "disabled": False,
                 "fields": [{
                     "key": "url",
-                    "value": "http://datahub-mcp:8000/mcp",
+                    "value": "http://archon-read-mcp:8000/mcp",
                 }],
                 "tools": tools,
             },
@@ -76,6 +84,7 @@ def preflight_response(
 async def test_preflight_proves_engine_mcp_and_mutation_policy(
     monkeypatch,
 ):
+    configure_core(monkeypatch)
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
@@ -97,6 +106,7 @@ async def test_preflight_proves_engine_mcp_and_mutation_policy(
 async def test_preflight_fails_closed_on_mcp_tool_surface_drift(
     monkeypatch, enabled, missing,
 ):
+    configure_core(monkeypatch)
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
@@ -130,12 +140,12 @@ async def test_stream_accepts_read_only_events_and_strips_upstream_ids(
 ):
     body = (
         event("TOOL_CALL", {
-            "tool_name": "execute_sql",
-            "tool_input": {"sql": "SELECT 1"},
+            "tool_name": "search",
+            "tool_input": {"query": "/q archon_demo+customers"},
         })
         + event("TOOL_RESULT", {
-            "tool_name": "execute_sql",
-            "result": "1",
+            "tool_name": "search",
+            "result": "provider-private-result",
             "is_error": False,
         })
         + event("COMPLETE", {"text": "done"})
@@ -150,8 +160,20 @@ async def test_stream_accepts_read_only_events_and_strips_upstream_ids(
     assert [item["event"] for item in events] == [
         "TOOL_CALL", "TOOL_RESULT", "COMPLETE",
     ]
-    assert "conversation_id" not in json.dumps(events)
-    assert "upstream-secret-id" not in json.dumps(events)
+    encoded = json.dumps(events)
+    assert "conversation_id" not in encoded
+    assert "upstream-secret-id" not in encoded
+    assert "/q archon_demo+customers" not in encoded
+    assert "provider-private-result" not in encoded
+    assert events[0]["payload"]["tracePayloadStored"] is False
+    assert events[1]["payload"]["tracePayloadStored"] is False
+    assert events[1]["payload"]["isError"] is False
+    assert events[1]["payload"]["resultBytes"] == len(
+        "provider-private-result".encode("utf-8")
+    )
+    trace = companion.analytics_mcp_trace_receipt(events)
+    assert trace["matchedPairs"] == 1
+    assert trace["tools"] == ["search"]
 
 
 @pytest.mark.asyncio
@@ -164,6 +186,19 @@ async def test_stream_accepts_read_only_events_and_strips_upstream_ids(
                 "tool_input": {},
             }) + event("COMPLETE", {"text": "done"}),
             "mutation",
+        ),
+        (
+            event("TOOL_CALL", {
+                "tool_name": "search",
+                "tool_input": {"query": "archon_demo"},
+            })
+            + event("TOOL_RESULT", {
+                "tool_name": "search",
+                "result": "provider-private-error",
+                "is_error": True,
+            })
+            + event("COMPLETE", {"text": "wrong"}),
+            "read tool reported an error",
         ),
         (
             event("ERROR", {"error": "failed"})

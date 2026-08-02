@@ -51,51 +51,88 @@ def runtime(monkeypatch):
 
 
 def context() -> dict:
-    result = {
+    governed_result = {
         "name": "archon_demo.customers",
         "governedColumn": GOVERNED_COLUMN,
         "downstreamDataset": DOWNSTREAM_DATASET,
     }
-    result_digest = companion.digest(result)
+    receipts = []
+    for index, name in enumerate(
+        companion.ACK_CANONICAL_READ_TOOLS,
+        start=1,
+    ):
+        result = governed_result if name == "search" else {"fixture": name}
+        body = {
+            "tool": name,
+            "provider": "datahub-agent-context",
+            "status": "verified",
+            "argumentsDigest": f"sha256:{index:064x}",
+            "resultDigest": companion.digest(result),
+            "result": result,
+        }
+        receipts.append({**body, "digest": companion.digest(body)})
     envelope = {
         "schemaVersion": "archon.datahub-context/v2",
         "query": DATASET,
         "entityUrns": [DATASET],
-        "receipts": [{
-            "tool": "search",
-            "provider": "datahub-agent-context",
-            "status": "verified",
-            "argumentsDigest": companion.digest({"query": DATASET}),
-            "resultDigest": result_digest,
-            "result": result,
-        }],
+        "receipts": receipts,
         "unknownPreserved": False,
     }
     return {**envelope, "digest": companion.digest(envelope)}
 
 
 def skills() -> dict:
-    artifacts = [
-        {
+    artifacts = []
+    for index, name in enumerate(
+        (*companion.OFFICIAL_SKILLS, companion.CUSTOM_SKILL),
+        start=1,
+    ):
+        artifact_digest = f"sha256:{index:064x}"
+        artifacts.append({
             "skill": name,
-            "artifactDigest": f"sha256:{index:064x}",
+            "artifactDigest": artifact_digest,
             "gitBlob": f"{index:040x}",
             "bytes": 10,
-        }
-        for index, name in enumerate(
-            (*companion.OFFICIAL_SKILLS, companion.CUSTOM_SKILL), start=1
-        )
-    ]
+            "reviewedExecution": companion.reviewed_skill_execution(
+                name, artifact_digest,
+            ),
+        })
     envelope = {
         "schemaVersion": "archon.datahub-skills-receipt/v2",
-        "sourceCommit": "f" * 40,
+        "sourceCommit": companion.SKILLS_SOURCE_COMMIT,
         "official": artifacts[:5],
         "custom": artifacts[5:],
-        "workflow": [
-            "datahub-search", "datahub-lineage", "datahub-quality",
-            "datahub-audit", "datahub-enrich",
-        ],
+        "workflow": list(companion.SKILL_WORKFLOW),
+        "reviewedSkillCount": 6,
         "mutationAuthority": "archon-remediation-worker",
+    }
+    return {**envelope, "digest": companion.digest(envelope)}
+
+
+def official_mcp_reads() -> dict:
+    receipts = []
+    for index, name in enumerate(
+        companion.MCP_CANONICAL_READ_TOOLS,
+        start=20,
+    ):
+        body = {
+            "schemaVersion": "archon.official-datahub-mcp-read-receipt/v1",
+            "provider": "official-datahub-mcp",
+            "tool": name,
+            "status": "verified",
+            "argumentsDigest": f"sha256:{index:064x}",
+            "resultDigest": f"sha256:{index + 20:064x}",
+            "providerPayloadStored": False,
+            "mutationsEnabled": False,
+        }
+        receipts.append({**body, "digest": companion.digest(body)})
+    envelope = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipts/v1",
+        "status": "verified",
+        "sequence": list(companion.MCP_CANONICAL_READ_TOOLS),
+        "receipts": receipts,
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
     }
     return {**envelope, "digest": companion.digest(envelope)}
 
@@ -143,8 +180,13 @@ async def test_analyze_returns_digest_bound_stack_without_upstream_id(
 ):
     ctx = context()
     skill_receipt = skills()
+    mcp_reads = official_mcp_reads()
     preflight = {
         "schemaVersion": "archon.analytics-agent-preflight/v2",
+        "dataHubMcpServer": {
+            "officialMcpReadReceipts": mcp_reads,
+            "officialMcpReadReceiptsDigest": mcp_reads["digest"],
+        },
         "digest": "sha256:" + "e" * 64,
     }
 
@@ -155,6 +197,14 @@ async def test_analyze_returns_digest_bound_stack_without_upstream_id(
         assert question == QUESTION
         assert context_value["digest"] == ctx["digest"]
         assert proof == preflight
+        assert grounding["officialMcpReadReceiptsDigest"] == mcp_reads["digest"]
+        assert grounding["ackContextDigest"] == ctx["digest"]
+        enrich = next(
+            item for item in grounding["receipts"]
+            if item["skill"] == "datahub-enrich"
+        )
+        assert enrich["status"] == "previewed"
+        assert enrich["requiredCallsSatisfied"] is True
         return {
             "schemaVersion": "archon.analytics-agent-result/v2",
             "events": [{"event": "COMPLETE", "payload": {"text": "done"}}],

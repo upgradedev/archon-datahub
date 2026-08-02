@@ -24,6 +24,26 @@ QUESTION = (
 )
 
 
+def official_mcp_reads() -> dict:
+    receipts = [
+        {
+            "tool": name,
+            "status": "verified",
+            "digest": companion.digest({"tool": name, "status": "verified"}),
+        }
+        for name in companion.MCP_CANONICAL_READ_TOOLS
+    ]
+    envelope = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipts/v1",
+        "status": "verified",
+        "sequence": list(companion.MCP_CANONICAL_READ_TOOLS),
+        "receipts": receipts,
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
+    }
+    return {**envelope, "digest": companion.digest(envelope)}
+
+
 def runtime_binding() -> companion.RuntimeBinding:
     return companion.RuntimeBinding(
         schemaVersion="archon.runtime-binding/v1",
@@ -278,6 +298,26 @@ async def test_model_probe_cache_age_and_runtime_generation_binding(
 
 
 @pytest.mark.asyncio
+async def test_model_probe_accepts_job_scoped_state_without_global_mutation(
+    runtime,
+    monkeypatch,
+):
+    global_state = companion._model_probe_state
+    job_state = companion._ModelProbeState()
+
+    async def probe(identity):
+        return model_receipt(identity)
+
+    monkeypatch.setattr(companion, "probe_analytics_model", probe)
+    receipt = await companion.analytics_model_preflight(job_state)
+    assert receipt["status"] == "verified"
+    assert job_state.success is not None
+    assert job_state.failure is None
+    assert global_state.success is None
+    assert global_state.failure is None
+
+
+@pytest.mark.asyncio
 async def test_model_probe_failure_cache_is_short_and_generic(
     runtime,
     monkeypatch,
@@ -314,6 +354,7 @@ async def test_combined_preflight_binds_mcp_process_and_model(
         return {
             "digest": "sha256:" + "1" * 64,
             "toolSurfaceDigest": "sha256:" + "2" * 64,
+            "officialMcpReadReceipts": official_mcp_reads(),
         }
 
     async def process():
@@ -349,6 +390,9 @@ async def test_combined_preflight_binds_mcp_process_and_model(
     )
     assert receipt["schemaVersion"] == "archon.analytics-agent-preflight/v2"
     assert receipt["dataHubMcpServer"]["status"] == "verified"
+    assert receipt["dataHubMcpServer"]["officialMcpReadReceiptsDigest"] == (
+        official_mcp_reads()["digest"]
+    )
     assert receipt["analyticsAgentProcess"]["status"] == "verified"
     assert receipt["analyticsModelConnectivity"]["provider"] == "bedrock"
     assert receipt["mutationTools"]["publish_analysis"] is False
@@ -380,6 +424,7 @@ async def test_component_health_separates_process_from_model_connectivity(
             "version": companion.MCP_VERSION,
             "sourceCommit": companion.MCP_SOURCE_COMMIT,
             "toolSurfaceDigest": "sha256:" + "3" * 64,
+            "officialMcpReadReceipts": official_mcp_reads(),
         }
 
     async def process():
@@ -399,6 +444,9 @@ async def test_component_health_separates_process_from_model_connectivity(
     assert components["analyticsModelConnectivity"] is False
     assert components["analyticsAgent"] is False
     assert evidence["analyticsAgentProcess"]["status"] == "verified"
+    assert evidence["dataHubMcpServer"]["officialMcpReadsVerified"] == len(
+        companion.MCP_CANONICAL_READ_TOOLS
+    )
     assert evidence["analyticsModelConnectivity"] == {"status": "unknown"}
     assert ready is False
 
@@ -426,6 +474,7 @@ async def test_component_health_ready_evidence_is_sanitized(
             "version": companion.MCP_VERSION,
             "sourceCommit": companion.MCP_SOURCE_COMMIT,
             "toolSurfaceDigest": "sha256:" + "3" * 64,
+            "officialMcpReadReceipts": official_mcp_reads(),
         }
 
     async def process():
@@ -451,6 +500,9 @@ async def test_component_health_ready_evidence_is_sanitized(
     components, evidence, ready = await companion.component_health()
     assert ready is True
     assert all(components.values())
+    assert evidence["dataHubMcpServer"]["officialMcpReadReceiptsDigest"] == (
+        official_mcp_reads()["digest"]
+    )
     assert evidence["analyticsModelConnectivity"] == {
         "status": "verified",
         "provider": "bedrock",
@@ -502,6 +554,80 @@ def test_event_projection_rejects_schema_and_tool_drift(event, match):
             CONVERSATION,
             complete_seen=False,
         )
+
+
+def projected_mcp_call(name: str) -> dict:
+    return {
+        "event": "TOOL_CALL",
+        "payload": {
+            "tool_name": name,
+            "toolInputDigest": companion.digest({"fixture": name}),
+            "tracePayloadStored": False,
+        },
+    }
+
+
+def projected_mcp_result(name: str, *, is_error: bool = False) -> dict:
+    return {
+        "event": "TOOL_RESULT",
+        "payload": {
+            "tool_name": name,
+            "isError": is_error,
+            "resultDigest": companion.digest({"fixture": name}),
+            "resultBytes": 10,
+            "tracePayloadStored": False,
+        },
+    }
+
+
+def test_analytics_mcp_trace_requires_ordered_matched_pairs():
+    events = [
+        projected_mcp_call("search"),
+        projected_mcp_result("search"),
+        {"event": "COMPLETE", "payload": {"text": "done"}},
+    ]
+    receipt = companion.analytics_mcp_trace_receipt(events)
+    assert receipt["status"] == "verified"
+    assert receipt["tools"] == ["search"]
+    assert receipt["matchedPairs"] == 1
+    assert receipt["tracePayloadStored"] is False
+    assert receipt["rawProviderPayloadStored"] is False
+    assert receipt["pairs"][0]["tool"] == "search"
+    assert "fixture" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [projected_mcp_result("search")],
+        [projected_mcp_call("search")],
+        [
+            projected_mcp_call("search"),
+            projected_mcp_result("search"),
+            projected_mcp_result("search"),
+        ],
+        [
+            projected_mcp_call("search"),
+            projected_mcp_call("get_entities"),
+            projected_mcp_result("get_entities"),
+            projected_mcp_result("search"),
+        ],
+        [
+            projected_mcp_call("search"),
+            projected_mcp_call("search"),
+            projected_mcp_result("search"),
+        ],
+        [
+            projected_mcp_call("search"),
+            projected_mcp_result("search", is_error=True),
+        ],
+    ],
+)
+def test_analytics_mcp_trace_rejects_duplicate_unmatched_or_failed_events(
+    events,
+):
+    with pytest.raises(RuntimeError, match="MCP"):
+        companion.analytics_mcp_trace_receipt(events)
 
 
 def sse(event_type: str, payload: dict) -> str:
@@ -649,7 +775,11 @@ async def test_create_conversation_and_run_projection(
     async def turn(conversation_id, prompt):
         assert conversation_id == CONVERSATION
         assert "ARCHON_GOVERNED_ANALYTICS_INPUT" in prompt
-        return [{"event": "COMPLETE", "payload": {"text": "done"}}]
+        return [
+            projected_mcp_call("search"),
+            projected_mcp_result("search"),
+            {"event": "COMPLETE", "payload": {"text": "done"}},
+        ]
 
     async def quality(conversation_id):
         assert conversation_id == CONVERSATION
@@ -667,9 +797,18 @@ async def test_create_conversation_and_run_projection(
             "receipts": [],
         },
         {"digest": GROUNDING, "receipts": []},
-        {"digest": "sha256:" + "e" * 64},
+        {
+            "digest": "sha256:" + "e" * 64,
+            "dataHubMcpServer": {
+                "officialMcpReadReceiptsDigest": official_mcp_reads()["digest"],
+            },
+        },
     )
     assert result["preflightDigest"] == "sha256:" + "e" * 64
+    assert result["officialMcpReadReceiptsDigest"] == (
+        official_mcp_reads()["digest"]
+    )
+    assert result["analyticsMcpTrace"]["matchedPairs"] == 1
     assert result["runHandle"].startswith("run_")
     assert result["digest"].startswith("sha256:")
 

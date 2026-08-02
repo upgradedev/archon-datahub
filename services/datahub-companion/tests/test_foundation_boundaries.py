@@ -85,20 +85,16 @@ def test_datahub_client_accepts_bounded_server_owned_https(monkeypatch):
 
     configure_runtime(monkeypatch, "cloud")
     monkeypatch.setattr(companion, "DataHubClient", factory)
-    monkeypatch.setenv("DATAHUB_GMS_URL", "https://datahub.example/gms")
+    monkeypatch.setenv("DATAHUB_GMS_URL", "https://judge.acryl.io/gms")
     monkeypatch.setenv("DATAHUB_GMS_TOKEN", "runtime-secret")
     companion.datahub_client()
     assert captured == {
-        "server": "https://datahub.example/gms",
+        "server": "https://judge.acryl.io/gms",
         "token": "runtime-secret",
     }
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
-def test_datahub_client_accepts_only_exact_core_loopback_http(
-    monkeypatch,
-    host,
-):
+def test_datahub_client_accepts_only_exact_core_read_bridge(monkeypatch):
     captured = {}
 
     def factory(**kwargs):
@@ -107,11 +103,11 @@ def test_datahub_client_accepts_only_exact_core_loopback_http(
 
     configure_runtime(monkeypatch, "core")
     monkeypatch.setattr(companion, "DataHubClient", factory)
-    monkeypatch.setenv("DATAHUB_GMS_URL", f"http://{host}:18080")
+    monkeypatch.setenv("DATAHUB_GMS_URL", "http://archon-gms:8080")
     monkeypatch.setenv("DATAHUB_GMS_TOKEN", "runtime-secret")
     companion.datahub_client()
     assert captured == {
-        "server": f"http://{host}:18080",
+        "server": "http://archon-gms:8080",
         "token": "runtime-secret",
     }
 
@@ -121,7 +117,12 @@ def test_datahub_client_accepts_only_exact_core_loopback_http(
     [
         ("cloud", "http://127.0.0.1:18080"),
         ("cloud", "http://localhost:18080"),
+        ("cloud", "https://datahub.example/gms"),
+        ("cloud", "https://127.0.0.1/gms"),
         ("core", "http://datahub.example:18080"),
+        ("core", "http://host.docker.internal:8080"),
+        ("core", "http://172.17.0.1:8080"),
+        ("core", "http://archon-writer-gms:8080"),
         ("core", "http://169.254.169.254:18080"),
         ("core", "http://[::1]:18080"),
         ("core", "http://127.0.0.1:8080"),
@@ -152,7 +153,7 @@ def test_datahub_client_rejects_missing_or_oversized_token(
     token,
 ):
     configure_runtime(monkeypatch, "cloud")
-    monkeypatch.setenv("DATAHUB_GMS_URL", "https://datahub.example/gms")
+    monkeypatch.setenv("DATAHUB_GMS_URL", "https://judge.acryl.io/gms")
     monkeypatch.setenv("DATAHUB_GMS_TOKEN", token)
     with pytest.raises(RuntimeError, match="bounded"):
         companion.datahub_client()
@@ -167,12 +168,12 @@ def test_datahub_connection_receipt_is_non_secret(monkeypatch):
         _graph = Graph()
 
     configure_runtime(monkeypatch, "core")
-    monkeypatch.setenv("DATAHUB_GMS_URL", "http://127.0.0.1:18080")
+    monkeypatch.setenv("DATAHUB_GMS_URL", "http://archon-gms:8080")
     monkeypatch.setattr(companion, "datahub_client", lambda: Client())
     receipt = companion.test_datahub_connection()
     assert receipt["status"] == "verified"
-    assert receipt["transport"] == "isolated-loopback-http"
-    assert receipt["endpointClass"] == "isolated-core-loopback"
+    assert receipt["transport"] == "isolated-bridge-http"
+    assert receipt["endpointClass"] == "isolated-core-read-bridge"
     assert receipt["mutationsEnabled"] is False
     assert "url" not in json.dumps(receipt).lower()
 
@@ -391,6 +392,7 @@ def test_private_service_allowlists_are_exact(
     value,
     match,
 ):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setenv(variable, value)
     operation = (
         companion.analytics_url
@@ -435,6 +437,7 @@ async def test_bounded_json_rejects_untrusted_response_shapes(mode):
 async def test_mcp_preflight_binds_live_health_to_provenance(
     monkeypatch,
 ):
+    configure_runtime(monkeypatch, "core")
     provenance = {
         "digest": "sha256:" + "a" * 64,
         "package": companion.MCP_PACKAGE,
@@ -447,6 +450,41 @@ async def test_mcp_preflight_binds_live_health_to_provenance(
         "load_mcp_provenance",
         lambda: provenance,
     )
+    reads_body = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipts/v1",
+        "status": "verified",
+        "sequence": list(companion.MCP_CANONICAL_READ_TOOLS),
+        "receipts": [
+            {"tool": name, "status": "verified"}
+            for name in companion.MCP_CANONICAL_READ_TOOLS
+        ],
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
+    }
+
+    async def protocol_proof(_client, *, exact_surface):
+        assert exact_surface is True
+        return {
+            "protocolVersion": companion.MCP_PROTOCOL_VERSION,
+            "sessionMode": "server-assigned",
+            "initializeDigest": "sha256:" + "b" * 64,
+            "serverInfo": {"name": "DataHub MCP", "version": "1"},
+            "serverInfoSource": "server-reported",
+            "serverInventory": {
+                "count": len(companion.MCP_TOOLS),
+                "names": list(companion.MCP_TOOLS),
+                "digest": "sha256:" + "c" * 64,
+                "matchesSelectedSurface": True,
+                "additionalToolsAdvertised": [],
+            },
+            "officialMcpReadReceipts": {
+                **reads_body,
+                "digest": companion.digest(reads_body),
+            },
+        }
+
+    monkeypatch.setattr(companion, "mcp_protocol_proof", protocol_proof)
+
     def healthy_response(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"status": "ok"})
 
@@ -454,18 +492,25 @@ async def test_mcp_preflight_binds_live_health_to_provenance(
     monkeypatch.setattr(
         companion,
         "mcp_client",
-        client_factory("http://datahub-mcp:8000", transport),
+        client_factory("http://archon-read-mcp:8000", transport),
     )
     receipt = await companion.mcp_preflight()
     assert receipt["status"] == "verified"
     assert receipt["mutationsEnabled"] is False
     assert receipt["toolSurface"] == list(companion.MCP_TOOLS)
+    assert receipt["serverIdentity"]["reportingMode"] == (
+        "server-reported-cross-bound-to-pinned-artifact"
+    )
+    assert receipt["officialMcpReadReceipts"]["digest"] == companion.digest(
+        reads_body
+    )
 
 
 @pytest.mark.asyncio
 async def test_mcp_preflight_rejects_process_only_health_drift(
     monkeypatch,
 ):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setattr(
         companion,
         "load_mcp_provenance",
@@ -493,7 +538,7 @@ async def test_mcp_preflight_rejects_process_only_health_drift(
 def connection_inventory(
     *,
     tools: list[dict] | None = None,
-    endpoint: str = "http://datahub-mcp:8000/mcp",
+    endpoint: str = "http://archon-read-mcp:8000/mcp",
     mcp_name: str = "archon-datahub-mcp",
     active: bool = True,
 ) -> list[dict]:
@@ -522,6 +567,7 @@ def connection_inventory(
 def test_connection_policy_requires_exact_live_mcp_surface(
     monkeypatch,
 ):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION",
         "archon-datahub-mcp",
@@ -539,6 +585,7 @@ def test_connection_policy_requires_exact_live_mcp_surface(
 
 @pytest.mark.parametrize("drift", ["missing", "write", "endpoint", "name", "inactive"])
 def test_connection_policy_rejects_mcp_drift(monkeypatch, drift):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION",
         "archon-datahub-mcp",
@@ -574,6 +621,7 @@ def test_connection_policy_rejects_mcp_drift(monkeypatch, drift):
 def test_native_datahub_connection_must_keep_mutations_observably_off(
     monkeypatch,
 ):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION",
         "archon-datahub-mcp",
@@ -603,6 +651,7 @@ def test_native_datahub_connection_must_keep_mutations_observably_off(
 
 @pytest.mark.asyncio
 async def test_analytics_contract_requires_configured_engine(monkeypatch):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.delenv("ARCHON_ANALYTICS_ENGINE", raising=False)
     with pytest.raises(RuntimeError, match="engine is not configured"):
         await companion.analytics_contract_preflight()
@@ -614,6 +663,7 @@ async def test_analytics_contract_rejects_process_and_engine_drift(
     monkeypatch,
     mode,
 ):
+    configure_runtime(monkeypatch, "core")
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
     monkeypatch.setenv(
         "ARCHON_DATAHUB_MCP_CONNECTION",

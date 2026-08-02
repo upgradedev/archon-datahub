@@ -166,7 +166,9 @@ def test_skill_receipt_verifies_official_and_custom_files(tmp_path, monkeypatch)
     lock_path.write_text(json.dumps({
         "schemaVersion": "archon.datahub-agent-stack-lock/v1",
         "components": {"dataHubSkills": {
-            "source": {"commit": "f" * 40},
+            "name": "datahub-skills",
+            "version": companion.SKILLS_VERSION,
+            "source": {"commit": companion.SKILLS_SOURCE_COMMIT},
             "files": files,
             "customFiles": {
                 "contrib/datahub-audit/SKILL.md": locked(custom_data),
@@ -181,31 +183,191 @@ def test_skill_receipt_verifies_official_and_custom_files(tmp_path, monkeypatch)
     assert receipt["schemaVersion"] == "archon.datahub-skills-receipt/v2"
     assert len(receipt["official"]) == 5
     assert receipt["custom"][0]["skill"] == "datahub-audit"
+    assert receipt["sourceCommit"] == companion.SKILLS_SOURCE_COMMIT
+    assert receipt["reviewedSkillCount"] == 6
+    assert all(
+        item["reviewedExecution"]["executionPlanDigest"].startswith("sha256:")
+        for item in receipt["official"] + receipt["custom"]
+    )
+    enrich = next(
+        item for item in receipt["official"]
+        if item["skill"] == "datahub-enrich"
+    )
+    assert enrich["reviewedExecution"]["executionPlan"]["phase"] == (
+        "governed-enrichment-preview"
+    )
     assert receipt["digest"].startswith("sha256:")
 
 
-def test_skill_grounding_links_artifacts_to_ack_receipts():
-    artifacts = [
-        {"skill": name, "artifactDigest": f"sha256:{index:064x}"}
-        for index, name in enumerate(
-            (*companion.OFFICIAL_SKILLS, companion.CUSTOM_SKILL), start=1
-        )
-    ]
-    context = {
-        "digest": CONTEXT,
-        "receipts": [
-            {"tool": "search", "resultDigest": "sha256:" + "d" * 64},
-            {
-                "tool": "get_dataset_assertions",
-                "resultDigest": "sha256:" + "e" * 64,
-            },
-        ],
+def skill_stack_receipt() -> dict:
+    artifacts = []
+    for index, name in enumerate(
+        (*companion.OFFICIAL_SKILLS, companion.CUSTOM_SKILL),
+        start=1,
+    ):
+        artifact_digest = f"sha256:{index:064x}"
+        artifacts.append({
+            "skill": name,
+            "artifactDigest": artifact_digest,
+            "reviewedExecution": companion.reviewed_skill_execution(
+                name, artifact_digest,
+            ),
+        })
+    envelope = {
+        "schemaVersion": "archon.datahub-skills-receipt/v2",
+        "sourceCommit": companion.SKILLS_SOURCE_COMMIT,
+        "official": artifacts[:5],
+        "custom": artifacts[5:],
+        "workflow": list(companion.SKILL_WORKFLOW),
+        "reviewedSkillCount": 6,
+        "mutationAuthority": "archon-remediation-worker",
     }
-    result = companion.ground_skills(
-        {"official": artifacts[:5], "custom": artifacts[5:]},
-        context,
-    )
+    return {**envelope, "digest": companion.digest(envelope)}
+
+
+def ack_context_receipt() -> dict:
+    receipts = []
+    for index, name in enumerate(
+        companion.ACK_CANONICAL_READ_TOOLS,
+        start=20,
+    ):
+        body = {
+            "tool": name,
+            "provider": "datahub-agent-context",
+            "status": "verified",
+            "argumentsDigest": f"sha256:{index:064x}",
+            "resultDigest": f"sha256:{index + 20:064x}",
+            "result": {"fixture": name},
+        }
+        receipts.append({**body, "digest": companion.digest(body)})
+    return {"digest": CONTEXT, "receipts": receipts}
+
+
+def official_mcp_read_receipt() -> dict:
+    receipts = []
+    for index, name in enumerate(
+        companion.MCP_CANONICAL_READ_TOOLS,
+        start=50,
+    ):
+        body = {
+            "schemaVersion": "archon.official-datahub-mcp-read-receipt/v1",
+            "provider": "official-datahub-mcp",
+            "tool": name,
+            "status": "verified",
+            "argumentsDigest": f"sha256:{index:064x}",
+            "resultDigest": f"sha256:{index + 20:064x}",
+            "providerPayloadStored": False,
+            "mutationsEnabled": False,
+        }
+        receipts.append({**body, "digest": companion.digest(body)})
+    envelope = {
+        "schemaVersion": "archon.official-datahub-mcp-read-receipts/v1",
+        "status": "verified",
+        "sequence": list(companion.MCP_CANONICAL_READ_TOOLS),
+        "receipts": receipts,
+        "providerPayloadStored": False,
+        "mutationsEnabled": False,
+    }
+    return {**envelope, "digest": companion.digest(envelope)}
+
+
+def test_skill_grounding_executes_artifact_bound_reviewed_plans():
+    skills = skill_stack_receipt()
+    context = ack_context_receipt()
+    mcp = official_mcp_read_receipt()
+    result = companion.ground_skills(skills, context, mcp)
+    assert result["schemaVersion"] == "archon.datahub-skill-grounding/v2"
+    assert result["skillsReceiptDigest"] == skills["digest"]
+    assert result["ackContextDigest"] == CONTEXT
+    assert result["officialMcpReadReceiptsDigest"] == mcp["digest"]
+    assert result["allRequiredCallsSatisfied"] is True
     assert len(result["receipts"]) == 6
-    assert all(item["sourceArtifactDigest"].startswith("sha256:") for item in result["receipts"])
-    audit = next(item for item in result["receipts"] if item["skill"] == "datahub-audit")
-    assert len(audit["ackReceiptDigests"]) == 2
+    assert all(
+        item["requiredCallsSatisfied"] is True
+        and item["sourceArtifactDigest"].startswith("sha256:")
+        and item["digest"] == companion.digest({
+            key: value for key, value in item.items() if key != "digest"
+        })
+        for item in result["receipts"]
+    )
+    enrich = next(
+        item for item in result["receipts"]
+        if item["skill"] == "datahub-enrich"
+    )
+    assert enrich["status"] == "previewed"
+    assert enrich["mode"] == "preview-only"
+    assert enrich["executionPlan"]["phase"] == "governed-enrichment-preview"
+    assert enrich["executionPlanDigest"] == next(
+        item["reviewedExecution"]["executionPlanDigest"]
+        for item in skills["official"]
+        if item["skill"] == "datahub-enrich"
+    )
+    assert [item["tool"] for item in enrich["satisfiedAckCalls"]] == list(
+        companion.ACK_CANONICAL_READ_TOOLS
+    )
+    assert [
+        item["tool"] for item in enrich["satisfiedOfficialMcpCalls"]
+    ] == list(companion.MCP_CANONICAL_READ_TOOLS)
+    assert all(
+        item["status"] == "executed"
+        for item in result["receipts"]
+        if item["skill"] != "datahub-enrich"
+    )
+
+
+def test_skill_grounding_keeps_ack_and_official_mcp_receipts_distinct():
+    result = companion.ground_skills(
+        skill_stack_receipt(),
+        ack_context_receipt(),
+        official_mcp_read_receipt(),
+    )
+    search_grounding = next(
+        item for item in result["receipts"]
+        if item["skill"] == "datahub-search"
+    )
+    assert len(search_grounding["ackReceiptDigests"]) == 3
+    assert len(search_grounding["officialMcpReadReceiptDigests"]) == 3
+    assert not set(search_grounding["ackReceiptDigests"]) & set(
+        search_grounding["officialMcpReadReceiptDigests"]
+    )
+
+
+def test_skill_grounding_rejects_changed_artifact_binding():
+    skills = skill_stack_receipt()
+    skills["official"][0]["artifactDigest"] = "sha256:" + "f" * 64
+    with pytest.raises(RuntimeError, match="digest drift"):
+        companion.ground_skills(
+            skills,
+            ack_context_receipt(),
+            official_mcp_read_receipt(),
+        )
+
+
+def test_skill_grounding_rejects_changed_required_call_policy():
+    skills = skill_stack_receipt()
+    search = skills["official"][0]
+    search["reviewedExecution"]["executionPlan"]["requiredCalls"]["ack"].pop()
+    body = {key: value for key, value in skills.items() if key != "digest"}
+    skills["digest"] = companion.digest(body)
+    with pytest.raises(RuntimeError, match="artifact binding drift"):
+        companion.ground_skills(
+            skills,
+            ack_context_receipt(),
+            official_mcp_read_receipt(),
+        )
+
+
+@pytest.mark.parametrize("mechanism", ["ack", "official-mcp"])
+def test_skill_grounding_fails_closed_when_required_call_is_missing(mechanism):
+    context = ack_context_receipt()
+    mcp = official_mcp_read_receipt()
+    if mechanism == "ack":
+        context["receipts"].pop()
+        match = "required calls missing"
+    else:
+        mcp["receipts"].pop()
+        body = {key: value for key, value in mcp.items() if key != "digest"}
+        mcp["digest"] = companion.digest(body)
+        match = "read sequence drift"
+    with pytest.raises(RuntimeError, match=match):
+        companion.ground_skills(skill_stack_receipt(), context, mcp)
