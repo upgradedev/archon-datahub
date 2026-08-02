@@ -57,9 +57,68 @@ grep -Fq 'detect-stack-drift' .github/workflows/production-posture.yml
 grep -Fq 'CloudWatch->SNS(KMS)->SQS(KMS)' \
   .github/workflows/production-paging-test.yml
 
-if grep -rInE --exclude='aws-security-contracts.test.sh' -- \
-  'codex.security|Codex Security' \
-  .github/workflows infra/aws/bin infra/aws/lib infra/aws/policy scripts tests/pipeline; then
+codex_security_pattern='codex[-._ ]?security'
+for positive_control_plane_reference in \
+  'uses: openai/codex-security@pinned-commit' \
+  'run: codex.security scan' \
+  'run: codex_security scan' \
+  'name: Codex Security'; do
+  if ! LC_ALL=C grep -qEi -- "${codex_security_pattern}" \
+    <<<"${positive_control_plane_reference}"; then
+    echo "::error::Codex Security guard failed its positive self-test" >&2
+    exit 1
+  fi
+done
+for negative_control_plane_reference in \
+  'name: AWS security contracts' \
+  'run: npm run security'; do
+  if LC_ALL=C grep -qEi -- "${codex_security_pattern}" \
+    <<<"${negative_control_plane_reference}"; then
+    echo "::error::Codex Security guard failed its negative self-test" >&2
+    exit 1
+  fi
+done
+
+codex_security_scan_status=0
+if codex_security_hits="$(
+  LC_ALL=C grep -rInEi -- "${codex_security_pattern}" \
+    .github/workflows infra/aws/bin infra/aws/lib infra/aws/policy scripts
+)"; then
+  codex_security_scan_status=0
+else
+  codex_security_scan_status=$?
+fi
+if ((codex_security_scan_status > 1)); then
+  echo "::error::Codex Security guard could not inspect the control plane" >&2
+  exit 1
+fi
+
+# verify-contrib enforces one documentation-only negative assertion. Allow
+# only that exact reviewed line; every other executable reference still fails.
+allowed_verify_contrib_assertions=0
+codex_security_violations=()
+if [[ -n "${codex_security_hits}" ]]; then
+  while IFS= read -r codex_security_hit; do
+    codex_security_hit_path="${codex_security_hit%%:*}"
+    codex_security_hit_rest="${codex_security_hit#*:}"
+    codex_security_hit_line="${codex_security_hit_rest%%:*}"
+    codex_security_hit_text="${codex_security_hit_rest#*:}"
+    if [[ "${codex_security_hit_path}" == "scripts/verify-contrib.mjs" &&
+      "${codex_security_hit_line}" =~ ^[0-9]+$ &&
+      "${codex_security_hit_text}" == \
+        '  "does not depend on Codex Security",' ]]; then
+      allowed_verify_contrib_assertions=$((allowed_verify_contrib_assertions + 1))
+      continue
+    fi
+    codex_security_violations+=("${codex_security_hit}")
+  done <<<"${codex_security_hits}"
+fi
+if ((allowed_verify_contrib_assertions != 1)); then
+  echo "::error::The reviewed verify-contrib negative assertion drifted" >&2
+  exit 1
+fi
+if ((${#codex_security_violations[@]} > 0)); then
+  printf '%s\n' "${codex_security_violations[@]}"
   echo "::error::Codex Security must not be part of the security control plane" >&2
   exit 1
 fi

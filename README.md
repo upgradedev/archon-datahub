@@ -32,6 +32,17 @@ consistent:
   Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
   optional comment; it never sends a tool name, entity URN, or mutation arguments.
 
+### Bounded version-history recovery
+
+A contradiction cannot fire from the MCP read tools alone: those tools ground the current
+catalog view, but do not by themselves prove that independent retained sources disagreed.
+For this differentiator, live mode directly reads a bounded set of DataHub GMS
+`GenericAspectV3` version 0/history records and preserves their system-metadata
+provenance. It treats `pipelineName` as stable source identity and `runId` as execution
+identity: changes from one pipeline are drift; only independent retained sources can form a
+contradiction. Missing, unauthorized, malformed, or truncated history fails closed to an
+unknown/manual result and can never become an actionable remediation.
+
 The judge-facing audit APIs are publicly usable only through CloudFront. A generated,
 KMS-encrypted origin credential is never delivered to the browser: CloudFront overwrites
 `x-api-key`, and API Gateway requires it on every method. The HTTP proxy replaces it with

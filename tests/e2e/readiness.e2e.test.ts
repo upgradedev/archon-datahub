@@ -330,6 +330,24 @@ test("readiness: lean runtime binding, recovery semantics, and CI SLO stay evide
     byId("SQ1").evidence,
     /DESIGN bounded GenericAspectV3 recovery=true/
   );
+  const readme = readFileSync(
+    new URL("../../README.md", import.meta.url),
+    "utf8"
+  ).replace(/\s+/g, " ");
+  assert.ok(
+    readme.includes("cannot fire from the MCP read tools alone"),
+    "README must disclose the MCP-only contradiction limitation"
+  );
+  assert.match(
+    readme,
+    /bounded version-history recovery/i,
+    "README must document bounded version-history recovery"
+  );
+  assert.match(
+    readme,
+    /GenericAspectV3/,
+    "README must identify the retained-aspect recovery contract"
+  );
   assert.match(
     byId("L1").evidence,
     /harness defaults\/gates=true; README exact CI Offline SLO=true/

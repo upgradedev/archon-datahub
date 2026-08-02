@@ -158,11 +158,12 @@ describe("ephemeral DataHub Core stack", () => {
     expect(lifecycle).toBeDefined();
     const endpointServices =
       lifecycle.Properties.Environment.Variables;
-    for (const [name, suffix] of [
+    const expectedEndpointServices = [
       ["CORE_BEDROCK_SERVICE_NAME", ".bedrock-runtime"],
       ["CORE_KMS_SERVICE_NAME", ".kms"],
       ["CORE_STS_SERVICE_NAME", ".sts"]
-    ]) {
+    ] as const satisfies ReadonlyArray<readonly [string, string]>;
+    for (const [name, suffix] of expectedEndpointServices) {
       expect(endpointServices[name]).toEqual({
         "Fn::Join": [
           "",
