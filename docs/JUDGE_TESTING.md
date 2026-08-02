@@ -55,7 +55,7 @@ proof; the recommended rejection path above remains the fastest review.
 6. Sign out after the session teardown is shown. Do not attempt manual cleanup. After
    the browser job, the workflow automatically enters the rollback job even if the
    browser journey failed or was cancelled after preparation. The separate
-   `governed-canary-rollback` environment requires a fresh human approval, removes
+   `governed-canary-recovery` environment requires a fresh human approval, removes
    only the canonical PII tag when present, reads the baseline again, and seals an
    attested `restored` or `already-baseline` receipt.
 
