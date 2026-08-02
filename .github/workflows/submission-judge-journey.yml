@@ -37,6 +37,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_PAGER: ""
+  AWS_REGION: eu-west-1
   NODE_VERSION: 22.23.1
   PREDICATE_TYPE: https://archon.datahub.dev/attestations/submission-judge-journey/v1
 
@@ -52,10 +55,12 @@ jobs:
       github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    environment: production-observer
     permissions:
       actions: read
       attestations: read
       contents: read
+      id-token: write
     outputs:
       application_origin: ${{ steps.verify.outputs.application_origin }}
       application_origin_sha256: ${{ steps.verify.outputs.application_origin_sha256 }}
@@ -244,7 +249,7 @@ jobs:
                 "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
             )"
             if [[ "${key}" == "deployment" ]]; then
-              artifact_name="deployment-evidence-${RELEASE_SHA}-${run_attempt}"
+              artifact_name="deployment-evidence-production-${RELEASE_SHA}-${run_id}"
               artifact="$(
                 jq -ce \
                   --arg name "${artifact_name}" \
@@ -348,6 +353,24 @@ jobs:
           echo "control_plane_gate_sha256=${control_plane_gate_sha256}" \
             >>"${GITHUB_OUTPUT}"
 
+      - name: Validate protected observer identity
+        env:
+          ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          OBSERVER_ROLE: ${{ vars.AWS_OBSERVER_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          test -z "${AWS_ACCESS_KEY_ID:-}"
+          [[ "${ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${OBSERVER_ROLE}" = \
+            "arn:aws:iam::${ACCOUNT_ID}:role/archon-production-observer"
+
+      - name: Configure read-only production observer
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_OBSERVER_ROLE_ARN }}
+          role-session-name: archon-judge-journey-observer-${{ github.run_id }}
+          mask-aws-account-id: true
       - name: Initialize isolated prerequisite directories
         run: |
           set -euo pipefail
@@ -435,6 +458,7 @@ jobs:
           REACTIVATE_ARTIFACT_NAME: ${{ steps.sources.outputs.reactivate_artifact_name }}
           REACTIVATE_ARTIFACT_DIGEST: ${{ steps.sources.outputs.reactivate_artifact_digest }}
           CONTROL_PLANE_GATE_SHA256: ${{ steps.sources.outputs.control_plane_gate_sha256 }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           root="${RUNNER_TEMP}/judge-journey-prerequisites"
@@ -506,109 +530,141 @@ jobs:
           }
 
           deployment_dir="${root}/deployment"
-          verify_checksum_inventory "${deployment_dir}"
-          for required in \
-            deployment-evidence.json \
-            live-runtime-manifest.json \
-            production-cdk-outputs.json \
-            production-runtime-config.json; do
-            test -f "${deployment_dir}/${required}"
-            test ! -L "${deployment_dir}/${required}"
-          done
+          deployment_verification_dir="${verification_root}/deployment"
+          bash scripts/verify-lean-submission-runtime-source.sh \
+            deployment "${deployment_dir}" "${deployment_verification_dir}" \
+            "${RELEASE_SHA}" "${DEPLOYMENT_RUN_ID}" \
+            "${DEPLOYMENT_RUN_ATTEMPT}" "${DEPLOYMENT_ARTIFACT_ID}" \
+            "${DEPLOYMENT_ARTIFACT_NAME}" "${DEPLOYMENT_ARTIFACT_DIGEST}"
           deployment_evidence="${deployment_dir}/deployment-evidence.json"
-          runtime_config="${deployment_dir}/production-runtime-config.json"
-          cdk_outputs="${deployment_dir}/production-cdk-outputs.json"
-          live_runtime="${deployment_dir}/live-runtime-manifest.json"
-          expected_deployment_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}"
-          jq -e \
-            --arg release "${RELEASE_SHA}" \
-            --arg deploymentUrl "${expected_deployment_url}" '
-              .schemaVersion == 1 and
-              .promotionPolicy == "build-once-promote-same-artifacts" and
-              .rollbackSelector.releaseSha == $release and
-              .source.deploymentRunUrl == $deploymentUrl and
-              .source.deploymentControlPlaneSha == $release and
-              .immutableArtifacts.identicalImageDigest == true and
-              (.immutableArtifacts.productionEcrImageDigest |
-                test("^sha256:[0-9a-f]{64}$")) and
-              .production.result == "passed" and
-              (.production.applicationUrl |
-                test("^https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")) and
-              (.production.runtimeConfigSha256 |
-                test("^[0-9a-f]{64}$")) and
-              (.production.liveRuntimeManifestSha256 |
-                test("^[0-9a-f]{64}$"))
-            ' "${deployment_evidence}" >/dev/null || {
-            echo "::error::Production deployment evidence is not exact"
-            exit 1
-          }
-          application_origin="$(
-            jq -er '.production.applicationUrl' "${deployment_evidence}"
+          deployment_binding_source="${deployment_verification_dir}/binding.json"
+          deployment_predicate_type="$(
+            jq -er .predicateType "${deployment_binding_source}"
           )"
+          deployment_predicate_digest="$(
+            jq -er .predicateDigest "${deployment_binding_source}"
+          )"
+          jq -e \
+            --argjson runId "${DEPLOYMENT_RUN_ID}" \
+            --argjson runAttempt "${DEPLOYMENT_RUN_ATTEMPT}" \
+            --argjson artifactId "${DEPLOYMENT_ARTIFACT_ID}" \
+            --arg artifactName "${DEPLOYMENT_ARTIFACT_NAME}" \
+            --arg artifactDigest "${DEPLOYMENT_ARTIFACT_DIGEST}" '
+              .workflowPath == ".github/workflows/deploy.yml" and
+              .runId == $runId and
+              .runAttempt == $runAttempt and
+              .artifactId == $artifactId and
+              .artifactName == $artifactName and
+              .artifactDigest == $artifactDigest and
+              .predicateType ==
+                "https://github.com/upgradedev/archon-datahub/" +
+                "attestations/aws-deployment/v2" and
+              (.predicateDigest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${deployment_binding_source}" >/dev/null
+
+          application_origin="$(
+            jq -er '.applicationUrl' "${deployment_evidence}"
+          )"
+          [[ "${application_origin}" =~ ^https://[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]]
           application_origin_sha256="$(
             printf '%s' "${application_origin}" |
               sha256sum |
               awk '{print $1}'
           )"
+          runtime_config="${verification_root}/production-runtime-config.json"
+          runtime_profiles="${verification_root}/runtime-profiles.json"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 15 --max-time 60 \
+            --output "${runtime_config}" \
+            "${application_origin}/runtime-config.json"
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 15 --max-time 60 \
+            --output "${runtime_profiles}" \
+            "${application_origin}/api/runtime-profiles"
+          test -s "${runtime_config}"
+          test -s "${runtime_profiles}"
+          test "$(stat -c '%s' "${runtime_config}")" -le 65536
+          test "$(stat -c '%s' "${runtime_profiles}")" -le 131072
           runtime_config_sha256="$(
             sha256sum "${runtime_config}" |
               awk '{print $1}'
           )"
-          test "${runtime_config_sha256}" = "$(
-            jq -er '.production.runtimeConfigSha256' "${deployment_evidence}"
+          jq -e '
+            (keys | sort) == [
+              "autoSelection","profiles","schemaVersion","serverTime"
+            ] and
+            .schemaVersion == "archon.runtime-profiles/v1" and
+            (.serverTime | fromdateiso8601) and
+            .autoSelection == "cloud" and
+            (.profiles | length) == 2 and
+            ([.profiles[].profileId] | sort) == ["cloud","core"] and
+            all(.profiles[];
+              (keys | sort) == [
+                "availability","capabilities","capabilityDigest","checkedAt",
+                "generation","profileId"
+              ] and
+              (.generation | type) == "string" and
+              (.generation | length) >= 1 and
+              (.checkedAt | fromdateiso8601) and
+              (.capabilityDigest | test("^sha256:[0-9a-f]{64}$")) and
+              (.capabilities | keys) == [
+                "agentContextKit","analyticsAgent","dataHubSkills",
+                "mcpGovernedWrite","mcpRead"
+              ] and
+              all(.capabilities[]; . == true)
+            ) and
+            ([.profiles[] | select(.profileId == "cloud") | .availability])
+              == ["READY"] and
+            ([.profiles[] | select(.profileId == "core") | .availability])
+              == ["LAUNCHABLE"]
+          ' "${runtime_profiles}" >/dev/null
+
+          caller_account="$(
+            aws sts get-caller-identity --query Account --output text
           )"
-          test "$(sha256sum "${live_runtime}" | awk '{print $1}')" = "$(
-            jq -er '.production.liveRuntimeManifestSha256' \
+          test "${caller_account}" = "${AWS_ACCOUNT_ID}"
+          judge_stack="$(
+            aws cloudformation describe-stacks \
+              --stack-name Archon-production-Judge \
+              --output json
+          )"
+          jq -e '
+            (.Stacks | length) == 1 and
+            .Stacks[0].StackName == "Archon-production-Judge" and
+            (.Stacks[0].StackStatus |
+              IN("CREATE_COMPLETE","UPDATE_COMPLETE")) and
+            (.Stacks[0].Outputs | type) == "array"
+          ' <<<"${judge_stack}" >/dev/null
+          stack_output() {
+            local key="$1"
+            jq -er --arg key "${key}" '
+              [.Stacks[0].Outputs[] |
+                select(.OutputKey == $key) |
+                .OutputValue] |
+              if length == 1 then .[0]
+              else error("missing or duplicate exact stack output") end
+            ' <<<"${judge_stack}"
+          }
+          test "$(stack_output ArchonReleaseSha)" = "${RELEASE_SHA}"
+          test "$(stack_output ArchonDeploymentWorkflowRunId)" = \
+            "${DEPLOYMENT_RUN_ID}"
+          test "$(stack_output ArchonApplicationUrl)" = \
+            "${application_origin}"
+          test "$(stack_output ArchonCloudRuntimeReleaseDigest)" = "$(
+            jq -er '.promotion.cloudRuntimeReleaseDigest' \
               "${deployment_evidence}"
           )"
-          jq -e --arg release "${RELEASE_SHA}" '
-            .schemaVersion == "archon.live-runtime-manifest/v1" and
-            .releaseBinding.releaseSha == $release and
-            (.spa.objects | length) > 0 and
-            .verification.result == "passed"
-          ' "${live_runtime}" >/dev/null
-          stack_name="$(
-            jq -er '.production.stackName' "${deployment_evidence}"
-          )"
-          user_pool_id="$(
-            jq -er \
-              --arg stack "${stack_name}" '
-                .[$stack].ArchonUserPoolId |
-                select(
-                  type == "string" and
-                  test("^[a-z]{2}(-gov)?-[a-z]+-[1-9][0-9]*_[A-Za-z0-9]+$")
-                )
-              ' "${cdk_outputs}"
-          )"
-          cognito_client_id="$(
-            jq -er \
-              --arg stack "${stack_name}" '
-                .[$stack].ArchonUserPoolClientId |
-                select(type == "string" and test("^[A-Za-z0-9]{8,128}$"))
-              ' "${cdk_outputs}"
-          )"
+          user_pool_id="$(stack_output ArchonUserPoolId)"
+          [[ "${user_pool_id}" =~ ^${AWS_REGION}_[A-Za-z0-9]+$ ]]
+          cognito_client_id="$(stack_output ArchonUserPoolClientId)"
+          [[ "${cognito_client_id}" =~ ^[A-Za-z0-9]{8,128}$ ]]
           cognito_hosted_ui_origin="$(
-            jq -er \
-              --arg stack "${stack_name}" '
-                .[$stack].ArchonCognitoHostedUiOrigin |
-                select(
-                  type == "string" and
-                  test("^https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
-                )
-              ' "${cdk_outputs}"
+            stack_output ArchonCognitoHostedUiOrigin
           )"
-          test "$(
-            jq -er \
-              --arg stack "${stack_name}" '
-                .[$stack].ArchonApplicationUrl
-              ' "${cdk_outputs}"
-          )" = "${application_origin}"
-          region="${user_pool_id%%_*}"
-          if [[ "${region}" == cn-* ]]; then
-            cognito_issuer="https://cognito-idp.${region}.amazonaws.com.cn/${user_pool_id}"
-          else
-            cognito_issuer="https://cognito-idp.${region}.amazonaws.com/${user_pool_id}"
-          fi
+          [[ "${cognito_hosted_ui_origin}" =~ ^https://[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]]
+          cognito_issuer="https://cognito-idp.${AWS_REGION}.amazonaws.com/${user_pool_id}"
           jq -e \
             --arg applicationOrigin "${application_origin}" \
             --arg clientId "${cognito_client_id}" \
@@ -632,81 +688,12 @@ jobs:
               .auth.logoutEndpoint == ($hostedUiOrigin + "/logout") and
               .auth.redirectUri == ($applicationOrigin + "/") and
               .auth.logoutUri == ($applicationOrigin + "/") and
-              .auth.scopes == ["openid", "email", "archon/approve"]
+              .auth.scopes ==
+                ["openid", "email", "profile", "archon/approve"]
             ' "${runtime_config}" >/dev/null || {
             echo "::error::Runtime configuration is not the exact deployed Cognito client"
             exit 1
           }
-
-          deployment_predicate_type="https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1"
-          deployment_expected_subjects="$(
-            jq -Rn '
-              [
-                inputs |
-                capture(
-                  "^(?<sha>[0-9a-f]{64})  (?<name>[^[:cntrl:]]+)$"
-                ) |
-                {
-                  name: .name,
-                  digest: {sha256: .sha}
-                }
-              ] |
-              sort_by(.name)
-            ' <"${deployment_dir}/SHA256SUMS"
-          )"
-          deployment_verification_raw="${verification_root}/deployment.raw.json"
-          gh attestation verify "${deployment_evidence}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow \
-              "github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml" \
-            --signer-digest "${RELEASE_SHA}" \
-            --source-digest "${RELEASE_SHA}" \
-            --source-ref refs/heads/master \
-            --predicate-type "${deployment_predicate_type}" \
-            --deny-self-hosted-runners \
-            --format json >"${deployment_verification_raw}"
-          deployment_evidence_sha256="$(
-            sha256sum "${deployment_evidence}" |
-              awk '{print $1}'
-          )"
-          deployment_verification="${verification_root}/deployment.json"
-          jq -ceS \
-            --arg predicateType "${deployment_predicate_type}" \
-            --arg subjectSha256 "${deployment_evidence_sha256}" \
-            --argjson expectedSubjects "${deployment_expected_subjects}" \
-            --slurpfile expectedPredicate "${deployment_evidence}" '
-              [
-                .[] |
-                select(
-                  .verificationResult.statement.predicateType ==
-                    $predicateType and
-                  .verificationResult.statement.predicate ==
-                    $expectedPredicate[0] and
-                  (
-                    .verificationResult.statement.subject |
-                    sort_by(.name)
-                  ) == $expectedSubjects and
-                  any(
-                    .verificationResult.statement.subject[];
-                    .digest.sha256 == $subjectSha256
-                  )
-                ) |
-                {
-                  predicateType:
-                    .verificationResult.statement.predicateType,
-                  statement: .verificationResult.statement
-                }
-              ] |
-              unique_by(.statement) |
-              if length == 1 then .[0]
-              else error(
-                "exactly one deployment attestation must bind the full subject set"
-              )
-              end
-            ' "${deployment_verification_raw}" >"${deployment_verification}"
-          rm -- "${deployment_verification_raw}"
-          deployment_predicate_digest="sha256:${deployment_evidence_sha256}"
-
           validate_lifecycle() {
             local operation="$1"
             local run_id="$2"
@@ -3319,14 +3306,14 @@ jobs:
               or not isinstance(deployment["artifactId"], int)
               or deployment["artifactId"] < 1
               or deployment["artifactName"] !=
-                f"deployment-evidence-{release}-"
-                f"{deployment['runAttempt']}"
+                f"deployment-evidence-production-{release}-"
+                f"{deployment_run_id}"
               or not digest_pattern.fullmatch(
                   deployment["artifactDigest"]
               )
               or deployment["predicateType"] !=
                 "https://github.com/upgradedev/archon-datahub/"
-                "attestations/production-deployment/v1"
+                "attestations/aws-deployment/v2"
               or not digest_pattern.fullmatch(
                   deployment["predicateDigest"]
               )
@@ -3489,7 +3476,7 @@ jobs:
               runtime["schemaVersion"] != 1
               or not isinstance(runtime["demoQuery"], str)
               or not 1 <= len(runtime["demoQuery"]) <= 256
-              or auth["scopes"] != ["openid", "email", "archon/approve"]
+              or auth["scopes"] != ["openid", "email", "profile", "archon/approve"]
           ):
               raise SystemExit("runtime configuration contract is invalid")
           redirect = urllib.parse.urlsplit(auth["redirectUri"])

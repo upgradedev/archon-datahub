@@ -11,6 +11,15 @@ const workflow = readFileSync(
 test("posture proves drift, alarms, encryption controls and zero idle", () => {
   assert.match(workflow, /^permissions:\s*\{\}/m);
   assert.match(workflow, /environment: production-observer/);
+  assert.match(
+    workflow,
+    /OBSERVER_ROLE: \$\{\{ vars\.AWS_READ_ROLE_ARN \}\}/u
+  );
+  assert.match(workflow, /role\/archon-production-posture-observer/u);
+  assert.doesNotMatch(
+    workflow,
+    /AWS_OBSERVER_ROLE_ARN|role\/archon-production-observer/u
+  );
   assert.match(workflow, /id-token: write/);
   assert.match(workflow, /verify-github-control-plane\.sh/);
   assert.match(workflow, /observe-aws-live-runtime\.sh/);

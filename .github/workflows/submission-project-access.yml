@@ -300,15 +300,15 @@ jobs:
             "${DEPLOYMENT_RUN_ID}" \
             .github/workflows/deploy.yml \
             dispatch \
-            "deployment-evidence-${RELEASE_SHA}-" \
-            exact-current
+            "deployment-evidence-production-${RELEASE_SHA}-" \
+            exact-run-id
           resolve_source \
             availability \
             "${AVAILABILITY_RUN_ID}" \
             .github/workflows/availability.yml \
             availability \
             "production-availability-${RELEASE_SHA}-" \
-            latest-retained
+            exact-run-id
           resolve_source \
             provision \
             "${PROVISION_RUN_ID}" \
@@ -625,7 +625,7 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
 
-      - name: Verify every upstream inventory and full attested subject set
+      - name: Verify lean deployment, availability, and full lifecycle attestations
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ inputs.release_sha }}
@@ -634,13 +634,35 @@ jobs:
           umask 077
           upstream="${RUNNER_TEMP}/submission-project-access-upstream"
           verification_root="${RUNNER_TEMP}/submission-project-access-upstream-verifications"
+          sources="${RUNNER_TEMP}/submission-project-access-resolver/sources.json"
           test ! -e "${verification_root}"
           mkdir --mode=0700 "${verification_root}"
+
+          verify_lean_source() {
+            local key="$1"
+            local mode="$2"
+            local source_dir="${upstream}/${key}"
+            local output_dir="${verification_root}/${key}"
+            local run_id run_attempt artifact_id artifact_name artifact_digest
+            run_id="$(jq -er --arg key "${key}" '.[$key].runId' "${sources}")"
+            run_attempt="$(jq -er --arg key "${key}" '.[$key].producerAttempt' "${sources}")"
+            artifact_id="$(jq -er --arg key "${key}" '.[$key].artifactId' "${sources}")"
+            artifact_name="$(jq -er --arg key "${key}" '.[$key].artifactName' "${sources}")"
+            artifact_digest="$(jq -er --arg key "${key}" '.[$key].artifactDigest' "${sources}")"
+            bash scripts/verify-lean-submission-runtime-source.sh \
+              "${mode}" "${source_dir}" "${output_dir}" "${RELEASE_SHA}" \
+              "${run_id}" "${run_attempt}" "${artifact_id}" \
+              "${artifact_name}" "${artifact_digest}"
+            cp "${output_dir}/verification.digest" \
+              "${verification_root}/${key}.digest"
+          }
+          verify_lean_source deployment deployment
+          verify_lean_source availability availability
 
           assert_inventory() {
             local directory="$1"
             local inventory="$2"
-            local expected_literal="${3:-}"
+            local expected_literal="$3"
             test -d "${directory}"
             test ! -L "${directory}"
             test -f "${directory}/${inventory}"
@@ -649,14 +671,10 @@ jobs:
               echo "::error::Upstream artifact contains a symbolic link"
               exit 1
             fi
-            test -z "$(
-              find "${directory}" -type f -size +10485760c -print -quit
-            )"
+            test -z "$(find "${directory}" -type f -size +10485760c -print -quit)"
             if ! awk '
               BEGIN { ok = 1 }
-              !/^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._\/-]*$/ {
-                ok = 0
-              }
+              !/^[0-9a-f]{64}  [A-Za-z0-9][A-Za-z0-9._\/-]*$/ { ok = 0 }
               $2 ~ /(^|\/)\.\.(\/|$)/ || $2 ~ /\/\// { ok = 0 }
               { if (seen[$2]++) ok = 0 }
               END { exit(ok ? 0 : 1) }
@@ -671,236 +689,110 @@ jobs:
             {
               awk '{print $2}' "${directory}/${inventory}"
               printf '%s\n' "${inventory}"
-            } |
-              LC_ALL=C sort >"${verification_root}/expected-files.txt"
+            } | LC_ALL=C sort >"${verification_root}/expected-files.txt"
             find "${directory}" -type f -printf '%P\n' |
               LC_ALL=C sort >"${verification_root}/actual-files.txt"
             diff -u \
               "${verification_root}/expected-files.txt" \
               "${verification_root}/actual-files.txt"
-            if test -n "${expected_literal}"; then
-              test "$(
-                find "${directory}" -type f -printf '%P\n' |
-                  LC_ALL=C sort
-              )" = "${expected_literal}"
-            fi
+            test "$(find "${directory}" -type f -printf '%P\n' | LC_ALL=C sort)" = \
+              "${expected_literal}"
           }
 
-          assert_inventory \
-            "${upstream}/deployment" \
-            SHA256SUMS
-          assert_inventory \
-            "${upstream}/availability" \
-            SHA256SUMS \
-            "$(
-              printf '%s\n' \
-                SHA256SUMS \
-                attestation-predicate.json \
-                availability-subject.sha256 \
-                availability.json \
-                manifest.json
-            )"
-          (
-            cd "${upstream}/availability"
-            sha256sum --check --strict availability-subject.sha256
-          )
-          test "$(
-            awk '{print $2}' \
-              "${upstream}/availability/availability-subject.sha256"
-          )" = "$(
-            printf '%s\n' availability.json manifest.json
-          )"
           for operation in provision rotate deactivate reactivate; do
             assert_inventory \
               "${upstream}/${operation}" \
               SHA256SUMS \
-              "$(
-                printf '%s\n' \
-                  SHA256SUMS \
-                  attestation-predicate.json \
-                  judge-operation-state.json \
-                  judge-user-operation-subject.sha256 \
-                  manifest.json \
-                  operation-receipt.json
-              )"
+              "$(printf '%s\n' SHA256SUMS attestation-predicate.json \
+                judge-operation-state.json judge-user-operation-subject.sha256 \
+                manifest.json operation-receipt.json)"
             (
               cd "${upstream}/${operation}"
-              sha256sum --check --strict \
-                judge-user-operation-subject.sha256
+              sha256sum --check --strict judge-user-operation-subject.sha256
             )
-            test "$(
-              awk '{print $2}' \
-                "${upstream}/${operation}/judge-user-operation-subject.sha256"
-            )" = "$(
-              printf '%s\n' \
-                judge-operation-state.json \
-                operation-receipt.json \
-                manifest.json
-            )"
+            test "$(awk '{print $2}' "${upstream}/${operation}/judge-user-operation-subject.sha256")" = \
+              "$(printf '%s\n' judge-operation-state.json operation-receipt.json manifest.json)"
           done
           assert_inventory \
             "${upstream}/journey" \
             SHA256SUMS \
-            "$(
-              printf '%s\n' \
-                SHA256SUMS \
-                attestation-predicate.json \
-                browser-journey-receipt.json \
-                deployment-binding.json \
-                judge-user-lifecycle.json \
-                journey-subject.sha256 \
-                manifest.json \
-                production-runtime-config.json \
-                terminal-observation.json
-            )"
+            "$(printf '%s\n' SHA256SUMS attestation-predicate.json \
+              browser-journey-receipt.json deployment-binding.json \
+              judge-user-lifecycle.json journey-subject.sha256 manifest.json \
+              production-runtime-config.json terminal-observation.json)"
           (
             cd "${upstream}/journey"
             sha256sum --check --strict journey-subject.sha256
           )
-          test "$(
-            awk '{print $2}' \
-              "${upstream}/journey/journey-subject.sha256"
-          )" = "$(
-            printf '%s\n' \
-              browser-journey-receipt.json \
-              deployment-binding.json \
-              judge-user-lifecycle.json \
-              production-runtime-config.json \
-              terminal-observation.json
-          )"
+          test "$(awk '{print $2}' "${upstream}/journey/journey-subject.sha256")" = \
+            "$(printf '%s\n' browser-journey-receipt.json deployment-binding.json \
+              judge-user-lifecycle.json production-runtime-config.json \
+              terminal-observation.json)"
 
           verify_subject_set() {
-            local key="$1"
-            local directory="$2"
-            local inventory="$3"
-            local predicate="$4"
-            local predicate_type="$5"
-            local signer_workflow="$6"
+            local key="$1" directory="$2" inventory="$3" predicate="$4"
+            local predicate_type="$5" signer_workflow="$6"
             local output="${verification_root}/${key}"
-            local raw_dir="${output}/raw"
-            local projections="${output}/projections"
-            local expected_subjects
-            local expected_predicate
-            local index=0
-            mkdir --mode=0700 "${output}"
-            mkdir --mode=0700 "${raw_dir}" "${projections}"
-            expected_subjects="$(
-              jq -Rn '
-                [
-                  inputs |
-                  capture(
-                    "^(?<sha>[0-9a-f]{64})  " +
-                    "(?<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
-                  ) |
-                  {
-                    name: .name,
-                    digest: {sha256: .sha}
-                  }
-                ] |
-                sort_by(.name)
-              ' <"${directory}/${inventory}"
-            )"
+            local raw_dir="${output}/raw" projections="${output}/projections"
+            local expected_subjects expected_predicate index=0
+            mkdir --mode=0700 "${output}" "${raw_dir}" "${projections}"
+            expected_subjects="$(jq -Rn '
+              [inputs | capture("^(?<sha>[0-9a-f]{64})  (?<name>[A-Za-z0-9][A-Za-z0-9._/-]*)$") |
+               {name:.name,digest:{sha256:.sha}}] | sort_by(.name)
+            ' <"${directory}/${inventory}")"
             expected_predicate="$(jq -cS . "${directory}/${predicate}")"
             while read -r subject_sha subject_name; do
               index=$((index + 1))
               local subject="${directory}/${subject_name}"
               local raw="${raw_dir}/${index}.json"
               local projected="${projections}/${index}.json"
-              test -f "${subject}"
-              test ! -L "${subject}"
-              test "$(sha256sum "${subject}" | awk '{print $1}')" = \
-                "${subject_sha}"
+              test "$(sha256sum "${subject}" | awk '{print $1}')" = "${subject_sha}"
               gh attestation verify "${subject}" \
                 --repo "${GITHUB_REPOSITORY}" \
-                --signer-workflow \
-                  "github.com/${GITHUB_REPOSITORY}/${signer_workflow}" \
+                --signer-workflow "github.com/${GITHUB_REPOSITORY}/${signer_workflow}" \
                 --signer-digest "${RELEASE_SHA}" \
                 --source-digest "${RELEASE_SHA}" \
                 --source-ref refs/heads/master \
                 --predicate-type "${predicate_type}" \
-                --deny-self-hosted-runners \
-                --format json >"${raw}"
+                --deny-self-hosted-runners --format json >"${raw}"
               jq -ceS \
                 --arg predicateType "${predicate_type}" \
                 --arg subjectName "${subject_name}" \
                 --arg subjectSha "${subject_sha}" \
                 --argjson expectedPredicate "${expected_predicate}" \
                 --argjson expectedSubjects "${expected_subjects}" '
-                  [
-                    .[] |
-                    select(
-                      .verificationResult.statement.predicateType ==
-                        $predicateType and
-                      .verificationResult.statement.predicate ==
-                        $expectedPredicate and
-                      (
-                        .verificationResult.statement.subject |
-                        sort_by(.name)
-                      ) == $expectedSubjects and
-                      any(
-                        .verificationResult.statement.subject[];
-                        .name == $subjectName and
-                        .digest.sha256 == $subjectSha
-                      )
-                    ) |
-                    {
-                      subject: {
-                        name: $subjectName,
-                        digest: ("sha256:" + $subjectSha)
-                      },
-                      statement: .verificationResult.statement
-                    }
-                  ] |
+                  [.[] | select(
+                    .verificationResult.statement.predicateType == $predicateType and
+                    .verificationResult.statement.predicate == $expectedPredicate and
+                    (.verificationResult.statement.subject | sort_by(.name)) == $expectedSubjects and
+                    any(.verificationResult.statement.subject[];
+                      .name == $subjectName and .digest.sha256 == $subjectSha)) |
+                    {subject:{name:$subjectName,digest:("sha256:" + $subjectSha)},
+                     statement:.verificationResult.statement}] |
                   unique_by(.statement) |
                   if length == 1 then .[0]
-                  else error(
-                    "exactly one attestation must bind the full subject set"
-                  )
-                  end
+                  else error("exactly one attestation must bind the full subject set") end
                 ' "${raw}" >"${projected}"
               rm -- "${raw}"
             done <"${directory}/${inventory}"
             rmdir -- "${raw_dir}"
-            jq -cS -s \
-              'sort_by(.subject.name)' \
+            jq -cS -s 'sort_by(.subject.name)' \
               "${projections}"/*.json >"${output}/verification-set.json"
-            printf 'sha256:%s\n' "$(
-              sha256sum "${output}/verification-set.json" |
-                awk '{print $1}'
-            )" >"${verification_root}/${key}.digest"
+            printf 'sha256:%s\n' "$(sha256sum "${output}/verification-set.json" | awk '{print $1}')" \
+              >"${verification_root}/${key}.digest"
           }
-
-          verify_subject_set \
-            deployment \
-            "${upstream}/deployment" \
-            SHA256SUMS \
-            deployment-evidence.json \
-            https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1 \
-            .github/workflows/deploy.yml
-          verify_subject_set \
-            availability \
-            "${upstream}/availability" \
-            availability-subject.sha256 \
-            attestation-predicate.json \
-            https://github.com/upgradedev/archon-datahub/attestations/production-availability/v1 \
-            .github/workflows/availability.yml
           for operation in provision rotate deactivate reactivate; do
             verify_subject_set \
-              "${operation}" \
-              "${upstream}/${operation}" \
-              judge-user-operation-subject.sha256 \
-              attestation-predicate.json \
+              "${operation}" "${upstream}/${operation}" \
+              judge-user-operation-subject.sha256 attestation-predicate.json \
               https://github.com/upgradedev/archon-datahub/attestations/judge-user-operation/v1 \
               .github/workflows/judge-user.yml
           done
           verify_subject_set \
-            journey \
-            "${upstream}/journey" \
-            journey-subject.sha256 \
+            journey "${upstream}/journey" journey-subject.sha256 \
             attestation-predicate.json \
             https://archon.datahub.dev/attestations/submission-judge-journey/v1 \
             .github/workflows/submission-judge-journey.yml
-
       - name: Reconstruct and validate exact upstream semantic bindings
         env:
           RELEASE_SHA: ${{ inputs.release_sha }}
@@ -917,6 +809,18 @@ jobs:
           export VERIFICATION_ROOT="${RUNNER_TEMP}/submission-project-access-upstream-verifications"
           export SOURCE_METADATA="${RUNNER_TEMP}/submission-project-access-resolver/sources.json"
           export VERIFIED_BINDING="${RUNNER_TEMP}/submission-project-access-verified.json"
+          application_url="$(
+            jq -er .applicationUrl \
+              "${UPSTREAM_ROOT}/deployment/deployment-evidence.json"
+          )"
+          [[ "${application_url}" =~ ^https://[A-Za-z0-9.-]+$ ]]
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --connect-timeout 15 --max-time 60 \
+            --output "${VERIFICATION_ROOT}/runtime-config.json" \
+            "${application_url}/runtime-config.json"
+          test -s "${VERIFICATION_ROOT}/runtime-config.json"
+          test "$(stat -c '%s' "${VERIFICATION_ROOT}/runtime-config.json")" -le 65536
           python3 - <<'PY'
           import datetime as dt
           import hashlib
@@ -1001,57 +905,162 @@ jobs:
               load(deployment_dir / "deployment-evidence.json"),
               {
                   "schemaVersion",
-                  "promotionPolicy",
-                  "rollbackSelector",
-                  "source",
-                  "immutableArtifacts",
-                  "dataHubDemoState",
-                  "pipelineSecurity",
-                  "staging",
-                  "production",
+                  "stage",
+                  "releaseSha",
+                  "ciRunId",
+                  "deploymentRunId",
+                  "applicationUrl",
+                  "promotion",
+                  "verification",
+                  "secretsProjected",
+                  "generatedAt",
               },
-              "deployment evidence",
+              "lean deployment evidence",
+          )
+          deployment_observation = exact(
+              load(deployment_dir / "observation.json"),
+              {
+                  "schemaVersion",
+                  "stage",
+                  "releaseSha",
+                  "observedAt",
+                  "topology",
+                  "runtime",
+                  "security",
+              },
+              "lean deployment observation",
           )
           deployment_meta = sources["deployment"]
           application_url = origin(
-              deployment_evidence["production"].get("applicationUrl"),
+              deployment_evidence["applicationUrl"],
               "production application URL",
           )
+          deployment_promotion = exact(
+              deployment_evidence["promotion"],
+              {
+                  "policy",
+                  "webArtifactDigest",
+                  "lambdaArtifactDigest",
+                  "cloudRuntimeReleaseDigest",
+                  "coreCapabilityDigest",
+                  "coreImageManifestDigest",
+              },
+              "deployment promotion",
+          )
+          deployment_verification = exact(
+              deployment_evidence["verification"],
+              {
+                  "result",
+                  "zeroIdleCore",
+                  "httpBoundary",
+                  "securityHeaders",
+                  "directApiRejected",
+                  "canonicalHostEnforced",
+                  "observationSha256",
+              },
+              "deployment verification",
+          )
+          digest_names = (
+              "webArtifactDigest",
+              "lambdaArtifactDigest",
+              "cloudRuntimeReleaseDigest",
+              "coreCapabilityDigest",
+              "coreImageManifestDigest",
+          )
           if (
-              deployment_evidence["schemaVersion"] != 1
-              or deployment_evidence["promotionPolicy"]
-              != "build-once-promote-same-artifacts"
-              or deployment_evidence["rollbackSelector"].get("releaseSha")
-              != release
-              or deployment_evidence["production"].get("result") != "passed"
-              or deployment_evidence["staging"].get("result") != "passed"
+              deployment_evidence["schemaVersion"]
+              != "archon.aws-deployment-evidence/v2"
+              or deployment_evidence["stage"] != "production"
+              or deployment_evidence["releaseSha"] != release
+              or deployment_evidence["deploymentRunId"]
+              != deployment_meta["runId"]
               or deployment_meta["runId"]
               != int(os.environ["DEPLOYMENT_RUN_ID"])
-              or deployment_evidence["source"].get("deploymentRunUrl")
-              != (
-                  f"https://github.com/{repository}/actions/runs/"
-                  f"{deployment_meta['runId']}"
+              or not isinstance(deployment_evidence["ciRunId"], int)
+              or deployment_evidence["ciRunId"] < 1
+              or deployment_evidence["secretsProjected"] is not False
+              or deployment_promotion["policy"]
+              != "build-once-promote-exact-artifacts"
+              or any(
+                  not isinstance(deployment_promotion[name], str)
+                  or not sha_pattern.fullmatch(deployment_promotion[name])
+                  for name in digest_names
+              )
+              or deployment_verification
+              != {
+                  "result": "passed",
+                  "zeroIdleCore": True,
+                  "httpBoundary": True,
+                  "securityHeaders": True,
+                  "directApiRejected": True,
+                  "canonicalHostEnforced": True,
+                  "observationSha256": sha(
+                      deployment_dir / "observation.json"
+                  ).removeprefix("sha256:"),
+              }
+              or deployment_observation["schemaVersion"]
+              != "archon.lean-runtime-observation/v1"
+              or deployment_observation["stage"] != "production"
+              or deployment_observation["releaseSha"] != release
+              or deployment_observation["topology"].get("coreIdle")
+              is not True
+              or deployment_observation["topology"].get(
+                  "legacyAlwaysOnRuntimeAbsent"
+              )
+              is not True
+              or deployment_observation["security"].get(
+                  "rawIdentifiersProjected"
+              )
+              is not False
+              or not isinstance(
+                  deployment_observation["runtime"].get(
+                      "cloudImageDigest"
+                  ),
+                  str,
+              )
+              or not sha_pattern.fullmatch(
+                  deployment_observation["runtime"]["cloudImageDigest"]
               )
           ):
-              raise SystemExit("deployment evidence is not the exact release")
-          runtime_path = deployment_dir / "production-runtime-config.json"
+              raise SystemExit("lean deployment evidence is not exact")
+
+          deployment_binding = exact(
+              load(verification_root / "deployment" / "binding.json"),
+              {
+                  "workflowPath",
+                  "runId",
+                  "runAttempt",
+                  "artifactId",
+                  "artifactName",
+                  "artifactDigest",
+                  "predicateType",
+                  "predicateDigest",
+              },
+              "deployment binding",
+          )
+          expected_deployment_binding = {
+              "workflowPath": ".github/workflows/deploy.yml",
+              "runId": deployment_meta["runId"],
+              "runAttempt": deployment_meta["producerAttempt"],
+              "artifactId": deployment_meta["artifactId"],
+              "artifactName": deployment_meta["artifactName"],
+              "artifactDigest": deployment_meta["artifactDigest"],
+              "predicateType": (
+                  "https://github.com/upgradedev/archon-datahub/"
+                  "attestations/aws-deployment/v2"
+              ),
+              "predicateDigest": sha(
+                  deployment_dir / "deployment-evidence.json"
+              ),
+          }
+          if deployment_binding != expected_deployment_binding:
+              raise SystemExit("deployment binding is not exact")
+
+          runtime_path = verification_root / "runtime-config.json"
           runtime = exact(
               load(runtime_path),
               {"schemaVersion", "auth", "demoQuery"},
               "runtime configuration",
-          )
-          live_manifest_path = deployment_dir / "live-runtime-manifest.json"
-          live_manifest = exact(
-              load(live_manifest_path),
-              {
-                  "schemaVersion",
-                  "releaseBinding",
-                  "ecs",
-                  "lambdas",
-                  "spa",
-                  "verification",
-              },
-              "live runtime manifest",
           )
           auth = exact(
               runtime["auth"],
@@ -1066,6 +1075,7 @@ jobs:
               },
               "runtime auth",
           )
+
           def auth_endpoint(value: object, path: str, label: str) -> str:
               if not isinstance(value, str):
                   raise SystemExit(f"{label} is not a string")
@@ -1103,84 +1113,72 @@ jobs:
               or authorization_origin != token_origin
               or authorization_origin != logout_origin
               or not isinstance(auth["clientId"], str)
-              or re.fullmatch(r"[A-Za-z0-9]{8,128}", auth["clientId"]) is None
+              or re.fullmatch(r"[A-Za-z0-9]{8,128}", auth["clientId"])
+              is None
               or auth["redirectUri"] != f"{application_url}/"
               or auth["logoutUri"] != f"{application_url}/"
-              or auth["scopes"] != ["openid", "email", "archon/approve"]
+              or auth["scopes"]
+              != ["openid", "email", "profile", "archon/approve"]
               or not isinstance(runtime["demoQuery"], str)
               or not runtime["demoQuery"].strip()
-              or deployment_evidence["production"].get(
-                  "runtimeConfigSha256"
-              )
-              != sha(runtime_path).removeprefix("sha256:")
-              or deployment_evidence["production"].get(
-                  "liveRuntimeManifestSha256"
-              )
-              != sha(live_manifest_path).removeprefix("sha256:")
-              or live_manifest["schemaVersion"]
-              != "archon.live-runtime-manifest/v1"
-              or live_manifest["releaseBinding"].get("releaseSha") != release
-              or live_manifest["releaseBinding"].get(
-                  "containerImageDigest"
-              )
-              != deployment_evidence["immutableArtifacts"].get(
-                  "productionEcrImageDigest"
-              )
-              or live_manifest["releaseBinding"].get("spaArtifactSha256")
-              != deployment_evidence["immutableArtifacts"].get(
-                  "webArchiveSha256"
-              )
-              or live_manifest["verification"].get("result") != "passed"
-              or not isinstance(
-                  live_manifest.get("spa", {}).get("objects"), list
-              )
           ):
               raise SystemExit("production runtime configuration is invalid")
-          deployment_binding = {
-              "workflowPath": ".github/workflows/deploy.yml",
-              "runId": deployment_meta["runId"],
-              "runAttempt": deployment_meta["producerAttempt"],
-              "artifactId": deployment_meta["artifactId"],
-              "artifactName": deployment_meta["artifactName"],
-              "artifactDigest": deployment_meta["artifactDigest"],
-              "predicateType": (
-                  "https://github.com/upgradedev/archon-datahub/"
-                  "attestations/production-deployment/v1"
-              ),
-              "predicateDigest": sha(
-                  deployment_dir / "deployment-evidence.json"
-              ),
-          }
 
           availability_dir = root / "availability"
           availability_meta = sources["availability"]
           availability = exact(
-              load(availability_dir / "availability.json"),
+              load(availability_dir / "evidence.json"),
               {
                   "schemaVersion",
+                  "releaseSha",
                   "observedAt",
-                  "source",
-                  "publicRuntime",
-                  "readOnlyAudit",
-                  "releaseEvidence",
+                  "checks",
+                  "profileResponseDigest",
+                  "rawIdentifiersRetained",
                   "result",
               },
               "availability evidence",
           )
-          availability_predicate = exact(
-              load(availability_dir / "attestation-predicate.json"),
+          availability_observation = exact(
+              load(availability_dir / "observation.json"),
               {
                   "schemaVersion",
-                  "repository",
+                  "stage",
                   "releaseSha",
-                  "source",
-                  "monitor",
-                  "deployment",
-                  "evidence",
-                  "result",
+                  "observedAt",
+                  "topology",
+                  "runtime",
+                  "security",
               },
-              "availability predicate",
+              "availability observation",
           )
+          availability_binding = exact(
+              load(verification_root / "availability" / "binding.json"),
+              {
+                  "workflowPath",
+                  "runId",
+                  "runAttempt",
+                  "artifactId",
+                  "artifactName",
+                  "artifactDigest",
+                  "predicateType",
+                  "predicateDigest",
+              },
+              "availability binding",
+          )
+          expected_availability_binding = {
+              "workflowPath": ".github/workflows/availability.yml",
+              "runId": availability_meta["runId"],
+              "runAttempt": availability_meta["producerAttempt"],
+              "artifactId": availability_meta["artifactId"],
+              "artifactName": availability_meta["artifactName"],
+              "artifactDigest": availability_meta["artifactDigest"],
+              "predicateType": (
+                  "https://github.com/upgradedev/archon-datahub/"
+                  "attestations/production-availability/v2"
+              ),
+              "predicateDigest": sha(availability_dir / "evidence.json"),
+          }
           availability_observed = instant(
               availability["observedAt"], "availability observedAt"
           )
@@ -1189,86 +1187,44 @@ jobs:
               application_url.encode("utf-8")
           ).hexdigest()
           if (
-              availability["schemaVersion"]
+              availability_binding != expected_availability_binding
+              or availability_meta["runId"]
+              != int(os.environ["AVAILABILITY_RUN_ID"])
+              or availability["schemaVersion"]
               != "archon.production-availability/v2"
-              or availability["source"].get("repository") != repository
-              or availability["source"].get("controlPlaneSha") != release
-              or availability["source"].get("workflowRunId")
-              != availability_meta["runId"]
-              or availability["source"].get("workflowRunAttempt")
-              != availability_meta["producerAttempt"]
-              or availability["publicRuntime"].get(
-                  "applicationOriginSha256"
+              or availability["releaseSha"] != release
+              or availability["checks"]
+              != {
+                  "publicSpa": True,
+                  "runtimeProfiles": True,
+                  "securityHeaders": True,
+                  "leanAwsControls": True,
+                  "coreIdle": True,
+              }
+              or not isinstance(availability["profileResponseDigest"], str)
+              or not sha_pattern.fullmatch(
+                  availability["profileResponseDigest"]
               )
-              != expected_origin_sha
-              or availability["publicRuntime"].get(
-                  "runtimeConfigSha256"
-              )
-              != sha(runtime_path).removeprefix("sha256:")
-              or availability["publicRuntime"].get(
-                  "runtimeConfigMatchesDeployment"
-              )
-              is not True
-              or availability["publicRuntime"].get(
-                  "publicBytesMatchLiveManifest"
-              )
-              is not True
-              or availability["publicRuntime"].get("redirectsObserved") != 0
-              or availability["publicRuntime"].get("strictTls") is not True
-              or availability["releaseEvidence"].get("deploymentRunId")
-              != deployment_meta["runId"]
-              or availability["releaseEvidence"].get(
-                  "deploymentRunAttempt"
-              )
-              != deployment_meta["producerAttempt"]
-              or availability["releaseEvidence"].get(
-                  "deploymentArtifactId"
-              )
-              != deployment_meta["artifactId"]
-              or availability["releaseEvidence"].get(
-                  "deploymentArtifactDigest"
-              )
-              != deployment_meta["artifactDigest"]
-              or availability["releaseEvidence"].get(
-                  "deploymentEvidenceSha256"
-              )
-              != sha(
-                  deployment_dir / "deployment-evidence.json"
-              ).removeprefix("sha256:")
+              or availability["rawIdentifiersRetained"] is not False
               or availability["result"] != "passed"
+              or availability_observation["schemaVersion"]
+              != "archon.lean-runtime-observation/v1"
+              or availability_observation["stage"] != "production"
+              or availability_observation["releaseSha"] != release
+              or availability_observation["topology"].get("coreIdle")
+              is not True
+              or availability_observation["topology"].get(
+                  "legacyAlwaysOnRuntimeAbsent"
+              )
+              is not True
+              or availability_observation["security"].get(
+                  "rawIdentifiersProjected"
+              )
+              is not False
               or availability_observed > now + dt.timedelta(minutes=5)
               or now - availability_observed > dt.timedelta(hours=7)
           ):
               raise SystemExit("availability evidence is not exact and fresh")
-          if (
-              availability_predicate["schemaVersion"]
-              != "archon.production-availability-attestation/v1"
-              or availability_predicate["repository"] != repository
-              or availability_predicate["releaseSha"] != release
-              or availability_predicate["source"].get("runId")
-              != availability_meta["runId"]
-              or availability_predicate["source"].get("runAttempt")
-              != availability_meta["producerAttempt"]
-              or availability_predicate["monitor"]
-              != {
-                  "cron": "17 */6 * * *",
-                  "maximumExpectedGapMinutes": 420,
-                  "observedAt": availability["observedAt"],
-                  "result": "passed",
-              }
-              or availability_predicate["deployment"].get("runId")
-              != deployment_meta["runId"]
-              or availability_predicate["evidence"].get(
-                  "availabilitySha256"
-              )
-              != sha(
-                  availability_dir / "availability.json"
-              ).removeprefix("sha256:")
-              or availability_predicate["result"]
-              != "public-read-path-verified"
-          ):
-              raise SystemExit("availability predicate binding is invalid")
-
           operation_names = [
               "provision",
               "rotate",
@@ -1541,18 +1497,7 @@ jobs:
               "applicationOriginSha256": expected_origin_sha,
               "deployment": deployment_binding,
               "availability": {
-                  "runId": availability_meta["runId"],
-                  "runAttempt": availability_meta["producerAttempt"],
-                  "artifactId": availability_meta["artifactId"],
-                  "artifactName": availability_meta["artifactName"],
-                  "artifactDigest": availability_meta["artifactDigest"],
-                  "predicateType": (
-                      "https://github.com/upgradedev/archon-datahub/"
-                      "attestations/production-availability/v1"
-                  ),
-                  "predicateDigest": sha(
-                      availability_dir / "attestation-predicate.json"
-                  ),
+                  **availability_binding,
                   "observedAt": availability["observedAt"],
               },
               "judgeUserLifecycle": lifecycle,
@@ -1661,9 +1606,13 @@ jobs:
             runtime \
             "${application_url}/runtime-config.json" \
             65536
+          credentialless_get \
+            profiles \
+            "${application_url}/api/runtime-profiles" \
+            131072
           cmp --silent \
             "${public_root}/runtime.body" \
-            "${RUNNER_TEMP}/submission-project-access-upstream/deployment/production-runtime-config.json"
+            "${RUNNER_TEMP}/submission-project-access-upstream-verifications/runtime-config.json"
           cmp --silent \
             "${public_root}/runtime.body" \
             "${RUNNER_TEMP}/submission-project-access-upstream/journey/production-runtime-config.json"
@@ -1675,91 +1624,87 @@ jobs:
             "${public_root}/runtime.headers"
           grep -qi '^cache-control:.*no-store' \
             "${public_root}/runtime.headers"
+          grep -qi '^content-type:[[:space:]]*application/json' \
+            "${public_root}/profiles.headers"
+          grep -qi '^cache-control:.*no-store' \
+            "${public_root}/profiles.headers"
+          jq -e '
+            (keys | sort) == [
+              "autoSelection","profiles","schemaVersion","serverTime"
+            ] and
+            .schemaVersion == "archon.runtime-profiles/v1" and
+            (.serverTime | fromdateiso8601) and
+            .autoSelection == "cloud" and
+            (.profiles | length) == 2 and
+            ([.profiles[].profileId] | sort) == ["cloud","core"] and
+            all(.profiles[];
+              (.capabilities | keys) == [
+                "agentContextKit","analyticsAgent","dataHubSkills",
+                "mcpGovernedWrite","mcpRead"
+              ] and
+              all(.capabilities[]; . == true) and
+              (.generation | type) == "string" and
+              (.generation | length) >= 1 and
+              (.checkedAt | fromdateiso8601) and
+              (.capabilityDigest | test("^sha256:[0-9a-f]{64}$"))
+            ) and
+            ([.profiles[] | select(.profileId == "cloud") | .availability])
+              == ["READY"] and
+            ([.profiles[] | select(.profileId == "core") | .availability])
+              == ["LAUNCHABLE"]
+          ' "${public_root}/profiles.body" >/dev/null
 
-          live_manifest="$(
-            printf '%s/%s' \
-              "${RUNNER_TEMP}/submission-project-access-upstream/deployment" \
-              live-runtime-manifest.json
-          )"
-          deployment_evidence="$(
-            printf '%s/%s' \
-              "${RUNNER_TEMP}/submission-project-access-upstream/deployment" \
-              deployment-evidence.json
-          )"
-          index_sha256="$(
-            sha256sum "${public_root}/app.body" | awk '{print $1}'
-          )"
-          runtime_sha256="$(
-            sha256sum "${public_root}/runtime.body" | awk '{print $1}'
-          )"
-          index_size="$(stat -c '%s' "${public_root}/app.body")"
-          runtime_size="$(stat -c '%s' "${public_root}/runtime.body")"
-          test "$(sha256sum "${live_manifest}" | awk '{print $1}')" = "$(
-            jq -er '.production.liveRuntimeManifestSha256' \
-              "${deployment_evidence}"
+          deployment_evidence="${RUNNER_TEMP}/submission-project-access-upstream/deployment/deployment-evidence.json"
+          deployment_observation="${RUNNER_TEMP}/submission-project-access-upstream/deployment/observation.json"
+          observation_sha256="$(
+            sha256sum "${deployment_observation}" | awk '{print $1}'
           )"
           jq -e \
             --arg release "${RELEASE_SHA}" \
-            --arg indexSha256 "${index_sha256}" \
-            --arg runtimeSha256 "${runtime_sha256}" \
-            --argjson indexSize "${index_size}" \
-            --argjson runtimeSize "${runtime_size}" '
-              .schemaVersion == "archon.live-runtime-manifest/v1" and
-              .releaseBinding.releaseSha == $release and
-              .verification.result == "passed" and
-              (.spa.objects | type) == "array" and
+            --arg applicationUrl "${application_url}" \
+            --arg observationSha256 "${observation_sha256}" '
+              .schemaVersion == "archon.aws-deployment-evidence/v2" and
+              .stage == "production" and
+              .releaseSha == $release and
+              .applicationUrl == $applicationUrl and
+              .promotion.policy == "build-once-promote-exact-artifacts" and
               all(
-                .spa.objects[];
-                (keys | sort) == [
-                  "key",
-                  "sha256",
-                  "size",
-                  "versionId"
-                ] and
-                (.key | type) == "string" and
-                (.key | length) >= 1 and
-                (.key | length) <= 1024 and
-                (.versionId | type) == "string" and
-                (.versionId | length) >= 1 and
-                (.versionId | length) <= 1024 and
-                (.sha256 | type) == "string" and
-                (.sha256 | test("^[0-9a-f]{64}$")) and
-                (.size | type) == "number" and
-                .size >= 0 and
-                .size == (.size | floor)
+                .promotion[
+                  "webArtifactDigest",
+                  "lambdaArtifactDigest",
+                  "cloudRuntimeReleaseDigest",
+                  "coreCapabilityDigest",
+                  "coreImageManifestDigest"
+                ];
+                test("^sha256:[0-9a-f]{64}$")
               ) and
-              (
-                [.spa.objects[].key] as $keys |
-                ($keys | length) == ($keys | unique | length)
-              ) and
-              (
-                [
-                  .spa.objects[] |
-                  select(.key == "index.html") |
-                  {key, sha256, size}
-                ] == [
-                  {
-                    key: "index.html",
-                    sha256: $indexSha256,
-                    size: $indexSize
-                  }
-                ]
-              ) and
-              (
-                [
-                  .spa.objects[] |
-                  select(.key == "runtime-config.json") |
-                  {key, sha256, size}
-                ] == [
-                  {
-                    key: "runtime-config.json",
-                    sha256: $runtimeSha256,
-                    size: $runtimeSize
-                  }
-                ]
-              )
-            ' "${live_manifest}" >/dev/null
-
+              .verification == {
+                result:"passed",
+                zeroIdleCore:true,
+                httpBoundary:true,
+                securityHeaders:true,
+                directApiRejected:true,
+                canonicalHostEnforced:true,
+                observationSha256:$observationSha256
+              } and
+              .secretsProjected == false
+            ' "${deployment_evidence}" >/dev/null
+          jq -e --arg release "${RELEASE_SHA}" '
+            .schemaVersion == "archon.lean-runtime-observation/v1" and
+            .stage == "production" and
+            .releaseSha == $release and
+            .topology.coreIdle == true and
+            .topology.legacyAlwaysOnRuntimeAbsent == true and
+            (.topology.stackFingerprintSha256 |
+              test("^[0-9a-f]{64}$")) and
+            (.runtime.cloudImageDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            .runtime.functions == 6 and
+            .runtime.imageFunctions == 3 and
+            .runtime.sessionTables == 2 and
+            .runtime.privateVersionedBuckets == 2 and
+            .security.rawIdentifiersProjected == false
+          ' "${deployment_observation}" >/dev/null
           repository_url="https://github.com/upgradedev/archon-datahub"
           release_url="${repository_url}/tree/${RELEASE_SHA}"
           license_url="${repository_url}/blob/${RELEASE_SHA}/LICENSE"
@@ -2193,7 +2138,10 @@ jobs:
           test "$(sed -n '4p' "${meta}")" = "0"
           cmp --silent \
             "${body}" \
-            "${RUNNER_TEMP}/submission-project-access-upstream/deployment/production-runtime-config.json"
+            "${RUNNER_TEMP}/submission-project-access-upstream-verifications/runtime-config.json"
+          cmp --silent \
+            "${body}" \
+            "${RUNNER_TEMP}/submission-project-access-upstream/journey/production-runtime-config.json"
 
       - name: Recheck canonical source state before retention
         env:
@@ -2463,14 +2411,14 @@ jobs:
                 workflow_path=".github/workflows/deploy.yml"
                 event_policy="dispatch"
                 operation=""
-                selection_policy="exact-current"
-                artifact_prefix="deployment-evidence-${RELEASE_SHA}-"
+                selection_policy="exact-run-id"
+                artifact_prefix="deployment-evidence-production-${RELEASE_SHA}-"
                 ;;
               availability)
                 workflow_path=".github/workflows/availability.yml"
                 event_policy="availability"
                 operation=""
-                selection_policy="latest-retained"
+                selection_policy="exact-run-id"
                 artifact_prefix="production-availability-${RELEASE_SHA}-"
                 ;;
               provision|rotate|deactivate|reactivate)
@@ -2972,7 +2920,7 @@ jobs:
                   "key": "deployment",
                   **sq3["deployment"],
                   "producerAttempt": sq3["deployment"]["runAttempt"],
-                  "subjectInventory": "SHA256SUMS",
+                  "subjectInventory": "deployment-evidence.json",
                   "predicateFile": "deployment-evidence.json",
                   "signerWorkflow": ".github/workflows/deploy.yml",
                   "eventPolicy": "dispatch",
@@ -2997,8 +2945,8 @@ jobs:
                       sq3["observation"]["availabilityPredicateDigest"],
                   "producerAttempt":
                       sq3["observation"]["availabilityRunAttempt"],
-                  "subjectInventory": "availability-subject.sha256",
-                  "predicateFile": "attestation-predicate.json",
+                  "subjectInventory": "evidence.json",
+                  "predicateFile": "evidence.json",
                   "signerWorkflow":
                       ".github/workflows/availability.yml",
                   "eventPolicy": "availability",
@@ -3260,6 +3208,41 @@ jobs:
           PY
             rm -- "${archive}"
             test -z "$(find "${directory}" -type l -print -quit)"
+            if [[ "${key}" == "deployment" || "${key}" == "availability" ]]; then
+              lean_verification="${work}/lean-verification"
+              bash scripts/verify-lean-submission-runtime-source.sh \
+                "${key}" "${directory}" "${lean_verification}" \
+                "${RELEASE_SHA}" "${run_id}" "${producer_attempt}" \
+                "${artifact_id}" "${artifact_name}" "${artifact_digest}"
+              jq -e --argjson retained "${source}" '
+                .workflowPath == $retained.workflowPath and
+                .runId == $retained.runId and
+                .runAttempt == $retained.runAttempt and
+                .artifactId == $retained.artifactId and
+                .artifactName == $retained.artifactName and
+                .artifactDigest == $retained.artifactDigest and
+                .predicateType == $retained.predicateType and
+                .predicateDigest == $retained.predicateDigest
+              ' "${lean_verification}/binding.json" >/dev/null
+              jq -e --arg release "${RELEASE_SHA}" --arg mode "${key}" '
+                .schemaVersion == "archon.submission-lean-runtime-source/v2" and
+                .mode == $mode and
+                .releaseSha == $release and
+                .topology == {
+                  stacks:[
+                    "Archon-production-Core",
+                    "Archon-production-Edge",
+                    "Archon-production-Judge"
+                  ],
+                  coreIdle:true,
+                  legacyAlwaysOnRuntimeAbsent:true
+                } and
+                .runtime.coreMode == "ephemeral-optional-live-session" and
+                .sanitized == true and
+                .secretMaterialRetained == false
+              ' "${lean_verification}/runtime-source.json" >/dev/null
+              continue
+            fi
             test -f "${directory}/SHA256SUMS"
             (
               cd "${directory}"
@@ -3431,6 +3414,10 @@ jobs:
             runtime \
             "${application_url}/runtime-config.json" \
             65536
+          public_get \
+            profiles \
+            "${application_url}/api/runtime-profiles" \
+            131072
           public_get repository "${repository_url}" 10485760
           public_get release "${release_url}" 10485760
           public_get license "${license_url}" 10485760
@@ -3444,92 +3431,83 @@ jobs:
             134217728
           cmp --silent \
             "${public}/runtime.body" \
-            "${RUNNER_TEMP}/submission-project-access-upstream-attester/deployment/source/production-runtime-config.json"
-          attester_deployment="$(
-            printf '%s/%s' \
-              "${RUNNER_TEMP}/submission-project-access-upstream-attester/deployment/source" \
-              deployment-evidence.json
-          )"
-          attester_live_manifest="$(
-            printf '%s/%s' \
-              "${RUNNER_TEMP}/submission-project-access-upstream-attester/deployment/source" \
-              live-runtime-manifest.json
-          )"
-          index_sha256="$(
-            sha256sum "${public}/app.body" | awk '{print $1}'
-          )"
-          runtime_sha256="$(
-            sha256sum "${public}/runtime.body" | awk '{print $1}'
-          )"
-          index_size="$(stat -c '%s' "${public}/app.body")"
-          runtime_size="$(stat -c '%s' "${public}/runtime.body")"
-          test "$(sha256sum \
-            "${attester_live_manifest}" | awk '{print $1}')" = "$(
-            jq -er '.production.liveRuntimeManifestSha256' \
-              "${attester_deployment}"
+            "${RUNNER_TEMP}/submission-project-access-upstream-attester/journey/source/production-runtime-config.json"
+          jq -e '
+            (keys | sort) == [
+              "autoSelection","profiles","schemaVersion","serverTime"
+            ] and
+            .schemaVersion == "archon.runtime-profiles/v1" and
+            (.serverTime | fromdateiso8601) and
+            .autoSelection == "cloud" and
+            (.profiles | length) == 2 and
+            ([.profiles[].profileId] | sort) == ["cloud","core"] and
+            all(.profiles[];
+              (.capabilities | keys) == [
+                "agentContextKit","analyticsAgent","dataHubSkills",
+                "mcpGovernedWrite","mcpRead"
+              ] and
+              all(.capabilities[]; . == true) and
+              (.generation | type) == "string" and
+              (.generation | length) >= 1 and
+              (.checkedAt | fromdateiso8601) and
+              (.capabilityDigest | test("^sha256:[0-9a-f]{64}$"))
+            ) and
+            ([.profiles[] | select(.profileId == "cloud") | .availability])
+              == ["READY"] and
+            ([.profiles[] | select(.profileId == "core") | .availability])
+              == ["LAUNCHABLE"]
+          ' "${public}/profiles.body" >/dev/null
+          attester_deployment="${RUNNER_TEMP}/submission-project-access-upstream-attester/deployment/source/deployment-evidence.json"
+          attester_observation="${RUNNER_TEMP}/submission-project-access-upstream-attester/deployment/source/observation.json"
+          observation_sha256="$(
+            sha256sum "${attester_observation}" | awk '{print $1}'
           )"
           jq -e \
             --arg release "${RELEASE_SHA}" \
-            --arg indexSha256 "${index_sha256}" \
-            --arg runtimeSha256 "${runtime_sha256}" \
-            --argjson indexSize "${index_size}" \
-            --argjson runtimeSize "${runtime_size}" '
-              .schemaVersion == "archon.live-runtime-manifest/v1" and
-              .releaseBinding.releaseSha == $release and
-              .verification.result == "passed" and
-              (.spa.objects | type) == "array" and
+            --arg applicationUrl "${application_url}" \
+            --arg observationSha256 "${observation_sha256}" '
+              .schemaVersion == "archon.aws-deployment-evidence/v2" and
+              .stage == "production" and
+              .releaseSha == $release and
+              .applicationUrl == $applicationUrl and
+              .promotion.policy == "build-once-promote-exact-artifacts" and
               all(
-                .spa.objects[];
-                (keys | sort) == [
-                  "key",
-                  "sha256",
-                  "size",
-                  "versionId"
-                ] and
-                (.key | type) == "string" and
-                (.key | length) >= 1 and
-                (.key | length) <= 1024 and
-                (.versionId | type) == "string" and
-                (.versionId | length) >= 1 and
-                (.versionId | length) <= 1024 and
-                (.sha256 | type) == "string" and
-                (.sha256 | test("^[0-9a-f]{64}$")) and
-                (.size | type) == "number" and
-                .size >= 0 and
-                .size == (.size | floor)
+                .promotion[
+                  "webArtifactDigest",
+                  "lambdaArtifactDigest",
+                  "cloudRuntimeReleaseDigest",
+                  "coreCapabilityDigest",
+                  "coreImageManifestDigest"
+                ];
+                test("^sha256:[0-9a-f]{64}$")
               ) and
-              (
-                [.spa.objects[].key] as $keys |
-                ($keys | length) == ($keys | unique | length)
-              ) and
-              (
-                [
-                  .spa.objects[] |
-                  select(.key == "index.html") |
-                  {key, sha256, size}
-                ] == [
-                  {
-                    key: "index.html",
-                    sha256: $indexSha256,
-                    size: $indexSize
-                  }
-                ]
-              ) and
-              (
-                [
-                  .spa.objects[] |
-                  select(.key == "runtime-config.json") |
-                  {key, sha256, size}
-                ] == [
-                  {
-                    key: "runtime-config.json",
-                    sha256: $runtimeSha256,
-                    size: $runtimeSize
-                  }
-                ]
-              )
-            ' "${attester_live_manifest}" >/dev/null
-
+              .verification == {
+                result:"passed",
+                zeroIdleCore:true,
+                httpBoundary:true,
+                securityHeaders:true,
+                directApiRejected:true,
+                canonicalHostEnforced:true,
+                observationSha256:$observationSha256
+              } and
+              .secretsProjected == false
+            ' "${attester_deployment}" >/dev/null
+          jq -e --arg release "${RELEASE_SHA}" '
+            .schemaVersion == "archon.lean-runtime-observation/v1" and
+            .stage == "production" and
+            .releaseSha == $release and
+            .topology.coreIdle == true and
+            .topology.legacyAlwaysOnRuntimeAbsent == true and
+            (.topology.stackFingerprintSha256 |
+              test("^[0-9a-f]{64}$")) and
+            (.runtime.cloudImageDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            .runtime.functions == 6 and
+            .runtime.imageFunctions == 3 and
+            .runtime.sessionTables == 2 and
+            .runtime.privateVersionedBuckets == 2 and
+            .security.rawIdentifiersProjected == false
+          ' "${attester_observation}" >/dev/null
           export PUBLIC_ROOT="${public}"
           python3 - <<'PY'
           import base64
@@ -3728,18 +3706,23 @@ jobs:
           deployment = load(
               deployment_dir / "deployment-evidence.json"
           )
+          deployment_observation = load(
+              deployment_dir / "observation.json"
+          )
+          deployment_binding = load(
+              upstream / "deployment" / "lean-verification" /
+              "binding.json"
+          )
           runtime = load(
-              deployment_dir / "production-runtime-config.json"
+              journey_dir / "production-runtime-config.json"
           )
-          live_manifest_path = (
-              deployment_dir / "live-runtime-manifest.json"
+          availability = load(availability_dir / "evidence.json")
+          availability_observation = load(
+              availability_dir / "observation.json"
           )
-          live_manifest = load(live_manifest_path)
-          availability = load(
-              availability_dir / "availability.json"
-          )
-          availability_predicate = load(
-              availability_dir / "attestation-predicate.json"
+          availability_binding = load(
+              upstream / "availability" / "lean-verification" /
+              "binding.json"
           )
           journey_manifest = load(journey_dir / "manifest.json")
           journey_predicate = load(
@@ -3810,115 +3793,148 @@ jobs:
               "/logout",
               "retained logout endpoint",
           )
+          expected_availability_binding = {
+              "workflowPath": ".github/workflows/availability.yml",
+              "runId": sq3["observation"]["availabilityRunId"],
+              "runAttempt": sq3["observation"][
+                  "availabilityRunAttempt"
+              ],
+              "artifactId": sq3["observation"]["availabilityArtifactId"],
+              "artifactName": sq3["observation"][
+                  "availabilityArtifactName"
+              ],
+              "artifactDigest": sq3["observation"][
+                  "availabilityArtifactDigest"
+              ],
+              "predicateType": sq3["observation"][
+                  "availabilityPredicateType"
+              ],
+              "predicateDigest": sq3["observation"][
+                  "availabilityPredicateDigest"
+              ],
+          }
+          deployment_verification = deployment.get("verification", {})
+          deployment_promotion = deployment.get("promotion", {})
           if (
               sq3["applicationUrl"] != application_url
               or sq4["applicationUrl"] != application_url
-              or deployment.get("schemaVersion") != 1
-              or deployment.get("rollbackSelector", {}).get(
-                  "releaseSha"
+              or deployment_binding != sq3["deployment"]
+              or journey_deployment != sq3["deployment"]
+              or journey_deployment != sq4["deployment"]
+              or deployment.get("schemaVersion")
+              != "archon.aws-deployment-evidence/v2"
+              or deployment.get("stage") != "production"
+              or deployment.get("releaseSha") != release
+              or deployment.get("deploymentRunId")
+              != sq3["deployment"]["runId"]
+              or deployment.get("applicationUrl") != application_url
+              or deployment.get("secretsProjected") is not False
+              or deployment_promotion.get("policy")
+              != "build-once-promote-exact-artifacts"
+              or any(
+                  re.fullmatch(
+                      r"sha256:[0-9a-f]{64}",
+                      str(deployment_promotion.get(name, "")),
+                  )
+                  is None
+                  for name in (
+                      "webArtifactDigest",
+                      "lambdaArtifactDigest",
+                      "cloudRuntimeReleaseDigest",
+                      "coreCapabilityDigest",
+                      "coreImageManifestDigest",
+                  )
               )
-              != release
-              or deployment.get("production", {}).get(
-                  "applicationUrl"
+              or deployment_verification
+              != {
+                  "result": "passed",
+                  "zeroIdleCore": True,
+                  "httpBoundary": True,
+                  "securityHeaders": True,
+                  "directApiRejected": True,
+                  "canonicalHostEnforced": True,
+                  "observationSha256": sha(
+                      deployment_dir / "observation.json"
+                  ).removeprefix("sha256:"),
+              }
+              or deployment_observation.get("schemaVersion")
+              != "archon.lean-runtime-observation/v1"
+              or deployment_observation.get("stage") != "production"
+              or deployment_observation.get("releaseSha") != release
+              or deployment_observation.get("topology", {}).get(
+                  "coreIdle"
               )
-              != application_url
-              or deployment.get("production", {}).get("result")
-              != "passed"
-              or deployment.get("production", {}).get(
-                  "runtimeConfigSha256"
+              is not True
+              or deployment_observation.get("topology", {}).get(
+                  "legacyAlwaysOnRuntimeAbsent"
               )
-              != sha(
-                  deployment_dir / "production-runtime-config.json"
-              ).removeprefix("sha256:")
-              or deployment.get("production", {}).get(
-                  "liveRuntimeManifestSha256"
+              is not True
+              or deployment_observation.get("security", {}).get(
+                  "rawIdentifiersProjected"
               )
-              != sha(live_manifest_path).removeprefix("sha256:")
-              or live_manifest.get("schemaVersion")
-              != "archon.live-runtime-manifest/v1"
-              or live_manifest.get("releaseBinding", {}).get(
-                  "releaseSha"
+              is not False
+              or re.fullmatch(
+                  r"sha256:[0-9a-f]{64}",
+                  str(
+                      deployment_observation.get("runtime", {}).get(
+                          "cloudImageDigest", ""
+                      )
+                  ),
               )
-              != release
-              or live_manifest.get("releaseBinding", {}).get(
-                  "containerImageDigest"
-              )
-              != deployment.get("immutableArtifacts", {}).get(
-                  "productionEcrImageDigest"
-              )
-              or live_manifest.get("releaseBinding", {}).get(
-                  "spaArtifactSha256"
-              )
-              != deployment.get("immutableArtifacts", {}).get(
-                  "webArchiveSha256"
-              )
-              or live_manifest.get("verification", {}).get("result")
-              != "passed"
-              or not isinstance(
-                  live_manifest.get("spa", {}).get("objects"), list
-              )
+              is None
               or set(runtime) != {"schemaVersion", "auth", "demoQuery"}
               or runtime.get("schemaVersion") != 1
               or authorization_origin != token_origin
               or authorization_origin != logout_origin
               or not isinstance(auth["clientId"], str)
-              or re.fullmatch(r"[A-Za-z0-9]{8,128}", auth["clientId"]) is None
+              or re.fullmatch(r"[A-Za-z0-9]{8,128}", auth["clientId"])
+              is None
               or auth["redirectUri"] != f"{application_url}/"
               or auth["logoutUri"] != f"{application_url}/"
-              or auth["scopes"] != ["openid", "email", "archon/approve"]
-              or journey_deployment != sq3["deployment"]
-              or journey_deployment != sq4["deployment"]
+              or auth["scopes"]
+              != ["openid", "email", "profile", "archon/approve"]
+              or not isinstance(runtime["demoQuery"], str)
+              or not runtime["demoQuery"].strip()
               or journey_lifecycle != sq4["judgeUserLifecycle"]
-              or load(
-                  journey_dir / "production-runtime-config.json"
-              )
-              != runtime
+              or availability_binding != expected_availability_binding
               or availability.get("schemaVersion")
               != "archon.production-availability/v2"
-              or availability.get("source", {}).get(
-                  "workflowRunId"
-              )
-              != sq3["observation"]["availabilityRunId"]
-              or availability.get("source", {}).get(
-                  "workflowRunAttempt"
-              )
-              != sq3["observation"]["availabilityRunAttempt"]
+              or availability.get("releaseSha") != release
               or availability.get("observedAt")
               != sq3["observation"]["availabilityObservedAt"]
+              or availability.get("checks")
+              != {
+                  "publicSpa": True,
+                  "runtimeProfiles": True,
+                  "securityHeaders": True,
+                  "leanAwsControls": True,
+                  "coreIdle": True,
+              }
+              or re.fullmatch(
+                  r"sha256:[0-9a-f]{64}",
+                  str(availability.get("profileResponseDigest", "")),
+              )
+              is None
+              or availability.get("rawIdentifiersRetained") is not False
+              or availability.get("result") != "passed"
+              or availability_observation.get("schemaVersion")
+              != "archon.lean-runtime-observation/v1"
+              or availability_observation.get("stage") != "production"
+              or availability_observation.get("releaseSha") != release
+              or availability_observation.get("topology", {}).get(
+                  "coreIdle"
+              )
+              is not True
+              or availability_observation.get("topology", {}).get(
+                  "legacyAlwaysOnRuntimeAbsent"
+              )
+              is not True
+              or availability_observation.get("security", {}).get(
+                  "rawIdentifiersProjected"
+              )
+              is not False
               or availability_observed > now + dt.timedelta(minutes=5)
               or now - availability_observed > dt.timedelta(hours=7)
-              or availability.get("publicRuntime", {}).get(
-                  "applicationOriginSha256"
-              )
-              != application_origin_sha
-              or availability.get("releaseEvidence", {}).get(
-                  "deploymentRunId"
-              )
-              != sq3["deployment"]["runId"]
-              or availability.get("releaseEvidence", {}).get(
-                  "deploymentArtifactId"
-              )
-              != sq3["deployment"]["artifactId"]
-              or availability.get("result") != "passed"
-              or availability_predicate.get("schemaVersion")
-              != "archon.production-availability-attestation/v1"
-              or availability_predicate.get("repository") != repository
-              or availability_predicate.get("releaseSha") != release
-              or availability_predicate.get("source", {}).get("runId")
-              != sq3["observation"]["availabilityRunId"]
-              or availability_predicate.get("source", {}).get(
-                  "runAttempt"
-              )
-              != sq3["observation"]["availabilityRunAttempt"]
-              or availability_predicate.get("monitor")
-              != {
-                  "cron": "17 */6 * * *",
-                  "maximumExpectedGapMinutes": 420,
-                  "observedAt": availability["observedAt"],
-                  "result": "passed",
-              }
-              or availability_predicate.get("result")
-              != "public-read-path-verified"
               or journey_manifest.get("releaseSha") != release
               or journey_manifest.get("source", {}).get("runId")
               != sq4["freshJudgeJourney"]["runId"]
@@ -3935,9 +3951,7 @@ jobs:
               or journey_manifest.get("journey", {}).get(
                   "terminalReceiptDigest"
               )
-              != sq4["freshJudgeJourney"][
-                  "terminalReceiptDigest"
-              ]
+              != sq4["freshJudgeJourney"]["terminalReceiptDigest"]
               or journey_predicate.get("checks", {}).get(
                   "identityIsFresh"
               )
@@ -4290,14 +4304,14 @@ jobs:
                 workflow_path=".github/workflows/deploy.yml"
                 event_policy="dispatch"
                 operation=""
-                selection_policy="exact-current"
-                artifact_prefix="deployment-evidence-${RELEASE_SHA}-"
+                selection_policy="exact-run-id"
+                artifact_prefix="deployment-evidence-production-${RELEASE_SHA}-"
                 ;;
               availability)
                 workflow_path=".github/workflows/availability.yml"
                 event_policy="availability"
                 operation=""
-                selection_policy="latest-retained"
+                selection_policy="exact-run-id"
                 artifact_prefix="production-availability-${RELEASE_SHA}-"
                 ;;
               provision|rotate|deactivate|reactivate)

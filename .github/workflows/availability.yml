@@ -52,7 +52,7 @@ jobs:
       - name: Validate protected observer configuration
         env:
           ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-          OBSERVER_ROLE: ${{ vars.AWS_OBSERVER_ROLE_ARN }}
+          OBSERVER_ROLE: ${{ vars.AWS_READ_ROLE_ARN }}
           APPLICATION_URL: ${{ vars.ARCHON_APPLICATION_URL }}
         run: |
           set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ vars.AWS_OBSERVER_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_READ_ROLE_ARN }}
           role-session-name: archon-availability-${{ github.run_id }}
           mask-aws-account-id: true
 
@@ -96,17 +96,33 @@ jobs:
           grep -Eiq '^x-content-type-options: nosniff' \
             "${RUNNER_TEMP}/availability/index.headers"
           jq -e '
+            (keys | sort) == [
+              "autoSelection","profiles","schemaVersion","serverTime"
+            ] and
             .schemaVersion == "archon.runtime-profiles/v1" and
             (.serverTime | fromdateiso8601) and
+            .autoSelection == "cloud" and
             (.profiles | length) == 2 and
             ([.profiles[].profileId] | sort) == ["cloud","core"] and
             all(.profiles[];
-              (.availability |
-                IN("READY","LAUNCHABLE","STARTING","BUSY","UNAVAILABLE")) and
-              (.capabilities |
-                keys == ["agentContextKit","analyticsAgent","dataHubSkills","mcpGovernedWrite","mcpRead"])
+              (keys | sort) == [
+                "availability","capabilities","capabilityDigest","checkedAt",
+                "generation","profileId"
+              ] and
+              (.generation | type) == "string" and
+              (.generation | length) >= 1 and
+              (.checkedAt | fromdateiso8601) and
+              (.capabilityDigest | test("^sha256:[0-9a-f]{64}$")) and
+              (.capabilities | keys) == [
+                "agentContextKit","analyticsAgent","dataHubSkills",
+                "mcpGovernedWrite","mcpRead"
+              ] and
+              all(.capabilities[]; . == true)
             ) and
-            (.autoSelection | IN("cloud","core"))
+            ([.profiles[] | select(.profileId == "cloud") | .availability])
+              == ["READY"] and
+            ([.profiles[] | select(.profileId == "core") | .availability])
+              == ["LAUNCHABLE"]
           ' "${RUNNER_TEMP}/availability/profiles.json" >/dev/null
           observed_release="$(
             jq -er '.releaseSha' "${RUNNER_TEMP}/availability/observation.json"

@@ -1529,6 +1529,9 @@ require_text "${foundation_workflow}" \
   'Application stack RoleARN transition:'
 require_text "${deploy_role}" \
   'CloudFrontHostedZoneId:' \
+  'GitHubDataHubCloudTrialRoleArn:' \
+  'AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN in the matching' \
+  'Value: !GetAtt GitHubDataHubCloudTrialRole.Arn' \
   'RoleName: !Sub archon-datahub-github-${DeploymentEnvironment}-cloud-trial' \
   'StageAndPromoteExactCloudRuntimeSecrets' \
   'RoleName: !Sub archon-${DeploymentEnvironment}-judge-user' \

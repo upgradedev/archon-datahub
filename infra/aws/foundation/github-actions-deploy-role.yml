@@ -824,6 +824,11 @@ Outputs:
     Value: !GetAtt JudgeUserRole.Arn
   JudgeUserRoleName:
     Value: !Ref JudgeUserRole
+  GitHubDataHubCloudTrialRoleArn:
+    Description: >-
+      Configure this value as AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN in the matching
+      deployment environment.
+    Value: !GetAtt GitHubDataHubCloudTrialRole.Arn
   CloudRuntimeImagePublisherRoleArn:
     Condition: IsProduction
     Description: >-
