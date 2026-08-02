@@ -1,1 +1,18 @@
-[project] name = "archon-datahub-companion" version = "0.1.0" description = "Private, read-only ACK and Analytics Agent runtime for Archon's governed DataHub flow" requires-python = "==3.11.*" dependencies = [   "acryl-datahub[datahub-rest]==1.6.0.6",   "datahub-agent-context[langchain]==1.6.0.17",   "datahub-analytics-agent==0.4.0", ]  [tool.uv] package = false required-version = "==0.11.31" exclude-newer = "2026-08-02T00:00:00Z" constraint-dependencies = [   "setuptools==83.0.0", ]
+[project]
+name = "archon-datahub-companion"
+version = "0.1.0"
+description = "Private, read-only ACK and Analytics Agent runtime for Archon's governed DataHub flow"
+requires-python = "==3.11.*"
+dependencies = [
+  "acryl-datahub[datahub-rest]==1.6.0.6",
+  "datahub-agent-context[langchain]==1.6.0.17",
+  "datahub-analytics-agent==0.4.0",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.11.31"
+exclude-newer = "2026-08-02T00:00:00Z"
+constraint-dependencies = [
+  "setuptools==83.0.0",
+]
