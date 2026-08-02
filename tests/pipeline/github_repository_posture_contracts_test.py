@@ -562,9 +562,9 @@ def validate_script(script: str) -> None:
         "observed environment names must equal the policy set",
     )
     require(
-        "jq -r 'length' <<<\"${observed_environments}\"\n)\" = \"17\""
+        "jq -r 'length' <<<\"${observed_environments}\"\n)\" = \"16\""
         in script,
-        "the terminal observed environment count must remain exactly seventeen",
+        "the terminal observed environment count must remain exactly sixteen",
     )
     require(
         ".environments.canAdminsBypass == false" in script,
