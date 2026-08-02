@@ -10,6 +10,8 @@ import json
 import os
 import re
 import tarfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -69,11 +71,28 @@ def request_bytes(url: str, token: str | None = None) -> bytes:
     if token and parsed.hostname == "api.github.com":
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=60) as response:
-        final = urllib.parse.urlparse(response.geturl())
-        if final.scheme != "https" or final.hostname not in ALLOWED_DOWNLOAD_HOSTS:
-            raise AssertionError(f"download redirected to unreviewed origin: {final.hostname}")
-        data = response.read(12_000_001)
+    data: bytes | None = None
+    for attempt, delay in enumerate((0, 1, 3)):
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                final = urllib.parse.urlparse(response.geturl())
+                if (
+                    final.scheme != "https"
+                    or final.hostname not in ALLOWED_DOWNLOAD_HOSTS
+                ):
+                    raise AssertionError(
+                        f"download redirected to unreviewed origin: {final.hostname}"
+                    )
+                data = response.read(12_000_001)
+            break
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 2:
+                raise
+    assert data is not None
     if len(data) > 12_000_000:
         raise AssertionError("download exceeded the reviewed in-memory ceiling")
     return data
