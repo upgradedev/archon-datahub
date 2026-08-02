@@ -2036,3 +2036,29 @@ require_text "${runbook}" \
   'MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY' \
   'token.actions.githubusercontent.com:workflow' \
   'Safe dispatch order for one exact signed master SHA'
+
+require_text "${deploy_role}" \
+  'GitHubDataHubCloudTrialRoleName:' \
+  'Value: !Ref GitHubDataHubCloudTrialRole'
+require_text "${reconciler}" \
+  '(.aws.applicationStackRolePreflight | length) == 6' \
+  '"datahub-cloud-trial-${stage}"' \
+  'datahub_cloud_trial_staging_role_arn=' \
+  'datahub_cloud_trial_production_role_arn=' \
+  'OPERATIONAL_ROLE_ARN["${kind}"]="${role_arn}"'
+test "$(grep -Fc '"GitHubDataHubCloudTrialRoleArn",' "${reconciler}")" -eq 2 ||
+  fail "trial role ARN output must be allowlisted for both stage stacks"
+test "$(grep -Fc '"GitHubDataHubCloudTrialRoleName",' "${reconciler}")" -eq 2 ||
+  fail "trial role name output must be allowlisted for both stage stacks"
+for role_kind in \
+  judge-staging datahub-cloud-trial-staging \
+  judge-production datahub-cloud-trial-production \
+  cloud-runtime-publisher posture-observer runtime-read paging-test; do
+  grep -Fq "\"${role_kind}\"" "${reconciler}" ||
+    fail "operational role receipt is missing ${role_kind}"
+done
+require_text "${foundation_workflow}" \
+  'DATAHUB_CLOUD_TRIAL_STAGING_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn }}' \
+  'DATAHUB_CLOUD_TRIAL_PRODUCTION_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_production_role_arn }}' \
+  'Set staging AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN' \
+  'Set production AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN'
