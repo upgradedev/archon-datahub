@@ -22,9 +22,16 @@ $wildcardRead[0].Effect == "Allow" and
 $wildcardRead[0].Resource == "*" and
 ($wildcardRead[0].Action |
   index("cloudformation:BatchDescribeTypeConfigurations")) != null and
-(([$policy.Statement[].Action] | flatten |
-  map(select(. == "cloudformation:DetectStackResourceDrift"))) |
-  length) == 1 and
+([$policy.Statement[] |
+  select(
+    (.Action |
+      if type == "array" then . else [.] end |
+      index("cloudformation:DetectStackResourceDrift")) != null
+  ) |
+  .Sid] | sort) == [
+    "ReconcileExactCoreAmiFoundationStack",
+    "ReconcileExactFoundationStacks"
+  ] and
 (([$policy.Statement[].Action] | flatten |
   map(select(. == "cloudformation:BatchDescribeTypeConfigurations"))) |
   length) == 1 and
