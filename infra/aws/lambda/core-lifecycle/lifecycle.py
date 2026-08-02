@@ -43,6 +43,16 @@ COMMAND_KEYS = {
         "expectedRevision",
     },
 }
+REAP_KEYS = (
+    {"schema", "action"},
+    {
+        "schema",
+        "action",
+        "expectedSessionId",
+        "expectedRevision",
+        "deadlineEpoch",
+    },
+)
 ACTIVE_STATES = {"STARTING", "ACTIVE", "UNHEALTHY", "FAILED"}
 TERMINAL_STATES = {"STOPPED", "EXPIRED"}
 CAPABILITIES = {
@@ -143,7 +153,12 @@ def _validate_command(event: Any, now: dt.datetime) -> dict[str, Any]:
     action = event.get("action")
     if action not in COMMAND_KEYS:
         raise ValueError("command action is invalid")
-    command = _exact_object(event, COMMAND_KEYS[action], "command")
+    if action == "REAP":
+        if set(event) not in REAP_KEYS:
+            raise ValueError("reap command must use an exact allowlisted schema")
+        command = dict(event)
+    else:
+        command = _exact_object(event, COMMAND_KEYS[action], "command")
     if command["schema"] != SCHEMA:
         raise ValueError("command schema is invalid")
     if action in {"START", "ACTIVITY", "STOP"}:
@@ -160,6 +175,24 @@ def _validate_command(event: Any, now: dt.datetime) -> dict[str, Any]:
             raise ValueError("expectedRevision is invalid")
         command = dict(command)
         command["binding"] = _validate_binding(command["binding"], now)
+    elif action == "REAP" and "expectedSessionId" in command:
+        if (
+            not isinstance(command["expectedSessionId"], str)
+            or SESSION_RE.fullmatch(command["expectedSessionId"]) is None
+        ):
+            raise ValueError("expectedSessionId is invalid")
+        if (
+            not isinstance(command["expectedRevision"], int)
+            or isinstance(command["expectedRevision"], bool)
+            or command["expectedRevision"] < 1
+        ):
+            raise ValueError("expectedRevision is invalid")
+        if (
+            not isinstance(command["deadlineEpoch"], int)
+            or isinstance(command["deadlineEpoch"], bool)
+            or command["deadlineEpoch"] < 1
+        ):
+            raise ValueError("deadlineEpoch is invalid")
     elif action == "FINALIZE":
         if command["decision"] not in {"UPSCALE", "DOWNSCALE"}:
             raise ValueError("finalize decision is invalid")
@@ -197,6 +230,7 @@ def _decision(
     session_id: str = "",
     revision: int = 0,
     code: str = "OK",
+    watchdog_deadline: dt.datetime | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema": "archon.core-runtime-decision/v1",
@@ -205,6 +239,12 @@ def _decision(
     }
     if operation_id:
         result["operationId"] = operation_id
+        result["sessionId"] = session_id
+        result["revision"] = revision
+    if watchdog_deadline is not None:
+        result["watchdog"] = True
+        result["watchdogDeadline"] = _iso(watchdog_deadline)
+        result["watchdogDeadlineEpoch"] = _epoch(watchdog_deadline)
         result["sessionId"] = session_id
         result["revision"] = revision
     return result
@@ -351,7 +391,13 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 ":now": _epoch(now),
             },
         )
-        return _decision("NONE", revision=revision, code="ACTIVITY_RECORDED")
+        return _decision(
+            "NONE",
+            session_id=session_id,
+            revision=revision,
+            code="ACTIVITY_RECORDED",
+            watchdog_deadline=idle,
+        )
     except ClientError as error:
         if not _conditional_failure(error):
             raise
@@ -362,7 +408,15 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         and int(current.get("revision", -1)) == revision
         and int(current.get("idleExpiresAt", 0)) >= _epoch(now)
     ):
-        return _decision("NONE", code="IDEMPOTENT")
+        return _decision(
+            "NONE",
+            session_id=session_id,
+            revision=revision,
+            code="IDEMPOTENT",
+            watchdog_deadline=dt.datetime.fromtimestamp(
+                int(current["idleExpiresAt"]), tz=dt.timezone.utc
+            ),
+        )
     return _decision("REJECT", code="STALE_ACTIVITY")
 
 
@@ -442,10 +496,19 @@ def _stop(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     )
 
 
-def _reap(now: dt.datetime) -> dict[str, Any]:
+def _reap(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     current = _lease()
     if current is None or current.get("state") in TERMINAL_STATES:
         return _decision("NONE", code="NO_ACTIVE_LEASE")
+    if "expectedSessionId" in command:
+        if (
+            current.get("sessionId") != command["expectedSessionId"]
+            or current.get("revision") != command["expectedRevision"]
+            or command["deadlineEpoch"] > _epoch(now)
+            or int(current.get("idleExpiresAt", 0) or 0)
+            != command["deadlineEpoch"]
+        ):
+            return _decision("NONE", code="STALE_WATCHDOG")
     revision = current.get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool):
         return _decision("REJECT", code="INVALID_STORED_REVISION")
@@ -495,6 +558,16 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
             and current.get("state") == final_state
             and "operationId" not in current
         ):
+            if final_state == "STARTING":
+                return _decision(
+                    "NONE",
+                    session_id=command["sessionId"],
+                    revision=command["expectedRevision"],
+                    code="IDEMPOTENT",
+                    watchdog_deadline=dt.datetime.fromtimestamp(
+                        int(current["idleExpiresAt"]), tz=dt.timezone.utc
+                    ),
+                )
             return _decision("NONE", code="IDEMPOTENT")
         return _decision("REJECT", code="FINALIZE_CONFLICT")
 
@@ -514,7 +587,20 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "expiresAt": _epoch(now) + 86400,
             }
         )
-    return _decision("NONE", code=f"{final_state}_COMMITTED")
+    if final_state == "STARTING":
+        current = _lease()
+        if current is None:
+            return _decision("REJECT", code="FINALIZE_READ_FAILED")
+        return _decision(
+            "NONE",
+            session_id=command["sessionId"],
+            revision=command["expectedRevision"],
+            code="STARTING_COMMITTED",
+            watchdog_deadline=dt.datetime.fromtimestamp(
+                int(current["idleExpiresAt"]), tz=dt.timezone.utc
+            ),
+        )
+    return _decision("NONE", code="STOPPED_COMMITTED")
 
 
 def handler(event: Any, _context: Any) -> dict[str, Any]:
@@ -529,7 +615,7 @@ def handler(event: Any, _context: Any) -> dict[str, Any]:
         if action == "STOP":
             return _stop(command, now)
         if action == "REAP":
-            return _reap(now)
+            return _reap(command, now)
         if action == "FINALIZE":
             return _finalize(command, now)
         raise AssertionError("unreachable action")
