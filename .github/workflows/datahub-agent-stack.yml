@@ -140,7 +140,7 @@ jobs:
             --group test
           (
             cd services/datahub-companion
-            uv run --frozen --group test pytest \
+            uv run --frozen --group test python -m pytest \
               --cov=archon_companion \
               --cov-branch \
               --cov-report=term-missing \
@@ -150,7 +150,17 @@ jobs:
           )
           test -s "$RUNNER_TEMP/datahub-companion-coverage.xml"
           test -s "$RUNNER_TEMP/datahub-companion-junit.xml"
-      - name: Audit the exact Python dependency closure
+      - name: Retain companion test evidence
+        if: always() && steps.lock.outputs.adopted == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-companion-tests-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/datahub-companion-coverage.xml
+            ${{ runner.temp }}/datahub-companion-junit.xml
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true      - name: Audit the exact Python dependency closure
         id: audit
         if: steps.lock.outputs.adopted == 'true'
         continue-on-error: true
@@ -183,13 +193,13 @@ jobs:
             any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0")
           ' "${RUNNER_TEMP}/datahub-agent-stack.cdx.json" >/dev/null
       - name: Upload VEX-dispositioned Python SARIF
-        if: always() && steps.lock.outputs.adopted == 'true'
+        if: always() && steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'skipped'
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
           category: uv-datahub-agent-stack
       - name: Retain immutable agent stack evidence
-        if: always() && steps.lock.outputs.adopted == 'true'
+        if: always() && steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: datahub-agent-stack-security-${{ github.sha }}
@@ -199,8 +209,6 @@ jobs:
             ${{ runner.temp }}/datahub-agent-stack.cdx.json
             .github/security/datahub-agent-stack.openvex.json
             ${{ runner.temp }}/datahub-agent-stack-vex-decision.json
-            ${{ runner.temp }}/datahub-companion-coverage.xml
-            ${{ runner.temp }}/datahub-companion-junit.xml
           if-no-files-found: error
           retention-days: 90
           overwrite: true
