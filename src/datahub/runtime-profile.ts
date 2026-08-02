@@ -51,6 +51,7 @@ export interface RuntimeSelectionOptions {
 export type RuntimeSelectionErrorCode =
   | "INVALID_RUNTIME_REQUEST"
   | "INVALID_RUNTIME_SNAPSHOT"
+  | "INVALID_RUNTIME_BINDING"
   | "RUNTIME_NOT_READY"
   | "NO_RUNTIME_AVAILABLE"
   | "RUNTIME_BINDING_MISMATCH";
@@ -81,6 +82,12 @@ function instant(value: string, name: string): number {
 }
 
 function exactCapabilities(value: RuntimeCapabilities): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime capabilities must be an object"
+    );
+  }
   const keys = Object.keys(value).sort();
   const expected = [...REQUIRED_RUNTIME_CAPABILITIES].sort();
   if (
@@ -103,6 +110,33 @@ function exactCapabilities(value: RuntimeCapabilities): void {
 }
 
 function validateSnapshot(snapshot: RuntimeProfileSnapshot): void {
+  if (
+    snapshot === null ||
+    typeof snapshot !== "object" ||
+    Array.isArray(snapshot)
+  ) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime snapshot must be an object"
+    );
+  }
+  const keys = Object.keys(snapshot).sort();
+  const expected = [
+    "capabilities",
+    "checkedAt",
+    "generation",
+    "profileId",
+    "status",
+  ];
+  if (
+    keys.length !== expected.length ||
+    keys.some((key, index) => key !== expected[index])
+  ) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime snapshot must use the exact allowlisted schema"
+    );
+  }
   if (!RUNTIME_PROFILE_IDS.includes(snapshot.profileId)) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
@@ -196,6 +230,90 @@ function snapshotMap(
   return mapped;
 }
 
+const RUNTIME_BINDING_KEYS = [
+  "boundAt",
+  "capabilityDigest",
+  "generation",
+  "leaseExpiresAt",
+  "profileId",
+  "resolution",
+  "schemaVersion",
+] as const;
+
+function invalidBinding(message: string): never {
+  throw new RuntimeSelectionError("INVALID_RUNTIME_BINDING", message);
+}
+
+function bindingInstant(value: unknown, name: string): number {
+  if (typeof value !== "string") {
+    return invalidBinding("runtime binding " + name + " must be a string");
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    return invalidBinding(
+      "runtime binding " + name + " must be an exact ISO-8601 UTC instant"
+    );
+  }
+  return parsed;
+}
+
+export function validateRuntimeBinding(
+  binding: RuntimeBinding
+): Readonly<RuntimeBinding> {
+  if (
+    binding === null ||
+    typeof binding !== "object" ||
+    Array.isArray(binding)
+  ) {
+    return invalidBinding("runtime binding must be an object");
+  }
+  const record = binding as unknown as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.length !== RUNTIME_BINDING_KEYS.length ||
+    keys.some((key, index) => key !== RUNTIME_BINDING_KEYS[index])
+  ) {
+    return invalidBinding("runtime binding must use the exact public schema");
+  }
+  if (record.schemaVersion !== "archon.runtime-binding/v1") {
+    return invalidBinding("runtime binding schema is invalid");
+  }
+  if (
+    typeof record.profileId !== "string" ||
+    !RUNTIME_PROFILE_IDS.includes(record.profileId as RuntimeProfileId)
+  ) {
+    return invalidBinding("runtime binding profile is not allowlisted");
+  }
+  if (
+    typeof record.generation !== "string" ||
+    !GENERATION.test(record.generation)
+  ) {
+    return invalidBinding("runtime binding generation is invalid");
+  }
+  if (
+    typeof record.capabilityDigest !== "string" ||
+    !DIGEST.test(record.capabilityDigest)
+  ) {
+    return invalidBinding("runtime binding capability digest is invalid");
+  }
+  if (record.resolution !== "auto" && record.resolution !== "explicit") {
+    return invalidBinding("runtime binding resolution is invalid");
+  }
+  const boundAtMs = bindingInstant(record.boundAt, "boundAt");
+  const leaseExpiresAtMs = bindingInstant(
+    record.leaseExpiresAt,
+    "leaseExpiresAt"
+  );
+  if (
+    leaseExpiresAtMs <= boundAtMs ||
+    leaseExpiresAtMs - boundAtMs > 2 * 60 * 60_000
+  ) {
+    return invalidBinding(
+      "runtime binding lease must be positive and no longer than two hours"
+    );
+  }
+  return Object.freeze({ ...binding });
+}
 export function selectRuntime(
   requested: RuntimeRequest,
   snapshots: readonly RuntimeProfileSnapshot[],
@@ -205,6 +323,38 @@ export function selectRuntime(
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_REQUEST",
       "runtime request is not allowlisted"
+    );
+  }
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options)
+  ) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime selection options must be an object"
+    );
+  }
+  const optionKeys = Object.keys(options);
+  if (
+    !optionKeys.includes("now") ||
+    !optionKeys.includes("leaseExpiresAt") ||
+    optionKeys.some(
+      (key) =>
+        key !== "now" &&
+        key !== "leaseExpiresAt" &&
+        key !== "maxHealthAgeMs"
+    )
+  ) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime selection options must use the exact schema"
+    );
+  }
+  if (!Array.isArray(snapshots)) {
+    throw new RuntimeSelectionError(
+      "INVALID_RUNTIME_SNAPSHOT",
+      "runtime snapshots must be an array"
     );
   }
   const nowMs = instant(options.now, "now");
@@ -238,7 +388,7 @@ export function selectRuntime(
     );
   }
 
-  return Object.freeze({
+  return validateRuntimeBinding({
     schemaVersion: "archon.runtime-binding/v1",
     profileId: selected.profileId,
     generation: selected.generation,
@@ -253,20 +403,25 @@ export function assertPinnedRuntime(
   expected: RuntimeBinding,
   actual: RuntimeBinding
 ): void {
+  let left: Readonly<RuntimeBinding>;
+  let right: Readonly<RuntimeBinding>;
+  try {
+    left = validateRuntimeBinding(expected);
+    right = validateRuntimeBinding(actual);
+  } catch {
+    throw new RuntimeSelectionError(
+      "RUNTIME_BINDING_MISMATCH",
+      "runtime binding is invalid after session resolution"
+    );
+  }
   const valid =
-    expected.schemaVersion === "archon.runtime-binding/v1" &&
-    actual.schemaVersion === "archon.runtime-binding/v1" &&
-    RUNTIME_PROFILE_IDS.includes(expected.profileId) &&
-    RUNTIME_PROFILE_IDS.includes(actual.profileId) &&
-    GENERATION.test(expected.generation) &&
-    GENERATION.test(actual.generation) &&
-    DIGEST.test(expected.capabilityDigest) &&
-    DIGEST.test(actual.capabilityDigest) &&
-    expected.profileId === actual.profileId &&
-    expected.generation === actual.generation &&
-    expected.capabilityDigest === actual.capabilityDigest &&
-    expected.boundAt === actual.boundAt &&
-    expected.leaseExpiresAt === actual.leaseExpiresAt;
+    left.schemaVersion === right.schemaVersion &&
+    left.profileId === right.profileId &&
+    left.generation === right.generation &&
+    left.capabilityDigest === right.capabilityDigest &&
+    left.resolution === right.resolution &&
+    left.boundAt === right.boundAt &&
+    left.leaseExpiresAt === right.leaseExpiresAt;
 
   if (!valid) {
     throw new RuntimeSelectionError(
