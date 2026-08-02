@@ -610,10 +610,6 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         if not _conditional_failure(error):
             raise
     current = _lease()
-    if endpoint_created and (
-        current is None or current.get("inferenceEndpointId") != endpoint_id
-    ):
-        _delete_endpoint(endpoint_id)
     if (
         current
         and current.get("sessionId") == session_id
