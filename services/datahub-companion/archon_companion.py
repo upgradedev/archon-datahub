@@ -7,6 +7,7 @@ encrypted handle bound to the runtime and evidence digests.
 from __future__ import annotations
 
 import asyncio
+import boto3
 import hashlib
 import hmac
 import json
@@ -23,6 +24,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
+from botocore.config import Config
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -93,6 +95,15 @@ MODEL_PROBE_SUCCESS_TTL_SECONDS = 300
 MODEL_PROBE_FAILURE_TTL_SECONDS = 15
 BEDROCK_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 AWS_REGION = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z0-9-]+-[0-9]$")
+AWS_ACCESS_ID = re.compile(r"^ASIA[A-Z0-9]{16}$")
+AWS_ROLE_ARN = re.compile(
+    r"^arn:(aws|aws-us-gov|aws-cn):iam::([0-9]{12}):role/"
+    r"([A-Za-z0-9+=,.@_/-]{1,512})$"
+)
+AWS_CALLER_ARN = re.compile(
+    r"^arn:(aws|aws-us-gov|aws-cn):sts::([0-9]{12}):assumed-role/"
+    r"([A-Za-z0-9+=,.@_-]{1,64})/([A-Za-z0-9+=,.@_-]{1,128})$"
+)
 CLOUD_TENANT_HOST = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.acryl\.io$"
 )
@@ -1777,6 +1788,101 @@ async def analytics_contract_preflight() -> dict[str, Any]:
     return {**receipt, "digest": digest(receipt)}
 
 
+def _bounded_temporary_aws_value(
+    name: str,
+    pattern: re.Pattern[str] | None = None,
+    *,
+    minimum: int,
+    maximum: int,
+) -> str:
+    value = os.environ.get(name, "")
+    if (
+        not minimum <= len(value) <= maximum
+        or any(ord(character) < 0x21 or ord(character) > 0x7e for character in value)
+        or (pattern is not None and pattern.fullmatch(value) is None)
+    ):
+        raise RuntimeError("temporary AWS role credential policy drift")
+    return value
+
+
+def temporary_aws_role_identity(region: str) -> dict[str, Any]:
+    _bounded_temporary_aws_value(
+        "AWS_ACCESS_KEY_ID", AWS_ACCESS_ID, minimum=20, maximum=20,
+    )
+    _bounded_temporary_aws_value(
+        "AWS_SECRET_ACCESS_KEY", minimum=40, maximum=128,
+    )
+    _bounded_temporary_aws_value(
+        "AWS_SESSION_TOKEN", minimum=16, maximum=8192,
+    )
+    if os.environ.get("AWS_STS_REGIONAL_ENDPOINTS") != "regional":
+        raise RuntimeError("regional STS endpoint policy drift")
+    if any(os.environ.get(name) for name in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    )):
+        raise RuntimeError("AWS identity proxy policy drift")
+
+    expected = os.environ.get("ARCHON_EXPECTED_ANALYTICS_ROLE_ARN", "")
+    expected_match = AWS_ROLE_ARN.fullmatch(expected)
+    if expected_match is None:
+        raise RuntimeError("expected Analytics role identity is invalid")
+    partition, account, role_path = expected_match.groups()
+    role_name = role_path.rsplit("/", 1)[-1]
+
+    try:
+        response = boto3.client(
+            "sts",
+            region_name=region,
+            config=Config(
+                connect_timeout=2,
+                read_timeout=5,
+                retries={"max_attempts": 2, "mode": "standard"},
+                proxies={},
+            ),
+        ).get_caller_identity()
+    except Exception as error:
+        raise RuntimeError("temporary AWS role identity is unavailable") from error
+    if not isinstance(response, dict):
+        raise RuntimeError("temporary AWS role identity is invalid")
+    caller = response.get("Arn")
+    caller_match = (
+        AWS_CALLER_ARN.fullmatch(caller)
+        if isinstance(caller, str)
+        else None
+    )
+    if caller_match is None:
+        raise RuntimeError("temporary AWS principal is not an assumed role")
+    caller_partition, caller_account, caller_role, session_name = caller_match.groups()
+    user_id = response.get("UserId")
+    if (
+        caller_partition != partition
+        or caller_account != account
+        or caller_role != role_name
+        or response.get("Account") != account
+        or not isinstance(user_id, str)
+        or not 3 <= len(user_id) <= 256
+        or ":" not in user_id
+        or not user_id.endswith(":" + session_name)
+    ):
+        raise RuntimeError("temporary AWS role identity does not match expected role")
+    projection = {
+        "schemaVersion": "archon.analytics-temporary-role-identity/v1",
+        "partition": partition,
+        "roleNameDigest": digest(role_name),
+        "accountDigest": digest(account),
+        "sessionNameDigest": digest(session_name),
+        "expectedRoleDigest": digest({
+            "schemaVersion": "archon.expected-analytics-role/v1",
+            "roleArn": expected,
+        }),
+        "usesTemporaryRoleCredentials": True,
+        "usesStaticAwsKeys": False,
+        "providerPayloadStored": False,
+    }
+    return {**projection, "digest": digest(projection)}
+
+
 def analytics_model_identity() -> dict[str, Any]:
     provider = os.environ.get("ARCHON_ANALYTICS_LLM_PROVIDER", "")
     model = os.environ.get("ARCHON_ANALYTICS_LLM_MODEL", "")
@@ -1787,9 +1893,12 @@ def analytics_model_identity() -> dict[str, Any]:
         raise RuntimeError("Analytics model is not configured")
     if not AWS_REGION.fullmatch(region):
         raise RuntimeError("Analytics model region is not configured")
+    role_identity = temporary_aws_role_identity(region)
     credential_mode = {
         "usesIamRoleCredentials": True,
+        "usesTemporaryRoleCredentials": True,
         "usesStaticAwsKeys": False,
+        "roleIdentityDigest": role_identity["digest"],
     }
     return {
         "provider": provider,
@@ -1812,8 +1921,8 @@ async def probe_analytics_model(identity: dict[str, Any]) -> dict[str, Any]:
             or configured.get("provider") != identity["provider"]
             or configured.get("model") != identity["model"]
             or configured.get("aws_region") != identity["region"]
-            or configured.get("has_key") is not True
-            or configured.get("has_aws_keys") is not False
+            or configured.get("has_key") is not False
+            or configured.get("has_aws_keys") is not True
         ):
             raise RuntimeError("Analytics model configuration drift")
         tested = await bounded_json(
@@ -1840,7 +1949,9 @@ async def probe_analytics_model(identity: dict[str, Any]) -> dict[str, Any]:
         "model": identity["model"],
         "region": identity["region"],
         "usesIamRoleCredentials": True,
+        "usesTemporaryRoleCredentials": True,
         "usesStaticAwsKeys": False,
+        "roleIdentityDigest": identity["roleIdentityDigest"],
         "credentialModeDigest": identity["credentialModeDigest"],
         "runtimeIdentityDigest": digest(configured_runtime_identity()),
         "probeAttempts": 1,
@@ -1954,6 +2065,9 @@ async def analytics_preflight(
             "model": model["model"],
             "region": model["region"],
             "usesIamRoleCredentials": model["usesIamRoleCredentials"],
+            "usesTemporaryRoleCredentials": model["usesTemporaryRoleCredentials"],
+            "usesStaticAwsKeys": model["usesStaticAwsKeys"],
+            "roleIdentityDigest": model["roleIdentityDigest"],
             "credentialModeDigest": model["credentialModeDigest"],
             "cacheAgeSeconds": model["cacheAgeSeconds"],
             "receiptDigest": model["digest"],
@@ -2529,6 +2643,9 @@ async def component_health() -> tuple[
             "model": model["model"],
             "region": model["region"],
             "usesIamRoleCredentials": model["usesIamRoleCredentials"],
+            "usesTemporaryRoleCredentials": model["usesTemporaryRoleCredentials"],
+            "usesStaticAwsKeys": model["usesStaticAwsKeys"],
+            "roleIdentityDigest": model["roleIdentityDigest"],
             "credentialModeDigest": model["credentialModeDigest"],
             "cacheAgeSeconds": model["cacheAgeSeconds"],
             "receiptDigest": model["digest"],

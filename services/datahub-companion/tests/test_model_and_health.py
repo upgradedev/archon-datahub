@@ -65,6 +65,16 @@ def runtime(monkeypatch):
     monkeypatch.setenv("ARCHON_ANALYTICS_LLM_PROVIDER", "bedrock")
     monkeypatch.setenv("ARCHON_ANALYTICS_LLM_MODEL", MODEL)
     monkeypatch.setenv("ARCHON_ANALYTICS_AWS_REGION", "eu-west-1")
+    monkeypatch.setattr(
+        companion,
+        "temporary_aws_role_identity",
+        lambda region: {
+            "schemaVersion": "archon.analytics-temporary-role-identity/v1",
+            "usesTemporaryRoleCredentials": True,
+            "usesStaticAwsKeys": False,
+            "digest": "sha256:" + "9" * 64,
+        },
+    )
     monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
     monkeypatch.setenv(
         "ARCHON_RUN_HANDLE_FERNET_KEY",
@@ -157,7 +167,7 @@ def test_model_identity_rejects_provider_model_or_region_drift(
 
 
 @pytest.mark.asyncio
-async def test_model_probe_proves_bedrock_reachability_without_keys_or_errors(
+async def test_model_probe_proves_bedrock_reachability_with_temporary_role_credentials(
     runtime,
     monkeypatch,
 ):
@@ -169,8 +179,8 @@ async def test_model_probe_proves_bedrock_reachability_without_keys_or_errors(
             return httpx.Response(200, json={
                 "provider": "bedrock",
                 "model": MODEL,
-                "has_key": True,
-                "has_aws_keys": False,
+                "has_key": False,
+                "has_aws_keys": True,
                 "aws_region": "eu-west-1",
             })
         if request.url.path == "/api/settings/llm/test":
@@ -202,7 +212,9 @@ async def test_model_probe_proves_bedrock_reachability_without_keys_or_errors(
     encoded = json.dumps(receipt)
     assert receipt["status"] == "verified"
     assert receipt["usesIamRoleCredentials"] is True
+    assert receipt["usesTemporaryRoleCredentials"] is True
     assert receipt["usesStaticAwsKeys"] is False
+    assert receipt["roleIdentityDigest"] == "sha256:" + "9" * 64
     assert receipt["probeAttempts"] == 1
     assert "provider-internal-secret" not in encoded
     assert all("aws_access_key" not in request.content.decode() for request in requests)
@@ -220,8 +232,8 @@ async def test_model_probe_fails_closed_without_echoing_provider_error(
             return httpx.Response(200, json={
                 "provider": "bedrock",
                 "model": MODEL if mode != "config" else "wrong-model",
-                "has_key": True,
-                "has_aws_keys": False,
+                "has_key": False,
+                "has_aws_keys": True,
                 "aws_region": "eu-west-1",
             })
         return httpx.Response(
@@ -254,7 +266,9 @@ def model_receipt(identity: dict) -> dict:
         "model": identity["model"],
         "region": identity["region"],
         "usesIamRoleCredentials": True,
+        "usesTemporaryRoleCredentials": True,
         "usesStaticAwsKeys": False,
+        "roleIdentityDigest": identity["roleIdentityDigest"],
         "credentialModeDigest": identity["credentialModeDigest"],
         "runtimeIdentityDigest": companion.digest(
             companion.configured_runtime_identity(),
@@ -377,6 +391,9 @@ async def test_combined_preflight_binds_mcp_process_and_model(
             "model": MODEL,
             "region": "eu-west-1",
             "usesIamRoleCredentials": True,
+            "usesTemporaryRoleCredentials": True,
+            "usesStaticAwsKeys": False,
+            "roleIdentityDigest": "sha256:" + "7" * 64,
             "credentialModeDigest": "sha256:" + "5" * 64,
             "cacheAgeSeconds": 4,
         }
@@ -490,6 +507,9 @@ async def test_component_health_ready_evidence_is_sanitized(
             "model": MODEL,
             "region": "eu-west-1",
             "usesIamRoleCredentials": True,
+            "usesTemporaryRoleCredentials": True,
+            "usesStaticAwsKeys": False,
+            "roleIdentityDigest": "sha256:" + "7" * 64,
             "credentialModeDigest": "sha256:" + "6" * 64,
             "cacheAgeSeconds": 2,
         }
@@ -509,6 +529,9 @@ async def test_component_health_ready_evidence_is_sanitized(
         "model": MODEL,
         "region": "eu-west-1",
         "usesIamRoleCredentials": True,
+        "usesTemporaryRoleCredentials": True,
+        "usesStaticAwsKeys": False,
+        "roleIdentityDigest": "sha256:" + "7" * 64,
         "credentialModeDigest": "sha256:" + "6" * 64,
         "cacheAgeSeconds": 2,
         "receiptDigest": "sha256:" + "5" * 64,
