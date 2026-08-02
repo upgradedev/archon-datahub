@@ -218,6 +218,11 @@ def validate(sources: dict[str, str]) -> None:
 
     for workflow, label in ((canary, "normal canary"), (recovery, "recovery")):
         require(
+            workflow.count("AWS_CANARY_RECOVERY_ROLE_ARN") == 2
+            and "AWS_CANARY_ROLLBACK_ROLE_ARN" not in workflow,
+            f"{label} is not exactly bound to the recovery role",
+        )
+        require(
             "secrets.CANARY_DATAHUB_READ_TOKEN" not in workflow
             and "secrets.CANARY_DATAHUB_WRITE_TOKEN" not in workflow,
             f"{label} returned to static GitHub DataHub tokens",
