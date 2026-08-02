@@ -29,6 +29,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 concurrency:
   group: datahub-companion-image-${{ github.ref }}
   cancel-in-progress: true
@@ -45,12 +48,13 @@ jobs:
       artifact_id: ${{ steps.candidate.outputs['artifact-id'] }}
       artifact_digest: ${{ steps.candidate.outputs['artifact-digest'] }}
     env:
-      IMAGE_REF: archon-datahub-companion:${{ github.sha }}
+      IMAGE_REF: archon-datahub-companion:${{ github.event.pull_request.head.sha || github.sha }}
       VEX_PATH: .github/security/datahub-companion-image.openvex.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ env.SOURCE_SHA }}
 
       - name: Materialize the exact official DataHub Skills source
         env:
@@ -83,7 +87,7 @@ jobs:
           platforms: linux/amd64
           tags: ${{ env.IMAGE_REF }}
           build-args: |
-            ARCHON_RELEASE_SHA=${{ github.sha }}
+            ARCHON_RELEASE_SHA=${{ env.SOURCE_SHA }}
           build-contexts: |
             datahub-skills=${{ runner.temp }}/datahub-skills
           cache-from: type=gha,scope=datahub-companion
@@ -354,7 +358,7 @@ jobs:
           [[ "${mcp_resolved_lock_sha}" =~ ^[a-f0-9]{64}$ ]]
           [[ "${mcp_wheel_graph_sha}" =~ ^[a-f0-9]{64}$ ]]
           jq -nS \
-            --arg sourceSha "${GITHUB_SHA}" \
+            --arg sourceSha "${SOURCE_SHA}" \
             --arg imageId "${image_id}" \
             --arg buildDigest "${BUILD_DIGEST}" \
             --arg archiveSha256 "${archive_sha}" \
@@ -391,7 +395,7 @@ jobs:
               governedMutationGatewayBundled: false,
               dataHubSkillsCommit: $skillsCommit,
               pythonImage: "python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba",
-              uvImage: "ghcr.io/astral-sh/uv@sha256:2381d6aa60c326b71fd40023f921a0a3b8f91b14d5db6b90402e65a635053709",
+              uvImage: "ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437",
               sourceBuilds: "deny",
               runtimeUser: "65532:65532"
             }' >"${evidence}/provenance.json"
@@ -407,15 +411,23 @@ jobs:
             sha256sum --check --strict image-subject.sha256
           )
 
-      - name: Stage the sealed companion artifact
+      - name: Stage available sealed companion evidence
         if: always()
         run: |
           set -euo pipefail
           artifact="${RUNNER_TEMP}/datahub-companion-artifact"
           mkdir -p "${artifact}"
-          cp -R "${RUNNER_TEMP}/datahub-companion-evidence" "${artifact}/evidence"
-          cp "${RUNNER_TEMP}/datahub-companion-image.raw.sarif" "${artifact}/"
-          cp "${RUNNER_TEMP}/datahub-companion-image.sarif" "${artifact}/"
+          if [[ -d "${RUNNER_TEMP}/datahub-companion-evidence" ]]; then
+            cp -R "${RUNNER_TEMP}/datahub-companion-evidence" "${artifact}/evidence"
+          fi
+          for evidence in \
+            "${RUNNER_TEMP}/datahub-companion-image.raw.sarif" \
+            "${RUNNER_TEMP}/datahub-companion-image.sarif"
+          do
+            if [[ -f "${evidence}" ]]; then
+              cp "${evidence}" "${artifact}/"
+            fi
+          done
           cp "${VEX_PATH}" "${artifact}/image.openvex.json"
           cp .github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json \
             "${artifact}/mcp.openvex.json"
@@ -425,7 +437,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: datahub-companion-image-${{ github.sha }}
+          name: datahub-companion-image-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/datahub-companion-artifact/
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'push' && 90 || 1 }}
@@ -462,7 +474,7 @@ jobs:
             sha256sum --check --strict SHA256SUMS
             sha256sum --check --strict image-subject.sha256
           )
-          test "$(jq --raw-output .sourceSha "${evidence}/provenance.json")" = "${GITHUB_SHA}"
+          test "$(jq --raw-output .sourceSha "${evidence}/provenance.json")" = "${SOURCE_SHA}"
       - name: Sign companion provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
