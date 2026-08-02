@@ -34,3 +34,15 @@ paths = [
 regexes = [
   '''ASIAABCDEFGHIJKLMNOP''',
 ]
+[[allowlists]]
+description = "One historical synthetic CDK logical ID tests exact Trivy resource binding"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+commits = ["c48b45e780ac32fa95fcefbc7c11da6e5a6f774f"]
+paths = [
+  '''^tests/pipeline/trivy-iac-exception-contract\.test\.mjs$''',
+]
+regexes = [
+  '''LogsKeyABCDEF12''',
+]
