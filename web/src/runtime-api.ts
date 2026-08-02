@@ -178,8 +178,9 @@ function profile(
   value: unknown,
   expectedProfileId: RuntimeProfileId,
 ): value is RuntimeProfileProjection {
+  if (!record(value)) return false;
+  const projectedCapabilities = value.capabilities;
   if (
-    !record(value) ||
     !exactKeys(value, [
       "profileId",
       "availability",
@@ -192,7 +193,7 @@ function profile(
     !AVAILABILITY.includes(
       value.availability as RuntimeProfileAvailability,
     ) ||
-    !capabilities(value.capabilities)
+    !capabilities(projectedCapabilities)
   ) {
     return false;
   }
@@ -201,7 +202,9 @@ function profile(
       value.generation === null &&
       value.checkedAt === null &&
       value.capabilityDigest === null &&
-      CAPABILITY_KEYS.every((key) => value.capabilities[key] === false)
+      CAPABILITY_KEYS.every(
+        (key) => projectedCapabilities[key] === false,
+      )
     );
   }
   return (
@@ -210,10 +213,11 @@ function profile(
     instant(value.checkedAt) &&
     typeof value.capabilityDigest === "string" &&
     DIGEST.test(value.capabilityDigest) &&
-    CAPABILITY_KEYS.every((key) => value.capabilities[key] === true)
+    CAPABILITY_KEYS.every(
+      (key) => projectedCapabilities[key] === true,
+    )
   );
 }
-
 function parseProfiles(value: unknown): RuntimeProfilesResponse {
   if (
     !record(value) ||
@@ -498,8 +502,10 @@ function runtimeBindingEvidence(
   value: unknown,
   expectedAuditId: string,
 ): value is RuntimeBindingEvidence {
+  if (!record(value)) return false;
+  const binding = value.runtimeBinding;
+  const projectedCapabilities = value.capabilities;
   if (
-    !record(value) ||
     !exactKeys(value, [
       "schemaVersion",
       "auditId",
@@ -515,8 +521,8 @@ function runtimeBindingEvidence(
     value.auditId !== expectedAuditId ||
     typeof value.runtimeSessionId !== "string" ||
     !SESSION_ID.test(value.runtimeSessionId) ||
-    !record(value.runtimeBinding) ||
-    !exactKeys(value.runtimeBinding, [
+    !record(binding) ||
+    !exactKeys(binding, [
       "schemaVersion",
       "profileId",
       "generation",
@@ -525,23 +531,23 @@ function runtimeBindingEvidence(
       "boundAt",
       "leaseExpiresAt",
     ]) ||
-    value.runtimeBinding.schemaVersion !== "archon.runtime-binding/v1" ||
-    !PROFILE_IDS.includes(value.runtimeBinding.profileId as RuntimeProfileId) ||
-    typeof value.runtimeBinding.generation !== "string" ||
-    !GENERATION.test(value.runtimeBinding.generation) ||
-    typeof value.runtimeBinding.capabilityDigest !== "string" ||
-    !DIGEST.test(value.runtimeBinding.capabilityDigest) ||
-    (value.runtimeBinding.resolution !== "auto" &&
-      value.runtimeBinding.resolution !== "explicit") ||
-    !instant(value.runtimeBinding.boundAt) ||
-    !instant(value.runtimeBinding.leaseExpiresAt) ||
-    Date.parse(value.runtimeBinding.leaseExpiresAt) <=
-      Date.parse(value.runtimeBinding.boundAt) ||
-    Date.parse(value.runtimeBinding.leaseExpiresAt) -
-      Date.parse(value.runtimeBinding.boundAt) >
+    binding.schemaVersion !== "archon.runtime-binding/v1" ||
+    !PROFILE_IDS.includes(binding.profileId as RuntimeProfileId) ||
+    typeof binding.generation !== "string" ||
+    !GENERATION.test(binding.generation) ||
+    typeof binding.capabilityDigest !== "string" ||
+    !DIGEST.test(binding.capabilityDigest) ||
+    (binding.resolution !== "auto" &&
+      binding.resolution !== "explicit") ||
+    !instant(binding.boundAt) ||
+    !instant(binding.leaseExpiresAt) ||
+    Date.parse(binding.leaseExpiresAt) <= Date.parse(binding.boundAt) ||
+    Date.parse(binding.leaseExpiresAt) - Date.parse(binding.boundAt) >
       2 * 60 * 60_000 ||
-    !capabilities(value.capabilities) ||
-    !CAPABILITY_KEYS.every((key) => value.capabilities[key] === true) ||
+    !capabilities(projectedCapabilities) ||
+    !CAPABILITY_KEYS.every(
+      (key) => projectedCapabilities[key] === true,
+    ) ||
     typeof value.bindingDigest !== "string" ||
     !DIGEST.test(value.bindingDigest) ||
     !Number.isSafeInteger(value.sessionRevision) ||
@@ -555,7 +561,6 @@ function runtimeBindingEvidence(
   }
   return true;
 }
-
 function parseRuntimeControlLoopStart(
   value: unknown,
 ): RuntimeControlLoopStart {
