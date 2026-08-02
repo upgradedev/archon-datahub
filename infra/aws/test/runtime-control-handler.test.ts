@@ -287,9 +287,9 @@ describe("runtime session control Lambda", () => {
       event("sessionStatus", { sessionId: "not-a-session" })
     );
 
-    expect(result.statusCode).toBe(502);
+    expect(result.statusCode).toBe(400);
     expect(result.payload).toEqual({
-      error: "runtime_control_unavailable"
+      error: "invalid_runtime_session_id"
     });
     expect(mockDdbSend).not.toHaveBeenCalled();
   });
