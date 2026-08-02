@@ -205,6 +205,7 @@ export interface JudgeEdgeApiProps {
   readonly controlFunction: lambda.IFunction;
   readonly spaBucket: s3.Bucket;
   readonly spaKey: kms.Key;
+  readonly cloudFrontLogBucket: s3.IBucket;
   readonly logsKey: kms.IKey;
   readonly originKeySecret: secretsmanager.ISecret;
 }
@@ -232,6 +233,7 @@ export function addJudgeEdgeApi(
     controlFunction,
     spaBucket,
     spaKey,
+    cloudFrontLogBucket,
     logsKey,
     originKeySecret
   } = props;
@@ -661,6 +663,10 @@ export function addJudgeEdgeApi(
         cloudfront.SecurityPolicyProtocol.TLS_V1_3_2025,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       enableIpv6: true,
+      enableLogging: true,
+      logBucket: cloudFrontLogBucket,
+      logFilePrefix: `${stage}/cloudfront/`,
+      logIncludesCookies: false,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       defaultBehavior: {
         origin: spaOrigin,

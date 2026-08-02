@@ -18,8 +18,32 @@ let ecr_repositories = Resources.*[
   Type == 'AWS::ECR::Repository'
 ]
 
+let vpcs = Resources.*[
+  Type == 'AWS::EC2::VPC'
+]
+
+let vpc_flow_logs = Resources.*[
+  Type == 'AWS::EC2::FlowLog'
+]
+
 let buckets = Resources.*[
   Type == 'AWS::S3::Bucket'
+]
+
+let state_buckets = %buckets[
+  Properties.AccessControl not exists
+]
+
+let acl_buckets = %buckets[
+  Properties.AccessControl exists
+]
+
+let access_log_buckets = %buckets[
+  Properties.AccessControl == 'LogDeliveryWrite'
+]
+
+let kms_acl_log_buckets = %state_buckets[
+  Properties.OwnershipControls.Rules[*].ObjectOwnership == 'ObjectWriter'
 ]
 
 let keys = Resources.*[
@@ -99,6 +123,21 @@ rule retired_always_on_topology_is_absent {
   %legacy_count == 0
 }
 
+rule every_vpc_emits_all_traffic_to_cloudwatch when %vpcs !empty {
+  let vpc_count = count(%vpcs)
+  let flow_log_count = count(%vpc_flow_logs)
+  %vpc_count == 1
+  %flow_log_count == 1
+  %vpc_flow_logs.Properties {
+    DeliverLogsPermissionArn exists
+    LogDestination exists
+    LogDestinationType == 'cloud-watch-logs'
+    ResourceId exists
+    ResourceType == 'VPC'
+    TrafficType == 'ALL'
+  }
+}
+
 rule ecr_release_registries_are_immutable when %ecr_repositories !empty {
   %ecr_repositories.Properties {
     ImageTagMutability == 'IMMUTABLE'
@@ -108,8 +147,8 @@ rule ecr_release_registries_are_immutable when %ecr_repositories !empty {
   }
 }
 
-rule s3_state_is_private_versioned_and_encrypted when %buckets !empty {
-  %buckets.Properties {
+rule s3_state_is_private_versioned_and_encrypted when %state_buckets !empty {
+  %state_buckets.Properties {
     PublicAccessBlockConfiguration {
       BlockPublicAcls == true
       BlockPublicPolicy == true
@@ -122,6 +161,70 @@ rule s3_state_is_private_versioned_and_encrypted when %buckets !empty {
       BucketKeyEnabled == true
       ServerSideEncryptionByDefault.SSEAlgorithm == 'aws:kms'
       ServerSideEncryptionByDefault.KMSMasterKeyID exists
+    }
+  }
+}
+
+rule only_the_reviewed_terminal_sink_may_enable_bucket_acls when %acl_buckets !empty {
+  let acl_bucket_count = count(%acl_buckets)
+  let access_log_bucket_count = count(%access_log_buckets)
+  %acl_bucket_count == %access_log_bucket_count
+}
+
+rule cloudfront_log_bucket_is_kms_encrypted_and_forwards_access_logs when %kms_acl_log_buckets !empty {
+  let kms_acl_log_bucket_count = count(%kms_acl_log_buckets)
+  %kms_acl_log_bucket_count == 1
+  %kms_acl_log_buckets.Properties {
+    AccessControl not exists
+    LoggingConfiguration {
+      DestinationBucketName exists
+      LogFilePrefix == /^(staging|production)\/s3\/cloudfront-log-bucket\/$/
+    }
+    OwnershipControls.Rules[*].ObjectOwnership == 'ObjectWriter'
+    some LifecycleConfiguration.Rules[*] {
+      Status == 'Enabled'
+      AbortIncompleteMultipartUpload.DaysAfterInitiation <= 1
+      ExpirationInDays <= 180
+      NoncurrentVersionExpiration.NoncurrentDays <= 30
+    }
+    some Tags[*] {
+      Key == 'SecurityProfile'
+      Value == 'cloudfront-access-log-bucket'
+    }
+  }
+}
+
+rule terminal_s3_access_log_sink_is_bounded when %access_log_buckets !empty {
+  let access_log_bucket_count = count(%access_log_buckets)
+  %access_log_bucket_count == 1
+  %access_log_buckets.Properties {
+    AccessControl == 'LogDeliveryWrite'
+    LoggingConfiguration not exists
+    PublicAccessBlockConfiguration {
+      BlockPublicAcls == true
+      BlockPublicPolicy == true
+      IgnorePublicAcls == true
+      RestrictPublicBuckets == true
+    }
+    OwnershipControls.Rules[*].ObjectOwnership == 'ObjectWriter'
+    VersioningConfiguration.Status == 'Enabled'
+    BucketEncryption.ServerSideEncryptionConfiguration !empty
+    BucketEncryption.ServerSideEncryptionConfiguration[*] {
+      BucketKeyEnabled not exists
+      ServerSideEncryptionByDefault {
+        SSEAlgorithm == 'AES256'
+        KMSMasterKeyID not exists
+      }
+    }
+    some LifecycleConfiguration.Rules[*] {
+      Status == 'Enabled'
+      AbortIncompleteMultipartUpload.DaysAfterInitiation <= 1
+      ExpirationInDays <= 180
+      NoncurrentVersionExpiration.NoncurrentDays <= 30
+    }
+    some Tags[*] {
+      Key == 'SecurityProfile'
+      Value == 'terminal-access-log-sink'
     }
   }
 }
@@ -231,6 +334,11 @@ rule cloudfront_uses_oac_custom_tls_and_waf when %distributions !empty {
     Enabled == true
     WebACLId exists
     Aliases !empty
+    Logging {
+      Bucket exists
+      IncludeCookies == false
+      Prefix == /^(staging|production)\/cloudfront\/$/
+    }
     ViewerCertificate {
       AcmCertificateArn exists
       CloudFrontDefaultCertificate not exists

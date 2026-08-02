@@ -154,7 +154,7 @@ async function main(): Promise<void> {
   }
 
   const lineage = new LineageAnalyzerAgent();
-  const findings = dedupeFindings([
+  const findings: Finding[] = dedupeFindings([
     ...lineage.analyze(harvest.facts),
     ...lineage.analyzeVersionHistory(harvest.versionHistories),
     ...new GovernanceAuditorAgent().audit(harvest.snapshot),

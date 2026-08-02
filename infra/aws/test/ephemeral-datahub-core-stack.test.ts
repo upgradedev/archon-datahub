@@ -68,6 +68,44 @@ describe("ephemeral DataHub Core stack", () => {
     });
   });
 
+  test("records all Core VPC traffic in retained KMS logs", () => {
+    const template = synthesized();
+    const flowLogs = Object.values(
+      resources(template, "AWS::EC2::FlowLog")
+    ) as any[];
+    expect(flowLogs).toHaveLength(1);
+    const flow = flowLogs[0]!;
+    expect(flow.Properties).toMatchObject({
+      LogDestinationType: "cloud-watch-logs",
+      MaxAggregationInterval: 600,
+      ResourceType: "VPC",
+      TrafficType: "ALL"
+    });
+    expect(flow.Properties.ResourceId.Ref).toMatch(/^CoreVpc/u);
+
+    const logGroupLogicalId =
+      flow.Properties.LogDestination["Fn::GetAtt"][0];
+    const logGroup = template.Resources[logGroupLogicalId];
+    expect(logGroup.Type).toBe("AWS::Logs::LogGroup");
+    expect(logGroup.Properties).toEqual(
+      expect.objectContaining({
+        KmsKeyId: expect.any(Object),
+        LogGroupName: "/archon/staging/datahub-core/vpc-flow",
+        RetentionInDays: 365
+      })
+    );
+    expect(logGroup.DeletionPolicy).toBe("Retain");
+    expect(logGroup.UpdateReplacePolicy).toBe("Retain");
+
+    const roleLogicalId =
+      flow.Properties.DeliverLogsPermissionArn["Fn::GetAtt"][0];
+    const role = template.Resources[roleLogicalId];
+    expect(role.Type).toBe("AWS::IAM::Role");
+    expect(JSON.stringify(role.Properties.AssumeRolePolicyDocument))
+      .toContain("vpc-flow-logs.amazonaws.com");
+    expect(role.Properties.PermissionsBoundary).toBeDefined();
+  });
+
   test("hardens the CDK default-SG restriction provider", () => {
     const template = synthesized();
     const providers = Object.entries(

@@ -82,7 +82,7 @@ describe("ArchonJudgeStack", () => {
       "AWS::Lambda::EventSourceMapping",
       6
     );
-    template.resourceCountIs("AWS::S3::Bucket", 2);
+    template.resourceCountIs("AWS::S3::Bucket", 4);
     template.resourceCountIs("AWS::SQS::Queue", 2);
     template.resourceCountIs("AWS::SNS::Topic", 1);
     template.resourceCountIs("AWS::SNS::Subscription", 1);
@@ -345,18 +345,20 @@ describe("ArchonJudgeStack", () => {
     });
   });
 
-  test("uses private versioned KMS buckets and CloudFront OAC", () => {
+  test("logs through KMS CloudFront storage into one terminal sink", () => {
     const template = judgeTemplate();
-    const buckets = Object.values(
+    const bucketEntries = Object.entries(
       template.findResources("AWS::S3::Bucket")
-    ) as any[];
-    expect(buckets).toHaveLength(2);
+    ) as [string, any][];
+    expect(bucketEntries).toHaveLength(4);
     expect(
-      buckets
-        .map((bucket) => bucket.Properties.BucketName)
+      bucketEntries
+        .map(([, bucket]) => bucket.Properties.BucketName)
         .sort()
     ).toEqual([
+      "archon-staging-access-logs-123456789012-eu-west-1",
       "archon-staging-cloud-checkpoints-123456789012-eu-west-1",
+      "archon-staging-cloudfront-logs-123456789012-eu-west-1",
       "archon-staging-spa-123456789012-eu-west-1"
     ]);
     const productionBuckets = Object.values(
@@ -367,26 +369,116 @@ describe("ArchonJudgeStack", () => {
         .map((bucket) => bucket.Properties.BucketName)
         .sort()
     ).toEqual([
+      "archon-production-access-logs-123456789012-eu-west-1",
       "archon-production-cloud-checkpoints-123456789012-eu-west-1",
+      "archon-production-cloudfront-logs-123456789012-eu-west-1",
       "archon-production-spa-123456789012-eu-west-1"
     ]);
-    for (const bucket of buckets) {
-      expect(bucket.Properties.VersioningConfiguration).toEqual({
-        Status: "Enabled"
-      });
-      const encryption =
-        bucket.Properties.BucketEncryption
-          .ServerSideEncryptionConfiguration;
-      expect(encryption).toHaveLength(1);
-      expect(encryption[0]).toMatchObject({
-        BucketKeyEnabled: true,
+
+    const [accessLogLogicalId, accessLogBucket] =
+      bucketEntries.find(([, bucket]) =>
+        bucket.Properties.BucketName.includes("-access-logs-")
+      )!;
+    expect(accessLogBucket.Properties.AccessControl)
+      .toBe("LogDeliveryWrite");
+    expect(accessLogBucket.Properties.LoggingConfiguration)
+      .toBeUndefined();
+    expect(accessLogBucket.Properties.OwnershipControls).toEqual({
+      Rules: [{ ObjectOwnership: "ObjectWriter" }]
+    });
+    expect(accessLogBucket.Properties.VersioningConfiguration)
+      .toEqual({ Status: "Enabled" });
+    expect(
+      accessLogBucket.Properties.BucketEncryption
+        .ServerSideEncryptionConfiguration
+    ).toEqual([
+      {
         ServerSideEncryptionByDefault: {
-          SSEAlgorithm: "aws:kms"
+          SSEAlgorithm: "AES256"
         }
+      }
+    ]);
+    expect(accessLogBucket.Properties.LifecycleConfiguration.Rules)
+      .toEqual([
+        expect.objectContaining({
+          AbortIncompleteMultipartUpload: {
+            DaysAfterInitiation: 1
+          },
+          ExpirationInDays: 30,
+          NoncurrentVersionExpiration: {
+            NoncurrentDays: 7
+          },
+          Status: "Enabled"
+        })
+      ]);
+    expect(accessLogBucket.Properties.Tags).toEqual(
+      expect.arrayContaining([
+        {
+          Key: "SecurityProfile",
+          Value: "terminal-access-log-sink"
+        }
+      ])
+    );
+
+    const [cloudFrontLogLogicalId, cloudFrontLogBucket] =
+      bucketEntries.find(([, bucket]) =>
+        bucket.Properties.BucketName.includes("-cloudfront-logs-")
+      )!;
+    expect(cloudFrontLogBucket.Properties.OwnershipControls)
+      .toEqual({ Rules: [{ ObjectOwnership: "ObjectWriter" }] });
+    expect(cloudFrontLogBucket.Properties.LoggingConfiguration)
+      .toEqual({
+        DestinationBucketName: { Ref: accessLogLogicalId },
+        LogFilePrefix: "staging/s3/cloudfront-log-bucket/"
       });
-      expect(
-        encryption[0].ServerSideEncryptionByDefault.KMSMasterKeyID
-      ).toBeDefined();
+    const cloudFrontEncryption =
+      cloudFrontLogBucket.Properties.BucketEncryption
+        .ServerSideEncryptionConfiguration;
+    expect(cloudFrontEncryption).toHaveLength(1);
+    expect(cloudFrontEncryption[0]).toMatchObject({
+      BucketKeyEnabled: true,
+      ServerSideEncryptionByDefault: {
+        SSEAlgorithm: "aws:kms",
+        KMSMasterKeyID: expect.any(Object)
+      }
+    });
+    expect(cloudFrontLogBucket.Properties.Tags).toEqual(
+      expect.arrayContaining([
+        {
+          Key: "SecurityProfile",
+          Value: "cloudfront-access-log-bucket"
+        }
+      ])
+    );
+
+    const sourceBuckets = bucketEntries.filter(
+      ([logicalId]) =>
+        ![
+          accessLogLogicalId,
+          cloudFrontLogLogicalId
+        ].includes(logicalId)
+    );
+    expect(
+      sourceBuckets
+        .map(([, bucket]) => {
+          const logging = bucket.Properties.LoggingConfiguration;
+          expect(logging.DestinationBucketName).toEqual({
+            Ref: accessLogLogicalId
+          });
+          expect(
+            bucket.Properties.BucketEncryption
+              .ServerSideEncryptionConfiguration[0]
+              .ServerSideEncryptionByDefault.SSEAlgorithm
+          ).toBe("aws:kms");
+          return logging.LogFilePrefix;
+        })
+        .sort()
+    ).toEqual([
+      "staging/s3/cloud-checkpoints/",
+      "staging/s3/spa/"
+    ]);
+
+    for (const [, bucket] of bucketEntries) {
       expect(bucket.Properties.PublicAccessBlockConfiguration).toEqual({
         BlockPublicAcls: true,
         BlockPublicPolicy: true,
@@ -394,6 +486,48 @@ describe("ArchonJudgeStack", () => {
         RestrictPublicBuckets: true
       });
     }
+    const distributions = Object.values(
+      template.findResources("AWS::CloudFront::Distribution")
+    ) as any[];
+    expect(distributions).toHaveLength(1);
+    const logging =
+      distributions[0].Properties.DistributionConfig.Logging;
+    expect(logging).toEqual(
+      expect.objectContaining({
+        IncludeCookies: false,
+        Prefix: "staging/cloudfront/"
+      })
+    );
+    expect(JSON.stringify(logging)).toContain(
+      cloudFrontLogLogicalId
+    );
+    expect(JSON.stringify(logging)).not.toContain(
+      accessLogLogicalId
+    );
+
+    const keys = Object.values(
+      template.findResources("AWS::KMS::Key")
+    ) as any[];
+    const deliveryStatements = keys.flatMap((key) =>
+      key.Properties.KeyPolicy.Statement.filter(
+        (statement: any) =>
+          statement.Sid ===
+            "AllowExactCloudFrontStandardLogDelivery"
+      )
+    );
+    expect(deliveryStatements).toHaveLength(1);
+    expect(deliveryStatements[0]).toMatchObject({
+      Effect: "Allow",
+      Principal: {
+        Service: "delivery.logs.amazonaws.com"
+      },
+      Resource: "*"
+    });
+    expect(deliveryStatements[0].Action.sort()).toEqual([
+      "kms:Decrypt",
+      "kms:GenerateDataKey*"
+    ]);
+
     template.hasResourceProperties(
       "AWS::CloudFront::OriginAccessControl",
       {

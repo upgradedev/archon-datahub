@@ -244,7 +244,7 @@ export async function sealRecoveryManifest(
     runtime: {
       profileId: "cloud" as const,
       resolution: "explicit" as const,
-      stackName: CLOUD_STACK,
+      stackName: CLOUD_STACK as typeof CLOUD_STACK,
       cloudImageDigest: digestField(required(source, "CANARY_CLOUD_IMAGE_DIGEST", 71), "Cloud image digest"),
     },
     target: {

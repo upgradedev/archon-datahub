@@ -2308,7 +2308,7 @@ def validate_facts(
             )
         exact(
             availability["artifactName"],
-            f"production-availability-{release}-{observation['availabilityRunId']}",
+            f"production-availability-{release}-{availability_run_id}",
             f"{label}.availability.artifactName",
         )
         sha256_digest(availability["artifactDigest"], f"{label}.availability.artifactDigest")

@@ -6,6 +6,7 @@ import {
   RemovalPolicy,
   Size,
   Stack,
+  Tags,
   Token,
   type StackProps
 } from "aws-cdk-lib";
@@ -180,6 +181,86 @@ export class ArchonJudgeStack extends Stack {
     );
     allowCloudWatchLogs(logsKey, stage);
 
+    // AWS requires S3 server-access-log destinations to use SSE-S3. This
+    // single terminal sink is intentionally not self-logged: self-delivery
+    // creates recursive, unbounded log objects. Every source bucket delivers
+    // here; CloudFront first writes to a KMS bucket whose own access logs also
+    // terminate here under a stage-scoped prefix.
+    const accessLogBucket = new s3.Bucket(
+      this,
+      "AccessLogBucket",
+      {
+        bucketName:
+          `archon-${stage}-access-logs-${physicalNameSuffix}`,
+        accessControl:
+          s3.BucketAccessControl.LOG_DELIVERY_WRITE,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        encryption: s3.BucketEncryption.S3_MANAGED,
+        enforceSSL: true,
+        objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
+        versioned: true,
+        lifecycleRules: [
+          {
+            id: "BoundedTerminalAccessLogs",
+            abortIncompleteMultipartUploadAfter: Duration.days(1),
+            noncurrentVersionExpiration:
+              Duration.days(isProduction ? 30 : 7),
+            expiration: Duration.days(isProduction ? 180 : 30)
+          }
+        ],
+        removalPolicy: RemovalPolicy.RETAIN
+      }
+    );
+    Tags.of(accessLogBucket).add(
+      "SecurityProfile",
+      "terminal-access-log-sink"
+    );
+
+    logsKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowExactCloudFrontStandardLogDelivery",
+        principals: [
+          new iam.ServicePrincipal(
+            "delivery.logs.amazonaws.com"
+          )
+        ],
+        actions: ["kms:GenerateDataKey*", "kms:Decrypt"],
+        resources: ["*"]
+      })
+    );
+    const cloudFrontLogBucket = new s3.Bucket(
+      this,
+      "CloudFrontLogBucket",
+      {
+        bucketName:
+          `archon-${stage}-cloudfront-logs-${physicalNameSuffix}`,
+        blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        bucketKeyEnabled: true,
+        encryption: s3.BucketEncryption.KMS,
+        encryptionKey: logsKey,
+        enforceSSL: true,
+        objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
+        serverAccessLogsBucket: accessLogBucket,
+        serverAccessLogsPrefix:
+          `${stage}/s3/cloudfront-log-bucket/`,
+        versioned: true,
+        lifecycleRules: [
+          {
+            id: "BoundedCloudFrontStandardLogs",
+            abortIncompleteMultipartUploadAfter: Duration.days(1),
+            noncurrentVersionExpiration:
+              Duration.days(isProduction ? 30 : 7),
+            expiration: Duration.days(isProduction ? 180 : 30)
+          }
+        ],
+        removalPolicy: RemovalPolicy.RETAIN
+      }
+    );
+    Tags.of(cloudFrontLogBucket).add(
+      "SecurityProfile",
+      "cloudfront-access-log-bucket"
+    );
+
     const spaBucket = new s3.Bucket(this, "SpaBucket", {
       bucketName:
         `archon-${stage}-spa-${physicalNameSuffix}`,
@@ -189,6 +270,8 @@ export class ArchonJudgeStack extends Stack {
       encryptionKey: spaKey,
       enforceSSL: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      serverAccessLogsBucket: accessLogBucket,
+      serverAccessLogsPrefix: `${stage}/s3/spa/`,
       versioned: true,
       lifecycleRules: [
         {
@@ -212,6 +295,9 @@ export class ArchonJudgeStack extends Stack {
         enforceSSL: true,
         objectOwnership:
           s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+        serverAccessLogsBucket: accessLogBucket,
+        serverAccessLogsPrefix:
+          `${stage}/s3/cloud-checkpoints/`,
         versioned: true,
         lifecycleRules: [
           {
@@ -513,6 +599,7 @@ export class ArchonJudgeStack extends Stack {
       controlFunction: control,
       spaBucket,
       spaKey,
+      cloudFrontLogBucket,
       logsKey,
       originKeySecret
     });

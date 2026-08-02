@@ -230,6 +230,35 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       ]
     });
 
+    const flowLogGroup = new logs.LogGroup(
+      this,
+      "CoreVpcFlowLogGroup",
+      {
+        logGroupName:
+          `/archon/${stage}/datahub-core/vpc-flow`,
+        encryptionKey: logsKey,
+        retention: logs.RetentionDays.ONE_YEAR,
+        removalPolicy: RemovalPolicy.RETAIN
+      }
+    );
+    const flowLogRole = new iam.Role(this, "CoreVpcFlowLogRole", {
+      description:
+        "Exact VPC Flow Logs delivery role for the isolated Core VPC",
+      assumedBy:
+        new iam.ServicePrincipal("vpc-flow-logs.amazonaws.com")
+    });
+    new ec2.FlowLog(this, "CoreVpcFlowLog", {
+      resourceType: ec2.FlowLogResourceType.fromVpc(vpc),
+      destination:
+        ec2.FlowLogDestination.toCloudWatchLogs(
+          flowLogGroup,
+          flowLogRole
+        ),
+      trafficType: ec2.FlowLogTrafficType.ALL,
+      maxAggregationInterval:
+        ec2.FlowLogMaxAggregationInterval.TEN_MINUTES
+    });
+
     // CDK's default-SG restriction is a framework custom resource. Keep that
     // defense in depth, while bringing its generated provider under the same
     // bounded-concurrency and X-Ray controls as every application Lambda.

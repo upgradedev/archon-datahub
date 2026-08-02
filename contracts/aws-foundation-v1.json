@@ -530,6 +530,7 @@
       "logs:CreateLogStream",
       "logs:DeleteLogDelivery",
       "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
 
       "logs:DescribeResourcePolicies",
       "logs:GetLogDelivery",

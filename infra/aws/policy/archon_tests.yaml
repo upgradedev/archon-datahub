@@ -230,3 +230,223 @@
   expectations:
     rules:
       kms_keys_rotate_and_are_not_immediately_deletable: FAIL
+
+- name: the exact bounded terminal access-log sink is accepted
+  input:
+    Resources:
+      AccessLogs:
+        Type: AWS::S3::Bucket
+        Properties:
+          AccessControl: LogDeliveryWrite
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          VersioningConfiguration:
+            Status: Enabled
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          LifecycleConfiguration:
+            Rules:
+              - Id: BoundedTerminalAccessLogs
+                Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 1
+                ExpirationInDays: 180
+                NoncurrentVersionExpiration:
+                  NoncurrentDays: 30
+          Tags:
+            - Key: SecurityProfile
+              Value: terminal-access-log-sink
+  expectations:
+    rules:
+      only_the_reviewed_terminal_sink_may_enable_bucket_acls: PASS
+      terminal_s3_access_log_sink_is_bounded: PASS
+
+- name: an unrelated ACL-enabled bucket is rejected
+  input:
+    Resources:
+      Unreviewed:
+        Type: AWS::S3::Bucket
+        Properties:
+          AccessControl: PublicRead
+  expectations:
+    rules:
+      only_the_reviewed_terminal_sink_may_enable_bucket_acls: FAIL
+
+- name: a recursive terminal log sink is rejected
+  input:
+    Resources:
+      Recursive:
+        Type: AWS::S3::Bucket
+        Properties:
+          AccessControl: LogDeliveryWrite
+          LoggingConfiguration:
+            DestinationBucketName: recursive
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          VersioningConfiguration:
+            Status: Enabled
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          LifecycleConfiguration:
+            Rules:
+              - Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 1
+                ExpirationInDays: 30
+                NoncurrentVersionExpiration:
+                  NoncurrentDays: 7
+          Tags:
+            - Key: SecurityProfile
+              Value: terminal-access-log-sink
+  expectations:
+    rules:
+      terminal_s3_access_log_sink_is_bounded: FAIL
+
+- name: an unbounded terminal log sink is rejected
+  input:
+    Resources:
+      Unbounded:
+        Type: AWS::S3::Bucket
+        Properties:
+          AccessControl: LogDeliveryWrite
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          VersioningConfiguration:
+            Status: Enabled
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - ServerSideEncryptionByDefault:
+                  SSEAlgorithm: AES256
+          LifecycleConfiguration:
+            Rules:
+              - Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 7
+                ExpirationInDays: 365
+                NoncurrentVersionExpiration:
+                  NoncurrentDays: 90
+          Tags:
+            - Key: SecurityProfile
+              Value: terminal-access-log-sink
+  expectations:
+    rules:
+      terminal_s3_access_log_sink_is_bounded: FAIL
+
+- name: the exact KMS CloudFront log bucket forwards its own access logs
+  input:
+    Resources:
+      CloudFrontLogs:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          VersioningConfiguration:
+            Status: Enabled
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: test-key
+          LoggingConfiguration:
+            DestinationBucketName: terminal-sink
+            LogFilePrefix: staging/s3/cloudfront-log-bucket/
+          LifecycleConfiguration:
+            Rules:
+              - Status: Enabled
+                AbortIncompleteMultipartUpload:
+                  DaysAfterInitiation: 1
+                ExpirationInDays: 30
+                NoncurrentVersionExpiration:
+                  NoncurrentDays: 7
+          Tags:
+            - Key: SecurityProfile
+              Value: cloudfront-access-log-bucket
+  expectations:
+    rules:
+      cloudfront_log_bucket_is_kms_encrypted_and_forwards_access_logs: PASS
+
+- name: an unlogged ObjectWriter KMS bucket is rejected
+  input:
+    Resources:
+      Unlogged:
+        Type: AWS::S3::Bucket
+        Properties:
+          PublicAccessBlockConfiguration:
+            BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          OwnershipControls:
+            Rules:
+              - ObjectOwnership: ObjectWriter
+          VersioningConfiguration:
+            Status: Enabled
+          BucketEncryption:
+            ServerSideEncryptionConfiguration:
+              - BucketKeyEnabled: true
+                ServerSideEncryptionByDefault:
+                  SSEAlgorithm: aws:kms
+                  KMSMasterKeyID: test-key
+  expectations:
+    rules:
+      cloudfront_log_bucket_is_kms_encrypted_and_forwards_access_logs: FAIL
+
+- name: an all-traffic CloudWatch VPC flow log is accepted
+  input:
+    Resources:
+      CoreVpc:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogDestination: test-log-group
+          LogDestinationType: cloud-watch-logs
+          ResourceId: core-vpc
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: PASS
+
+- name: a VPC without flow logs is rejected
+  input:
+    Resources:
+      CoreVpc:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
