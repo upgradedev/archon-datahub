@@ -67,23 +67,39 @@ jobs:
           test "$(jq -r .schemaVersion "$LOCK_PATH")" =             "archon.datahub-cloud-runtime-image-lock/v1"
           test "$(jq -r .platform "$LOCK_PATH")" = "linux/amd64"
           test "$(jq -r .architecture "$LOCK_PATH")" = "x86_64"
-          jq -r '.sourceBlobs[] | [.path,.blobSha] | @tsv' "$LOCK_PATH" |
           while IFS=$'\t' read -r path expected; do
             test -f "$path"
             observed="$(git hash-object -- "$path")"
             test "$observed" = "$expected"
-          done
-          jq -r '.immutableInputs[] | [.path,.blobSha] | @tsv' "$LOCK_PATH" |
+          done < <(
+            jq -r '.sourceBlobs[] | [.path,.blobSha] | @tsv' "$LOCK_PATH"
+          )
           while IFS=$'\t' read -r path expected; do
             test -f "$path"
             observed="$(git hash-object -- "$path")"
             test "$observed" = "$expected"
-          done
+          done < <(
+            jq -r '.immutableInputs[] | [.path,.blobSha] | @tsv' "$LOCK_PATH"
+          )
           test "$(git hash-object services/datahub-companion/uv.lock)" =             "$(jq -r .dependencyLock.blobSha "$LOCK_PATH")"
           test "$(git hash-object services/datahub-companion/pyproject.toml)" =             "$(jq -r .dependencyLock.pyprojectBlobSha "$LOCK_PATH")"
           grep -F             'public.ecr.aws/lambda/python:3.11@sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8'             services/datahub-cloud-runtime/Dockerfile
           grep -F             'ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437'             services/datahub-cloud-runtime/Dockerfile
-          test -z "$(git status --porcelain --untracked-files=all)"
+          if ! git diff --quiet --; then
+            echo "::error title=Cloud runtime source boundary::tracked source changed before build"
+            exit 1
+          fi
+          if ! git diff --cached --quiet --; then
+            echo "::error title=Cloud runtime source boundary::index changed before build"
+            exit 1
+          fi
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [[ -n "$untracked" ]]; then
+            while IFS= read -r path; do
+              printf '::error file=%s,title=Cloud runtime source boundary::unexpected untracked path before build\n' "$path"
+            done <<<"$untracked"
+            exit 1
+          fi
 
       - name: Materialize exact official DataHub Skills without a Git checkout
         env:
