@@ -449,4 +449,195 @@ def ground_skills(
     return {**envelope, "digest": digest(envelope)}
 
 
+def analytics_url() -> str:
+    configured = os.environ.get(
+        "ARCHON_ANALYTICS_AGENT_URL", "http://analytics-agent:8100",
+    )
+    parsed = urlparse(configured)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"analytics-agent", "127.0.0.1", "localhost"}
+        or parsed.port != 8100
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("Analytics Agent URL is outside the private allowlist")
+    return configured.rstrip("/")
+
+
+def analytics_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url=analytics_url(),
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
+async def bounded_json(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+) -> Any:
+    request = client.build_request(method, path, json=body)
+    response = await client.send(request, stream=True)
+    try:
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError("Analytics Agent returned a non-success status")
+        media_type = response.headers.get("content-type", "").split(";", 1)[0]
+        if media_type != "application/json":
+            raise RuntimeError("Analytics Agent returned an unexpected media type")
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > MAX_JSON_BYTES:
+                raise RuntimeError("Analytics Agent JSON exceeded policy")
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks))
+    finally:
+        await response.aclose()
+
+
+def validate_connections(
+    connections: Any,
+    engine_name: str,
+) -> dict[str, Any]:
+    if not isinstance(connections, list) or len(connections) > 100:
+        raise RuntimeError("Analytics Agent connection inventory drift")
+    active_datahub: list[str] = []
+    engine_connected = False
+    for item in connections:
+        if not isinstance(item, dict):
+            raise RuntimeError("Analytics Agent connection schema drift")
+        name = item.get("name")
+        connection_type = item.get("type")
+        active = item.get("status") == "connected" and item.get("disabled") is False
+        if name == engine_name and active:
+            engine_connected = True
+        if connection_type not in {"datahub", "datahub-mcp"} or not active:
+            continue
+        tools = item.get("tools")
+        if not isinstance(tools, list):
+            raise RuntimeError("DataHub mutation policy is not observable")
+        toggles: dict[str, bool] = {}
+        for tool in tools:
+            if not isinstance(tool, dict):
+                raise RuntimeError("DataHub tool policy schema drift")
+            tool_name = tool.get("name")
+            enabled = tool.get("enabled")
+            if isinstance(tool_name, str) and isinstance(enabled, bool):
+                toggles[tool_name] = enabled
+        for mutation in ("publish_analysis", "save_correction"):
+            if mutation not in toggles or toggles[mutation] is not False:
+                raise RuntimeError("Analytics Agent mutation tools are not disabled")
+        active_datahub.append(str(name))
+    if not active_datahub:
+        raise RuntimeError("no connected DataHub context platform")
+    if not engine_connected:
+        raise RuntimeError("configured Analytics engine is not connected")
+    return {
+        "activeDataHubConnections": sorted(active_datahub),
+        "engineName": engine_name,
+        "mutationTools": {
+            "publish_analysis": False,
+            "save_correction": False,
+        },
+    }
+
+
+async def analytics_preflight() -> dict[str, Any]:
+    engine_name = os.environ.get("ARCHON_ANALYTICS_ENGINE", "")
+    if not GENERATION.fullmatch(engine_name):
+        raise RuntimeError("Analytics engine is not configured")
+    async with analytics_client(httpx.Timeout(10.0, connect=3.0)) as client:
+        health, engines, connections = await asyncio.gather(
+            bounded_json(client, "GET", "/health"),
+            bounded_json(client, "GET", "/api/engines"),
+            bounded_json(client, "GET", "/api/settings/connections"),
+        )
+    if health != {"status": "ok"}:
+        raise RuntimeError("Analytics Agent health contract drift")
+    if not isinstance(engines, list) or len(engines) > 100:
+        raise RuntimeError("Analytics Agent engine inventory drift")
+    matching = [
+        item for item in engines
+        if isinstance(item, dict)
+        and item.get("name") == engine_name
+        and isinstance(item.get("type"), str)
+        and item["type"]
+    ]
+    if len(matching) != 1:
+        raise RuntimeError("configured Analytics engine is unavailable")
+    policy = validate_connections(connections, engine_name)
+    receipt = {
+        "schemaVersion": "archon.analytics-agent-preflight/v1",
+        "status": "verified",
+        "health": "ok",
+        "engine": {"name": engine_name, "type": matching[0]["type"]},
+        **policy,
+    }
+    return {**receipt, "digest": digest(receipt)}
+
+
+def canonical_conversation_id(value: Any) -> str:
+    if not isinstance(value, str) or len(value) != 36:
+        raise RuntimeError("Analytics Agent returned an invalid conversation id")
+    try:
+        canonical_id = str(uuid.UUID(value))
+    except ValueError as error:
+        raise RuntimeError(
+            "Analytics Agent returned an invalid conversation id"
+        ) from error
+    if canonical_id != value:
+        raise RuntimeError("Analytics Agent conversation id is not canonical")
+    return canonical_id
+
+
+def safe_conversation_path(conversation_id: str, suffix: str) -> str:
+    canonical_id = canonical_conversation_id(conversation_id)
+    return f"/api/conversations/{quote(canonical_id, safe='')}/{suffix}"
+
+
+def project_event(
+    event: Any,
+    conversation_id: str,
+    *,
+    complete_seen: bool,
+) -> tuple[dict[str, Any] | None, bool]:
+    if not isinstance(event, dict) or not set(event).issubset(
+        {"event", "conversation_id", "message_id", "payload"}
+    ):
+        raise RuntimeError("Analytics Agent event schema drift")
+    event_type = event.get("event")
+    if event_type == "KEEPALIVE":
+        if set(event) != {"event"}:
+            raise RuntimeError("Analytics Agent keepalive schema drift")
+        return None, complete_seen
+    if event_type == "ERROR":
+        raise RuntimeError("Analytics Agent reported an error")
+    if event_type not in EVENT_TYPES or complete_seen:
+        raise RuntimeError("Analytics Agent emitted an unexpected event")
+    if event.get("conversation_id") != conversation_id:
+        raise RuntimeError("Analytics Agent conversation binding drift")
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise RuntimeError("Analytics Agent event payload drift")
+    if event_type in {"TOOL_CALL", "TOOL_RESULT"}:
+        tool_name = payload.get("tool_name")
+        if tool_name in MUTATION_TOOLS:
+            raise RuntimeError("Analytics Agent attempted a mutation")
+        if tool_name not in READ_ONLY_TOOLS:
+            raise RuntimeError("Analytics Agent invoked an unreviewed tool")
+    return {
+        "event": event_type,
+        "payload": sanitized(payload),
+    }, event_type == "COMPLETE"
+
+
 # __ARCHON_APPEND__
