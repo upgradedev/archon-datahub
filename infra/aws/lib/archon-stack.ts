@@ -1837,7 +1837,51 @@ export class ArchonPlatformStack extends Stack {
         }
       }
     });
-    const decisionModel = api.addModel("ApprovalDecisionRequest", {
+    const runtimeSessionModel = api.addModel("RuntimeSessionRequest", {
+      modelName: `ArchonRuntimeSession${pascal(stage)}`,
+      contentType: "application/json",
+      schema: {
+        schema: apigateway.JsonSchemaVersion.DRAFT4,
+        type: apigateway.JsonSchemaType.OBJECT,
+        additionalProperties: false,
+        required: ["requestedProfile"],
+        properties: {
+          requestedProfile: {
+            type: apigateway.JsonSchemaType.STRING,
+            enum: ["auto", "cloud", "core"]
+          }
+        }
+      }
+    });
+    const runtimeControlLoopModel = api.addModel(
+      "RuntimeControlLoopRequest",
+      {
+        modelName: `ArchonRuntimeControlLoop${pascal(stage)}`,
+        contentType: "application/json",
+        schema: {
+          schema: apigateway.JsonSchemaVersion.DRAFT4,
+          type: apigateway.JsonSchemaType.OBJECT,
+          additionalProperties: false,
+          required: ["query", "sessionId"],
+          properties: {
+            query: {
+              type: apigateway.JsonSchemaType.STRING,
+              minLength: 1,
+              maxLength: 256,
+              pattern: "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            mode: {
+              type: apigateway.JsonSchemaType.STRING,
+              enum: ["READ_ONLY", "GOVERNED"]
+            },
+            sessionId: {
+              type: apigateway.JsonSchemaType.STRING,
+              pattern: "^rs_[A-Za-z0-9_-]{43}$"
+            }
+          }
+        }
+      }
+    );
       modelName: `ArchonApprovalDecision${pascal(stage)}`,
       contentType: "application/json",
       schema: {
@@ -1868,7 +1912,65 @@ export class ArchonPlatformStack extends Stack {
     const scrubbedOriginCredential = {
       "integration.request.header.x-api-key": "'redacted'"
     };
-    const controlStartRequestTemplate = `{
+    const runtimeProfilesRequestTemplate = `{
+  "operation": "profiles",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")"
+}`;
+    const runtimeSessionStartRequestTemplate = `{
+  "operation": "sessionStart",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "body": $input.json('$'),
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const runtimeSessionStatusRequestTemplate = `{
+  "operation": "sessionStatus",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "sessionId": "$util.escapeJavaScript($input.params('sessionId')).replaceAll("\\\\'","'")"
+}`;
+    const runtimeSessionActivityRequestTemplate = `{
+  "operation": "sessionActivity",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "sessionId": "$util.escapeJavaScript($input.params('sessionId')).replaceAll("\\\\'","'")",
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const runtimeSessionStopRequestTemplate = `{
+  "operation": "sessionStop",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "sessionId": "$util.escapeJavaScript($input.params('sessionId')).replaceAll("\\\\'","'")",
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const runtimeControlStartRequestTemplate = `{
+  "operation": "startV2",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "body": $input.json('$'),
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const runtimeControlStatusRequestTemplate = `{
+  "operation": "statusV2",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "auditId": "$util.escapeJavaScript($input.params('auditId')).replaceAll("\\\\'","'")",
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
   "operation": "start",
   "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
   "body": $input.json('$')
@@ -1910,6 +2012,139 @@ export class ArchonPlatformStack extends Stack {
       }
     );
 
+    const runtimeProfilesResource = apiResource.addResource("runtime-profiles");
+    runtimeProfilesResource.addMethod(
+      "GET",
+      narrowLambdaIntegration(
+        runtimeControlFunction,
+        runtimeProfilesRequestTemplate
+      ),
+      {
+        authorizationType: apigateway.AuthorizationType.NONE,
+        requestValidator,
+        apiKeyRequired: true,
+        methodResponses: narrowLambdaMethodResponses(["200", "502"])
+      }
+    );
+    const runtimeSessionsResource = apiResource.addResource("runtime-sessions");
+    runtimeSessionsResource.addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        runtimeControlFunction,
+        runtimeSessionStartRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestModels: { "application/json": runtimeSessionModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "201", "202", "400", "401", "403", "409", "413", "502"
+        ])
+      }
+    );
+    const runtimeSessionResource =
+      runtimeSessionsResource.addResource("{sessionId}");
+    const runtimeSessionPathParameters = {
+      "method.request.path.sessionId": true
+    };
+    runtimeSessionResource.addMethod(
+      "GET",
+      narrowLambdaIntegration(
+        runtimeControlFunction,
+        runtimeSessionStatusRequestTemplate
+      ),
+      {
+        authorizationType: apigateway.AuthorizationType.NONE,
+        requestValidator,
+        apiKeyRequired: true,
+        requestParameters: runtimeSessionPathParameters,
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "400", "404", "409", "502"
+        ])
+      }
+    );
+    for (const [method, template] of [
+      ["PATCH", runtimeSessionActivityRequestTemplate],
+      ["DELETE", runtimeSessionStopRequestTemplate]
+    ] as const) {
+      runtimeSessionResource.addMethod(
+        method,
+        narrowLambdaIntegration(runtimeControlFunction, template),
+        {
+          ...authenticatedMethod,
+          authorizationScopes: [approvalScopeName],
+          requestParameters: runtimeSessionPathParameters,
+          methodResponses: narrowLambdaMethodResponses([
+            "200", "202", "400", "401", "403", "404", "409", "502"
+          ])
+        }
+      );
+    }
+    runtimeSessionResource.addResource("activity").addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        runtimeControlFunction,
+        runtimeSessionActivityRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestParameters: runtimeSessionPathParameters,
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "400", "401", "403", "404", "409", "502"
+        ])
+      }
+    );
+    runtimeSessionResource.addResource("stop").addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        runtimeControlFunction,
+        runtimeSessionStopRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestParameters: runtimeSessionPathParameters,
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "202", "400", "401", "403", "404", "409", "502"
+        ])
+      }
+    );
+
+    const runtimeControlLoopsResource =
+      apiResource.addResource("control-loops-v2");
+    runtimeControlLoopsResource.addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        controlFunction,
+        runtimeControlStartRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestModels: { "application/json": runtimeControlLoopModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "202", "400", "401", "403", "404", "409", "413", "502"
+        ])
+      }
+    );
+    runtimeControlLoopsResource.addResource("{auditId}").addMethod(
+      "GET",
+      narrowLambdaIntegration(
+        controlFunction,
+        runtimeControlStatusRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestParameters: {
+          "method.request.path.auditId": true
+        },
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "400", "401", "403", "404", "409", "410", "502"
+        ])
+      }
+    );
     const controlLoopsResource = apiResource.addResource("control-loops");
     controlLoopsResource.addMethod(
       "POST",
@@ -2704,7 +2939,12 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonAuthLogoutUri", applicationRootUrl);
     output(this, "ArchonApproverGroupName", approverGroup.groupName!);
     output(this, "ArchonStateMachineArn", stateMachine.stateMachineArn);
-    output(this, "ArchonAuditQueueUrl", auditQueue.queueUrl);
+    output(this, "ArchonRuntimeSessionTableName", runtimeSessionTable.tableName);
+    output(
+      this,
+      "ArchonRuntimeControlFunctionArn",
+      runtimeControlFunction.functionArn
+    );    output(this, "ArchonAuditQueueUrl", auditQueue.queueUrl);
     output(this, "ArchonApprovalQueueUrl", approvalQueue.queueUrl);
     output(this, "ArchonRemediationQueueUrl", remediationQueue.queueUrl);
     output(this, "ArchonApprovalTableName", approvalTable.tableName);
