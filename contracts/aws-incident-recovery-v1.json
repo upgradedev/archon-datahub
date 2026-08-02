@@ -242,7 +242,7 @@
   "recoveryRole": {
     "stackName": "Archon-Governed-Canary-Roles",
     "stackTemplate": "infra/aws/foundation/governed-canary-roles.yml",
-    "stackTemplateSourceSha256": "cf613a1af94a339253a2e0aac3f1ebb61066337629e83c0b254b609227a2817d",
+    "stackTemplateSourceSha256": "0c636d2af933c03b7752334fd4998141355564696ba08c81e06bda8bb459df73",
     "roleName": "archon-datahub-github-governed-canary-recovery",
     "baselinePolicyName": "archon-staging-stack-read",
     "baselinePolicyUnchanged": true,
