@@ -366,6 +366,22 @@ async function request(
   );
 }
 
+function authorizationHeaders(accessToken: string): {
+  Authorization: string;
+} {
+  if (
+    accessToken.length < 20 ||
+    accessToken.length > 16_384 ||
+    /[\s^@-^_\u007F]/u.test(accessToken)
+  ) {
+    throw new RuntimeApiError(
+      "An authenticated judge or steward session is required.",
+      401,
+    );
+  }
+  return { Authorization: "Bearer " + accessToken };
+}
+
 function sessionPath(sessionId: string): string {
   if (!SESSION_ID.test(sessionId)) {
     throw new RuntimeApiError("The runtime session capability is invalid.", 400);
@@ -383,6 +399,7 @@ export async function getRuntimeProfiles(
 
 export async function startRuntimeSession(
   requestedProfile: RuntimeRequest,
+  accessToken: string,
   signal?: AbortSignal,
 ): Promise<RuntimeSessionStatus> {
   if (!REQUESTS.includes(requestedProfile)) {
@@ -392,6 +409,7 @@ export async function startRuntimeSession(
     await request(RUNTIME_SESSIONS_PATH, {
       method: "POST",
       body: JSON.stringify({ requestedProfile }),
+      headers: authorizationHeaders(accessToken),
       signal,
     }),
   );
@@ -408,12 +426,14 @@ export async function getRuntimeSession(
 
 export async function extendRuntimeSession(
   sessionId: string,
+  accessToken: string,
   signal?: AbortSignal,
 ): Promise<RuntimeSessionStatus> {
   return parseSession(
     await request(sessionPath(sessionId) + "/activity", {
       method: "POST",
       body: "{}",
+      headers: authorizationHeaders(accessToken),
       signal,
     }),
   );
@@ -421,12 +441,14 @@ export async function extendRuntimeSession(
 
 export async function stopRuntimeSession(
   sessionId: string,
+  accessToken: string,
   signal?: AbortSignal,
 ): Promise<RuntimeSessionStatus> {
   return parseSession(
     await request(sessionPath(sessionId) + "/stop", {
       method: "POST",
       body: "{}",
+      headers: authorizationHeaders(accessToken),
       signal,
     }),
   );
