@@ -115,7 +115,8 @@ if MUTATION_SIGNING_KEY_ARN == DATA_KEY_ARN:
 ANALYTICS_ROLE_ARN = _required_env(
     "CORE_ANALYTICS_ROLE_ARN",
     re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"),
-)GATEWAY_ROLE_ARN = _required_env(
+)
+GATEWAY_ROLE_ARN = _required_env(
     "CORE_GATEWAY_ROLE_ARN",
     re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"),
 )

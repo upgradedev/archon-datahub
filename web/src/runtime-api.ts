@@ -1637,8 +1637,6 @@ function parseRuntimeControlLoopStatus(
   const status = value as unknown as RuntimeControlLoopStatus;
   const governedEvidenceComplete =
     agent !== undefined && governed !== undefined && improve !== undefined;
-  const isImproveCapability =
-    improve?.schemaVersion === "archon.datahub-improve-context-capability/v2";
   const isImproveResult =
     improve?.schemaVersion === "archon.datahub-improve-context-projection/v2";
   const improveCapabilityStatus =

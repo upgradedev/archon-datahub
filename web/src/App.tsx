@@ -1439,7 +1439,7 @@ function AgentStackPanel({
 
 export function App() {
   const auth = useSyncExternalStore(subscribeToAuth, getAuthSnapshot, getAuthSnapshot);
-  const [audit, setAudit] = useState<LoadedAudit>({
+  const [audit] = useState<LoadedAudit>({
     envelope: previewAudit,
     source: "fixture",
     fallbackReason:

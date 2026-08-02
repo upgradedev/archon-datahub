@@ -3,8 +3,7 @@
 const { createHash, randomBytes } = require("node:crypto");
 const {
   DynamoDBClient,
-  GetItemCommand,
-  PutItemCommand
+  GetItemCommand
 } = require("@aws-sdk/client-dynamodb");
 const {
   GetObjectCommand,
