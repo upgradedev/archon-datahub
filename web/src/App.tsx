@@ -9,6 +9,7 @@ import {
 import { loadAudit, submitApprovalDecision } from "./api";
 import { EvidencePack } from "./EvidencePack";
 import { GuidedTour } from "./GuidedTour";
+import { RuntimeControl } from "./RuntimeControl";
 import {
   beginSignIn,
   getAccessToken,
@@ -1461,6 +1462,12 @@ export function App() {
               />
             </div>
           </section>
+
+          <RuntimeControl
+            getAccessToken={
+              auth.status === "authenticated" ? getAccessToken : undefined
+            }
+          />
 
           <div className="mt-6">
             <PipelineTrace trace={report.trace} />
