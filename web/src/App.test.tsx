@@ -144,6 +144,10 @@ describe("Archon control plane", () => {
 
     expect(screen.getByText(/preview only: approve selected/i)).toBeInTheDocument();
     expect(screen.getByText(/no backend decision or mutation was sent/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject proposal" }));
+    expect(screen.getByText(/preview only: reject selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/no backend decision or mutation was sent/i)).toBeInTheDocument();
   });
 
   it("locks the live Agent Stack until Cognito authenticates the steward", async () => {
