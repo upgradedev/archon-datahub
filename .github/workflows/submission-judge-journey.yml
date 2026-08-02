@@ -540,7 +540,7 @@ jobs:
           deployment_observation="${deployment_dir}/observation.json"
           test -f "${deployment_observation}"
           test ! -L "${deployment_observation}"
-          test "$(jq -er .releaseSha "${deployment_observation}")" = 
+          test "$(jq -er .releaseSha "${deployment_observation}")" = \
             "${RELEASE_SHA}"
           deployment_binding_source="${deployment_verification_dir}/binding.json"
           deployment_predicate_type="$(
