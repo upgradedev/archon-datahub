@@ -160,7 +160,8 @@ jobs:
             ${{ runner.temp }}/datahub-companion-junit.xml
           if-no-files-found: warn
           retention-days: 90
-          overwrite: true      - name: Audit the exact Python dependency closure
+          overwrite: true
+      - name: Audit the exact Python dependency closure
         id: audit
         if: steps.lock.outputs.adopted == 'true'
         continue-on-error: true
