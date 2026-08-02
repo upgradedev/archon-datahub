@@ -24,6 +24,8 @@ function json(value: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
+const ACCESS_TOKEN = "TEST_ONLY_TOKEN_000000000000";
+
 const allCapabilities = {
   mcpRead: true,
   mcpGovernedWrite: true,
@@ -174,7 +176,7 @@ describe("runtime API trust boundary", () => {
     const fetchMock = vi.fn().mockResolvedValue(json(status()));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await startRuntimeSession("auto");
+    const result = await startRuntimeSession("auto", ACCESS_TOKEN);
 
     expect(result.resolvedProfile).toBe("core");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -224,8 +226,8 @@ describe("runtime API trust boundary", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await getRuntimeSession(sessionId);
-    await extendRuntimeSession(sessionId);
-    await stopRuntimeSession(sessionId);
+    await extendRuntimeSession(sessionId, ACCESS_TOKEN);
+    await stopRuntimeSession(sessionId, ACCESS_TOKEN);
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -251,10 +253,10 @@ describe("runtime API trust boundary", () => {
     await expect(getRuntimeSession("rs_short")).rejects.toMatchObject({
       status: 400,
     });
-    await expect(extendRuntimeSession("https://internal")).rejects.toMatchObject({
+    await expect(extendRuntimeSession("https://internal", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 400,
     });
-    await expect(stopRuntimeSession("../admin")).rejects.toMatchObject({
+    await expect(stopRuntimeSession("../admin", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 400,
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -290,15 +292,28 @@ describe("runtime API trust boundary", () => {
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(startRuntimeSession("auto")).rejects.toMatchObject({
+    await expect(startRuntimeSession("auto", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 502,
     });
-    await expect(startRuntimeSession("auto")).rejects.toMatchObject({
+    await expect(startRuntimeSession("auto", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 502,
     });
-    await expect(startRuntimeSession("auto")).rejects.toMatchObject({
+    await expect(startRuntimeSession("auto", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 502,
     });
+  });
+
+  it("rejects absent or malformed authentication before runtime mutations", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(startRuntimeSession("auto", "")).rejects.toMatchObject({
+      status: 401,
+    });
+    await expect(
+      startRuntimeSession("auto", "not a bearer token"),
+    ).rejects.toMatchObject({ status: 401 });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("maps only stable runtime errors and never reflects upstream bodies", async () => {
@@ -314,7 +329,7 @@ describe("runtime API trust boundary", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(startRuntimeSession("cloud")).rejects.toMatchObject({
+    await expect(startRuntimeSession("cloud", ACCESS_TOKEN)).rejects.toMatchObject({
       status: 409,
       message:
         "That DataHub runtime is not fully ready with all five capabilities.",
