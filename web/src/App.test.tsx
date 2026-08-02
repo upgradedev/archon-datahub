@@ -325,4 +325,186 @@ describe("Archon control plane", () => {
     expect(proof).not.toHaveTextContent("privateKey");
     expect(proof).not.toHaveTextContent("accessToken");
   });
-});
+
+  it("executes improve-context, approval, governed write-back, and rerun proof", async () => {
+    authMocks.snapshot = {
+      status: "authenticated",
+      expiresAt: Date.now() + 60_000,
+    };
+    const baseResult = {
+      context: {
+        digest: `sha256:${"1".repeat(64)}`,
+        entityUrns: [
+          "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+        ],
+        receipts: [
+          { tool: "search" },
+          { tool: "get_entities" },
+          { tool: "get_lineage_downstream" },
+          { tool: "list_schema_fields" },
+        ],
+        unknownPreserved: false,
+      },
+      skills: {
+        digest: `sha256:${"2".repeat(64)}`,
+        workflow: [
+          "datahub-search",
+          "datahub-lineage",
+          "datahub-quality",
+          "datahub-audit",
+          "datahub-enrich",
+        ],
+      },
+      analytics: {
+        digest: `sha256:${"3".repeat(64)}`,
+        events: [
+          { event: "SQL" },
+          { event: "RESULT" },
+          { event: "CHART" },
+          { event: "COMPLETE" },
+        ],
+        contextQuality: { score: 4, label: "good" },
+      },
+    };
+    const runtimeEvidence = {
+      digest: `sha256:${"4".repeat(64)}`,
+      runtimeBinding: { profileId: "cloud" },
+    };
+    const awaitingImprovement = {
+      schemaVersion: "archon.runtime-control-loop-status/v2",
+      auditId: "c".repeat(64),
+      status: "AWAITING_IMPROVEMENT",
+      phase: "IMPROVING_CONTEXT",
+      runtimeEvidence,
+      agentStackResult: baseResult,
+      improveContext: {
+        schemaVersion: "archon.datahub-improve-context-capability/v2",
+        status: "AVAILABLE",
+      },
+    };
+    const awaitingApproval = {
+      ...awaitingImprovement,
+      status: "AWAITING_APPROVAL",
+      phase: "AWAITING_APPROVAL",
+      improveContext: {
+        schemaVersion: "archon.datahub-improve-context-projection/v2",
+        resultDigest: `sha256:${"5".repeat(64)}`,
+        events: [
+          { event: "TEXT", text: "Propose PII tag for customer_email." },
+          { event: "COMPLETE", status: "proposal-only" },
+        ],
+      },
+      plan: {
+        expectedBefore: { tagUrns: [] },
+        expectedBeforeDigest: `sha256:${"6".repeat(64)}`,
+        expectedAfter: { tagUrns: ["urn:li:tag:PII"] },
+        expectedAfterDigest: `sha256:${"7".repeat(64)}`,
+        improveReceiptDigest: `sha256:${"8".repeat(64)}`,
+      },
+      approval: { status: "PENDING" },
+    };
+    const completed = {
+      ...awaitingApproval,
+      status: "SUCCEEDED",
+      phase: "COMPLETE",
+      approval: { status: "APPROVED" },
+      remediation: {
+        verified: true,
+        mutationExecutor: "official-datahub-mcp",
+        receiptDigest: `sha256:${"9".repeat(64)}`,
+        policyDigest: `sha256:${"a".repeat(64)}`,
+        afterDigest: `sha256:${"b".repeat(64)}`,
+        authorizationEvidence: {
+          keyReferenceDigest: `sha256:${"c".repeat(64)}`,
+          envelopeDigest: `sha256:${"d".repeat(64)}`,
+        },
+        officialMcpMutation: {
+          approvalDigest: `sha256:${"e".repeat(64)}`,
+        },
+      },
+      contextDelta: {
+        ackContextChanged: true,
+        analyticsResultChanged: true,
+      },
+      skillCompletion: {
+        sourceArtifactDigest: `sha256:${"f".repeat(64)}`,
+        previewSkillReceiptDigest: `sha256:${"0".repeat(64)}`,
+        skillGroundingDigest: `sha256:${"1".repeat(64)}`,
+        officialMcpMutationReceiptDigest: `sha256:${"2".repeat(64)}`,
+      },
+    };
+    const rerun = {
+      ...completed,
+      auditId: "d".repeat(64),
+      remediation: undefined,
+      contextDelta: undefined,
+      skillCompletion: undefined,
+      agentStackResult: {
+        ...baseResult,
+        context: {
+          ...baseResult.context,
+          digest: `sha256:${"3".repeat(64)}`,
+          receipts: [
+            ...baseResult.context.receipts,
+            {
+              tool: "get_entities",
+              tagUrns: ["urn:li:tag:PII"],
+            },
+          ],
+        },
+      },
+    };
+
+    runtimeMocks.loadRuntimeAgentStack
+      .mockResolvedValueOnce(awaitingImprovement)
+      .mockResolvedValueOnce(rerun);
+    runtimeMocks.requestRuntimeImproveContext.mockResolvedValueOnce(
+      awaitingApproval,
+    );
+    runtimeMocks.submitRuntimeApproval.mockResolvedValueOnce(undefined);
+    runtimeMocks.resumeRuntimeAgentStack.mockResolvedValueOnce(completed);
+    render(<App />);
+
+    const run = await screen.findByRole("button", {
+      name: "Run canonical Agent Stack",
+    });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+
+    const improve = await screen.findByRole("button", {
+      name: "Generate proposal",
+    });
+    await waitFor(() => expect(improve).toBeEnabled());
+    fireEvent.click(improve);
+
+    const approve = await screen.findByRole("button", {
+      name: "Approve exact plan",
+    });
+    await waitFor(() => expect(approve).toBeEnabled());
+    expect(screen.getByText("urn:li:tag:PII")).toBeInTheDocument();
+    fireEvent.click(approve);
+
+    expect(await screen.findByTestId("governed-proof")).toHaveTextContent(
+      "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
+    );
+    expect(runtimeMocks.submitRuntimeApproval).toHaveBeenCalledWith(
+      "c".repeat(64),
+      "APPROVE",
+      "TEST_ONLY_TOKEN_000000000000",
+      "Judge approved the exact content-addressed PII tag plan.",
+      expect.any(AbortSignal),
+    );
+
+    const rerunButton = await screen.findByRole("button", {
+      name: "Run canonical Agent Stack again",
+    });
+    await waitFor(() => expect(rerunButton).toBeEnabled());
+    fireEvent.click(rerunButton);
+
+    expect(
+      await screen.findByText(
+        "Run-again proof: a new ACK context read observed PII on the source column.",
+      ),
+    ).toBeInTheDocument();
+    expect(runtimeMocks.loadRuntimeAgentStack).toHaveBeenCalledTimes(2);
+  });});
