@@ -426,10 +426,92 @@ describe("ephemeral DataHub Core stack", () => {
       "kms:DescribeKey",
       "kms:GetPublicKey"
     ]);
-    expect(actions(bySid.InvokeOnlyConfiguredBedrockModel).sort()).toEqual([
+    expect(
+      actions(bySid.InvokeOnlyConfiguredBedrockInferenceProfile).sort()
+    ).toEqual([
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream"
     ]);
+    expect(
+      actions(
+        bySid.InvokeConfiguredBedrockModelsOnlyThroughProfile
+      ).sort()
+    ).toEqual([
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream"
+    ]);
+    expect(
+      JSON.stringify(
+        bySid.InvokeOnlyConfiguredBedrockInferenceProfile.Resource
+      )
+    ).toContain(
+      "inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    );
+    expect(
+      JSON.stringify(
+        bySid.InvokeConfiguredBedrockModelsOnlyThroughProfile.Resource
+      )
+    ).toContain(
+      "foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+    );
+    expect(
+      JSON.stringify(
+        bySid.InvokeConfiguredBedrockModelsOnlyThroughProfile.Condition
+      )
+    ).toContain("bedrock:InferenceProfileArn");
+    expect(JSON.stringify(template)).not.toContain(
+      "application-inference-profile"
+    );
+
+    expect(
+      actions(bySid.InspectOnlyConfiguredCoreImageAndEndpoints).sort()
+    ).toEqual(["ec2:DescribeImages", "ec2:DescribeVpcEndpoints"]);
+    expect(
+      bySid.InspectOnlyConfiguredCoreImageAndEndpoints.Resource
+    ).toBe("*");
+    expect(
+      actions(bySid.UseOnlyExactCoreNetworkForSessionEndpoints)
+    ).toEqual(["ec2:CreateVpcEndpoint"]);
+    expect(
+      bySid.UseOnlyExactCoreNetworkForSessionEndpoints.Resource
+    ).toHaveLength(3);
+    expect(
+      JSON.stringify(
+        bySid.UseOnlyExactCoreNetworkForSessionEndpoints.Resource
+      )
+    ).toContain("security-group/");
+    expect(actions(bySid.CreateOnlySessionScopedCoreEndpoints)).toEqual([
+      "ec2:CreateVpcEndpoint"
+    ]);
+    expect(
+      JSON.stringify(bySid.CreateOnlySessionScopedCoreEndpoints.Resource)
+    ).toContain("vpc-endpoint/*");
+    expect(
+      bySid.CreateOnlySessionScopedCoreEndpoints.Condition.StringEquals[
+        "ec2:VpceServiceOwner"
+      ]
+    ).toBe("amazon");
+    expect(
+      bySid.CreateOnlySessionScopedCoreEndpoints.Condition.StringEquals[
+        "ec2:VpceServiceName"
+      ]
+    ).toHaveLength(3);
+    expect(actions(bySid.TagOnlyNewSessionScopedCoreEndpoints)).toEqual([
+      "ec2:CreateTags"
+    ]);
+    expect(
+      bySid.TagOnlyNewSessionScopedCoreEndpoints.Condition.StringEquals[
+        "ec2:CreateAction"
+      ]
+    ).toBe("CreateVpcEndpoint");
+    expect(
+      actions(bySid.DeleteOnlyOwnedSessionScopedCoreEndpoints)
+    ).toEqual(["ec2:DeleteVpcEndpoints"]);
+    expect(
+      bySid.DeleteOnlyOwnedSessionScopedCoreEndpoints.Condition.StringLike[
+        "ec2:ResourceTag/ArchonSessionId"
+      ]
+    ).toBe("rs_*");
     expect(JSON.stringify(template)).not.toContain(
       "dynamodb:TransactWriteItems"
     );

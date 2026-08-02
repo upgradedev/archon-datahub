@@ -215,6 +215,64 @@ describe("ArchonJudgeStack", () => {
     );
   });
 
+  test("scopes Cloud stream discovery and exact EU Bedrock inference", () => {
+    const template = judgeTemplate();
+    const statements = Object.values(
+      template.findResources("AWS::IAM::Policy")
+    ).flatMap(
+      (policy: any) =>
+        policy.Properties.PolicyDocument.Statement ?? []
+    );
+    const actions = (statement: any): string[] =>
+      Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+
+    const inventories = statements.filter((statement) =>
+      actions(statement).includes("dynamodb:ListStreams")
+    );
+    expect(inventories).toHaveLength(4);
+    for (const statement of inventories) {
+      expect(statement.Resource).toBe("*");
+      expect(JSON.stringify(statement.Condition)).toContain(
+        "aws:RequestedRegion"
+      );
+    }
+    const streamReads = statements.filter((statement) =>
+      actions(statement).includes("dynamodb:GetRecords")
+    );
+    expect(streamReads).toHaveLength(4);
+    for (const statement of streamReads) {
+      expect(statement.Resource).not.toBe("*");
+      expect(actions(statement)).not.toContain(
+        "dynamodb:ListStreams"
+      );
+    }
+
+    const profile = statements.find(
+      (statement) =>
+        statement.Sid === "InvokeOnlyReviewedAnalyticsProfile"
+    );
+    const models = statements.find(
+      (statement) =>
+        statement.Sid ===
+        "InvokeReviewedModelsOnlyThroughAnalyticsProfile"
+    );
+    expect(profile).toBeDefined();
+    expect(models).toBeDefined();
+    expect(JSON.stringify(profile.Resource)).toContain(
+      "inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    );
+    expect(JSON.stringify(models.Resource)).toContain(
+      "foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+    );
+    expect(JSON.stringify(models.Condition)).toContain(
+      "bedrock:InferenceProfileArn"
+    );
+    expect(JSON.stringify([profile, models])).not.toContain(
+      "application-inference-profile"
+    );
+  });
   test("isolates four Cloud mappings and bounds poison retries", () => {
     const template = judgeTemplate();
     const mappings = Object.values(

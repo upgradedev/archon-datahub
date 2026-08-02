@@ -135,20 +135,29 @@ function imageFunction(
   return fn;
 }
 
-function streamReadPolicy(
+function streamReadPolicies(
   sid: string,
   streamArn: string
-): iam.PolicyStatement {
-  return new iam.PolicyStatement({
-    sid,
-    actions: [
-      "dynamodb:DescribeStream",
-      "dynamodb:GetRecords",
-      "dynamodb:GetShardIterator",
-      "dynamodb:ListStreams"
-    ],
-    resources: [streamArn]
-  });
+): iam.PolicyStatement[] {
+  return [
+    new iam.PolicyStatement({
+      sid,
+      actions: [
+        "dynamodb:DescribeStream",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator"
+      ],
+      resources: [streamArn]
+    }),
+    new iam.PolicyStatement({
+      sid: sid + "Inventory",
+      actions: ["dynamodb:ListStreams"],
+      resources: ["*"],
+      conditions: {
+        StringEquals: { "aws:RequestedRegion": Aws.REGION }
+      }
+    })
+  ];
 }
 
 function tablePolicy(
@@ -184,12 +193,12 @@ function eventMapping(
   failureQueue: sqs.IQueue,
   config: MappingConfig
 ): lambda.CfnEventSourceMapping {
-  config.role.addToPolicy(
-    streamReadPolicy(
-      "Consume" + config.id + "Stream",
-      config.streamArn
-    )
-  );
+  for (const policy of streamReadPolicies(
+    "Consume" + config.id + "Stream",
+    config.streamArn
+  )) {
+    config.role.addToPolicy(policy);
+  }
   failureQueue.grantSendMessages(config.role);
   // Event-source MaximumConcurrency has a service minimum of two. The
   // mutation/reset workers remain serialized by reserved concurrency instead.
@@ -317,20 +326,34 @@ export function addCloudRuntime(
       }
     })
   );
+  const bedrockInferenceProfileArn =
+    "arn:" + Aws.PARTITION + ":bedrock:" + Aws.REGION + ":" +
+    Aws.ACCOUNT_ID + ":inference-profile/" + BEDROCK_INFERENCE_PROFILE;
+  const bedrockActions = [
+    "bedrock:InvokeModel",
+    "bedrock:InvokeModelWithResponseStream"
+  ];
   readRole.addToPolicy(
     new iam.PolicyStatement({
-      sid: "InvokeOnlyReviewedAnalyticsModels",
-      actions: [
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream"
-      ],
-      resources: [
-        `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${BEDROCK_INFERENCE_PROFILE}`,
-        ...BEDROCK_BASE_REGIONS.map(
-          (region) =>
-            `arn:${Aws.PARTITION}:bedrock:${region}::foundation-model/${BEDROCK_BASE_MODEL}`
-        )
-      ]
+      sid: "InvokeOnlyReviewedAnalyticsProfile",
+      actions: bedrockActions,
+      resources: [bedrockInferenceProfileArn]
+    })
+  );
+  readRole.addToPolicy(
+    new iam.PolicyStatement({
+      sid: "InvokeReviewedModelsOnlyThroughAnalyticsProfile",
+      actions: bedrockActions,
+      resources: BEDROCK_BASE_REGIONS.map(
+        (region) =>
+          "arn:" + Aws.PARTITION + ":bedrock:" + region +
+          "::foundation-model/" + BEDROCK_BASE_MODEL
+      ),
+      conditions: {
+        StringEquals: {
+          "bedrock:InferenceProfileArn": bedrockInferenceProfileArn
+        }
+      }
     })
   );
   readRole.addToPolicy(

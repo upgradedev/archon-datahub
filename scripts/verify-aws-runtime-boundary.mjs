@@ -42,10 +42,16 @@ function array(value) {
   return Array.isArray(value) ? value : value === undefined ? [] : [value];
 }
 
+function normalizeAction(action) {
+  return action.toLowerCase();
+}
+
 function actionMatches(allowed, required) {
-  if (allowed === required) return true;
-  if (!allowed.endsWith("*")) return false;
-  return required.startsWith(allowed.slice(0, -1));
+  const normalizedAllowed = normalizeAction(allowed);
+  const normalizedRequired = normalizeAction(required);
+  if (normalizedAllowed === normalizedRequired) return true;
+  if (!normalizedAllowed.endsWith("*")) return false;
+  return normalizedRequired.startsWith(normalizedAllowed.slice(0, -1));
 }
 
 function collectAllowActions(policyDocument, destination) {
@@ -68,9 +74,9 @@ const allowedActions = array(boundary.allowedActions);
 if (
   allowedActions.length === 0 ||
   allowedActions.some((action) => typeof action !== "string" || action === "*") ||
-  new Set(allowedActions).size !== allowedActions.length
+  new Set(allowedActions.map(normalizeAction)).size !== allowedActions.length
 ) {
-  fail("allowedActions must be a unique, non-empty string inventory without *");
+  fail("allowedActions must be a case-insensitively unique, non-empty string inventory without *");
 }
 const approvedPolicies = boundary.approvedAwsManagedPolicies;
 if (

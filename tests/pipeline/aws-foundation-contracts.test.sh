@@ -165,6 +165,24 @@ jq --exit-status '
       "archon-aws-foundation-identity",
       "archon-aws-foundation-attachments"
     ],
+    identityRoleMigration: {
+      baselineCanonicalSha256:
+        "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+      baselineDefaultVersion: "v1",
+      contract:
+        "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+      exactRoleDelta: [
+        "archon-datahub-github-staging-cloud-trial",
+        "archon-datahub-github-production-cloud-trial",
+        "archon-datahub-cloud-runtime-publish-production"
+      ],
+      policyName: "archon-aws-foundation-identity",
+      targetCanonicalSha256:
+        "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+      targetVersion: "v2",
+      workflow:
+        ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
+    },
     maximumDocumentBytes: 6144,
     migrationContract:
       "contracts/aws-foundation-policy-migration-v1.json",
@@ -551,12 +569,16 @@ jq --exit-status '
     [.aws.runtimeBoundary.allowedActions[] |
       select(
         startswith("iam:") or
-        startswith("sts:") or
         startswith("account:") or
         startswith("organizations:")
       )] |
     length
-  ) == 0
+  ) == 0 and
+  (
+    [.aws.runtimeBoundary.allowedActions[] |
+      select(startswith("sts:"))] |
+    sort
+  ) == ["sts:AssumeRole", "sts:GetCallerIdentity"]
 ' "${contract}" >/dev/null
 
 trigger_contract="$(
@@ -1015,6 +1037,29 @@ require_text "${execution_policy}" \
   'ArchonCdkUsEast1ExecutionPolicyArns:' \
   'ArchonCdkExecutionPolicyNames:' \
   'ArchonRuntimeBoundaryArn:' \
+  'ScaleOnlyStageCoreRuntime' \
+  'InvokeOnlyReviewedAnalyticsModels' \
+  'EmitOnlyCoreRuntimeMetrics' \
+  'UseOnlyStageTableStreams' \
+  'CreateOnlyTaggedCoreSessionEndpoints' \
+  'TagOnlyNewCoreSessionEndpoints' \
+  'ReconcileOnlyOwnedCoreSessionEndpoints' \
+  'InspectOnlyEuWest1CoreResources' \
+  'UseOnlyStageRuntimeEncryptionKeys' \
+  'ReadOnlyStageMutationVerificationKeys' \
+  'SignOnlyStageGovernedMutations' \
+  'InvokeOnlyStageRuntimeFunctions' \
+  'ObserveOnlyStageCloudCheckpointVersioning' \
+  'AssumeOnlyStageCoreScopedRuntimeRoles' \
+  'ConfirmOnlyCurrentRuntimeIdentity' \
+  'DenyVersionDeletionOutsideCloudCheckpointResets' \
+  'kms:SigningAlgorithm: ECDSA_SHA_256' \
+  'alias/archon/${DeploymentEnvironment}/datahub-core-mutation-signing' \
+  'bedrock:InferenceProfileArn: !Sub arn:aws:bedrock:eu-west-1:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' \
+  'arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0' \
+  'secret:archon/${DeploymentEnvironment}/datahub-cloud/*' \
+  '- dynamodb:ListStreams' \
+  'NotResource: !Sub arn:aws:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-*/cloud-runtime/v2/*' \
   'DenySharedApiGatewayAccountMutation' \
   'DenyRuntimeBoundaryRemoval' \
   'DenyFoundationControlPlaneMutation' \
@@ -1047,6 +1092,11 @@ require_text "${execution_policy}" \
   'CreateOnlyTaggedStageCloudFrontFunctions' \
   'ReconcileOnlyExactCanonicalHostFunction'
 forbid_text "${execution_policy}" \
+  'Action: sts:*' \
+  'kms:Describe*' \
+  'application-inference-profile' \
+  'secret:archon/${DeploymentEnvironment}/datahub-read-' \
+  'secret:archon/${DeploymentEnvironment}/datahub-write-' \
   'route53:DisassociateVPCFromHostedZone' \
   'route53:VPCs: arn:' \
   'route53:*' \
@@ -1373,6 +1423,10 @@ forbid_text "${failure_sanitizer}" \
   'physicalResourceId' \
   'StackId'
 require_text "${runtime_verifier}" \
+  'function normalizeAction(action)' \
+  'return action.toLowerCase();' \
+  'allowedActions.map(normalizeAction)' \
+  'case-insensitively unique' \
   'const uncovered' \
   'const unusedAllowed' \
   'const unseenApprovedPolicies' \

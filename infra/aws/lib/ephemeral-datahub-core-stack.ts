@@ -153,20 +153,24 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       `com.amazonaws.${Aws.REGION}.bedrock-runtime`;
     const kmsServiceName = `com.amazonaws.${Aws.REGION}.kms`;
     const stsServiceName = `com.amazonaws.${Aws.REGION}.sts`;
+    const exactBedrockInferenceProfileArn =
+      "arn:" + Aws.PARTITION + ":bedrock:" + Aws.REGION + ":" +
+      Aws.ACCOUNT_ID + ":inference-profile/" + llmModelId.valueAsString;
+    const exactBedrockFoundationModelArns = [
+      "eu-central-1",
+      "eu-north-1",
+      "eu-south-1",
+      "eu-south-2",
+      "eu-west-1",
+      "eu-west-3"
+    ].map(
+      (region) =>
+        "arn:" + Aws.PARTITION + ":bedrock:" + region +
+        "::foundation-model/" + llmBaseModelId.valueAsString
+    );
     const exactBedrockResources = [
-      `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${llmModelId.valueAsString}`,
-      `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:application-inference-profile/${llmModelId.valueAsString}`,
-      ...[
-        "eu-central-1",
-        "eu-north-1",
-        "eu-south-1",
-        "eu-south-2",
-        "eu-west-1",
-        "eu-west-3"
-      ].map(
-        (region) =>
-          `arn:${Aws.PARTITION}:bedrock:${region}::foundation-model/${llmBaseModelId.valueAsString}`
-      )
+      exactBedrockInferenceProfileArn,
+      ...exactBedrockFoundationModelArns
     ];
 
     const dataKey = new kms.Key(this, "DataKey", {
@@ -361,14 +365,28 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         "One-hour role-chained credentials for the Analytics Agent; Bedrock invoke only",
       maxSessionDuration: Duration.hours(1)
     });
+    const bedrockInvokeActions = [
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream"
+    ];
     analyticsRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: "InvokeOnlyConfiguredBedrockModel",
-        actions: [
-          "bedrock:InvokeModel",
-          "bedrock:InvokeModelWithResponseStream"
-        ],
-        resources: exactBedrockResources
+        sid: "InvokeOnlyConfiguredBedrockInferenceProfile",
+        actions: bedrockInvokeActions,
+        resources: [exactBedrockInferenceProfileArn]
+      })
+    );
+    analyticsRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "InvokeConfiguredBedrockModelsOnlyThroughProfile",
+        actions: bedrockInvokeActions,
+        resources: exactBedrockFoundationModelArns,
+        conditions: {
+          StringEquals: {
+            "bedrock:InferenceProfileArn":
+              exactBedrockInferenceProfileArn
+          }
+        }
       })
     );
     const gatewayRole = new iam.Role(this, "CoreGovernedGatewayRole", {
@@ -670,17 +688,111 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     );
     lifecycleFunction.addToRolePolicy(
       new iam.PolicyStatement({
-        sid: "VerifyOnlyConfiguredCoreImage",
-        actions: [
-          "ec2:CreateTags",
-          "ec2:CreateVpcEndpoint",
-          "ec2:DeleteVpcEndpoints",
-          "ec2:DescribeImages",
-          "ec2:DescribeVpcEndpoints"
-        ],
+        sid: "InspectOnlyConfiguredCoreImageAndEndpoints",
+        actions: ["ec2:DescribeImages", "ec2:DescribeVpcEndpoints"],
         resources: ["*"],
         conditions: {
           StringEquals: { "aws:RequestedRegion": "eu-west-1" }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "UseOnlyExactCoreNetworkForSessionEndpoints",
+        actions: ["ec2:CreateVpcEndpoint"],
+        resources: [
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":vpc/" + vpc.vpcId,
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":subnet/" + vpc.isolatedSubnets[0]!.subnetId,
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":security-group/" +
+            inferenceEndpointSecurityGroup.securityGroupId
+        ],
+        conditions: {
+          StringEquals: { "aws:RequestedRegion": "eu-west-1" }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "CreateOnlySessionScopedCoreEndpoints",
+        actions: ["ec2:CreateVpcEndpoint"],
+        resources: [
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":vpc-endpoint/*"
+        ],
+        conditions: {
+          StringEquals: {
+            "aws:RequestTag/Application": "archon-datahub",
+            "aws:RequestTag/Environment": stage,
+            "aws:RequestTag/ManagedBy": "archon-core-lifecycle",
+            "aws:RequestedRegion": "eu-west-1",
+            "ec2:VpceServiceName": [
+              bedrockRuntimeServiceName,
+              kmsServiceName,
+              stsServiceName
+            ],
+            "ec2:VpceServiceOwner": "amazon"
+          },
+          "ForAllValues:StringEquals": {
+            "aws:TagKeys": [
+              "Application",
+              "Environment",
+              "ManagedBy",
+              "ArchonSessionId",
+              "ArchonCapability"
+            ]
+          }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "TagOnlyNewSessionScopedCoreEndpoints",
+        actions: ["ec2:CreateTags"],
+        resources: [
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":vpc-endpoint/*"
+        ],
+        conditions: {
+          StringEquals: {
+            "aws:RequestTag/Application": "archon-datahub",
+            "aws:RequestTag/Environment": stage,
+            "aws:RequestTag/ManagedBy": "archon-core-lifecycle",
+            "aws:RequestedRegion": "eu-west-1",
+            "ec2:CreateAction": "CreateVpcEndpoint"
+          },
+          "ForAllValues:StringEquals": {
+            "aws:TagKeys": [
+              "Application",
+              "Environment",
+              "ManagedBy",
+              "ArchonSessionId",
+              "ArchonCapability"
+            ]
+          }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "DeleteOnlyOwnedSessionScopedCoreEndpoints",
+        actions: ["ec2:DeleteVpcEndpoints"],
+        resources: [
+          "arn:" + Aws.PARTITION + ":ec2:" + Aws.REGION + ":" +
+            Aws.ACCOUNT_ID + ":vpc-endpoint/*"
+        ],
+        conditions: {
+          StringEquals: {
+            "aws:RequestedRegion": "eu-west-1",
+            "ec2:ResourceTag/Application": "archon-datahub",
+            "ec2:ResourceTag/Environment": stage,
+            "ec2:ResourceTag/ManagedBy": "archon-core-lifecycle"
+          },
+          StringLike: {
+            "ec2:ResourceTag/ArchonSessionId": "rs_*"
+          }
         }
       })
     );

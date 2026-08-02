@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
@@ -86,18 +86,28 @@ function canonical(value) {
 }
 
 function read(path, label) {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    fail(`${label} must be a regular non-symlink file`);
-  }
-  const bytes = readFileSync(path);
-  let value;
+  let descriptor;
   try {
-    value = JSON.parse(bytes.toString("utf8"));
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch {
-    fail(`${label} is not valid JSON`);
+    fail(`${label} must be a readable regular non-symlink file`);
   }
-  return { bytes, value };
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) {
+      fail(`${label} must be a regular non-symlink file`);
+    }
+    const bytes = readFileSync(descriptor);
+    let value;
+    try {
+      value = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      fail(`${label} is not valid JSON`);
+    }
+    return { bytes, value };
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function write(path, value) {

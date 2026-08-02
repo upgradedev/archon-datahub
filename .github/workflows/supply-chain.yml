@@ -1055,10 +1055,13 @@ jobs:
                  ["observedAt"]
              end)
           ' "${EVIDENCE}/provenance.json" >/dev/null
+          sums_tmp="${RUNNER_TEMP}/supply/SHA256SUMS.tmp"
+          rm -f -- "${sums_tmp}"
           (
             cd "${EVIDENCE}"
             find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' |
-              LC_ALL=C sort -z | xargs -0 sha256sum >SHA256SUMS
+              LC_ALL=C sort -z | xargs -0 sha256sum >"${sums_tmp}"
+            mv -- "${sums_tmp}" SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
 
