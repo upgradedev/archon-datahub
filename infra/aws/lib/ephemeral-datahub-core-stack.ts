@@ -101,21 +101,81 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       }
     );
 
+    const exactInferenceProfile =
+      "eu.anthropic.claude-sonnet-4-5-20250929-v1:0";
+    const exactBaseModel = "anthropic.claude-sonnet-4-5-20250929-v1:0";
     const llmModelId = new CfnParameter(this, "DataHubCoreBedrockModelId", {
       type: "String",
       description:
-        "Exact Bedrock model or inference-profile ID preflighted before Core readiness",
-      minLength: 1,
-      maxLength: 256,
-      allowedPattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+        "Exact EU Bedrock inference-profile ID preflighted before Core readiness",
+      default: exactInferenceProfile,
+      allowedValues: [exactInferenceProfile]
     });
+    const llmBaseModelId = new CfnParameter(
+      this,
+      "DataHubCoreBedrockBaseModelId",
+      {
+        type: "String",
+        description:
+          "Exact underlying foundation model bound by the AMI manifest and IAM",
+        default: exactBaseModel,
+        allowedValues: [exactBaseModel]
+      }
+    );
+    const demoQuery = new CfnParameter(this, "DataHubCoreDemoQuery", {
+      type: "String",
+      description: "The one exact source dataset admitted by the judge demo",
+      default:
+        "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+      allowedValues: [
+        "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+      ]
+    });
+    const analyticsQuestion = new CfnParameter(
+      this,
+      "DataHubCoreAnalyticsQuestion",
+      {
+        type: "String",
+        description: "The one exact portable Analytics Agent judge question",
+        default:
+          "Which customer segment generated the highest net revenue in Q2 2026, and is customers.customer_email governed as PII?",
+        allowedValues: [
+          "Which customer segment generated the highest net revenue in Q2 2026, and is customers.customer_email governed as PII?"
+        ]
+      }
+    );
     const bedrockRuntimeServiceName =
       `com.amazonaws.${Aws.REGION}.bedrock-runtime`;
+    const kmsServiceName = `com.amazonaws.${Aws.REGION}.kms`;
+    const exactBedrockResources = [
+      `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${llmModelId.valueAsString}`,
+      `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:application-inference-profile/${llmModelId.valueAsString}`,
+      ...[
+        "eu-central-1",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "eu-west-1",
+        "eu-west-3"
+      ].map(
+        (region) =>
+          `arn:${Aws.PARTITION}:bedrock:${region}::foundation-model/${llmBaseModelId.valueAsString}`
+      )
+    ];
 
     const dataKey = new kms.Key(this, "DataKey", {
       alias: `alias/archon/${stage}/datahub-core-data`,
       description: "DataHub Core lease, health, job, and receipt encryption",
       enableKeyRotation: true,
+      pendingWindow: Duration.days(30),
+      removalPolicy: RemovalPolicy.RETAIN
+    });
+    const mutationSigningKey = new kms.Key(this, "MutationSigningKey", {
+      alias: `alias/archon/${stage}/datahub-core-mutation-signing`,
+      description:
+        "Off-host remediation authorization; Core receives public verification material only",
+      keySpec: kms.KeySpec.ECC_NIST_P256,
+      keyUsage: kms.KeyUsage.SIGN_VERIFY,
       pendingWindow: Duration.days(30),
       removalPolicy: RemovalPolicy.RETAIN
     });
@@ -171,7 +231,6 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
           "dynamodb:GetItem",
           "dynamodb:PutItem",
           "dynamodb:Query",
-          "dynamodb:TransactWriteItems",
           "dynamodb:UpdateItem"
         ],
         resources: [this.leaseTable.tableArn]
@@ -201,7 +260,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       {
         vpc,
         description:
-          "Ephemeral Bedrock Runtime endpoint accepts TLS only from the Core host",
+          "Ephemeral Bedrock Runtime and KMS endpoints accept TLS only from the Core host",
         allowAllOutbound: false,
         allowAllIpv6Outbound: false,
         disableInlineRules: true
@@ -210,32 +269,32 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     inferenceEndpointSecurityGroup.addIngressRule(
       hostSecurityGroup,
       ec2.Port.tcp(443),
-      "Core host to ephemeral Bedrock Runtime endpoint"
+      "Core host to ephemeral Bedrock Runtime and KMS endpoints"
     );
     hostSecurityGroup.addEgressRule(
       inferenceEndpointSecurityGroup,
       ec2.Port.tcp(443),
-      "Ephemeral Bedrock Runtime interface endpoint only"
+      "Ephemeral session-owned Bedrock Runtime and KMS interface endpoints only"
     );
 
     const instanceRole = new iam.Role(this, "CoreInstanceRole", {
+      roleName: `archon-${stage}-datahub-core-host`,
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
       description:
         "DataHub Core host reads its lease and exchanges bounded health/job receipts",
       maxSessionDuration: Duration.hours(1)
     });
-    dataKey.grantEncryptDecrypt(instanceRole);
     instanceRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: "ExchangeOnlyCoreRuntimeRecords",
-        actions: [
-          "dynamodb:DescribeTable",
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:Query",
-          "dynamodb:TransactWriteItems",
-          "dynamodb:UpdateItem"
-        ],
+        sid: "DescribeOnlyCoreRuntimeTable",
+        actions: ["dynamodb:DescribeTable"],
+        resources: [this.leaseTable.tableArn]
+      })
+    );
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadOnlyCoreRuntimeRecords",
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
         resources: [this.leaseTable.tableArn],
         conditions: {
           "ForAllValues:StringLike": {
@@ -245,23 +304,160 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
               "SESSION#rs_*",
               "MUTATION#rs_*"
             ]
-          }
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "PublishOnlyCoreRuntimeHealth",
+        actions: ["dynamodb:PutItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["RUNTIME#core"]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "TransitionOnlyExistingCoreRuntimeRecords",
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": [
+              "CORE#LEASE",
+              "SESSION#rs_*",
+              "MUTATION#rs_*"
+            ]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
         }
       })
     );
 
-    instanceRole.addToPolicy(
+
+    const lifecycleRole = new iam.Role(this, "CoreLifecycleRole", {
+      roleName: `archon-${stage}-datahub-core-lifecycle`,
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      description:
+        "Exact lease, endpoint, KMS-encryption, and scoped-credential authority; no Bedrock invoke",
+      maxSessionDuration: Duration.hours(1)
+    });
+    const analyticsRole = new iam.Role(this, "CoreAnalyticsRole", {
+      roleName: `archon-${stage}-datahub-core-analytics`,
+      assumedBy: new iam.ArnPrincipal(lifecycleRole.roleArn),
+      description:
+        "One-hour role-chained credentials for the Analytics Agent; Bedrock invoke only",
+      maxSessionDuration: Duration.hours(1)
+    });
+    analyticsRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "InvokeOnlyConfiguredBedrockModel",
         actions: [
           "bedrock:InvokeModel",
           "bedrock:InvokeModelWithResponseStream"
         ],
-        resources: [
-          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}::foundation-model/${llmModelId.valueAsString}`,
-          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/${llmModelId.valueAsString}`,
-          `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:application-inference-profile/${llmModelId.valueAsString}`
-        ]
+        resources: exactBedrockResources
+      })
+    );
+    const gatewayRole = new iam.Role(this, "CoreGovernedGatewayRole", {
+      roleName: `archon-${stage}-datahub-core-gateway`,
+      assumedBy: new iam.ArnPrincipal(lifecycleRole.roleArn),
+      description:
+        "One-hour governed gateway credentials; exact lease/job CAS and mutation public-key verification only",
+      maxSessionDuration: Duration.hours(1)
+    });
+    gatewayRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadOnlyActiveCoreLease",
+        actions: ["dynamodb:GetItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["CORE#LEASE"]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    gatewayRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ConsumeOnlyBoundMutationJobs",
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["MUTATION#rs_*"]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    const credentialContextEquals = {
+      "kms:EncryptionContext:stage": stage,
+      "kms:EncryptionContext:generation": generation.valueAsString,
+      "kms:EncryptionContext:capabilityDigest": capabilityDigest.valueAsString,
+      "kms:EncryptionContext:capability": [
+        "analytics-agent-bedrock",
+        "governed-gateway-control"
+      ]
+    };
+    const credentialContextLike = {
+      "kms:EncryptionContext:sessionId": "rs_*"
+    };
+    mutationSigningKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowExactGovernedGatewayPublicKeyRead",
+        principals: [new iam.ArnPrincipal(gatewayRole.roleArn)],
+        actions: ["kms:GetPublicKey", "kms:DescribeKey"],
+        resources: ["*"]
+      })
+    );
+    gatewayRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "GetOnlyPinnedMutationVerificationKey",
+        actions: ["kms:GetPublicKey", "kms:DescribeKey"],
+        resources: [mutationSigningKey.keyArn]
+      })
+    );
+    instanceRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "DecryptOnlyActiveScopedCredentials",
+        actions: ["kms:Decrypt"],
+        resources: [dataKey.keyArn],
+        conditions: {
+          StringEquals: credentialContextEquals,
+          StringLike: credentialContextLike
+        }
+      })
+    );
+    dataKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowExactLifecycleCredentialEncryption",
+        principals: [new iam.ArnPrincipal(lifecycleRole.roleArn)],
+        actions: ["kms:Encrypt"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: credentialContextEquals,
+          StringLike: credentialContextLike
+        }
+      })
+    );
+    dataKey.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: "AllowExactHostCredentialDecryption",
+        principals: [new iam.ArnPrincipal(instanceRole.roleArn)],
+        actions: ["kms:Decrypt"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: credentialContextEquals,
+          StringLike: credentialContextLike
+        }
       })
     );
 
@@ -278,11 +474,18 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       `ARCHON_RUNTIME_GENERATION=${generation.valueAsString}`,
       `ARCHON_RUNTIME_CAPABILITY_DIGEST=${capabilityDigest.valueAsString}`,
       `ARCHON_IMAGE_MANIFEST_DIGEST=${imageManifestDigest.valueAsString}`,
+      `ARCHON_CORE_DATA_KEY_ARN=${dataKey.keyArn}`,
+      `ARCHON_MUTATION_SIGNING_KEY_ARN=${mutationSigningKey.keyArn}`,
       "ARCHON_LLM_PROVIDER=bedrock",
       `ARCHON_LLM_MODEL=${llmModelId.valueAsString}`,
+      `ARCHON_CHART_LLM_MODEL=${llmModelId.valueAsString}`,
+      `ARCHON_QUALITY_LLM_MODEL=${llmModelId.valueAsString}`,
+      `ARCHON_DELIGHT_LLM_MODEL=${llmModelId.valueAsString}`,
+      `ARCHON_DEMO_QUERY=${demoQuery.valueAsString}`,
+      `ARCHON_ANALYTICS_QUESTION=${analyticsQuestion.valueAsString}`,
       "ARCHON_COMPANION_URL=http://127.0.0.1:8080",
       "ARCHON_ANALYTICS_AGENT_URL=http://127.0.0.1:8100",
-      "ARCHON_DATAHUB_GMS_URL=https://127.0.0.1:9443/gms",
+      "ARCHON_DATAHUB_GMS_URL=http://127.0.0.1:18080",
       "ARCHON_ENV",
       "chmod 0600 /etc/archon/datahub-core.env",
       "systemctl enable --now archon-datahub-core.service"
@@ -306,8 +509,8 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         securityGroup: hostSecurityGroup,
         role: instanceRole,
         userData,
-        healthCheck: autoscaling.HealthCheck.ec2({
-          grace: Duration.minutes(20)
+        healthChecks: autoscaling.HealthChecks.ec2({
+          gracePeriod: Duration.minutes(20)
         }),
         groupMetrics: [autoscaling.GroupMetrics.all()],
         terminationPolicies: [autoscaling.TerminationPolicy.OLDEST_INSTANCE],
@@ -342,6 +545,20 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         removalPolicy: RemovalPolicy.RETAIN
       }
     );
+    lifecycleRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "WriteOnlyLifecycleLogGroup",
+        actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources: [`${lifecycleLogGroup.logGroupArn}:*`]
+      })
+    );
+    lifecycleRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "PublishOnlyXRayTelemetry",
+        actions: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+        resources: ["*"]
+      })
+    );
     const lifecycleFunction = new lambda.Function(
       this,
       "CoreLifecycleFunction",
@@ -360,6 +577,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         reservedConcurrentExecutions: 5,
         tracing: lambda.Tracing.ACTIVE,
         logGroup: lifecycleLogGroup,
+        role: lifecycleRole,
         environment: {
           CORE_LEASE_TABLE: this.leaseTable.tableName,
           CORE_AMI_ID: imageId.valueAsString,
@@ -371,14 +589,67 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
           CORE_SUBNET_ID: vpc.isolatedSubnets[0]!.subnetId,
           CORE_INFERENCE_SECURITY_GROUP_ID:
             inferenceEndpointSecurityGroup.securityGroupId,
+          CORE_INTERFACE_SECURITY_GROUP_ID:
+            inferenceEndpointSecurityGroup.securityGroupId,
           CORE_BEDROCK_SERVICE_NAME: bedrockRuntimeServiceName,
+          CORE_KMS_SERVICE_NAME: kmsServiceName,
+          CORE_DATA_KEY_ARN: dataKey.keyArn,
+          CORE_MUTATION_SIGNING_KEY_ARN: mutationSigningKey.keyArn,
+          CORE_ANALYTICS_ROLE_ARN: analyticsRole.roleArn,
+          CORE_GATEWAY_ROLE_ARN: gatewayRole.roleArn,
+          CORE_INSTANCE_ROLE_ARN: instanceRole.roleArn,
+          CORE_BEDROCK_RESOURCE_ARNS:
+            Stack.of(this).toJsonString(exactBedrockResources),
           CORE_IDLE_SECONDS: "1800",
           CORE_HARD_SECONDS: "7200",
           CORE_OPERATION_SECONDS: "300"
         }
       }
     );
-    this.leaseTable.grantReadWriteData(lifecycleFunction);
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadAndTransitionOnlyCoreLease",
+        actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["CORE#LEASE"]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "PublishOnlyStoppedCoreHealth",
+        actions: ["dynamodb:PutItem"],
+        resources: [this.leaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringEquals": {
+            "dynamodb:LeadingKeys": ["RUNTIME#core"]
+          },
+          Null: { "dynamodb:LeadingKeys": "false" }
+        }
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "AssumeOnlyCoreScopedRuntimeRoles",
+        actions: ["sts:AssumeRole"],
+        resources: [analyticsRole.roleArn, gatewayRole.roleArn]
+      })
+    );
+    lifecycleFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "EncryptOnlyBoundScopedCredentials",
+        actions: ["kms:Encrypt"],
+        resources: [dataKey.keyArn],
+        conditions: {
+          StringEquals: credentialContextEquals,
+          StringLike: credentialContextLike
+        }
+      })
+    );
     lifecycleFunction.addToRolePolicy(
       new iam.PolicyStatement({
         sid: "VerifyOnlyConfiguredCoreImage",
@@ -695,6 +966,12 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     );
     output(
       this,
+      "ArchonCoreLeaseTableStreamArn",
+      this.leaseTable.tableStreamArn!,
+      `archon-${stage}-core-lease-table-stream-arn`
+    );
+    output(
+      this,
       "ArchonCoreAutoScalingGroupName",
       this.autoScalingGroup.autoScalingGroupName,
       `archon-${stage}-core-asg-name`
@@ -725,9 +1002,21 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     );
     output(
       this,
+      "ArchonCoreMutationSigningKeyArn",
+      mutationSigningKey.keyArn,
+      `archon-${stage}-core-mutation-signing-key-arn`
+    );
+    output(
+      this,
       "ArchonCoreBedrockModelId",
       llmModelId.valueAsString,
       `archon-${stage}-core-bedrock-model-id`
+    );
+    output(
+      this,
+      "ArchonCoreBedrockBaseModelId",
+      llmBaseModelId.valueAsString,
+      `archon-${stage}-core-bedrock-base-model-id`
     );
   }
 }

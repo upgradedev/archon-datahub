@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import os
 import pathlib
 import sys
@@ -13,6 +14,27 @@ OTHER_SESSION = "rs_" + "B" * 43
 DIGEST = "sha256:" + "a" * 64
 MANIFEST = "sha256:" + "b" * 64
 GENERATION = "core-20260802-1"
+DATA_KEY_ARN = "arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+MUTATION_KEY_ARN = "arn:aws:kms:eu-west-1:123456789012:key/87654321-4321-4321-4321-210987654321"
+ANALYTICS_ROLE_ARN = "arn:aws:iam::123456789012:role/archon-core-analytics-staging"
+INSTANCE_ROLE_ARN = "arn:aws:iam::123456789012:role/archon-core-host-staging"
+PROFILE = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+BASE_MODEL = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+BEDROCK_RESOURCES = [
+    f"arn:aws:bedrock:eu-west-1:123456789012:inference-profile/{PROFILE}",
+    f"arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/{PROFILE}",
+    *[
+        f"arn:aws:bedrock:{region}::foundation-model/{BASE_MODEL}"
+        for region in (
+            "eu-central-1",
+            "eu-north-1",
+            "eu-south-1",
+            "eu-south-2",
+            "eu-west-1",
+            "eu-west-3",
+        )
+    ],
+]
 
 os.environ.update(
     {
@@ -25,9 +47,15 @@ os.environ.update(
         "CORE_VPC_ID": "vpc-0123456789abcdef0",
         "CORE_SUBNET_ID": "subnet-0123456789abcdef0",
         "CORE_INFERENCE_SECURITY_GROUP_ID": "sg-0123456789abcdef0",
-        "CORE_BEDROCK_SERVICE_NAME": (
-            "com.amazonaws.eu-west-1.bedrock-runtime"
-        ),
+        "CORE_INTERFACE_SECURITY_GROUP_ID": "sg-0123456789abcdef0",
+        "CORE_BEDROCK_SERVICE_NAME": "com.amazonaws.eu-west-1.bedrock-runtime",
+        "CORE_KMS_SERVICE_NAME": "com.amazonaws.eu-west-1.kms",
+        "CORE_DATA_KEY_ARN": DATA_KEY_ARN,
+        "CORE_MUTATION_SIGNING_KEY_ARN": MUTATION_KEY_ARN,
+        "CORE_ANALYTICS_ROLE_ARN": ANALYTICS_ROLE_ARN,
+        "CORE_GATEWAY_ROLE_ARN": GATEWAY_ROLE_ARN,
+        "CORE_INSTANCE_ROLE_ARN": INSTANCE_ROLE_ARN,
+        "CORE_BEDROCK_RESOURCE_ARNS": json.dumps(BEDROCK_RESOURCES),
         "CORE_IDLE_SECONDS": "1800",
         "CORE_HARD_SECONDS": "7200",
         "CORE_OPERATION_SECONDS": "300",
@@ -46,8 +74,8 @@ class FakeClientError(Exception):
 class FakeTable:
     def __init__(self) -> None:
         self.item = None
-        self.updates = []
-        self.puts = []
+        self.updates: list[dict] = []
+        self.puts: list[dict] = []
         self.fail_next_update = ""
 
     def update_item(self, **kwargs):
@@ -75,44 +103,56 @@ class FakeEc2:
 
     def describe_images(self, **_kwargs):
         return {
-            "Images": [
-                {
-                    "State": "available",
-                    "Architecture": "x86_64",
-                    "RootDeviceType": "ebs",
-                    "EnaSupport": True,
-                    "ImdsSupport": "v2.0",
-                    "Tags": [
-                        {"Key": "Application", "Value": "archon-datahub"},
-                        {"Key": "ArchonDataHubCore", "Value": "verified"},
-                        {"Key": "ArchonGeneration", "Value": GENERATION},
-                        {"Key": "ArchonCapabilityDigest", "Value": DIGEST},
-                        {
-                            "Key": "ArchonImageManifestDigest",
-                            "Value": MANIFEST,
-                        },
-                        {
-                            "Key": "ArchonFourComponents",
-                            "Value": "mcp,ack,skills,analytics",
-                        },
-                        {"Key": "ManagedBy", "Value": "github-actions"},
-                    ],
-                }
-            ]
+            "Images": [{
+                "State": "available",
+                "Architecture": "x86_64",
+                "RootDeviceType": "ebs",
+                "EnaSupport": True,
+                "ImdsSupport": "v2.0",
+                "Tags": [
+                    {"Key": "Application", "Value": "archon-datahub"},
+                    {"Key": "ArchonDataHubCore", "Value": "verified"},
+                    {"Key": "ArchonGeneration", "Value": GENERATION},
+                    {"Key": "ArchonCapabilityDigest", "Value": DIGEST},
+                    {"Key": "ArchonImageManifestDigest", "Value": MANIFEST},
+                    {"Key": "ArchonFourComponents", "Value": "mcp,ack,skills,analytics"},
+                    {"Key": "ManagedBy", "Value": "github-actions"},
+                    {"Key": "archon:Purpose", "Value": "datahub-core-ami"},
+                ],
+            }]
         }
 
-    def describe_vpc_endpoints(self, **_kwargs):
-        return {"VpcEndpoints": list(self.endpoints)}
+    def describe_vpc_endpoints(self, *, Filters):
+        capability = next(
+            (
+                entry["Values"][0]
+                for entry in Filters
+                if entry["Name"] == "tag:ArchonCapability"
+            ),
+            None,
+        )
+        values = []
+        for endpoint in self.endpoints:
+            tags = {tag["Key"]: tag["Value"] for tag in endpoint["Tags"]}
+            if capability is None or tags.get("ArchonCapability") == capability:
+                values.append(endpoint)
+        return {"VpcEndpoints": values}
 
     def create_vpc_endpoint(self, **kwargs):
-        EVENTS.append("endpoint-create")
+        tags = kwargs["TagSpecifications"][0]["Tags"]
+        capability = {tag["Key"]: tag["Value"] for tag in tags}["ArchonCapability"]
+        EVENTS.append(f"endpoint-create:{capability}")
         self.create_calls.append(kwargs)
         endpoint = {
-            "VpcEndpointId": "vpce-0123456789abcdef0",
+            "VpcEndpointId": (
+                "vpce-0123456789abcdef0"
+                if capability == "kms"
+                else "vpce-0fedcba9876543210"
+            ),
             "State": "available",
-            "Tags": kwargs["TagSpecifications"][0]["Tags"],
+            "Tags": tags,
         }
-        self.endpoints = [endpoint]
+        self.endpoints.append(endpoint)
         return {"VpcEndpoint": endpoint}
 
     def delete_vpc_endpoints(self, *, VpcEndpointIds):
@@ -125,11 +165,45 @@ class FakeEc2:
         return {}
 
 
+class FakeSts:
+    def __init__(self) -> None:
+        self.expiration = dt.datetime(2026, 8, 2, 9, tzinfo=dt.timezone.utc)
+        self.calls: list[dict] = []
+
+    def assume_role(self, **kwargs):
+        EVENTS.append("sts-assume")
+        self.calls.append(kwargs)
+        return {
+            "Credentials": {
+                "AccessKeyId": "ASIAEXAMPLESCOPED",
+                "SecretAccessKey": "secret-value-never-in-ddb",
+                "SessionToken": "session-value-never-in-ddb",
+                "Expiration": self.expiration,
+            }
+        }
+
+
+class FakeKms:
+    def __init__(self) -> None:
+        self.encrypt_calls: list[dict] = []
+
+    def encrypt(self, **kwargs):
+        EVENTS.append("kms-encrypt")
+        self.encrypt_calls.append(kwargs)
+        return {"CiphertextBlob": b"x" * 128}
+
+
 TABLE = FakeTable()
 EC2 = FakeEc2()
+STS = FakeSts()
+KMS = FakeKms()
 fake_boto3 = types.ModuleType("boto3")
 fake_boto3.resource = lambda _name: types.SimpleNamespace(Table=lambda _table: TABLE)
-fake_boto3.client = lambda name: EC2 if name == "ec2" else None
+fake_boto3.client = lambda name: {
+    "ec2": EC2,
+    "sts": STS,
+    "kms": KMS,
+}[name]
 fake_exceptions = types.ModuleType("botocore.exceptions")
 fake_exceptions.ClientError = FakeClientError
 sys.modules.setdefault("boto3", fake_boto3)
@@ -169,6 +243,26 @@ def command(action: str, revision: int = 0) -> dict:
     }
 
 
+def active_lease(now: dt.datetime, revision: int = 8, expiry_seconds: int = 600) -> dict:
+    return {
+        "pk": "CORE#LEASE",
+        "sk": "CURRENT",
+        "sessionId": SESSION,
+        "state": "READY",
+        "revision": revision,
+        "generation": GENERATION,
+        "capabilityDigest": DIGEST,
+        "idleExpiresAt": int((now + dt.timedelta(minutes=10)).timestamp()),
+        "hardExpiresAt": int(instant(10).timestamp()),
+        "analyticsCredentialsVersion": "acv_" + "1" * 32,
+        "analyticsCredentialsExpiresAt": int((now + dt.timedelta(seconds=expiry_seconds)).timestamp()),
+        "analyticsCredentialsCiphertext": "eA==",
+        "gatewayCredentialsVersion": "gcv_" + "2" * 32,
+        "gatewayCredentialsExpiresAt": int((now + dt.timedelta(seconds=expiry_seconds)).timestamp()),
+        "gatewayCredentialsCiphertext": "eQ==",
+    }
+
+
 class CoreLifecycleTests(TestCase):
     def setUp(self) -> None:
         EVENTS.clear()
@@ -179,6 +273,9 @@ class CoreLifecycleTests(TestCase):
         EC2.endpoints.clear()
         EC2.create_calls.clear()
         EC2.delete_calls.clear()
+        STS.calls.clear()
+        KMS.encrypt_calls.clear()
+        STS.expiration = instant(9)
 
     def test_exact_canonical_contract(self) -> None:
         validated = lifecycle._validate_command(command("START"), instant(8))
@@ -187,139 +284,166 @@ class CoreLifecycleTests(TestCase):
         invalid["binding"]["extra"] = True
         with self.assertRaises(ValueError):
             lifecycle._validate_command(invalid, instant(8))
-        self.assertEqual(
-            lifecycle.CAPABILITIES,
-            {
-                "mcpRead": True,
-                "mcpGovernedWrite": True,
-                "agentContextKit": True,
-                "dataHubSkills": True,
-                "analyticsAgent": True,
-            },
-        )
 
-    def test_start_reserves_before_endpoint_and_uses_exact_lease(self) -> None:
+    def test_start_reserves_then_creates_kms_and_bedrock_and_stores_only_ciphertext(self) -> None:
         result = lifecycle._start(command("START", revision=7), instant(8))
         self.assertEqual(result["decision"], "UPSCALE")
-        self.assertEqual(result["revision"], 8)
-        self.assertEqual(EVENTS[:2], ["ddb-update", "endpoint-create"])
-        reserve = TABLE.updates[0]
-        values = reserve["ExpressionAttributeValues"]
-        self.assertEqual(values[":expected"], 7)
-        self.assertEqual(values[":revision"], 8)
-        self.assertEqual(values[":idle"], int(instant(8, 30).timestamp()))
-        self.assertEqual(values[":hard"], int(instant(10).timestamp()))
-        self.assertIn(
-            "attribute_not_exists(operationId)",
-            reserve["ConditionExpression"],
+        self.assertEqual(
+            EVENTS,
+            [
+                "ddb-update",
+                "endpoint-create:kms",
+                "endpoint-create:bedrock",
+                "sts-assume",
+                "kms-encrypt",
+                "sts-assume",
+                "kms-encrypt",
+                "ddb-update",
+            ],
         )
-        self.assertIn("inferenceEndpointId", TABLE.updates[1]["UpdateExpression"])
-
-    def test_losing_start_allocates_no_endpoint(self) -> None:
-        TABLE.item = {
-            "sessionId": OTHER_SESSION,
-            "state": "READY",
-            "revision": 3,
-            "generation": GENERATION,
-            "capabilityDigest": DIGEST,
+        self.assertEqual([call["ServiceName"] for call in EC2.create_calls], [
+            "com.amazonaws.eu-west-1.kms",
+            "com.amazonaws.eu-west-1.bedrock-runtime",
+        ])
+        kms_policy = EC2.create_calls[0]["PolicyDocument"]["Statement"][0]
+        self.assertEqual(kms_policy["Principal"], {"AWS": INSTANCE_ROLE_ARN})
+        self.assertEqual(kms_policy["Action"], "kms:Decrypt")
+        self.assertEqual(kms_policy["Resource"], DATA_KEY_ARN)
+        public_key_policy = EC2.create_calls[0]["PolicyDocument"]["Statement"][1]
+        self.assertEqual(public_key_policy["Principal"], {"AWS": GATEWAY_ROLE_ARN})
+        self.assertEqual(public_key_policy["Action"], ["kms:GetPublicKey", "kms:DescribeKey"])
+        self.assertEqual(public_key_policy["Resource"], MUTATION_KEY_ARN)
+        analytics_context = lifecycle._encryption_context(
+            SESSION, "analytics-agent-bedrock"
+        )
+        gateway_context = lifecycle._encryption_context(
+            SESSION, "governed-gateway-control"
+        )
+        expected_endpoint_context = {
+            f"kms:EncryptionContext:{key}": value
+            for key, value in analytics_context.items()
+            if key != "capability"
         }
+        expected_endpoint_context["kms:EncryptionContext:capability"] = [
+            "analytics-agent-bedrock", "governed-gateway-control"
+        ]
+        self.assertEqual(
+            kms_policy["Condition"]["StringEquals"], expected_endpoint_context
+        )
+        bedrock_policy = EC2.create_calls[1]["PolicyDocument"]["Statement"][0]
+        self.assertEqual(bedrock_policy["Principal"], {"AWS": ANALYTICS_ROLE_ARN})
+        self.assertEqual(bedrock_policy["Resource"], BEDROCK_RESOURCES)
+        persisted = TABLE.updates[1]["ExpressionAttributeValues"]
+        serialized = json.dumps(persisted)
+        self.assertNotIn("secret-value-never-in-ddb", serialized)
+        self.assertNotIn("session-value-never-in-ddb", serialized)
+        self.assertIn(":analyticsCiphertext", persisted)
+        self.assertIn(":gatewayCiphertext", persisted)
+        self.assertEqual(KMS.encrypt_calls[0]["EncryptionContext"], analytics_context)
+        self.assertEqual(KMS.encrypt_calls[1]["EncryptionContext"], gateway_context)
+        self.assertEqual(
+            [call["RoleArn"] for call in STS.calls],
+            [ANALYTICS_ROLE_ARN, GATEWAY_ROLE_ARN],
+        )
+        self.assertTrue(all(call["DurationSeconds"] == 3600 for call in STS.calls))
+
+    def test_losing_start_allocates_no_billable_endpoint_or_credentials(self) -> None:
+        TABLE.item = active_lease(instant(8), revision=3)
+        TABLE.item["sessionId"] = OTHER_SESSION
         TABLE.fail_next_update = "ConditionalCheckFailedException"
         result = lifecycle._start(command("START", revision=3), instant(8))
         self.assertEqual(result["code"], "LEASE_CONFLICT")
         self.assertEqual(EC2.create_calls, [])
+        self.assertEqual(STS.calls, [])
+        self.assertEqual(KMS.encrypt_calls, [])
 
-    def test_endpoint_client_token_is_retry_deterministic(self) -> None:
-        first = lifecycle._endpoint_token(SESSION)
-        second = lifecycle._endpoint_token(SESSION)
-        self.assertEqual(first, second)
-        self.assertRegex(first, r"^[0-9a-f]{64}$")
-
-    def test_activity_is_ready_only_and_returns_exact_watchdog(self) -> None:
-        result = lifecycle._activity(command("ACTIVITY", revision=8), instant(8, 20))
-        self.assertTrue(result["watchdog"])
-        self.assertEqual(result["revision"], 9)
+    def test_activity_rotates_before_expiry_when_session_extends_past_one_hour(self) -> None:
+        now = instant(9, 5)
+        TABLE.item = active_lease(now, revision=8, expiry_seconds=300)
+        STS.expiration = instant(10, 5)
+        result = lifecycle._activity(command("ACTIVITY", revision=8), now)
+        self.assertEqual(result["code"], "ACTIVITY_RECORDED_CREDENTIALS_ROTATED")
+        values = TABLE.updates[-1]["ExpressionAttributeValues"]
+        self.assertIn(":analyticsCiphertext", values)
+        self.assertIn(":gatewayCiphertext", values)
+        self.assertNotEqual(
+            values[":analyticsVersion"], TABLE.item["analyticsCredentialsVersion"]
+        )
+        self.assertNotEqual(
+            values[":gatewayVersion"], TABLE.item["gatewayCredentialsVersion"]
+        )
         self.assertEqual(
-            result["watchdogDeadline"], "2026-08-02T08:50:00.000Z"
+            [call["RoleArn"] for call in STS.calls],
+            [ANALYTICS_ROLE_ARN, GATEWAY_ROLE_ARN],
         )
-        update = TABLE.updates[-1]
-        self.assertIn("#state=:ready", update["ConditionExpression"])
-        self.assertEqual(update["ExpressionAttributeValues"][":ready"], "READY")
-
-    def test_activity_conditional_conflict_has_no_endpoint_state_dependency(self) -> None:
-        TABLE.item = {
-            "sessionId": SESSION,
-            "state": "READY",
-            "revision": 9,
-            "idleExpiresAt": int(instant(8, 50).timestamp()),
-        }
-        TABLE.fail_next_update = "ConditionalCheckFailedException"
-        result = lifecycle._activity(
-            command("ACTIVITY", revision=8), instant(8, 20)
-        )
-        self.assertEqual(result["code"], "IDEMPOTENT")
-        self.assertEqual(result["revision"], 9)
-        self.assertEqual(EC2.create_calls, [])
-        self.assertEqual(EC2.delete_calls, [])
-
-    def test_stale_watchdog_is_a_noop_after_activity_revision(self) -> None:
-        TABLE.item = {
-            "pk": "CORE#LEASE",
-            "sk": "CURRENT",
-            "sessionId": SESSION,
-            "state": "READY",
-            "revision": 9,
-            "idleExpiresAt": int(instant(8, 50).timestamp()),
-            "hardExpiresAt": int(instant(10).timestamp()),
-        }
-        stale = {
-            "schema": "archon.core-runtime-command/v1",
-            "action": "REAP",
-            "expectedSessionId": SESSION,
-            "expectedRevision": 8,
-            "deadlineEpoch": int(instant(8, 30).timestamp()),
-        }
-        result = lifecycle._reap(stale, instant(8, 31))
-        self.assertEqual(result["code"], "STALE_WATCHDOG")
-        self.assertEqual(TABLE.updates, [])
-
-    def test_exact_watchdog_drains_at_deadline(self) -> None:
-        deadline = int(instant(8, 30).timestamp())
-        TABLE.item = {
-            "pk": "CORE#LEASE",
-            "sk": "CURRENT",
-            "sessionId": SESSION,
-            "state": "READY",
-            "revision": 8,
-            "idleExpiresAt": deadline,
-            "hardExpiresAt": int(instant(10).timestamp()),
-        }
-        exact = {
-            "schema": "archon.core-runtime-command/v1",
-            "action": "REAP",
-            "expectedSessionId": SESSION,
-            "expectedRevision": 8,
-            "deadlineEpoch": deadline,
-        }
-        result = lifecycle._reap(exact, instant(8, 30))
-        self.assertEqual(result["decision"], "DOWNSCALE")
-        self.assertEqual(result["revision"], 9)
+        self.assertEqual(len(KMS.encrypt_calls), 2)
         self.assertEqual(
-            TABLE.updates[-1]["ExpressionAttributeValues"][":draining"],
-            "DRAINING",
+            {call["EncryptionContext"]["capability"] for call in KMS.encrypt_calls},
+            {"analytics-agent-bedrock", "governed-gateway-control"},
         )
 
-    def test_lifecycle_role_code_never_calls_autoscaling(self) -> None:
+    def test_activity_reuses_scoped_credentials_when_expiry_is_not_near(self) -> None:
+        now = instant(8, 10)
+        TABLE.item = active_lease(now, revision=8, expiry_seconds=2400)
+        result = lifecycle._activity(command("ACTIVITY", revision=8), now)
+        self.assertEqual(result["code"], "ACTIVITY_RECORDED")
+        values = TABLE.updates[-1]["ExpressionAttributeValues"]
+        self.assertNotIn(":analyticsCiphertext", values)
+        self.assertNotIn(":gatewayCiphertext", values)
+        self.assertEqual(STS.calls, [])
+        self.assertEqual(KMS.encrypt_calls, [])
+
+    def test_finalize_down_removes_ciphertext_and_both_endpoints(self) -> None:
+        EC2.endpoints = [
+            {
+                "VpcEndpointId": "vpce-0123456789abcdef0",
+                "State": "available",
+                "Tags": [
+                    {"Key": "ArchonSessionId", "Value": SESSION},
+                    {"Key": "ArchonCapability", "Value": "kms"},
+                ],
+            },
+            {
+                "VpcEndpointId": "vpce-0fedcba9876543210",
+                "State": "available",
+                "Tags": [
+                    {"Key": "ArchonSessionId", "Value": SESSION},
+                    {"Key": "ArchonCapability", "Value": "bedrock"},
+                ],
+            },
+        ]
+        TABLE.item = {
+            **active_lease(instant(8)),
+            "state": "DRAINING",
+            "operationId": "1" * 32,
+            "inferenceEndpointId": "vpce-0fedcba9876543210",
+            "kmsEndpointId": "vpce-0123456789abcdef0",
+        }
+        final = {
+            "schema": "archon.core-runtime-command/v1",
+            "action": "FINALIZE",
+            "decision": "DOWNSCALE",
+            "operationId": "1" * 32,
+            "sessionId": SESSION,
+            "expectedRevision": 8,
+        }
+        result = lifecycle._finalize(final, instant(8, 30))
+        self.assertEqual(result["code"], "STOPPED_COMMITTED")
+        update = TABLE.updates[-1]["UpdateExpression"]
+        self.assertIn("analyticsCredentialsCiphertext", update)
+        self.assertIn("gatewayCredentialsCiphertext", update)
+        self.assertIn("kmsEndpointId", update)
+        self.assertEqual(
+            sorted(EC2.delete_calls),
+            sorted(["vpce-0123456789abcdef0", "vpce-0fedcba9876543210"]),
+        )
+
+    def test_lifecycle_has_no_autoscaling_or_direct_bedrock_authority(self) -> None:
         source = path.read_text(encoding="utf-8").lower()
         self.assertNotIn("autoscaling", source)
-        self.assertNotIn("set_desired_capacity", source)
-        self.assertNotIn("update_auto_scaling_group", source)
-
-    def test_ami_mismatch_fails_closed(self) -> None:
-        bad = FakeEc2()
-        bad.describe_images = mock.Mock(return_value={"Images": []})
-        with mock.patch.object(lifecycle, "_EC2", bad):
-            with self.assertRaises(ValueError):
-                lifecycle._verify_ami()
+        self.assertNotIn('boto3.client("bedrock-runtime")', source)
+        self.assertIn("_sts.assume_role", source)
+        self.assertIn("_kms.encrypt", source)
 
 
 if __name__ == "__main__":

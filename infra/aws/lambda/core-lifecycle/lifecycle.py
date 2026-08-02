@@ -6,8 +6,11 @@ not permitted to mutate Auto Scaling. Step Functions is the only scaling owner.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
+import json
+import logging
 import os
 import re
 import time
@@ -16,6 +19,8 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
+
+LOGGER = logging.getLogger("archon.core_lifecycle")
 
 SCHEMA = "archon.core-runtime-command/v1"
 SESSION_RE = re.compile(r"^rs_[A-Za-z0-9_-]{43}$")
@@ -88,6 +93,55 @@ BEDROCK_SERVICE_NAME = _required_env(
     "CORE_BEDROCK_SERVICE_NAME",
     re.compile(r"^com\.amazonaws\.eu-west-1\.bedrock-runtime$"),
 )
+KMS_SERVICE_NAME = _required_env(
+    "CORE_KMS_SERVICE_NAME", re.compile(r"^com\.amazonaws\.eu-west-1\.kms$")
+)
+INTERFACE_SECURITY_GROUP_ID = _required_env(
+    "CORE_INTERFACE_SECURITY_GROUP_ID", re.compile(r"^sg-[0-9a-f]{8,17}$")
+)
+DATA_KEY_ARN = _required_env(
+    "CORE_DATA_KEY_ARN",
+    re.compile(r"^arn:(aws|aws-us-gov|aws-cn):kms:eu-west-1:\d{12}:key/[0-9a-f-]{36}$"),
+)
+MUTATION_SIGNING_KEY_ARN = _required_env(
+    "CORE_MUTATION_SIGNING_KEY_ARN",
+    re.compile(r"^arn:(aws|aws-us-gov|aws-cn):kms:eu-west-1:\d{12}:key/[0-9a-f-]{36}$"),
+)
+if MUTATION_SIGNING_KEY_ARN == DATA_KEY_ARN:
+    raise RuntimeError("mutation signing and data-encryption keys must be distinct")
+ANALYTICS_ROLE_ARN = _required_env(
+    "CORE_ANALYTICS_ROLE_ARN",
+    re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"),
+)GATEWAY_ROLE_ARN = _required_env(
+    "CORE_GATEWAY_ROLE_ARN",
+    re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"),
+)
+INSTANCE_ROLE_ARN = _required_env(
+    "CORE_INSTANCE_ROLE_ARN",
+    re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$"),
+)
+try:
+    _resources = json.loads(_required_env("CORE_BEDROCK_RESOURCE_ARNS"))
+except json.JSONDecodeError as error:
+    raise RuntimeError("CORE_BEDROCK_RESOURCE_ARNS is invalid") from error
+if (
+    not isinstance(_resources, list)
+    or len(_resources) != 8
+    or len(set(_resources)) != 8
+    or not all(
+        isinstance(value, str)
+        and re.fullmatch(
+            r"^arn:(aws|aws-us-gov|aws-cn):bedrock:"
+            r"(eu-central-1|eu-north-1|eu-south-1|eu-south-2|eu-west-1|eu-west-3):"
+            r"(?:\d{12})?:(?:inference-profile|application-inference-profile|foundation-model)/"
+            r"[A-Za-z0-9._:-]{1,256}$",
+            value,
+        )
+        for value in _resources
+    )
+):
+    raise RuntimeError("CORE_BEDROCK_RESOURCE_ARNS must contain the exact eight resources")
+BEDROCK_RESOURCES = tuple(_resources)
 IDLE_SECONDS = int(_required_env("CORE_IDLE_SECONDS", re.compile(r"^[1-9]\d{2,4}$")))
 HARD_SECONDS = int(_required_env("CORE_HARD_SECONDS", re.compile(r"^[1-9]\d{3,5}$")))
 OPERATION_SECONDS = int(
@@ -99,6 +153,8 @@ if IDLE_SECONDS != 1800 or HARD_SECONDS != 7200 or OPERATION_SECONDS != 300:
 _DYNAMODB = boto3.resource("dynamodb")
 _TABLE = _DYNAMODB.Table(TABLE_NAME)
 _EC2 = boto3.client("ec2")
+_STS = boto3.client("sts")
+_KMS = boto3.client("kms")
 
 
 def _now() -> dt.datetime:
@@ -288,6 +344,7 @@ def _verify_ami() -> None:
         "ArchonImageManifestDigest": IMAGE_MANIFEST_DIGEST,
         "ArchonFourComponents": "mcp,ack,skills,analytics",
         "ManagedBy": "github-actions",
+        "archon:Purpose": "datahub-core-ami",
     }
     valid = (
         image.get("State") == "available"
@@ -301,18 +358,18 @@ def _verify_ami() -> None:
         raise ValueError("configured Core AMI failed the immutable provenance gate")
 
 
-def _runtime_endpoints() -> list[dict[str, Any]]:
-    response = _EC2.describe_vpc_endpoints(
-        Filters=[
-            {"Name": "vpc-id", "Values": [VPC_ID]},
-            {"Name": "service-name", "Values": [BEDROCK_SERVICE_NAME]},
-            {"Name": "tag:Application", "Values": ["archon-datahub"]},
-            {"Name": "tag:ManagedBy", "Values": ["archon-core-lifecycle"]},
-            {"Name": "tag:Environment", "Values": [STAGE]},
-        ]
-    )
-    # Keep deleting endpoints in the result. Private DNS can remain reserved
-    # until EC2 stops returning the endpoint, so create must wait for absence.
+def _runtime_endpoints(capability: str | None = None) -> list[dict[str, Any]]:
+    filters = [
+        {"Name": "vpc-id", "Values": [VPC_ID]},
+        {"Name": "tag:Application", "Values": ["archon-datahub"]},
+        {"Name": "tag:ManagedBy", "Values": ["archon-core-lifecycle"]},
+        {"Name": "tag:Environment", "Values": [STAGE]},
+    ]
+    if capability is not None:
+        if capability not in {"bedrock", "kms"}:
+            raise ValueError("endpoint capability is invalid")
+        filters.append({"Name": "tag:ArchonCapability", "Values": [capability]})
+    response = _EC2.describe_vpc_endpoints(Filters=filters)
     return [
         endpoint
         for endpoint in response.get("VpcEndpoints", [])
@@ -329,10 +386,69 @@ def _endpoint_session(endpoint: dict[str, Any]) -> str:
     return str(tags.get("ArchonSessionId", ""))
 
 
-def _endpoint_token(session_id: str) -> str:
-    material = f"{STAGE}\0{GENERATION}\0{session_id}".encode("utf-8")
+def _endpoint_token(session_id: str, capability: str) -> str:
+    material = f"{STAGE}\0{GENERATION}\0{session_id}\0{capability}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
+
+def _encryption_context(session_id: str, capability: str) -> dict[str, str]:
+    if capability not in {"analytics-agent-bedrock", "governed-gateway-control"}:
+        raise ValueError("credential capability is invalid")
+    return {
+        "stage": STAGE,
+        "sessionId": session_id,
+        "generation": GENERATION,
+        "capabilityDigest": CAPABILITY_DIGEST,
+        "capability": capability,
+    }
+
+
+def _endpoint_policy(capability: str, session_id: str) -> dict[str, Any]:
+    if capability == "kms":
+        context: dict[str, Any] = {
+            f"kms:EncryptionContext:{key}": value
+            for key, value in _encryption_context(
+                session_id, "analytics-agent-bedrock"
+            ).items()
+            if key != "capability"
+        }
+        context["kms:EncryptionContext:capability"] = [
+            "analytics-agent-bedrock", "governed-gateway-control"
+        ]
+        return {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "OnlyActiveCoreHostDecrypt",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": INSTANCE_ROLE_ARN},
+                    "Action": "kms:Decrypt",
+                    "Resource": DATA_KEY_ARN,
+                    "Condition": {"StringEquals": context},
+                },
+                {
+                    "Sid": "OnlyGovernedGatewayVerificationKey",
+                    "Effect": "Allow",
+                    "Principal": {"AWS": GATEWAY_ROLE_ARN},
+                    "Action": ["kms:GetPublicKey", "kms:DescribeKey"],
+                    "Resource": MUTATION_SIGNING_KEY_ARN,
+                },
+            ],
+        }
+    if capability == "bedrock":
+        return {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "OnlyScopedAnalyticsSession",
+                "Effect": "Allow",
+                "Principal": {"AWS": ANALYTICS_ROLE_ARN},
+                "Action": [
+                    "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
+                ],
+                "Resource": list(BEDROCK_RESOURCES),
+            }],
+        }
+    raise ValueError("endpoint capability is invalid")
 
 def _delete_endpoint(endpoint_id: Any) -> None:
     if not isinstance(endpoint_id, str) or re.fullmatch(
@@ -342,18 +458,102 @@ def _delete_endpoint(endpoint_id: Any) -> None:
     _EC2.delete_vpc_endpoints(VpcEndpointIds=[endpoint_id])
 
 
-def _cleanup_orphan_endpoints(active_endpoint_id: str = "") -> None:
+def _cleanup_orphan_endpoints(active_endpoint_ids: set[str] | None = None) -> None:
+    active = active_endpoint_ids or set()
     for endpoint in _runtime_endpoints():
         endpoint_id = endpoint.get("VpcEndpointId", "")
-        if endpoint_id != active_endpoint_id and endpoint.get("State") != "deleting":
+        if endpoint_id not in active and endpoint.get("State") != "deleting":
             _delete_endpoint(endpoint_id)
 
 
-def _ensure_inference_endpoint(
-    session_id: str, operation_expires_at: int
+def _cleanup_session_endpoints(
+    session_id: str, endpoint_ids: tuple[str, ...] = ()
+) -> None:
+    owned = {
+        value
+        for value in endpoint_ids
+        if isinstance(value, str)
+        and re.fullmatch(r"^vpce-[0-9a-f]{8,17}$", value)
+    }
+    try:
+        for endpoint in _runtime_endpoints():
+            candidate = endpoint.get("VpcEndpointId")
+            if (
+                _endpoint_session(endpoint) == session_id
+                and endpoint.get("State") != "deleting"
+                and isinstance(candidate, str)
+                and re.fullmatch(r"^vpce-[0-9a-f]{8,17}$", candidate)
+            ):
+                owned.add(candidate)
+    except ClientError as error:
+        LOGGER.warning(
+            "Could not enumerate session-owned endpoints during rollback",
+            exc_info=error,
+        )
+    for candidate in sorted(owned):
+        try:
+            _delete_endpoint(candidate)
+        except ClientError as error:
+            LOGGER.warning(
+                "Could not delete exact session-owned endpoint %s",
+                candidate,
+                exc_info=error,
+            )
+
+
+def _abandon_start(
+    session_id: str,
+    revision: int,
+    operation_id: str,
+    endpoint_ids: tuple[str, ...] = (),
+) -> None:
+    for attempt in range(3):
+        try:
+            _TABLE.update_item(
+                Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
+                UpdateExpression=(
+                    "SET #state=:failed, updatedAt=:updated "
+                    "REMOVE operationId, operationExpiresAt, inferenceEndpointId, "
+                    "kmsEndpointId, analyticsCredentialsCiphertext, "
+                    "analyticsCredentialsExpiresAt, analyticsCredentialsVersion, "
+                    "gatewayCredentialsCiphertext, gatewayCredentialsExpiresAt, "
+                    "gatewayCredentialsVersion"
+                ),
+                ConditionExpression=(
+                    "sessionId=:session AND #state=:starting "
+                    "AND revision=:revision AND operationId=:operation "
+                    "AND generation=:generation AND capabilityDigest=:digest"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":failed": "FAILED",
+                    ":updated": _iso(_now()),
+                    ":session": session_id,
+                    ":starting": "STARTING",
+                    ":revision": revision,
+                    ":operation": operation_id,
+                    ":generation": GENERATION,
+                    ":digest": CAPABILITY_DIGEST,
+                },
+            )
+            break
+        except ClientError as error:
+            if _conditional_failure(error):
+                break
+            if attempt < 2:
+                time.sleep(0.2 * (2**attempt))
+    _cleanup_session_endpoints(session_id, endpoint_ids)
+
+
+def _ensure_endpoint(
+    capability: str, session_id: str, operation_expires_at: int
 ) -> tuple[str, bool]:
-    # The operation lease bounds this wait. Retrying the Lambda uses the same
-    # deterministic EC2 client token and therefore cannot allocate a duplicate.
+    service_name = {
+        "bedrock": BEDROCK_SERVICE_NAME,
+        "kms": KMS_SERVICE_NAME,
+    }.get(capability)
+    if service_name is None:
+        raise ValueError("endpoint capability is invalid")
     remaining = max(1, operation_expires_at - int(time.time()) - 5)
     deadline = time.monotonic() + min(210, remaining)
     retryable_codes = {
@@ -363,7 +563,7 @@ def _ensure_inference_endpoint(
         "InvalidVpcEndpoint.DuplicateSubnets",
     }
     while True:
-        endpoints = _runtime_endpoints()
+        endpoints = _runtime_endpoints(capability)
         for endpoint in endpoints:
             if (
                 _endpoint_session(endpoint) == session_id
@@ -374,54 +574,42 @@ def _ensure_inference_endpoint(
                     r"^vpce-[0-9a-f]{8,17}$", endpoint_id
                 ):
                     return endpoint_id, False
-
-        # A previous session may still own the private-DNS name. Delete it and
-        # wait until DescribeVpcEndpoints no longer returns it before creating.
         for endpoint in endpoints:
             if endpoint.get("State") != "deleting":
                 _delete_endpoint(endpoint.get("VpcEndpointId"))
         if endpoints:
             if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "Bedrock Runtime endpoint private-DNS release timed out"
-                )
+                raise TimeoutError(f"{capability} endpoint release timed out")
             time.sleep(3)
             continue
-
         try:
             response = _EC2.create_vpc_endpoint(
                 VpcEndpointType="Interface",
                 VpcId=VPC_ID,
-                ServiceName=BEDROCK_SERVICE_NAME,
+                ServiceName=service_name,
                 SubnetIds=[SUBNET_ID],
-                SecurityGroupIds=[INFERENCE_SECURITY_GROUP_ID],
+                SecurityGroupIds=[INTERFACE_SECURITY_GROUP_ID],
                 PrivateDnsEnabled=True,
-                ClientToken=_endpoint_token(session_id),
-                TagSpecifications=[
-                    {
-                        "ResourceType": "vpc-endpoint",
-                        "Tags": [
-                            {"Key": "Application", "Value": "archon-datahub"},
-                            {"Key": "Environment", "Value": STAGE},
-                            {
-                                "Key": "ManagedBy",
-                                "Value": "archon-core-lifecycle",
-                            },
-                            {"Key": "ArchonSessionId", "Value": session_id},
-                        ],
-                    }
-                ],
+                ClientToken=_endpoint_token(session_id, capability),
+                PolicyDocument=_endpoint_policy(capability, session_id),
+                TagSpecifications=[{
+                    "ResourceType": "vpc-endpoint",
+                    "Tags": [
+                        {"Key": "Application", "Value": "archon-datahub"},
+                        {"Key": "Environment", "Value": STAGE},
+                        {"Key": "ManagedBy", "Value": "archon-core-lifecycle"},
+                        {"Key": "ArchonSessionId", "Value": session_id},
+                        {"Key": "ArchonCapability", "Value": capability},
+                    ],
+                }],
             )
         except ClientError as error:
             code = error.response.get("Error", {}).get("Code", "")
-            if (
-                code not in retryable_codes
-                and not str(code).startswith("InvalidVpcEndpoint")
-            ):
+            if code not in retryable_codes and not str(code).startswith("InvalidVpcEndpoint"):
                 raise
             if time.monotonic() >= deadline:
                 raise TimeoutError(
-                    "Bedrock Runtime endpoint creation did not converge"
+                    f"{capability} endpoint creation did not converge"
                 ) from error
             time.sleep(3)
             continue
@@ -429,11 +617,79 @@ def _ensure_inference_endpoint(
         if not isinstance(endpoint_id, str) or re.fullmatch(
             r"^vpce-[0-9a-f]{8,17}$", endpoint_id
         ) is None:
-            raise ValueError(
-                "Bedrock Runtime endpoint creation returned no exact ID"
-            )
+            raise ValueError(f"{capability} endpoint creation returned no exact ID")
         return endpoint_id, True
 
+
+def _mint_scoped_credentials(
+    session_id: str,
+    now: dt.datetime,
+    *,
+    role_arn: str,
+    capability: str,
+    version_prefix: str,
+    session_label: str,
+) -> dict[str, Any]:
+    if version_prefix not in {"acv_", "gcv_"} or session_label not in {"analytics", "gateway"}:
+        raise ValueError("scoped credential contract is invalid")
+    suffix = hashlib.sha256(session_id.encode("ascii")).hexdigest()[:16]
+    response = _STS.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=f"archon-{session_label}-{suffix}",
+        DurationSeconds=3600,
+    )
+    credentials = response.get("Credentials", {})
+    expiration = credentials.get("Expiration")
+    if not isinstance(expiration, dt.datetime):
+        raise RuntimeError("STS returned no credential expiration")
+    expiration_epoch = _epoch(expiration)
+    if expiration_epoch < _epoch(now) + 3300 or expiration_epoch > _epoch(now) + 3660:
+        raise RuntimeError("STS credential duration is outside the one-hour bound")
+    plaintext = {
+        "accessKeyId": credentials.get("AccessKeyId"),
+        "secretAccessKey": credentials.get("SecretAccessKey"),
+        "sessionToken": credentials.get("SessionToken"),
+        "expirationEpoch": expiration_epoch,
+    }
+    if (
+        not all(
+            isinstance(plaintext[key], str) and 1 <= len(plaintext[key]) <= 4096
+            for key in ("accessKeyId", "secretAccessKey", "sessionToken")
+        )
+        or not str(plaintext["accessKeyId"]).startswith("ASIA")
+    ):
+        raise RuntimeError("STS returned invalid scoped credentials")
+    encrypted = _KMS.encrypt(
+        KeyId=DATA_KEY_ARN,
+        Plaintext=json.dumps(
+            plaintext, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8"),
+        EncryptionContext=_encryption_context(session_id, capability),
+    )
+    ciphertext = encrypted.get("CiphertextBlob")
+    if not isinstance(ciphertext, bytes) or not 64 <= len(ciphertext) <= 16384:
+        raise RuntimeError("KMS returned invalid credential ciphertext")
+    return {
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "expiresAt": expiration_epoch,
+        "version": version_prefix + uuid.uuid4().hex,
+    }
+
+
+def _mint_analytics_credentials(session_id: str, now: dt.datetime) -> dict[str, Any]:
+    return _mint_scoped_credentials(
+        session_id, now, role_arn=ANALYTICS_ROLE_ARN,
+        capability="analytics-agent-bedrock", version_prefix="acv_",
+        session_label="analytics",
+    )
+
+
+def _mint_gateway_credentials(session_id: str, now: dt.datetime) -> dict[str, Any]:
+    return _mint_scoped_credentials(
+        session_id, now, role_arn=GATEWAY_ROLE_ARN,
+        capability="governed-gateway-control", version_prefix="gcv_",
+        session_label="gateway",
+    )
 
 def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     _verify_ami()
@@ -475,7 +731,10 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "resolution=:resolution, boundAt=:bound, "
                 "idleExpiresAt=:idle, hardExpiresAt=:hard, updatedAt=:updated, "
                 "operationId=:operation, operationExpiresAt=:operationExpiry, "
-                "expiresAt=:ttl REMOVE stoppedAt, inferenceEndpointId"
+                "expiresAt=:ttl REMOVE stoppedAt, inferenceEndpointId, kmsEndpointId, "
+                "analyticsCredentialsCiphertext, analyticsCredentialsExpiresAt, "
+                "analyticsCredentialsVersion, gatewayCredentialsCiphertext, "
+                "gatewayCredentialsExpiresAt, gatewayCredentialsVersion"
             ),
             ConditionExpression=(
                 "(attribute_not_exists(pk) OR "
@@ -517,55 +776,87 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         else:
             return _decision("REJECT", code="LEASE_CONFLICT")
 
-    endpoint_id, endpoint_created = _ensure_inference_endpoint(
-        session_id, operation_expires_at
-    )
+    endpoint_ids: list[str] = []
     try:
-        _TABLE.update_item(
-            Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
-            UpdateExpression=(
-                "SET inferenceEndpointId=:endpoint, updatedAt=:updated"
-            ),
-            ConditionExpression=(
-                "sessionId=:session AND #state=:starting "
-                "AND revision=:revision AND operationId=:operation "
-                "AND generation=:generation AND capabilityDigest=:digest"
-            ),
-            ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={
-                ":endpoint": endpoint_id,
-                ":updated": _iso(now),
-                ":session": session_id,
-                ":starting": "STARTING",
-                ":revision": revision,
-                ":operation": operation_id,
-                ":generation": GENERATION,
-                ":digest": CAPABILITY_DIGEST,
-            },
+        kms_endpoint_id, _ = _ensure_endpoint(
+            "kms", session_id, operation_expires_at
         )
-    except ClientError as error:
-        if not _conditional_failure(error):
-            raise
-        current = _lease()
-        if not (
-            current
-            and current.get("sessionId") == session_id
-            and current.get("revision") == revision
-            and current.get("operationId") == operation_id
-            and current.get("inferenceEndpointId") == endpoint_id
-        ):
-            if endpoint_created and (
-                current is None
-                or current.get("inferenceEndpointId") != endpoint_id
+        endpoint_ids.append(kms_endpoint_id)
+        inference_endpoint_id, _ = _ensure_endpoint(
+            "bedrock", session_id, operation_expires_at
+        )
+        endpoint_ids.append(inference_endpoint_id)
+        analytics_credential = _mint_analytics_credentials(session_id, now)
+        gateway_credential = _mint_gateway_credentials(session_id, now)
+        try:
+            _TABLE.update_item(
+                Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
+                UpdateExpression=(
+                    "SET inferenceEndpointId=:inferenceEndpoint, "
+                    "kmsEndpointId=:kmsEndpoint, updatedAt=:updated, "
+                    "analyticsCredentialsCiphertext=:analyticsCiphertext, "
+                    "analyticsCredentialsExpiresAt=:analyticsExpiry, "
+                    "analyticsCredentialsVersion=:analyticsVersion, "
+                    "gatewayCredentialsCiphertext=:gatewayCiphertext, "
+                    "gatewayCredentialsExpiresAt=:gatewayExpiry, "
+                    "gatewayCredentialsVersion=:gatewayVersion"
+                ),
+                ConditionExpression=(
+                    "sessionId=:session AND #state=:starting "
+                    "AND revision=:revision AND operationId=:operation "
+                    "AND generation=:generation AND capabilityDigest=:digest"
+                ),
+                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeValues={
+                    ":inferenceEndpoint": inference_endpoint_id,
+                    ":kmsEndpoint": kms_endpoint_id,
+                    ":analyticsCiphertext": analytics_credential["ciphertext"],
+                    ":analyticsExpiry": analytics_credential["expiresAt"],
+                    ":analyticsVersion": analytics_credential["version"],
+                    ":gatewayCiphertext": gateway_credential["ciphertext"],
+                    ":gatewayExpiry": gateway_credential["expiresAt"],
+                    ":gatewayVersion": gateway_credential["version"],
+                    ":updated": _iso(now),
+                    ":session": session_id,
+                    ":starting": "STARTING",
+                    ":revision": revision,
+                    ":operation": operation_id,
+                    ":generation": GENERATION,
+                    ":digest": CAPABILITY_DIGEST,
+                },
+            )
+        except ClientError as error:
+            if not _conditional_failure(error):
+                raise
+            current = _lease()
+            if not (
+                current
+                and current.get("sessionId") == session_id
+                and current.get("revision") == revision
+                and current.get("operationId") == operation_id
+                and current.get("inferenceEndpointId") == inference_endpoint_id
+                and current.get("kmsEndpointId") == kms_endpoint_id
+                and isinstance(current.get("analyticsCredentialsCiphertext"), str)
+                and isinstance(current.get("analyticsCredentialsVersion"), str)
+                and int(current.get("analyticsCredentialsExpiresAt", 0)) > _epoch(now) + 900
+                and isinstance(current.get("gatewayCredentialsCiphertext"), str)
+                and isinstance(current.get("gatewayCredentialsVersion"), str)
+                and int(current.get("gatewayCredentialsExpiresAt", 0)) > _epoch(now) + 900
             ):
-                _delete_endpoint(endpoint_id)
-            return _decision("REJECT", code="LEASE_CONFLICT")
+                _abandon_start(
+                    session_id, revision, operation_id, tuple(endpoint_ids)
+                )
+                return _decision("REJECT", code="LEASE_CONFLICT")
+    except Exception:
+        _abandon_start(session_id, revision, operation_id, tuple(endpoint_ids))
+        raise
     return _decision(
         "UPSCALE",
         operation_id=operation_id,
         session_id=session_id,
         revision=revision,
     )
+
 def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     binding = command["binding"]
     session_id = command["sessionId"]
@@ -573,40 +864,119 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     hard = _parse_iso(binding["leaseExpiresAt"], "binding.leaseExpiresAt")
     idle = min(now + dt.timedelta(seconds=IDLE_SECONDS), hard)
     revision = expected + 1
+    current = _lease()
+    if (
+        not current
+        or current.get("sessionId") != session_id
+        or current.get("state") != "READY"
+        or current.get("revision") != expected
+        or current.get("generation") != GENERATION
+        or current.get("capabilityDigest") != CAPABILITY_DIGEST
+        or int(current.get("hardExpiresAt", 0)) != _epoch(hard)
+        or int(current.get("hardExpiresAt", 0)) <= _epoch(now)
+    ):
+        if (
+            current
+            and current.get("sessionId") == session_id
+            and int(current.get("revision", -1)) == revision
+            and int(current.get("idleExpiresAt", 0)) >= _epoch(now)
+        ):
+            return _decision(
+                "NONE",
+                session_id=session_id,
+                revision=revision,
+                code="IDEMPOTENT",
+                watchdog_deadline=dt.datetime.fromtimestamp(
+                    int(current["idleExpiresAt"]), tz=dt.timezone.utc
+                ),
+            )
+        return _decision("REJECT", code="STALE_ACTIVITY")
+    previous_analytics_version = current.get("analyticsCredentialsVersion")
+    previous_gateway_version = current.get("gatewayCredentialsVersion")
+    analytics_expiry = current.get("analyticsCredentialsExpiresAt")
+    gateway_expiry = current.get("gatewayCredentialsExpiresAt")
+    if (
+        not isinstance(previous_analytics_version, str)
+        or re.fullmatch(r"^acv_[0-9a-f]{32}$", previous_analytics_version) is None
+        or not isinstance(previous_gateway_version, str)
+        or re.fullmatch(r"^gcv_[0-9a-f]{32}$", previous_gateway_version) is None
+        or not isinstance(analytics_expiry, int)
+        or isinstance(analytics_expiry, bool)
+        or not isinstance(gateway_expiry, int)
+        or isinstance(gateway_expiry, bool)
+    ):
+        return _decision("REJECT", code="INVALID_CREDENTIAL_BINDING")
+    rotate_analytics = analytics_expiry <= _epoch(now) + 1200
+    rotate_gateway = gateway_expiry <= _epoch(now) + 1200
+    analytics_credential = (
+        _mint_analytics_credentials(session_id, now) if rotate_analytics else None
+    )
+    gateway_credential = (
+        _mint_gateway_credentials(session_id, now) if rotate_gateway else None
+    )
+    update = "SET idleExpiresAt=:idle, updatedAt=:updated, revision=:next"
+    values: dict[str, Any] = {
+        ":idle": _epoch(idle),
+        ":updated": _iso(now),
+        ":next": revision,
+        ":session": session_id,
+        ":ready": "READY",
+        ":expected": expected,
+        ":generation": GENERATION,
+        ":digest": CAPABILITY_DIGEST,
+        ":hard": _epoch(hard),
+        ":now": _epoch(now),
+        ":previousAnalyticsVersion": previous_analytics_version,
+        ":previousGatewayVersion": previous_gateway_version,
+    }
+    if analytics_credential is not None:
+        update += (
+            ", analyticsCredentialsCiphertext=:analyticsCiphertext, "
+            "analyticsCredentialsExpiresAt=:analyticsExpiry, "
+            "analyticsCredentialsVersion=:analyticsVersion"
+        )
+        values.update({
+            ":analyticsCiphertext": analytics_credential["ciphertext"],
+            ":analyticsExpiry": analytics_credential["expiresAt"],
+            ":analyticsVersion": analytics_credential["version"],
+        })
+    if gateway_credential is not None:
+        update += (
+            ", gatewayCredentialsCiphertext=:gatewayCiphertext, "
+            "gatewayCredentialsExpiresAt=:gatewayExpiry, "
+            "gatewayCredentialsVersion=:gatewayVersion"
+        )
+        values.update({
+            ":gatewayCiphertext": gateway_credential["ciphertext"],
+            ":gatewayExpiry": gateway_credential["expiresAt"],
+            ":gatewayVersion": gateway_credential["version"],
+        })
     try:
         _TABLE.update_item(
             Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
-            UpdateExpression=(
-                "SET idleExpiresAt=:idle, updatedAt=:updated, revision=:next"
-            ),
+            UpdateExpression=update,
             ConditionExpression=(
                 "sessionId=:session AND #state=:ready AND revision=:expected "
                 "AND generation=:generation AND capabilityDigest=:digest "
                 "AND hardExpiresAt=:hard AND hardExpiresAt>:now "
+                "AND analyticsCredentialsVersion=:previousAnalyticsVersion "
+                "AND gatewayCredentialsVersion=:previousGatewayVersion "
                 "AND attribute_not_exists(operationId)"
             ),
             ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={
-                ":idle": _epoch(idle),
-                ":updated": _iso(now),
-                ":next": revision,
-                ":session": session_id,
-                ":ready": "READY",
-                ":expected": expected,
-                ":generation": GENERATION,
-                ":digest": CAPABILITY_DIGEST,
-                ":hard": _epoch(hard),
-                ":now": _epoch(now),
-            },
+            ExpressionAttributeValues=values,
         )
         return _decision(
             "NONE",
             session_id=session_id,
             revision=revision,
-            code="ACTIVITY_RECORDED",
+            code=(
+                "ACTIVITY_RECORDED_CREDENTIALS_ROTATED"
+                if analytics_credential is not None or gateway_credential is not None
+                else "ACTIVITY_RECORDED"
+            ),
             watchdog_deadline=idle,
-        )
-    except ClientError as error:
+        )    except ClientError as error:
         if not _conditional_failure(error):
             raise
     current = _lease()
@@ -626,7 +996,6 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
             ),
         )
     return _decision("REJECT", code="STALE_ACTIVITY")
-
 
 def _begin_down(
     current: dict[str, Any],
@@ -735,13 +1104,26 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     decision = command["decision"]
     final_state = "STARTING" if decision == "UPSCALE" else "STOPPED"
     before = _lease()
-    endpoint_id = (
-        str(before.get("inferenceEndpointId", "")) if before else ""
+    endpoint_ids = (
+        (
+            str(before.get("inferenceEndpointId", "")),
+            str(before.get("kmsEndpointId", "")),
+        )
+        if before
+        else ()
     )
     update = (
         "SET #state=:state, updatedAt=:updated"
         + (", stoppedAt=:updated" if final_state == "STOPPED" else "")
-        + " REMOVE operationId, operationExpiresAt"
+        + (
+            " REMOVE operationId, operationExpiresAt, inferenceEndpointId, "
+            "kmsEndpointId, analyticsCredentialsCiphertext, "
+            "analyticsCredentialsExpiresAt, analyticsCredentialsVersion, "
+                    "gatewayCredentialsCiphertext, gatewayCredentialsExpiresAt, "
+                    "gatewayCredentialsVersion"
+            if final_state == "STOPPED"
+            else " REMOVE operationId, operationExpiresAt"
+        )
     )
     try:
         _TABLE.update_item(
@@ -784,7 +1166,8 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         return _decision("REJECT", code="FINALIZE_CONFLICT")
 
     if final_state == "STOPPED":
-        _delete_endpoint(endpoint_id)
+        for endpoint_id in endpoint_ids:
+            _delete_endpoint(endpoint_id)
         _cleanup_orphan_endpoints()
         _TABLE.put_item(
             Item={

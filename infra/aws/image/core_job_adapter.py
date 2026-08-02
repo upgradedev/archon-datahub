@@ -42,6 +42,7 @@ READ_OPERATIONS = {
     "IMPROVE_CONTEXT": "/v2/improve-context",
     "READ_TAGS": None,
 }
+POST_OPERATIONS = {"POST_ANALYZE", "POST_READ_TAGS"}
 MUTATION_OPERATION = "GOVERNED_TAG_MUTATION"
 
 
@@ -65,6 +66,41 @@ def _canonical(value: Any) -> bytes:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _seal_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Bind every durable receipt to its exact canonical content."""
+    if "receiptDigest" in receipt:
+        raise ValueError("receipt is already sealed")
+    return {**receipt, "receiptDigest": _digest(receipt)}
+
+
+def _receipt_context(item: dict[str, Any]) -> dict[str, str]:
+    context: dict[str, str] = {}
+    operation = item.get("operation")
+    if operation in {*READ_OPERATIONS, *POST_OPERATIONS, MUTATION_OPERATION}:
+        context["operation"] = operation
+    request = item.get("request")
+    if isinstance(request, dict):
+        audit_id = request.get("auditId")
+        evidence_digest = request.get("runtimeEvidenceDigest")
+        if isinstance(audit_id, str) and AUDIT_RE.fullmatch(audit_id):
+            context["auditId"] = audit_id
+        if (
+            isinstance(evidence_digest, str)
+            and DIGEST_RE.fullmatch(evidence_digest)
+        ):
+            context["runtimeEvidenceDigest"] = evidence_digest
+        source_audit = request.get("sourceMutationAuditId")
+        source_receipt = request.get("sourceMutationReceiptDigest")
+        if isinstance(source_audit, str) and AUDIT_RE.fullmatch(source_audit):
+            context["sourceMutationAuditId"] = source_audit
+        if (
+            isinstance(source_receipt, str)
+            and DIGEST_RE.fullmatch(source_receipt)
+        ):
+            context["sourceMutationReceiptDigest"] = source_receipt
+    return context
 
 
 def _json_value(value: Any, depth: int = 0) -> bool:
@@ -135,6 +171,53 @@ def _valid_read_request(request: Any) -> bool:
     )
 
 
+def _valid_post_request(operation: str, request: Any) -> bool:
+    if not _exact(
+        request,
+        {
+            "schemaVersion",
+            "originalRequest",
+            "sourceMutationAuditId",
+            "sourceMutationReceiptDigest",
+            "postMutationExpectedTagState",
+        },
+    ):
+        return False
+    expected_schema = {
+        "POST_ANALYZE": "archon.datahub-post-mutation-analysis/v1",
+        "POST_READ_TAGS": "archon.core-post-mutation-tag-read/v1",
+    }.get(operation)
+    state = request["postMutationExpectedTagState"]
+    if (
+        request["schemaVersion"] != expected_schema
+        or not isinstance(request["sourceMutationAuditId"], str)
+        or AUDIT_RE.fullmatch(request["sourceMutationAuditId"]) is None
+        or not isinstance(request["sourceMutationReceiptDigest"], str)
+        or DIGEST_RE.fullmatch(request["sourceMutationReceiptDigest"]) is None
+        or not _exact(
+            state, {"entityUrn", "columnPath", "tagUrns", "stateDigest"}
+        )
+        or not isinstance(state["entityUrn"], str)
+        or DATASET_RE.fullmatch(state["entityUrn"]) is None
+        or not _valid_column(state["columnPath"])
+        or state["tagUrns"] not in ([], [PII_TAG])
+    ):
+        return False
+    unsigned_state = {
+        "entityUrn": state["entityUrn"],
+        "columnPath": state["columnPath"],
+        "tagUrns": state["tagUrns"],
+    }
+    if (
+        not isinstance(state["stateDigest"], str)
+        or not hmac.compare_digest(state["stateDigest"], _digest(unsigned_state))
+    ):
+        return False
+    original = request["originalRequest"]
+    if operation == "POST_READ_TAGS":
+        return _valid_read_request(original)
+    return _bounded_request(original)
+
 def _valid_governed_request(request: Any) -> bool:
     if not _exact(
         request,
@@ -144,17 +227,20 @@ def _valid_governed_request(request: Any) -> bool:
             "runtimeEvidenceDigest",
             "auditEvidenceDigest",
             "planDigest",
+            "policyDigest",
             "approval",
             "action",
             "arguments",
             "expectedBeforeDigest",
             "expectedAfterDigest",
+            "authorization",
             "requestDigest",
         },
     ):
         return False
     approval = request["approval"]
     arguments = request["arguments"]
+    authorization = request["authorization"]
     if not _exact(
         approval,
         {
@@ -164,12 +250,15 @@ def _valid_governed_request(request: Any) -> bool:
             "decidedAt",
             "digest",
         },
-    ) or not _exact(arguments, {"tagUrns", "entityUrns", "columnPaths"}):
+    ) or not _exact(arguments, {"tagUrns", "entityUrns", "columnPaths"}) or not _exact(
+        authorization, {"envelope", "signature"}
+    ):
         return False
     digests = (
         request["runtimeEvidenceDigest"],
         request["auditEvidenceDigest"],
         request["planDigest"],
+        request["policyDigest"],
         request["expectedBeforeDigest"],
         request["expectedAfterDigest"],
         request["requestDigest"],
@@ -213,6 +302,8 @@ def _request_valid(operation: Any, request: Any) -> bool:
         return True
     if operation == "READ_TAGS":
         return _valid_read_request(request)
+    if operation in POST_OPERATIONS:
+        return _valid_post_request(operation, request)
     if operation == MUTATION_OPERATION:
         return _valid_governed_request(request)
     return False
@@ -227,22 +318,25 @@ class CoreJobAdapter:
         generation: str,
         capability_digest: str,
         companion_url: str = "http://127.0.0.1:8080",
+        read_mcp_url: str = "http://127.0.0.1:8000/mcp",
         governed_mcp_url: str = "http://127.0.0.1:8001/mcp",
     ) -> None:
         if SESSION_RE.fullmatch(session_id) is None:
             raise ValueError("invalid session")
         if companion_url != "http://127.0.0.1:8080":
             raise ValueError("companion must remain loopback-only")
+        if read_mcp_url != "http://127.0.0.1:8000/mcp":
+            raise ValueError("read MCP must remain loopback-only")
         if governed_mcp_url != "http://127.0.0.1:8001/mcp":
-            raise ValueError("governed MCP must remain loopback-only")
+            raise ValueError("governed gateway must remain loopback-only")
         self._table = boto3.resource("dynamodb").Table(table_name)
         self._session_id = session_id
         self._generation = generation
         self._capability_digest = capability_digest
         self._base = companion_url
+        self._read_mcp_url = read_mcp_url
         self._governed_mcp_url = governed_mcp_url
         self._cursors: dict[str, Any] = {}
-
     def process_once(self) -> int:
         processed = 0
         for partition in (
@@ -267,6 +361,13 @@ class CoreJobAdapter:
             response = self._table.query(**query)
             for item in response.get("Items", []):
                 try:
+                    # This consumer never mutates or reports jobs bound to another runtime.
+                    if (
+                        not isinstance(item, dict)
+                        or item.get("profileId") != "core"
+                        or item.get("schema") != "archon.runtime-bound-job/v2"
+                    ):
+                        continue
                     if not self._valid(item, partition):
                         self._reject_invalid(item)
                         continue
@@ -303,7 +404,8 @@ class CoreJobAdapter:
             and isinstance(job_id, str)
             and JOB_RE.fullmatch(job_id) is not None
             and item.get("sk") == f"JOB#{job_id}"
-            and item.get("schema") == "archon.core-runtime-job/v1"
+            and item.get("schema") == "archon.runtime-bound-job/v2"
+            and item.get("profileId") == "core"
             and item.get("sessionId") == self._session_id
             and item.get("generation") == self._generation
             and item.get("capabilityDigest") == self._capability_digest
@@ -326,12 +428,14 @@ class CoreJobAdapter:
                     "attemptCount=if_not_exists(attemptCount,:zero)+:one"
                 ),
                 ConditionExpression=(
-                    "#state=:queued AND sessionId=:session "
-                    "AND generation=:generation "
+                    "#state=:queued AND #schema=:schema AND profileId=:profile "
+                    "AND sessionId=:session AND generation=:generation "
                     "AND capabilityDigest=:digest"
                 ),
-                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeNames={"#state": "state", "#schema": "schema"},
                 ExpressionAttributeValues={
+                    ":schema": "archon.runtime-bound-job/v2",
+                    ":profile": "core",
                     ":running": "RUNNING",
                     ":started": started,
                     ":attempt": attempt_id,
@@ -349,7 +453,6 @@ class CoreJobAdapter:
             if _conditional_failure(error):
                 return None
             raise
-
     def _recover_expired(self, item: dict[str, Any]) -> bool:
         deadline = item.get("attemptDeadlineEpoch")
         attempt_id = item.get("attemptId")
@@ -382,10 +485,17 @@ class CoreJobAdapter:
                 ),
                 ConditionExpression=(
                     "#state=:running AND attemptId=:attempt "
-                    "AND attemptDeadlineEpoch=:deadline"
+                    "AND attemptDeadlineEpoch=:deadline AND #schema=:schema "
+                    "AND profileId=:profile AND sessionId=:session "
+                    "AND generation=:generation AND capabilityDigest=:digest"
                 ),
-                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeNames={"#state": "state", "#schema": "schema"},
                 ExpressionAttributeValues={
+                    ":schema": "archon.runtime-bound-job/v2",
+                    ":profile": "core",
+                    ":session": self._session_id,
+                    ":generation": self._generation,
+                    ":digest": self._capability_digest,
                     ":queued": "QUEUED",
                     ":recovered": _iso(),
                     ":running": "RUNNING",
@@ -398,7 +508,6 @@ class CoreJobAdapter:
             if _conditional_failure(error):
                 return False
             raise
-
     def _execute(self, item: dict[str, Any], attempt_id: str) -> None:
         try:
             operation = item["operation"]
@@ -408,8 +517,10 @@ class CoreJobAdapter:
                 )
             elif operation == "READ_TAGS":
                 result = self._read_tags(item["request"])
+            elif operation in POST_OPERATIONS:
+                result = self._post_mutation(operation, item["request"])
             elif operation == MUTATION_OPERATION:
-                result = self._governed_mutation(item["request"])
+                result = self._governed_mutation(item)
             else:
                 raise RuntimeError("operation is not allowlisted")
             self._complete(item, attempt_id, "SUCCEEDED", result=result)
@@ -420,7 +531,6 @@ class CoreJobAdapter:
                 "FAILED",
                 error={"code": "CORE_JOB_FAILED", "retryable": True},
             )
-
     def _companion(self, path: str | None, body_value: dict[str, Any]) -> dict[str, Any]:
         if path not in {"/v2/analyze", "/v2/improve-context"}:
             raise RuntimeError("companion path is not allowlisted")
@@ -445,31 +555,40 @@ class CoreJobAdapter:
             raise RuntimeError("companion response was not a bounded object")
         return result
 
-    def _mcp_call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        if tool_name not in {"get_entities", "add_tags", "remove_tags"}:
-            raise RuntimeError("MCP tool is not allowlisted")
+    def _mcp_call(
+        self, url: str, tool_name: str, arguments: dict[str, Any]
+    ) -> Any:
+        if (
+            url not in {self._read_mcp_url, self._governed_mcp_url}
+            or tool_name not in {"get_entities", "execute_governed_mutation"}
+            or (
+                tool_name == "execute_governed_mutation"
+                and url != self._governed_mcp_url
+            )
+            or (tool_name == "get_entities" and url != self._read_mcp_url)
+        ):
+            raise RuntimeError("MCP authority or tool is not allowlisted")
 
         async def invoke() -> Any:
             from fastmcp import Client
 
-            async with Client(self._governed_mcp_url) as client:
+            async with Client(url) as client:
                 response = await client.call_tool(tool_name, arguments)
             if getattr(response, "is_error", False):
-                raise RuntimeError("governed MCP tool failed")
+                raise RuntimeError("bounded MCP call failed")
             data = getattr(response, "data", None)
             if data is not None:
                 return data
             structured = getattr(response, "structured_content", None)
             if structured is not None:
                 return structured
-            blocks = getattr(response, "content", [])
             texts = [
                 block.text
-                for block in blocks
+                for block in getattr(response, "content", [])
                 if isinstance(getattr(block, "text", None), str)
             ]
             if len(texts) != 1:
-                raise RuntimeError("governed MCP result schema drift")
+                raise RuntimeError("bounded MCP result schema drift")
             return json.loads(texts[0])
 
         return asyncio.run(invoke())
@@ -477,9 +596,11 @@ class CoreJobAdapter:
     def _read_tags(self, request: dict[str, Any]) -> dict[str, Any]:
         entity = request["entityUrn"]
         column = request["columnPath"]
-        raw = self._mcp_call("get_entities", {"urns": [entity]})
+        raw = self._mcp_call(
+            self._read_mcp_url, "get_entities", {"urns": [entity]}
+        )
         if not _json_value(raw):
-            raise RuntimeError("governed MCP read result exceeded policy")
+            raise RuntimeError("read MCP result exceeded policy")
         found, tags = _column_tags(raw, column)
         if not found:
             raise RuntimeError("bound DataHub column was not found")
@@ -494,51 +615,144 @@ class CoreJobAdapter:
             "stateDigest": _digest(state),
         }
 
-    def _governed_mutation(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _post_mutation(
+        self, operation: str, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not _valid_post_request(operation, request):
+            raise RuntimeError("post-mutation request is invalid")
+        expected = request["postMutationExpectedTagState"]
+        live = self._read_tags(
+            {
+                "entityUrn": expected["entityUrn"],
+                "columnPath": expected["columnPath"],
+            }
+        )
+        if not hmac.compare_digest(live["stateDigest"], expected["stateDigest"]):
+            raise RuntimeError("post-mutation live tag state drifted")
+        if operation == "POST_ANALYZE":
+            post_result = self._companion(
+                "/v2/analyze", request["originalRequest"]
+            )
+            schema = "archon.datahub-post-mutation-analysis-result/v1"
+        else:
+            post_result = live
+            schema = "archon.core-post-mutation-tag-read-result/v1"
+        result = {
+            "schemaVersion": schema,
+            "sourceMutationAuditId": request["sourceMutationAuditId"],
+            "sourceMutationReceiptDigest": request[
+                "sourceMutationReceiptDigest"
+            ],
+            "postMutationExpectedTagState": expected,
+            "postMutationResult": post_result,
+            "postMutationResultDigest": _digest(post_result),
+        }
+        return result
+
+    def _governed_mutation(self, item: dict[str, Any]) -> dict[str, Any]:
+        request = item["request"]
         if not _valid_governed_request(request):
             raise RuntimeError("governed mutation envelope is invalid")
-        arguments = request["arguments"]
-        read_request = {
-            "entityUrn": arguments["entityUrns"][0],
-            "columnPath": arguments["columnPaths"][0],
-        }
-        before = self._read_tags(read_request)
-        if not hmac.compare_digest(
-            before["stateDigest"], request["expectedBeforeDigest"]
-        ):
-            raise RuntimeError("governed mutation before-state drift")
-        tool = "add_tags" if request["action"] == "ADD_TAGS" else "remove_tags"
-        mutation_result = self._mcp_call(
-            tool,
-            {
-                "tag_urns": arguments["tagUrns"],
-                "entity_urns": arguments["entityUrns"],
-                "column_paths": arguments["columnPaths"],
-            },
+        gateway_result = self._mcp_call(
+            self._governed_mcp_url,
+            "execute_governed_mutation",
+            {"job_id": item["jobId"], "request": request},
         )
-        if not isinstance(mutation_result, dict) or mutation_result.get("success") is not True:
-            raise RuntimeError("governed MCP mutation was not confirmed")
-        after = self._read_tags(read_request)
-        if not hmac.compare_digest(
-            after["stateDigest"], request["expectedAfterDigest"]
+        expected_keys = {
+            "schemaVersion",
+            "success",
+            "action",
+            "requestDigest",
+            "policyDigest",
+            "approvalDigest",
+            "beforeDigest",
+            "afterDigest",
+            "changed",
+            "verified",
+            "mutationExecutor",
+            "officialMcpMutation",
+            "authorizationEvidence",
+            "receiptDigest",
+        }
+        if not isinstance(gateway_result, dict) or set(gateway_result) != expected_keys:
+            raise RuntimeError("governed gateway result schema drift")
+        unsigned = dict(gateway_result)
+        receipt_digest = unsigned.pop("receiptDigest")
+        official = gateway_result.get("officialMcpMutation")
+        authorization_evidence = gateway_result.get("authorizationEvidence")
+        signature = request["authorization"]["signature"]
+        expected_tool = "add_tags" if request["action"] == "ADD_TAGS" else "remove_tags"
+        nested_evidence_valid = (
+            _exact(
+                official,
+                {"tool", "policyDigest", "approvalDigest", "requestDigest", "responseDigest"},
+            )
+            and official["tool"] == expected_tool
+            and official["policyDigest"] == request["policyDigest"]
+            and official["approvalDigest"] == request["approval"]["digest"]
+            and official["requestDigest"] == request["requestDigest"]
+            and isinstance(official["responseDigest"], str)
+            and DIGEST_RE.fullmatch(official["responseDigest"]) is not None
+            and _exact(
+                authorization_evidence,
+                {
+                    "keyArn", "algorithm", "canonicalization", "envelopeDigest",
+                    "signatureDigest", "consumedAt",
+                },
+            )
+            and authorization_evidence["keyArn"] == signature["keyArn"]
+            and authorization_evidence["algorithm"] == "ECDSA_SHA_256"
+            and authorization_evidence["canonicalization"]
+            == "archon.sorted-json-utf8/v1"
+            and authorization_evidence["envelopeDigest"] == signature["envelopeDigest"]
+            and isinstance(authorization_evidence["signatureDigest"], str)
+            and DIGEST_RE.fullmatch(authorization_evidence["signatureDigest"])
+            is not None
+            and isinstance(authorization_evidence["consumedAt"], str)
+            and ISO_RE.fullmatch(authorization_evidence["consumedAt"]) is not None
+        )
+        if (
+            gateway_result["schemaVersion"]
+            != "archon.core-governed-gateway-result/v2"
+            or gateway_result["success"] is not True
+            or gateway_result["verified"] is not True
+            or gateway_result["mutationExecutor"] != "official-datahub-mcp"
+            or gateway_result["action"] != request["action"]
+            or gateway_result["requestDigest"] != request["requestDigest"]
+            or gateway_result["policyDigest"] != request["policyDigest"]
+            or gateway_result["approvalDigest"] != request["approval"]["digest"]
+            or gateway_result["beforeDigest"] != request["expectedBeforeDigest"]
+            or gateway_result["afterDigest"] != request["expectedAfterDigest"]
+            or not isinstance(gateway_result["changed"], bool)
+            or not nested_evidence_valid
+            or not isinstance(receipt_digest, str)
+            or not hmac.compare_digest(receipt_digest, _digest(unsigned))
         ):
-            raise RuntimeError("governed mutation after-state drift")
+            raise RuntimeError("governed gateway receipt verification failed")
         result = {
             "schemaVersion": "archon.core-governed-tag-result/v1",
             "requestDigest": request["requestDigest"],
-            "beforeDigest": before["stateDigest"],
-            "afterDigest": after["stateDigest"],
+            "policyDigest": request["policyDigest"],
+            "beforeDigest": gateway_result["beforeDigest"],
+            "afterDigest": gateway_result["afterDigest"],
             "verified": True,
+            "mutationExecutor": "official-datahub-mcp",
+            "officialMcpMutation": gateway_result["officialMcpMutation"],
+            "authorizationEvidence": gateway_result["authorizationEvidence"],
         }
         return {**result, "responseDigest": _digest(result)}
-
     def _reject_invalid(self, item: Any) -> None:
         if not isinstance(item, dict):
             return
         pk = item.get("pk")
         sk = item.get("sk")
         if (
-            not isinstance(pk, str)
+            item.get("profileId") != "core"
+            or item.get("schema") != "archon.runtime-bound-job/v2"
+            or item.get("sessionId") != self._session_id
+            or item.get("generation") != self._generation
+            or item.get("capabilityDigest") != self._capability_digest
+            or not isinstance(pk, str)
             or pk
             not in {
                 f"SESSION#{self._session_id}",
@@ -553,25 +767,37 @@ class CoreJobAdapter:
         if not isinstance(job_id, str) or JOB_RE.fullmatch(job_id) is None:
             job_id = sk.removeprefix("JOB#")
         receipt = {
-            "schema": "archon.core-runtime-job-receipt/v1",
+            "schema": "archon.runtime-bound-job-receipt/v2",
+            "profileId": "core",
             "jobId": job_id,
             "sessionId": self._session_id,
             "generation": self._generation,
             "capabilityDigest": self._capability_digest,
             "state": "FAILED",
             "completedAt": _iso(),
+            **_receipt_context(item),
             "error": {"code": "INVALID_CORE_JOB", "retryable": False},
         }
+        receipt = _seal_receipt(receipt)
         try:
             self._table.update_item(
                 Key={"pk": pk, "sk": sk},
                 UpdateExpression=(
                     "SET #state=:failed, completedAt=:completed, receipt=:receipt "
-                    "REMOVE request, attemptId, attemptDeadlineEpoch"
+                    "REMOVE attemptId, attemptDeadlineEpoch"
                 ),
-                ConditionExpression="#state IN (:queued,:running)",
-                ExpressionAttributeNames={"#state": "state"},
+                ConditionExpression=(
+                    "#state IN (:queued,:running) AND #schema=:schema "
+                    "AND profileId=:profile AND sessionId=:session "
+                    "AND generation=:generation AND capabilityDigest=:digest"
+                ),
+                ExpressionAttributeNames={"#state": "state", "#schema": "schema"},
                 ExpressionAttributeValues={
+                    ":schema": "archon.runtime-bound-job/v2",
+                    ":profile": "core",
+                    ":session": self._session_id,
+                    ":generation": self._generation,
+                    ":digest": self._capability_digest,
                     ":failed": "FAILED",
                     ":completed": receipt["completedAt"],
                     ":receipt": receipt,
@@ -593,7 +819,8 @@ class CoreJobAdapter:
         error: dict[str, Any] | None = None,
     ) -> bool:
         receipt: dict[str, Any] = {
-            "schema": "archon.core-runtime-job-receipt/v1",
+            "schema": "archon.runtime-bound-job-receipt/v2",
+            "profileId": "core",
             "jobId": item["jobId"],
             "sessionId": self._session_id,
             "generation": self._generation,
@@ -601,13 +828,14 @@ class CoreJobAdapter:
             "state": state,
             "completedAt": _iso(),
             "attemptId": attempt_id,
+            **_receipt_context(item),
         }
         if result is not None:
             receipt["result"] = result
         if error is not None:
             receipt["error"] = error
         try:
-            if len(_canonical(receipt)) > MAX_RECEIPT_BYTES:
+            if len(_canonical(_seal_receipt(receipt))) > MAX_RECEIPT_BYTES:
                 receipt.pop("result", None)
                 receipt["state"] = "FAILED"
                 receipt["error"] = {
@@ -621,18 +849,27 @@ class CoreJobAdapter:
                 "code": "CORE_JOB_RECEIPT_INVALID",
                 "retryable": False,
             }
+        receipt = _seal_receipt(receipt)
         try:
             self._table.update_item(
                 Key={"pk": item["pk"], "sk": item["sk"]},
                 UpdateExpression=(
                     "SET #state=:state, completedAt=:completed, receipt=:receipt "
-                    "REMOVE request, attemptId, attemptDeadlineEpoch"
+                    "REMOVE attemptId, attemptDeadlineEpoch"
                 ),
                 ConditionExpression=(
-                    "#state=:running AND attemptId=:attempt"
+                    "#state=:running AND attemptId=:attempt "
+                    "AND #schema=:schema AND profileId=:profile "
+                    "AND sessionId=:session AND generation=:generation "
+                    "AND capabilityDigest=:digest"
                 ),
-                ExpressionAttributeNames={"#state": "state"},
+                ExpressionAttributeNames={"#state": "state", "#schema": "schema"},
                 ExpressionAttributeValues={
+                    ":schema": "archon.runtime-bound-job/v2",
+                    ":profile": "core",
+                    ":session": self._session_id,
+                    ":generation": self._generation,
+                    ":digest": self._capability_digest,
                     ":state": receipt["state"],
                     ":completed": receipt["completedAt"],
                     ":receipt": receipt,

@@ -1,81 +1,59 @@
 from __future__ import annotations
 
-import decimal
 import importlib.util
 import pathlib
 import sys
-import time
 import types
 from unittest import TestCase, main, mock
 
 SESSION = "rs_" + "A" * 43
 JOB = "job_" + "B" * 22
-GENERATION = "core-20260802-1"
 DIGEST = "sha256:" + "a" * 64
-DATASET = (
-    "urn:li:dataset:(urn:li:dataPlatform:snowflake,"
-    "archon.public.customers,PROD)"
-)
+AUDIT = "b" * 64
+DATASET = "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
 
 
 class FakeClientError(Exception):
     def __init__(self, code: str) -> None:
-        super().__init__(code)
         self.response = {"Error": {"Code": code}}
 
 
 class FakeKey:
-    def __init__(self, _name: str) -> None:
-        pass
+    def __init__(self, value):
+        self.value = value
 
-    def eq(self, _value):
-        return self
+    def eq(self, value):
+        return ("eq", self.value, value)
 
-    def begins_with(self, _value):
-        return self
+    def begins_with(self, value):
+        return ("begins", self.value, value)
 
-    def __and__(self, _other):
-        return self
+    def __and__(self, other):
+        return ("and", self, other)
 
 
 class FakeTable:
     def __init__(self) -> None:
-        self.pages: list[list[dict]] = []
-        self.queries: list[dict] = []
-        self.updates: list[dict] = []
-        self.fail_update = ""
-
-    def query(self, **kwargs):
-        self.queries.append(kwargs)
-        index = len(self.queries) - 1
-        items = self.pages[index] if index < len(self.pages) else []
-        result = {"Items": items}
-        if index + 1 < len(self.pages):
-            result["LastEvaluatedKey"] = {
-                "pk": f"cursor-{index}",
-                "sk": f"cursor-{index}",
-            }
-        return result
+        self.updates = []
+        self.items = []
 
     def update_item(self, **kwargs):
         self.updates.append(kwargs)
-        if self.fail_update:
-            code = self.fail_update
-            self.fail_update = ""
-            raise FakeClientError(code)
         return {}
+
+    def query(self, **_kwargs):
+        return {"Items": list(self.items)}
 
 
 TABLE = FakeTable()
 fake_boto3 = types.ModuleType("boto3")
-fake_boto3.resource = lambda _name: types.SimpleNamespace(Table=lambda _name: TABLE)
-fake_dynamodb = types.ModuleType("boto3.dynamodb")
+fake_boto3.resource = lambda _name: types.SimpleNamespace(Table=lambda _table: TABLE)
 fake_conditions = types.ModuleType("boto3.dynamodb.conditions")
 fake_conditions.Key = FakeKey
 fake_exceptions = types.ModuleType("botocore.exceptions")
 fake_exceptions.ClientError = FakeClientError
 sys.modules.setdefault("boto3", fake_boto3)
-sys.modules.setdefault("boto3.dynamodb", fake_dynamodb)
+sys.modules.setdefault("boto3.dynamodb", types.ModuleType("boto3.dynamodb"))
 sys.modules.setdefault("boto3.dynamodb.conditions", fake_conditions)
 sys.modules.setdefault("botocore", types.ModuleType("botocore"))
 sys.modules.setdefault("botocore.exceptions", fake_exceptions)
@@ -83,241 +61,263 @@ sys.modules.setdefault("botocore.exceptions", fake_exceptions)
 path = pathlib.Path(__file__).with_name("core_job_adapter.py")
 spec = importlib.util.spec_from_file_location("core_job_adapter", path)
 assert spec is not None and spec.loader is not None
-adapter_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(adapter_module)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 
 
-def job(
-    *,
-    state: str = "QUEUED",
-    operation: str = "ANALYZE",
-    request=None,
-    partition: str | None = None,
-) -> dict:
-    return {
-        "pk": partition or f"SESSION#{SESSION}",
-        "sk": f"JOB#{JOB}",
-        "schema": "archon.core-runtime-job/v1",
-        "sessionId": SESSION,
-        "generation": GENERATION,
-        "capabilityDigest": DIGEST,
-        "state": state,
-        "operation": operation,
-        "jobId": JOB,
-        "request": {} if request is None else request,
+def state(tags: list[str]) -> dict:
+    value = {
+        "entityUrn": DATASET,
+        "columnPath": "customer_email",
+        "tagUrns": tags,
     }
+    return {**value, "stateDigest": module._digest(value)}
 
 
 def governed_request() -> dict:
-    before_state = {
-        "entityUrn": DATASET,
-        "columnPath": "email",
-        "tagUrns": [],
+    approval = {
+        "approvalId": "approval-1",
+        "decision": "APPROVE",
+        "approverDigest": DIGEST,
+        "decidedAt": "2026-08-02T08:00:00.000Z",
+        "digest": DIGEST,
     }
-    after_state = {
-        "entityUrn": DATASET,
-        "columnPath": "email",
-        "tagUrns": ["urn:li:tag:PII"],
-    }
-    request = {
+    value = {
         "schemaVersion": "archon.core-governed-tag-mutation/v1",
-        "auditId": "b" * 64,
-        "runtimeEvidenceDigest": "sha256:" + "c" * 64,
-        "auditEvidenceDigest": "sha256:" + "d" * 64,
-        "planDigest": "sha256:" + "e" * 64,
-        "approval": {
-            "approvalId": "approval-123",
-            "decision": "APPROVE",
-            "approverDigest": "sha256:" + "f" * 64,
-            "decidedAt": "2026-08-02T12:00:00.000Z",
-            "digest": "sha256:" + "1" * 64,
-        },
+        "auditId": AUDIT,
+        "runtimeEvidenceDigest": DIGEST,
+        "auditEvidenceDigest": DIGEST,
+        "planDigest": DIGEST,
+        "policyDigest": DIGEST,
+        "approval": approval,
         "action": "ADD_TAGS",
         "arguments": {
             "tagUrns": ["urn:li:tag:PII"],
             "entityUrns": [DATASET],
-            "columnPaths": ["email"],
+            "columnPaths": ["customer_email"],
         },
-        "expectedBeforeDigest": adapter_module._digest(before_state),
-        "expectedAfterDigest": adapter_module._digest(after_state),
+        "expectedBeforeDigest": state([])["stateDigest"],
+        "expectedAfterDigest": state(["urn:li:tag:PII"])["stateDigest"],
+        "authorization": {
+            "envelope": {"signed": True},
+            "signature": {
+                "keyArn": "arn:aws:kms:eu-west-1:123456789012:key/example",
+                "algorithm": "ECDSA_SHA_256",
+                "canonicalization": "archon.sorted-json-utf8/v1",
+                "envelopeDigest": DIGEST,
+                "signatureBase64": "opaque",
+            },
+        },
     }
-    return {**request, "requestDigest": adapter_module._digest(request)}
+    return {**value, "requestDigest": module._digest(value)}
+
+
+def post_request(operation: str) -> dict:
+    expected = state(["urn:li:tag:PII"])
+    if operation == "POST_READ_TAGS":
+        schema = "archon.core-post-mutation-tag-read/v1"
+        original = {
+            "schemaVersion": "archon.core-tag-read/v1",
+            "auditId": AUDIT,
+            "runtimeEvidenceDigest": DIGEST,
+            "entityUrn": DATASET,
+            "columnPath": "customer_email",
+        }
+    else:
+        schema = "archon.datahub-post-mutation-analysis/v1"
+        original = {
+            "schemaVersion": "archon.demo-analysis/v1",
+            "question": "Re-run with the verified PII context.",
+        }
+    return {
+        "schemaVersion": schema,
+        "originalRequest": original,
+        "sourceMutationAuditId": AUDIT,
+        "sourceMutationReceiptDigest": DIGEST,
+        "postMutationExpectedTagState": expected,
+    }
+
+
+def runtime_job(*, profile_id: str = "core", schema: str = "archon.runtime-bound-job/v2") -> dict:
+    return {
+        "pk": f"SESSION#{SESSION}",
+        "sk": f"JOB#{JOB}",
+        "schema": schema,
+        "profileId": profile_id,
+        "sessionId": SESSION,
+        "generation": "core-generation",
+        "capabilityDigest": DIGEST,
+        "jobId": JOB,
+        "operation": "POST_READ_TAGS",
+        "state": "QUEUED",
+        "request": post_request("POST_READ_TAGS"),
+    }
 
 
 class CoreJobAdapterTests(TestCase):
     def setUp(self) -> None:
-        TABLE.pages = []
-        TABLE.queries.clear()
         TABLE.updates.clear()
-        TABLE.fail_update = ""
-        self.adapter = adapter_module.CoreJobAdapter(
-            table_name="CoreLease",
+        TABLE.items.clear()
+        self.adapter = module.CoreJobAdapter(
+            table_name="core-table",
             session_id=SESSION,
-            generation=GENERATION,
+            generation="core-generation",
             capability_digest=DIGEST,
         )
 
-    def test_pagination_reaches_job_after_more_than_twenty_terminal_items(self):
-        terminal = [
-            job(state="SUCCEEDED")
-            for _index in range(20)
-        ]
-        queued = job()
-        TABLE.pages = [terminal, terminal, terminal, [queued]]
-        executed: list[str] = []
+    def test_governed_request_requires_policy_and_asymmetric_authorization(self):
+        value = governed_request()
+        self.assertTrue(module._valid_governed_request(value))
+        for key in ("policyDigest", "authorization"):
+            invalid = dict(value)
+            invalid.pop(key)
+            self.assertFalse(module._valid_governed_request(invalid))
+        tampered = governed_request()
+        tampered["arguments"]["columnPaths"] = ["other"]
+        self.assertFalse(module._valid_governed_request(tampered))
+
+    def test_read_mcp_cannot_route_mutation_and_gateway_cannot_route_reads(self):
+        with self.assertRaises(RuntimeError):
+            self.adapter._mcp_call(
+                self.adapter._read_mcp_url,
+                "execute_governed_mutation",
+                {"job_id": JOB},
+            )
+        with self.assertRaises(RuntimeError):
+            self.adapter._mcp_call(
+                self.adapter._governed_mcp_url,
+                "get_entities",
+                {"urns": [DATASET]},
+            )
+
+    def test_governed_mutation_uses_one_gateway_execution_and_seals_evidence(self):
+        request = governed_request()
+        gateway_unsigned = {
+            "schemaVersion": "archon.core-governed-gateway-result/v2",
+            "success": True,
+            "action": "ADD_TAGS",
+            "requestDigest": request["requestDigest"],
+            "policyDigest": DIGEST,
+            "approvalDigest": DIGEST,
+            "beforeDigest": request["expectedBeforeDigest"],
+            "afterDigest": request["expectedAfterDigest"],
+            "changed": True,
+            "verified": True,
+            "mutationExecutor": "official-datahub-mcp",
+            "officialMcpMutation": {
+                "tool": "add_tags",
+                "policyDigest": DIGEST,
+                "approvalDigest": DIGEST,
+                "requestDigest": request["requestDigest"],
+                "responseDigest": DIGEST,
+            },
+            "authorizationEvidence": {
+                "keyArn": "arn:aws:kms:eu-west-1:123456789012:key/example",
+                "algorithm": "ECDSA_SHA_256",
+                "canonicalization": "archon.sorted-json-utf8/v1",
+                "envelopeDigest": DIGEST,
+                "signatureDigest": DIGEST,
+                "consumedAt": "2026-08-02T08:00:00.000Z",
+            },
+        }
+        gateway_result = {
+            **gateway_unsigned,
+            "receiptDigest": module._digest(gateway_unsigned),
+        }
+        item = {"jobId": JOB, "request": request}
+        with mock.patch.object(
+            self.adapter, "_mcp_call", return_value=gateway_result
+        ) as call:
+            result = self.adapter._governed_mutation(item)
+        call.assert_called_once_with(
+            self.adapter._governed_mcp_url,
+            "execute_governed_mutation",
+            {"job_id": JOB, "request": request},
+        )
+        self.assertEqual(result["mutationExecutor"], "official-datahub-mcp")
+        self.assertEqual(result["officialMcpMutation"]["tool"], "add_tags")
+        self.assertEqual(
+            result["authorizationEvidence"]["canonicalization"],
+            "archon.sorted-json-utf8/v1",
+        )
+        self.assertEqual(
+            result["responseDigest"],
+            module._digest({k: v for k, v in result.items() if k != "responseDigest"}),
+        )
+
+    def test_post_analysis_rechecks_live_tags_then_reruns_companion(self):
+        request = post_request("POST_ANALYZE")
         with (
-            mock.patch.object(self.adapter, "_claim", return_value="a" * 32),
+            mock.patch.object(
+                self.adapter, "_read_tags", return_value=state(["urn:li:tag:PII"])
+            ),
             mock.patch.object(
                 self.adapter,
-                "_execute",
-                side_effect=lambda item, _attempt: executed.append(item["jobId"]),
-            ),
+                "_companion",
+                return_value={"answer": "PII is now verified."},
+            ) as companion,
         ):
-            processed = self.adapter._process_partition(f"SESSION#{SESSION}")
-        self.assertEqual(processed, 1)
-        self.assertEqual(executed, [JOB])
-        self.assertEqual(len(TABLE.queries), 4)
-        self.assertIn("ExclusiveStartKey", TABLE.queries[-1])
-
-    def test_stale_attempt_cannot_complete(self):
-        TABLE.fail_update = "ConditionalCheckFailedException"
-        completed = self.adapter._complete(
-            job(state="RUNNING"),
-            "a" * 32,
-            "SUCCEEDED",
-            result={"ok": True},
-        )
-        self.assertFalse(completed)
-        condition = TABLE.updates[-1]["ConditionExpression"]
-        self.assertIn("attemptId=:attempt", condition)
-
-    def test_expired_attempt_is_requeued_for_crash_recovery(self):
-        running = job(state="RUNNING")
-        running.update(
-            {
-                "attemptId": "a" * 32,
-                "attemptDeadlineEpoch": int(time.time()) - 1,
-                "attemptCount": 1,
-            }
-        )
-        self.assertTrue(self.adapter._recover_expired(running))
-        update = TABLE.updates[-1]
-        self.assertIn("SET #state=:queued", update["UpdateExpression"])
-        self.assertIn("REMOVE attemptId", update["UpdateExpression"])
-
-    def test_malformed_job_is_rejected_and_next_job_continues(self):
-        malformed = job(request={"decimal": decimal.Decimal("1.2")})
-        valid = job()
-        valid["jobId"] = "job_" + "C" * 22
-        valid["sk"] = "JOB#" + valid["jobId"]
-        TABLE.pages = [[malformed, valid]]
-        executed: list[str] = []
-        with mock.patch.object(
-            self.adapter,
-            "_execute",
-            side_effect=lambda item, _attempt: executed.append(item["jobId"]),
-        ):
-            processed = self.adapter._process_partition(f"SESSION#{SESSION}")
-        self.assertEqual(processed, 1)
-        self.assertEqual(executed, [valid["jobId"]])
+            result = self.adapter._post_mutation("POST_ANALYZE", request)
+        companion.assert_called_once_with("/v2/analyze", request["originalRequest"])
         self.assertEqual(
-            TABLE.updates[0]["ExpressionAttributeValues"][":receipt"]["error"][
-                "code"
-            ],
-            "INVALID_CORE_JOB",
+            result["schemaVersion"],
+            "archon.datahub-post-mutation-analysis-result/v1",
+        )
+        self.assertEqual(result["sourceMutationAuditId"], AUDIT)
+        self.assertEqual(
+            result["postMutationResultDigest"],
+            module._digest(result["postMutationResult"]),
         )
 
-    def test_unapproved_forged_or_multi_target_mutations_fail_closed(self):
-        valid = governed_request()
-        self.assertTrue(adapter_module._valid_governed_request(valid))
+    def test_post_tag_read_rejects_live_state_drift(self):
+        request = post_request("POST_READ_TAGS")
+        with mock.patch.object(self.adapter, "_read_tags", return_value=state([])):
+            with self.assertRaises(RuntimeError):
+                self.adapter._post_mutation("POST_READ_TAGS", request)
 
-        unapproved = {**valid, "approval": {**valid["approval"], "decision": "DENY"}}
-        self.assertFalse(adapter_module._valid_governed_request(unapproved))
+    def test_core_consumer_ignores_cloud_mismatch_and_legacy_jobs(self):
+        cloud = runtime_job(profile_id="cloud")
+        generation_mismatch = runtime_job()
+        generation_mismatch["generation"] = "other-generation"
+        capability_mismatch = runtime_job()
+        capability_mismatch["capabilityDigest"] = "sha256:" + "c" * 64
+        legacy = runtime_job(schema="archon.core-runtime-job/v1")
+        TABLE.items.extend([cloud, generation_mismatch, capability_mismatch, legacy])
+        with mock.patch.object(self.adapter, "_execute") as execute:
+            self.assertEqual(self.adapter.process_once(), 0)
+        execute.assert_not_called()
+        self.assertEqual(TABLE.updates, [])
+        self.assertFalse(self.adapter._valid(cloud, f"SESSION#{SESSION}"))
+        self.assertFalse(self.adapter._valid(generation_mismatch, f"SESSION#{SESSION}"))
+        self.assertFalse(self.adapter._valid(capability_mismatch, f"SESSION#{SESSION}"))
+        self.assertFalse(self.adapter._valid(legacy, f"SESSION#{SESSION}"))
 
-        forged = {**valid, "planDigest": "sha256:" + "9" * 64}
-        self.assertFalse(adapter_module._valid_governed_request(forged))
-
-        wrong_tag = {
-            **valid,
-            "arguments": {
-                **valid["arguments"],
-                "tagUrns": ["urn:li:tag:Sensitive"],
-            },
-        }
-        wrong_tag["requestDigest"] = adapter_module._digest(
-            {key: value for key, value in wrong_tag.items() if key != "requestDigest"}
-        )
-        self.assertFalse(adapter_module._valid_governed_request(wrong_tag))
-
-        multi = {
-            **valid,
-            "arguments": {
-                **valid["arguments"],
-                "entityUrns": [DATASET, DATASET],
-                "columnPaths": ["email", "phone"],
-            },
-        }
-        multi["requestDigest"] = adapter_module._digest(
-            {key: value for key, value in multi.items() if key != "requestDigest"}
-        )
-        self.assertFalse(adapter_module._valid_governed_request(multi))
-
-    def test_mutation_job_requires_separate_partition(self):
-        request = governed_request()
-        direct = job(
-            operation="GOVERNED_TAG_MUTATION",
-            request=request,
-            partition=f"SESSION#{SESSION}",
-        )
-        isolated = {
-            **direct,
-            "pk": f"MUTATION#{SESSION}",
-        }
-        self.assertFalse(
-            self.adapter._valid(direct, f"SESSION#{SESSION}")
-        )
+    def test_terminal_receipt_preserves_immutable_request_and_runtime_binding(self):
+        item = runtime_job()
+        item["state"] = "RUNNING"
+        original_request = item["request"]
         self.assertTrue(
-            self.adapter._valid(isolated, f"MUTATION#{SESSION}")
+            self.adapter._complete(
+                item, "f" * 32, "SUCCEEDED", result={"ok": True}
+            )
         )
+        update = TABLE.updates[-1]
+        self.assertNotIn("request", update["UpdateExpression"])
+        self.assertIs(item["request"], original_request)
+        receipt = update["ExpressionAttributeValues"][":receipt"]
+        self.assertEqual(receipt["schema"], "archon.runtime-bound-job-receipt/v2")
+        self.assertEqual(receipt["profileId"], "core")
+        self.assertIn("#schema=:schema", update["ConditionExpression"])
+        self.assertIn("profileId=:profile", update["ConditionExpression"])
 
-    def test_governed_write_verifies_before_and_after(self):
-        request = governed_request()
-        before = [{"schemaMetadata": {"fields": [{"fieldPath": "email", "tags": []}]}}]
-        after = [
-            {
-                "schemaMetadata": {
-                    "fields": [
-                        {
-                            "fieldPath": "email",
-                            "tags": [{"tag": {"urn": "urn:li:tag:PII"}}],
-                        }
-                    ]
-                }
-            }
-        ]
-        calls = [before, {"success": True}, after]
-        with mock.patch.object(
-            self.adapter, "_mcp_call", side_effect=calls
-        ) as mcp:
-            result = self.adapter._governed_mutation(request)
-        self.assertTrue(result["verified"])
-        self.assertEqual(result["requestDigest"], request["requestDigest"])
-        self.assertRegex(result["responseDigest"], r"^sha256:[a-f0-9]{64}$")
-        self.assertEqual(
-            [call.args[0] for call in mcp.call_args_list],
-            ["get_entities", "add_tags", "get_entities"],
-        )
-
-    def test_receipt_bound_prevents_dynamodb_item_overflow(self):
-        self.adapter._complete(
-            job(state="RUNNING"),
-            "a" * 32,
-            "SUCCEEDED",
-            result={"payload": "x" * (adapter_module.MAX_RECEIPT_BYTES + 1)},
-        )
-        receipt = TABLE.updates[-1]["ExpressionAttributeValues"][":receipt"]
-        self.assertEqual(receipt["state"], "FAILED")
-        self.assertEqual(receipt["error"]["code"], "CORE_JOB_RECEIPT_TOO_LARGE")
+    def test_post_operations_are_session_only_and_adapter_never_enqueues(self):
+        item = runtime_job()
+        self.assertTrue(self.adapter._valid(item, f"SESSION#{SESSION}"))
+        self.assertFalse(self.adapter._valid(item, f"MUTATION#{SESSION}"))
+        source = path.read_text(encoding="utf-8")
+        self.assertNotIn(".put_item(", source)
+        self.assertNotIn("authorization_digest", source)
+        self.assertNotIn("_governed_gateway_key", source)
 
 
 if __name__ == "__main__":
