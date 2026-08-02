@@ -36,7 +36,8 @@ describe("ephemeral DataHub Core stack", () => {
         "DataHubCoreGeneration",
         "DataHubCoreCapabilityDigest",
         "DataHubCoreImageManifestDigest",
-        "DynamoDbPrefixListId"
+        "DynamoDbPrefixListId",
+        "DataHubCoreBedrockModelId"
       ])
     );
     expect(
@@ -91,30 +92,49 @@ describe("ephemeral DataHub Core stack", () => {
     expect(serialized).not.toContain('"AssociatePublicIpAddress":true');
   });
 
-  test("has no ingress and limits host egress to the DynamoDB prefix list", () => {
+  test("uses a runtime-created inference endpoint and exact security-group paths", () => {
     const template = synthesized();
-    expect(
-      Object.keys(resources(template, "AWS::EC2::SecurityGroupIngress"))
-    ).toHaveLength(0);
-    const egress = Object.values(
-      resources(template, "AWS::EC2::SecurityGroupEgress")
+    const ingress = Object.values(
+      resources(template, "AWS::EC2::SecurityGroupIngress")
     ) as any[];
-    expect(egress).toHaveLength(1);
-    expect(egress[0].Properties).toEqual(
+    expect(ingress).toHaveLength(1);
+    expect(ingress[0].Properties).toEqual(
       expect.objectContaining({
         IpProtocol: "tcp",
         FromPort: 443,
         ToPort: 443,
-        DestinationPrefixListId: { Ref: "DynamoDbPrefixListId" }
+        SourceSecurityGroupId: expect.any(Object),
+        GroupId: expect.any(Object)
       })
+    );
+    const egress = Object.values(
+      resources(template, "AWS::EC2::SecurityGroupEgress")
+    ) as any[];
+    expect(egress).toHaveLength(2);
+    expect(egress).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Properties: expect.objectContaining({
+            DestinationPrefixListId: { Ref: "DynamoDbPrefixListId" }
+          })
+        }),
+        expect.objectContaining({
+          Properties: expect.objectContaining({
+            DestinationSecurityGroupId: expect.any(Object)
+          })
+        })
+      ])
     );
     const endpoints = Object.values(
       resources(template, "AWS::EC2::VPCEndpoint")
     ) as any[];
     expect(endpoints).toHaveLength(1);
     expect(endpoints[0].Properties.VpcEndpointType).toBe("Gateway");
+    const serialized = JSON.stringify(template);
+    expect(serialized).toContain("ec2:CreateVpcEndpoint");
+    expect(serialized).toContain("ec2:DeleteVpcEndpoints");
+    expect(serialized).toContain("CORE_BEDROCK_SERVICE_NAME");
   });
-
   test("uses Step Functions as the sole Auto Scaling owner", () => {
     const template = synthesized();
     const serialized = JSON.stringify(template);
