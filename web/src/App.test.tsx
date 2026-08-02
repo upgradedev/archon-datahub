@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { previewAudit } from "./fixtures";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const authMocks = vi.hoisted(() => ({
-  snapshot: { status: "anonymous" } as const,
+  snapshot: { status: "anonymous" } as
+    | { status: "anonymous" }
+    | { status: "authenticated"; expiresAt: number },
   beginSignIn: vi.fn(async () => undefined),
   signOut: vi.fn(),
 }));
@@ -18,24 +19,71 @@ vi.mock("./auth", () => ({
   subscribeToAuth: () => () => undefined,
 }));
 
+const runtimeMocks = vi.hoisted(() => ({
+  loadRuntimeAgentStack: vi.fn(),
+  requestRuntimeImproveContext: vi.fn(),
+  resumeRuntimeAgentStack: vi.fn(),
+  submitRuntimeApproval: vi.fn(),
+}));
+
+vi.mock("./runtime-api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./runtime-api")>();
+  return {
+    ...actual,
+    loadRuntimeAgentStack: runtimeMocks.loadRuntimeAgentStack,
+    requestRuntimeImproveContext: runtimeMocks.requestRuntimeImproveContext,
+    resumeRuntimeAgentStack: runtimeMocks.resumeRuntimeAgentStack,
+    submitRuntimeApproval: runtimeMocks.submitRuntimeApproval,
+  };
+});
+
+vi.mock("./RuntimeControl", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  return {
+    RuntimeControl: ({
+      onSessionChange,
+    }: {
+      onSessionChange?: (session: unknown) => void;
+    }) => {
+      React.useEffect(() => {
+        onSessionChange?.({
+          schemaVersion: "archon.runtime-session-status/v1",
+          sessionId: `rs_${"R".repeat(43)}`,
+          requestedProfile: "auto",
+          resolvedProfile: "cloud",
+          state: "READY",
+          createdAt: "2026-08-02T08:00:00.000Z",
+          updatedAt: "2026-08-02T08:00:01.000Z",
+          idleExpiresAt: "2026-08-02T08:30:01.000Z",
+          hardExpiresAt: "2026-08-02T10:00:00.000Z",
+          remainingSeconds: 1800,
+          canRun: true,
+          canExtend: true,
+        });
+      }, [onSessionChange]);
+      return React.createElement(
+        "div",
+        { "data-testid": "runtime-control-fixture" },
+        "Pinned Cloud runtime ready",
+      );
+    },
+  };
+});
+
 import { App } from "./App";
+
+beforeEach(() => {
+  authMocks.snapshot = { status: "anonymous" };
+  runtimeMocks.loadRuntimeAgentStack.mockReset();
+  runtimeMocks.requestRuntimeImproveContext.mockReset();
+  runtimeMocks.resumeRuntimeAgentStack.mockReset();
+  runtimeMocks.submitRuntimeApproval.mockReset();
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-
-function json(value: unknown): Response {
-  return {
-    status: 200,
-    ok: true,
-    headers: {
-      get: (name: string) =>
-        name.toLowerCase() === "content-type" ? "application/json" : null,
-    },
-    json: async () => value,
-  } as unknown as Response;
-}
 
 describe("Archon control plane", () => {
   it("renders the product-specific integrity view with an explicit fixture label", () => {
@@ -98,200 +146,183 @@ describe("Archon control plane", () => {
     expect(screen.getByText(/no backend decision or mutation was sent/i)).toBeInTheDocument();
   });
 
-  it("locks live approval controls until Cognito authenticates the steward", async () => {
-    const auditId = "a".repeat(64);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-start/v1",
-          auditId,
-          status: "RUNNING",
-          pollUrl: `/api/control-loops/${auditId}`,
-          submittedAt: "2026-07-23T12:00:00.000Z",
-        }),
-      )
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-status/v1",
-          auditId,
-          status: "AWAITING_APPROVAL",
-          submittedAt: "2026-07-23T12:00:00.000Z",
-          updatedAt: "2026-07-23T12:00:02.000Z",
-          releaseSha: "live-release-sha",
-          report: previewAudit.report,
-          approval: {
-            approvalId: "approval-g6-customer-email-001",
-            status: "PENDING",
-            expiresAt: "2026-08-10T20:59:00.000Z",
-            planDigest: `sha256:${"1".repeat(64)}`,
-            evidenceDigest: `sha256:${"2".repeat(64)}`,
-          },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
+  it("locks the live Agent Stack until Cognito authenticates the steward", async () => {
     render(<App />);
 
-    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
-
-    expect(await screen.findByText("Live DataHub")).toBeInTheDocument();
     expect(
-      screen.getByText(/live decisions are locked until cognito sign-in/i),
+      await screen.findByLabelText("Canonical DataHub dataset URN"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve exact plan" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Reject proposal" })).toBeDisabled();
-    expect(screen.getByText(/immutable evidence is ready/i)).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
-      "/api/control-loops",
-      expect.objectContaining({ method: "POST" }),
+    const run = screen.getByRole("button", {
+      name: "Run canonical Agent Stack",
+    });
+    expect(run).toBeDisabled();
+    fireEvent.click(run);
+    expect(runtimeMocks.loadRuntimeAgentStack).not.toHaveBeenCalled();
+    expect(screen.getByText("Pinned Cloud runtime ready")).toBeInTheDocument();
+  });
+
+  it("renders the bounded four-component DataHub execution receipt", async () => {
+    authMocks.snapshot = {
+      status: "authenticated",
+      expiresAt: Date.now() + 60_000,
+    };
+    const status = {
+      schemaVersion: "archon.runtime-control-loop-status/v2",
+      auditId: "e".repeat(64),
+      status: "SUCCEEDED",
+      phase: "COMPLETE",
+      runtimeEvidence: {
+        digest: `sha256:${"1".repeat(64)}`,
+        runtimeBinding: { profileId: "cloud" },
+      },
+      agentStackResult: {
+        context: {
+          digest: `sha256:${"2".repeat(64)}`,
+          entityUrns: [
+            "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+          ],
+          receipts: [
+            { tool: "search" },
+            { tool: "get_entities" },
+            { tool: "get_lineage_downstream" },
+          ],
+          unknownPreserved: false,
+        },
+        skills: {
+          digest: `sha256:${"3".repeat(64)}`,
+          workflow: [
+            "datahub-search",
+            "datahub-lineage",
+            "datahub-quality",
+            "datahub-audit",
+            "datahub-enrich",
+          ],
+        },
+        analytics: {
+          digest: `sha256:${"4".repeat(64)}`,
+          events: [
+            { event: "SQL", statementDigest: `sha256:${"5".repeat(64)}` },
+            { event: "RESULT", rowCount: 1 },
+            { event: "CHART", chart: "bar" },
+            { event: "COMPLETE", answer: "Enterprise generated the highest Q2 net revenue." },
+          ],
+          contextQuality: {
+            status: "verified",
+            score: 5,
+            label: "excellent",
+            reason: "Grounded by ACK, official MCP reads, and reviewed Skills.",
+          },
+        },
+      },
+    };
+    runtimeMocks.loadRuntimeAgentStack.mockResolvedValueOnce(status);
+    render(<App />);
+
+    const run = await screen.findByRole("button", {
+      name: "Run canonical Agent Stack",
+    });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
+
+    const panel = await screen.findByTestId("agent-stack-panel");
+    await waitFor(() =>
+      expect(within(panel).getByText("SUCCEEDED · COMPLETE")).toBeInTheDocument(),
     );
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      `/api/control-loops/${auditId}`,
-      expect.objectContaining({ method: "GET" }),
+    expect(within(panel).getByText("DataHub Cloud · managed")).toBeInTheDocument();
+    expect(within(panel).getByText("5/5")).toBeInTheDocument();
+    expect(within(panel).getByText("excellent")).toBeInTheDocument();
+    expect(within(panel).getByText("SQL")).toBeInTheDocument();
+    expect(within(panel).getByText("CHART")).toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("run_private_backend_handle");
+    expect(runtimeMocks.loadRuntimeAgentStack).toHaveBeenCalledWith(
+      "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+      "Which customer segment generated the highest net revenue in Q2 2026, and is customers.customer_email governed as PII?",
+      `rs_${"R".repeat(43)}`,
+      "TEST_ONLY_TOKEN_000000000000",
+      expect.any(AbortSignal),
+      expect.any(Function),
     );
   });
 
-  it("renders only the bounded live model provenance projection", async () => {
-    const auditId = "e".repeat(64);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-start/v1",
-          auditId,
-          status: "RUNNING",
-          pollUrl: `/api/control-loops/${auditId}`,
-          submittedAt: "2026-07-23T12:00:00.000Z",
-        }),
-      )
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-status/v1",
-          auditId,
-          status: "AWAITING_APPROVAL",
-          submittedAt: "2026-07-23T12:00:00.000Z",
-          updatedAt: "2026-07-23T12:00:02.000Z",
-          releaseSha: "live-model-release",
-          report: {
-            ...previewAudit.report,
-            modelProvenance: {
-              schemaVersion: "archon.model-runtime-provenance/v1",
-              source: "live-provider",
-              modelCall: true,
-              provider: "qwen",
-              requestedModel: "qwen-plus",
-              returnedModel: "qwen-plus-2026-07",
-              providerResponseId: "chatcmpl_archon_123",
-              tokenUsage: {
-                inputTokens: 120,
-                outputTokens: 30,
-                totalTokens: 150,
-              },
-              latencyMs: 842,
-            },
-          },
-          approval: {
-            approvalId: "approval-g6-customer-email-001",
-            status: "PENDING",
-            expiresAt: "2026-08-10T20:59:00.000Z",
-            planDigest: `sha256:${"1".repeat(64)}`,
-            evidenceDigest: `sha256:${"2".repeat(64)}`,
-          },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
+  it("renders only the sanitized governed MCP and KMS proof", async () => {
+    authMocks.snapshot = {
+      status: "authenticated",
+      expiresAt: Date.now() + 60_000,
+    };
+    const status = {
+      schemaVersion: "archon.runtime-control-loop-status/v2",
+      auditId: "b".repeat(64),
+      status: "SUCCEEDED",
+      phase: "COMPLETE",
+      runtimeEvidence: {
+        digest: `sha256:${"6".repeat(64)}`,
+        runtimeBinding: { profileId: "core" },
+      },
+      agentStackResult: {
+        context: {
+          digest: `sha256:${"7".repeat(64)}`,
+          entityUrns: [
+            "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+          ],
+          receipts: [{ tool: "get_entities" }],
+          unknownPreserved: false,
+        },
+        skills: {
+          digest: `sha256:${"8".repeat(64)}`,
+          workflow: ["datahub-search", "datahub-enrich"],
+        },
+        analytics: {
+          digest: `sha256:${"9".repeat(64)}`,
+          events: [{ event: "COMPLETE" }],
+          contextQuality: { score: 5, label: "excellent" },
+        },
+      },
+      remediation: {
+        verified: true,
+        mutationExecutor: "official-datahub-mcp",
+        receiptDigest: `sha256:${"a".repeat(64)}`,
+        policyDigest: `sha256:${"b".repeat(64)}`,
+        afterDigest: `sha256:${"c".repeat(64)}`,
+        authorizationEvidence: {
+          keyReferenceDigest: `sha256:${"d".repeat(64)}`,
+          envelopeDigest: `sha256:${"e".repeat(64)}`,
+        },
+        officialMcpMutation: {
+          approvalDigest: `sha256:${"f".repeat(64)}`,
+        },
+      },
+      contextDelta: {
+        ackContextChanged: true,
+        analyticsResultChanged: true,
+      },
+      skillCompletion: {
+        sourceArtifactDigest: `sha256:${"1".repeat(64)}`,
+        previewSkillReceiptDigest: `sha256:${"2".repeat(64)}`,
+        skillGroundingDigest: `sha256:${"3".repeat(64)}`,
+        officialMcpMutationReceiptDigest: `sha256:${"4".repeat(64)}`,
+      },
+    };
+    runtimeMocks.loadRuntimeAgentStack.mockResolvedValueOnce(status);
     render(<App />);
 
-    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
+    const run = await screen.findByRole("button", {
+      name: "Run canonical Agent Stack",
+    });
+    await waitFor(() => expect(run).toBeEnabled());
+    fireEvent.click(run);
 
-    await screen.findByText("Live model call");
-    const panel = screen.getByTestId("model-provenance");
-    expect(within(panel).getByText("Live model call")).toBeInTheDocument();
-    expect(within(panel).getByText("qwen", { exact: true })).toBeInTheDocument();
-    expect(within(panel).getByText("qwen-plus")).toBeInTheDocument();
-    expect(within(panel).getByText("qwen-plus-2026-07")).toBeInTheDocument();
-    expect(within(panel).getByText("chatcmpl_archon_123")).toBeInTheDocument();
-    expect(panel).toHaveTextContent("120 in · 30 out · 150 total");
-    expect(panel).toHaveTextContent("842 ms");
-    expect(panel).not.toHaveTextContent("https://provider.example.test");
-    expect(panel).not.toHaveTextContent("private prompt body");
-    expect(panel).not.toHaveTextContent("provider raw response");
-  });
-
-  it("renders only the sanitized, verified terminal evidence projection", async () => {
-    const auditId = "b".repeat(64);
-    const receiptDigest = `sha256:${"7".repeat(64)}`;
-    const executionEvidenceDigest = `sha256:${"8".repeat(64)}`;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-start/v1",
-          auditId,
-          status: "RUNNING",
-          pollUrl: `/api/control-loops/${auditId}`,
-          submittedAt: "2026-07-23T12:00:00.000Z",
-        }),
-      )
-      .mockResolvedValueOnce(
-        json({
-          schemaVersion: "archon.control-loop-status/v1",
-          auditId,
-          status: "SUCCEEDED",
-          submittedAt: "2026-07-23T12:00:00.000Z",
-          updatedAt: "2026-07-23T12:01:03.000Z",
-          completedAt: "2026-07-23T12:01:03.000Z",
-          releaseSha: "live-terminal-release",
-          report: previewAudit.report,
-          approval: {
-            approvalId: "approval-g6-customer-email-001",
-            status: "DECIDED",
-            expiresAt: "2026-07-30T12:00:00.000Z",
-            planDigest: `sha256:${"1".repeat(64)}`,
-            evidenceDigest: `sha256:${"2".repeat(64)}`,
-            decision: "APPROVE",
-          },
-          result: {
-            outcome: "VERIFIED",
-            receiptDigest,
-            executionEvidenceDigest,
-            completedAt: "2026-07-23T12:01:02.000Z",
-            verification: {
-              checks: [
-                { checkId: "TARGET_UNCHANGED", passed: true },
-                { checkId: "PREEXISTING_TAGS_PRESERVED", passed: true },
-                { checkId: "POLICY_TAG_PRESENT", passed: true },
-                { checkId: "NO_UNEXPECTED_TAGS", passed: true },
-                { checkId: "APPROVAL_BINDING_VALID", passed: true },
-              ],
-              eventCount: 7,
-              rollbackAvailability: "ELIGIBLE",
-            },
-          },
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-    render(<App />);
-
-    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
-
-    const evidence = await screen.findByTestId("terminal-evidence");
-    expect(evidence).toHaveAttribute("id", "judge-tour-terminal-proof");
-    expect(within(evidence).getByText("VERIFIED")).toBeInTheDocument();
-    expect(within(evidence).getByText("5/5 passed")).toBeInTheDocument();
-    expect(within(evidence).getByText("7")).toBeInTheDocument();
-    expect(within(evidence).getByText("ELIGIBLE")).toBeInTheDocument();
-    expect(
-      within(evidence).getByText("APPROVAL_BINDING_VALID"),
-    ).toBeInTheDocument();
-    expect(within(evidence).getByTitle(receiptDigest)).toBeInTheDocument();
-    expect(within(evidence).getByTitle(executionEvidenceDigest)).toBeInTheDocument();
-    expect(evidence).not.toHaveTextContent("taskToken");
-    expect(evidence).not.toHaveTextContent("private-steward-subject");
+    const proof = await screen.findByTestId("governed-proof");
+    expect(within(proof).getByText("Official MCP · add_tags")).toBeInTheDocument();
+    expect(within(proof).getByTestId("kms-authority-proof")).toHaveTextContent(
+      "KMS-signed authority verified",
+    );
+    expect(within(proof).getByTestId("enrich-skill-completion")).toHaveTextContent(
+      "executed-with-human-approval",
+    );
+    expect(screen.getByTestId("agent-runtime-profile")).toHaveTextContent(
+      "DataHub Core · ephemeral",
+    );
+    expect(proof).not.toHaveTextContent("privateKey");
+    expect(proof).not.toHaveTextContent("accessToken");
   });
 });
