@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { App, DefaultStackSynthesizer, Tags } from "aws-cdk-lib";
 import { ArchonEdgeStack } from "../lib/archon-edge-stack";
+import { ArchonEphemeralDataHubCoreStack } from "../lib/ephemeral-datahub-core-stack";
 import { ArchonPlatformStack, ArchonRegistryStack } from "../lib/archon-stack";
 
 const app = new App();
@@ -11,6 +12,13 @@ if (!/^[a-z][a-z0-9-]{1,15}$/.test(stage)) {
 if (stage !== "staging" && stage !== "production") {
   throw new Error("CDK context 'stage' must be exactly staging or production");
 }
+const includeCoreValue = String(
+  app.node.tryGetContext("includeCore") ?? "false"
+).toLowerCase();
+if (includeCoreValue !== "true" && includeCoreValue !== "false") {
+  throw new Error("CDK context 'includeCore' must be exactly true or false");
+}
+const includeCore = includeCoreValue === "true";
 const bootstrapQualifier = stage === "production" ? "archonprd" : "archonstg";
 const stackSynthesizer = (): DefaultStackSynthesizer =>
   new DefaultStackSynthesizer({ qualifier: bootstrapQualifier });
@@ -48,6 +56,16 @@ const edge = new ArchonEdgeStack(app, `Archon-${stage}-Edge`, {
   terminationProtection: stage === "production"
 });
 
+const core = includeCore
+  ? new ArchonEphemeralDataHubCoreStack(app, `Archon-${stage}-Core`, {
+      env,
+      stage,
+      description: `Archon DataHub ${stage} zero-idle ephemeral Core runtime`,
+      synthesizer: stackSynthesizer(),
+      terminationProtection: stage === "production"
+    })
+  : undefined;
+
 const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
   env,
   stage,
@@ -60,7 +78,12 @@ if (registry !== undefined) {
   platform.addStackDependency(registry);
 }
 
-for (const stack of [edge, platform, ...(registry === undefined ? [] : [registry])]) {
+for (const stack of [
+  edge,
+  platform,
+  ...(registry === undefined ? [] : [registry]),
+  ...(core === undefined ? [] : [core])
+]) {
   Tags.of(stack).add("Application", "archon-datahub");
   Tags.of(stack).add("ManagedBy", "aws-cdk");
   Tags.of(stack).add(
