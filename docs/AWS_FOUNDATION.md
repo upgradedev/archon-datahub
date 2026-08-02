@@ -103,10 +103,12 @@ and always removes its twenty-minute recovery authorization. Its receipt is
 checksum-sealed and attested. Do not run Foundation until the migration and its
 automatic cleanup both succeed.
 
-Foundation then creates `CloudRuntimeImagePublisherRole` inside the existing
-`Archon-GitHub-Production-Deploy-Role` stack under `IsProduction`. The existing
-production deploy role and all existing outputs remain unchanged; the stack
-adds only `CloudRuntimeImagePublisherRoleArn` and
+Foundation creates `GitHubDataHubCloudTrialRole` in both matching
+`Archon-GitHub-<Stage>-Deploy-Role` stacks and creates
+`CloudRuntimeImagePublisherRole` only in production. Existing deploy roles and
+prior outputs remain unchanged. Each stage adds
+`GitHubDataHubCloudTrialRoleArn` and `GitHubDataHubCloudTrialRoleName`;
+production additionally adds `CloudRuntimeImagePublisherRoleArn` and
 `CloudRuntimeImagePublisherRoleName`.
 
 The publisher trust is exact: protected `production` environment, `master`, this
@@ -118,9 +120,29 @@ single repository only with the required ownership tags, publish/inspect images,
 and delete bounded image tags. It cannot delete or re-policy the repository,
 change lifecycle configuration, or use IAM/KMS.
 
-After a successful Foundation run, copy the verified non-sensitive handoff value
-from `steps.reconcile.outputs.cloud_runtime_publisher_role_arn` into the
-protected production environment variable `AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN`.
+The sanitized operational-role receipt is exact and ordered:
+`judge-staging`, `datahub-cloud-trial-staging`, `judge-production`,
+`datahub-cloud-trial-production`, `cloud-runtime-publisher`,
+`posture-observer`, `runtime-read`, and `paging-test`. Both trial-role bindings
+participate in the combined binding digest.
+
+After a successful Foundation run, wire only the verified in-memory outputs:
+
+- `steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn` to staging
+  `AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN`;
+- `steps.reconcile.outputs.datahub_cloud_trial_production_role_arn` to
+  production `AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN`;
+- `steps.reconcile.outputs.cloud_runtime_publisher_role_arn` to production
+  `AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN`;
+- `steps.core_ami_foundation.outputs.build_role_arn` and
+  `steps.core_ami_foundation.outputs.instance_profile` to staging
+  `AWS_CORE_AMI_BUILD_ROLE_ARN` and
+  `AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE`.
+
+Do not persist an environment or JSON handoff file. To pass a value from the
+current shell without placing it in command history, omit `--body` and use
+standard input, for example:
+`printf '%s' "$value" | gh variable set NAME --env ENV -R upgradedev/archon-datahub`.
 Then publish by pushing the intended release commit to `master`, or dispatch the
 workflow manually. Manual dispatch accepts no revision input and is bound to the
 exact current `master` workflow/source SHA, so it cannot reinterpret a release SHA.
@@ -131,8 +153,10 @@ Safe dispatch order for one exact signed master SHA is:
 2. run the identity v1-to-v2 migration above;
 3. run the Core AMI control-policy v2-to-v3 migration;
 4. run AWS Foundation with `BOOTSTRAP_CDK_FOUNDATION`;
-5. set the verified production publisher-role variable;
-6. publish the Cloud runtime image from the exact release push.
+5. wire the verified staging/production trial-role, production publisher-role,
+   and staging Core AMI role/profile outputs;
+6. publish the companion and Cloud runtime images for the exact release push;
+7. build the Core AMI from the exact signed companion push.
 
 All steps share the AWS control-plane locks and must be allowed to finish their
 mandatory cleanup before the next mutation starts.
