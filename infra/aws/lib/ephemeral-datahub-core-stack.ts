@@ -379,23 +379,95 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         "sessionId.$": "$.lifecycle.sessionId",
         "expectedRevision.$": "$.lifecycle.revision"
       }),
-      payloadResponseOnly: true
+      payloadResponseOnly: true,
+      resultPath: "$.lifecycle"
     });
     const complete = new sfn.Succeed(this, "CoreLifecycleComplete");
     const rejected = new sfn.Fail(this, "CoreLifecycleRejected", {
       error: "CoreLifecycleRejected",
       cause: "The authoritative lease rejected the command"
     });
+    const watchdog = new sfn.Wait(this, "WaitForExactCoreLeaseDeadline", {
+      time: sfn.WaitTime.timestampPath("$.lifecycle.watchdogDeadline")
+    });
+    const watchdogReap = new tasks.LambdaInvoke(
+      this,
+      "ReapExactCoreLeaseRevision",
+      {
+        lambdaFunction: lifecycleFunction,
+        payload: sfn.TaskInput.fromObject({
+          schema: "archon.core-runtime-command/v1",
+          action: "REAP",
+          "expectedSessionId.$": "$.lifecycle.sessionId",
+          "expectedRevision.$": "$.lifecycle.revision",
+          "deadlineEpoch.$": "$.lifecycle.watchdogDeadlineEpoch"
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.lifecycle"
+      }
+    );
+    const watchdogScaleDown = new tasks.CallAwsService(
+      this,
+      "ScaleExpiredCoreDown",
+      {
+        service: "autoscaling",
+        action: "updateAutoScalingGroup",
+        parameters: {
+          AutoScalingGroupName: this.autoScalingGroup.autoScalingGroupName,
+          DesiredCapacity: 0
+        },
+        iamResources: [this.autoScalingGroup.autoScalingGroupArn],
+        resultPath: sfn.JsonPath.DISCARD
+      }
+    );
+    const watchdogFinalize = new tasks.LambdaInvoke(
+      this,
+      "FinalizeExpiredCoreLease",
+      {
+        lambdaFunction: lifecycleFunction,
+        payload: sfn.TaskInput.fromObject({
+          schema: "archon.core-runtime-command/v1",
+          action: "FINALIZE",
+          "decision.$": "$.lifecycle.decision",
+          "operationId.$": "$.lifecycle.operationId",
+          "sessionId.$": "$.lifecycle.sessionId",
+          "expectedRevision.$": "$.lifecycle.revision"
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.lifecycle"
+      }
+    );
+    watchdogScaleDown.next(watchdogFinalize).next(complete);
+    const watchdogDecision = new sfn.Choice(this, "ExactWatchdogScaleDecision")
+      .when(
+        sfn.Condition.stringEquals("$.lifecycle.decision", "DOWNSCALE"),
+        watchdogScaleDown
+      )
+      .when(sfn.Condition.stringEquals("$.lifecycle.decision", "NONE"), complete)
+      .otherwise(rejected);
+    watchdog.next(watchdogReap).next(watchdogDecision);
+    const maybeWatchdog = new sfn.Choice(this, "ScheduleExactCoreWatchdog")
+      .when(
+        sfn.Condition.and(
+          sfn.Condition.isPresent("$.lifecycle.watchdog"),
+          sfn.Condition.booleanEquals("$.lifecycle.watchdog", true)
+        ),
+        watchdog
+      )
+      .otherwise(complete);
     scaleUp.next(finalize);
     scaleDown.next(finalize);
-    finalize.next(complete);
+    finalize.next(maybeWatchdog);
     const decide = new sfn.Choice(this, "CoreScaleDecision")
       .when(sfn.Condition.stringEquals("$.lifecycle.decision", "UPSCALE"), scaleUp)
       .when(
         sfn.Condition.stringEquals("$.lifecycle.decision", "DOWNSCALE"),
         scaleDown
       )
-      .when(sfn.Condition.stringEquals("$.lifecycle.decision", "NONE"), complete)
+      .when(
+        sfn.Condition.stringEquals("$.lifecycle.decision", "NONE"),
+        maybeWatchdog
+      )
       .otherwise(rejected);
     const definition = normalize.next(prepare).next(decide);
 
@@ -406,7 +478,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         stateMachineName: `archon-${stage}-datahub-core-session`,
         stateMachineType: sfn.StateMachineType.STANDARD,
         definitionBody: sfn.DefinitionBody.fromChainable(definition),
-        timeout: Duration.minutes(5),
+        timeout: Duration.hours(3),
         logs: {
           destination: stateMachineLogGroup,
           level: sfn.LogLevel.ERROR,
