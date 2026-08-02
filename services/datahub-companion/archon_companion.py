@@ -802,4 +802,148 @@ def grounded_prompt(
     return "ARCHON_GOVERNED_ANALYTICS_INPUT\n" + encoded.decode("utf-8")
 
 
+def handle_cipher() -> Fernet:
+    raw = os.environ.get("ARCHON_RUN_HANDLE_FERNET_KEY", "")
+    if not raw:
+        raise RuntimeError("run handle key is not configured")
+    try:
+        return Fernet(raw.encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as error:
+        raise RuntimeError("run handle key is invalid") from error
+
+
+def issue_run_handle(
+    conversation_id: str,
+    binding: RuntimeBinding,
+    context_digest: str,
+    grounding_digest: str,
+) -> str:
+    canonical_id = canonical_conversation_id(conversation_id)
+    now = utc_now()
+    expires = min(
+        binding.leaseExpiresAt.astimezone(UTC),
+        now + timedelta(minutes=30),
+    )
+    payload = {
+        "schemaVersion": "archon.analytics-run-handle/v1",
+        "conversationId": canonical_id,
+        "bindingDigest": binding_digest(binding),
+        "profileId": binding.profileId,
+        "generation": binding.generation,
+        "capabilityDigest": binding.capabilityDigest,
+        "contextDigest": context_digest,
+        "skillGroundingDigest": grounding_digest,
+        "issuedAt": int(now.timestamp()),
+        "expiresAt": int(expires.timestamp()),
+    }
+    token = handle_cipher().encrypt(canonical(payload)).decode("ascii")
+    handle = "run_" + token
+    if not RUN_HANDLE.fullmatch(handle):
+        raise RuntimeError("generated run handle is outside policy")
+    return handle
+
+
+def resolve_run_handle(
+    handle: str,
+    binding: RuntimeBinding,
+) -> dict[str, Any]:
+    validate_binding(binding)
+    if not RUN_HANDLE.fullmatch(handle):
+        raise HTTPException(400, "invalid run handle")
+    try:
+        raw = handle_cipher().decrypt(handle[4:].encode("ascii"))
+        if len(raw) > 4096:
+            raise ValueError("oversized")
+        payload = json.loads(raw)
+    except (InvalidToken, UnicodeEncodeError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(400, "invalid run handle") from error
+    expected_keys = {
+        "schemaVersion", "conversationId", "bindingDigest", "profileId",
+        "generation", "capabilityDigest", "contextDigest",
+        "skillGroundingDigest", "issuedAt", "expiresAt",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise HTTPException(400, "invalid run handle")
+    try:
+        canonical_id = canonical_conversation_id(payload["conversationId"])
+    except RuntimeError as error:
+        raise HTTPException(400, "invalid run handle") from error
+    now_epoch = int(utc_now().timestamp())
+    if (
+        payload["schemaVersion"] != "archon.analytics-run-handle/v1"
+        or not isinstance(payload["issuedAt"], int)
+        or isinstance(payload["issuedAt"], bool)
+        or not isinstance(payload["expiresAt"], int)
+        or isinstance(payload["expiresAt"], bool)
+        or payload["issuedAt"] > now_epoch
+        or payload["expiresAt"] <= now_epoch
+        or payload["expiresAt"] - payload["issuedAt"] > 1800
+        or payload["expiresAt"]
+        > int(binding.leaseExpiresAt.astimezone(UTC).timestamp())
+        or not DIGEST.fullmatch(str(payload["contextDigest"]))
+        or not DIGEST.fullmatch(str(payload["skillGroundingDigest"]))
+    ):
+        raise HTTPException(400, "expired or invalid run handle")
+    expected = {
+        "bindingDigest": binding_digest(binding),
+        "profileId": binding.profileId,
+        "generation": binding.generation,
+        "capabilityDigest": binding.capabilityDigest,
+    }
+    if any(
+        not isinstance(payload.get(key), str)
+        or not hmac.compare_digest(payload[key], value)
+        for key, value in expected.items()
+    ):
+        raise HTTPException(409, "run handle is bound to another runtime")
+    return {**payload, "conversationId": canonical_id}
+
+
+async def create_conversation() -> str:
+    engine_name = os.environ["ARCHON_ANALYTICS_ENGINE"]
+    async with analytics_client(httpx.Timeout(10.0, connect=3.0)) as client:
+        created = await bounded_json(
+            client,
+            "POST",
+            "/api/conversations",
+            body={
+                "title": "Archon governed judge analysis",
+                "engine_name": engine_name,
+            },
+        )
+    if not isinstance(created, dict) or created.get("engine_name") != engine_name:
+        raise RuntimeError("Analytics Agent conversation contract drift")
+    return canonical_conversation_id(created.get("id"))
+
+
+async def run_analytics(
+    question: str,
+    binding: RuntimeBinding,
+    context: dict[str, Any],
+    grounding: dict[str, Any],
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    conversation_id = await create_conversation()
+    events = await analytics_turn(
+        conversation_id,
+        grounded_prompt(question, binding, context, grounding),
+    )
+    quality = await context_quality(conversation_id)
+    handle = issue_run_handle(
+        conversation_id, binding, context["digest"], grounding["digest"],
+    )
+    projection = {
+        "schemaVersion": "archon.analytics-agent-result/v2",
+        "events": events,
+        "contextQuality": quality,
+        "runHandle": handle,
+        "preflightDigest": preflight["digest"],
+        "contextDigest": context["digest"],
+        "skillGroundingDigest": grounding["digest"],
+        "mutationsEnabled": False,
+        "improveContextCommandAvailable": True,
+    }
+    return {**projection, "digest": digest(projection)}
+
+
 # __ARCHON_APPEND__
