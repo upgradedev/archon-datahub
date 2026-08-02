@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const {
   DynamoDBClient,
   GetItemCommand,
@@ -31,6 +32,8 @@ const stepFunctions = new SFNClient({});
 const runtimeSessionTable = process.env.RUNTIME_SESSION_TABLE;
 const coreLeaseTable = process.env.CORE_LEASE_TABLE;
 const coreStateMachineArn = process.env.CORE_SESSION_STATE_MACHINE_ARN;
+const runtimeOperatorGroup =
+  process.env.RUNTIME_OPERATOR_GROUP || "archon-approvers";
 
 const MAX_BODY_BYTES = 1024;
 const REQUESTS = ["auto", "cloud", "core"];
@@ -75,6 +78,57 @@ function exactKeys(value, required) {
       (key) => typeof key === "string" && required.includes(key)
     ) &&
     required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function groupsFrom(claim) {
+  if (typeof claim !== "string") return [];
+  return claim
+    .replace(/[\[\]"]/gu, "")
+    .split(/[,\s]+/u)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseIdentity(value) {
+  if (
+    !exactKeys(value, ["subject", "issuer", "groups"]) ||
+    typeof value.subject !== "string" ||
+    value.subject.length < 1 ||
+    value.subject.length > 512 ||
+    /[^@-^_\u007f]/u.test(value.subject) ||
+    typeof value.issuer !== "string" ||
+    value.issuer.length < 8 ||
+    value.issuer.length > 2048 ||
+    !value.issuer.startsWith("https://") ||
+    /[^@-^_\u007f]/u.test(value.issuer) ||
+    typeof value.groups !== "string" ||
+    value.groups.length > 2048 ||
+    /[^@-^_\u007f]/u.test(value.groups)
+  ) {
+    throw new PublicError(401, "authenticated_runtime_operator_required");
+  }
+  if (!groupsFrom(value.groups).includes(runtimeOperatorGroup)) {
+    throw new PublicError(403, "runtime_operator_role_required");
+  }
+  return {
+    subject: value.subject,
+    issuer: value.issuer
+  };
+}
+
+function ownerDigest(identity) {
+  return (
+    "sha256:" +
+    createHash("sha256")
+      .update(
+        JSON.stringify({
+          issuer: identity.issuer,
+          subject: identity.subject
+        }),
+        "utf8"
+      )
+      .digest("hex")
   );
 }
 
@@ -200,7 +254,7 @@ async function getItem(tableName, pk, sk) {
       Key: { pk: { S: pk }, sk: { S: sk } },
       ConsistentRead: true,
       ProjectionExpression:
-        "pk, sk, payload, revision, generation, #status, #state, checkedAt, capabilities, capabilityDigest, sessionId, expiresAt",
+        "pk, sk, payload, revision, principalHash, generation, #status, #state, checkedAt, capabilities, capabilityDigest, sessionId, expiresAt",
       ExpressionAttributeNames: { "#status": "status", "#state": "state" }
     })
   );
@@ -392,12 +446,13 @@ async function selectStartProfile(requestedProfile, currentTime) {
   throw new PublicError(409, "runtime_not_ready");
 }
 
-function sessionItem(session) {
+function sessionItem(session, principalHash) {
   return {
     pk: { S: "SESSION#" + session.sessionId },
     sk: { S: "RUNTIME" },
     payload: { S: JSON.stringify(session) },
     revision: { N: String(session.revision) },
+    principalHash: { S: principalHash },
     expiresAt: {
       N: String(
         Math.floor(Date.parse(session.hardExpiresAt) / 1000) +
@@ -407,11 +462,14 @@ function sessionItem(session) {
   };
 }
 
-async function putSession(session) {
+async function putSession(session, principalHash) {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(principalHash)) {
+    throw new Error("invalid runtime session owner digest");
+  }
   await dynamodb.send(
     new PutItemCommand({
       TableName: configured("RUNTIME_SESSION_TABLE", runtimeSessionTable),
-      Item: sessionItem(session),
+      Item: sessionItem(session, principalHash),
       ConditionExpression: "attribute_not_exists(pk)"
     })
   );
@@ -442,7 +500,19 @@ async function readSession(sessionId) {
   if (session.revision !== revision) {
     throw new Error("stored runtime session revision drift");
   }
-  return session;
+  const principalHash = stringAttribute(item, "principalHash");
+  if (!principalHash || !/^sha256:[a-f0-9]{64}$/u.test(principalHash)) {
+    throw new Error("stored runtime session owner is invalid");
+  }
+  return { session, principalHash };
+}
+
+async function readOwnedSession(sessionId, identity) {
+  const stored = await readSession(sessionId);
+  if (stored.principalHash !== ownerDigest(parseIdentity(identity))) {
+    throw new PublicError(403, "runtime_session_owner_mismatch");
+  }
+  return stored.session;
 }
 
 async function updateSession(previous, next) {
@@ -500,7 +570,8 @@ async function coreCommand(action, session, expectedRevision) {
   );
 }
 
-async function startSession(body) {
+async function startSession(body, identity) {
+  const owner = ownerDigest(parseIdentity(identity));
   const requestedProfile = parseStartBody(body);
   const currentTime = now();
   const selected = await selectStartProfile(requestedProfile, currentTime);
@@ -510,7 +581,7 @@ async function startSession(body) {
     binding: bindingFor(requestedProfile, selected.health, currentTime),
     state: selected.state
   });
-  await putSession(session);
+  await putSession(session, owner);
   if (session.binding.profileId === "core") {
     try {
       await coreCommand(
@@ -617,13 +688,17 @@ async function reconcile(value, currentTime) {
 
 async function sessionStatus(sessionId) {
   const currentTime = now();
-  const session = await reconcile(await readSession(sessionId), currentTime);
+  const stored = await readSession(sessionId);
+  const session = await reconcile(stored.session, currentTime);
   return response(200, publicStatus(session, currentTime));
 }
 
-async function recordActivity(sessionId) {
+async function recordActivity(sessionId, identity) {
   const currentTime = now();
-  const original = await reconcile(await readSession(sessionId), currentTime);
+  const original = await reconcile(
+    await readOwnedSession(sessionId, identity),
+    currentTime
+  );
   if (original.state !== "ACTIVE") {
     throw new PublicError(409, "runtime_session_not_active");
   }
@@ -642,9 +717,12 @@ async function recordActivity(sessionId) {
   return response(200, publicStatus(next, currentTime));
 }
 
-async function stopSession(sessionId) {
+async function stopSession(sessionId, identity) {
   const currentTime = now();
-  const original = await reconcile(await readSession(sessionId), currentTime);
+  const original = await reconcile(
+    await readOwnedSession(sessionId, identity),
+    currentTime
+  );
   let next = requestStop(original, currentTime);
   if (next.revision === original.revision) {
     return response(200, publicStatus(next, currentTime));
@@ -675,10 +753,10 @@ exports.handler = async (event) => {
       return await profiles();
     }
     if (
-      exactKeys(event, ["operation", "requestId", "body"]) &&
+      exactKeys(event, ["operation", "requestId", "body", "identity"]) &&
       event.operation === "sessionStart"
     ) {
-      return await startSession(event.body);
+      return await startSession(event.body, event.identity);
     }
     if (
       exactKeys(event, ["operation", "requestId", "sessionId"]) &&
@@ -687,16 +765,16 @@ exports.handler = async (event) => {
       return await sessionStatus(event.sessionId);
     }
     if (
-      exactKeys(event, ["operation", "requestId", "sessionId"]) &&
+      exactKeys(event, ["operation", "requestId", "sessionId", "identity"]) &&
       event.operation === "sessionActivity"
     ) {
-      return await recordActivity(event.sessionId);
+      return await recordActivity(event.sessionId, event.identity);
     }
     if (
-      exactKeys(event, ["operation", "requestId", "sessionId"]) &&
+      exactKeys(event, ["operation", "requestId", "sessionId", "identity"]) &&
       event.operation === "sessionStop"
     ) {
-      return await stopSession(event.sessionId);
+      return await stopSession(event.sessionId, event.identity);
     }
     return response(404, { error: "not_found" });
   } catch (error) {
