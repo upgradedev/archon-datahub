@@ -70,37 +70,60 @@ const GENERATION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const DIGEST = /^sha256:[a-f0-9]{64}$/u;
 const DEFAULT_MAX_HEALTH_AGE_MS = 90_000;
 
-function instant(value: string, name: string): number {
+function instant(
+  value: unknown,
+  name: string,
+  code: RuntimeSelectionErrorCode = "INVALID_RUNTIME_SNAPSHOT"
+): number {
+  if (typeof value !== "string") {
+    throw new RuntimeSelectionError(code, `${name} must be a string`);
+  }
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
     throw new RuntimeSelectionError(
-      "INVALID_RUNTIME_SNAPSHOT",
+      code,
       `${name} must be an exact ISO-8601 UTC instant`
     );
   }
   return parsed;
 }
 
-function exactCapabilities(value: RuntimeCapabilities): void {
+function exactStringKeys(
+  value: object,
+  expected: readonly string[],
+  code: RuntimeSelectionErrorCode,
+  message: string
+): void {
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== expected.length ||
+    keys.some(
+      (key) => typeof key !== "string" || !expected.includes(key)
+    ) ||
+    expected.some(
+      (key) => !Object.prototype.hasOwnProperty.call(value, key)
+    )
+  ) {
+    throw new RuntimeSelectionError(code, message);
+  }
+}
+
+function exactCapabilities(value: unknown): void {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
       "runtime capabilities must be an object"
     );
   }
-  const keys = Object.keys(value).sort();
-  const expected = [...REQUIRED_RUNTIME_CAPABILITIES].sort();
-  if (
-    keys.length !== expected.length ||
-    keys.some((key, index) => key !== expected[index])
-  ) {
-    throw new RuntimeSelectionError(
-      "INVALID_RUNTIME_SNAPSHOT",
-      "runtime capabilities must use the exact allowlisted schema"
-    );
-  }
+  exactStringKeys(
+    value,
+    REQUIRED_RUNTIME_CAPABILITIES,
+    "INVALID_RUNTIME_SNAPSHOT",
+    "runtime capabilities must use the exact allowlisted schema"
+  );
+  const capabilities = value as Record<RuntimeCapability, unknown>;
   for (const key of REQUIRED_RUNTIME_CAPABILITIES) {
-    if (typeof value[key] !== "boolean") {
+    if (typeof capabilities[key] !== "boolean") {
       throw new RuntimeSelectionError(
         "INVALID_RUNTIME_SNAPSHOT",
         `runtime capability ${key} must be boolean`
@@ -109,7 +132,7 @@ function exactCapabilities(value: RuntimeCapabilities): void {
   }
 }
 
-function validateSnapshot(snapshot: RuntimeProfileSnapshot): void {
+function validateSnapshot(snapshot: unknown): asserts snapshot is RuntimeProfileSnapshot {
   if (
     snapshot === null ||
     typeof snapshot !== "object" ||
@@ -120,23 +143,12 @@ function validateSnapshot(snapshot: RuntimeProfileSnapshot): void {
       "runtime snapshot must be an object"
     );
   }
-  const keys = Object.keys(snapshot).sort();
-  const expected = [
-    "capabilities",
-    "checkedAt",
-    "generation",
-    "profileId",
-    "status",
-  ];
-  if (
-    keys.length !== expected.length ||
-    keys.some((key, index) => key !== expected[index])
-  ) {
-    throw new RuntimeSelectionError(
-      "INVALID_RUNTIME_SNAPSHOT",
-      "runtime snapshot must use the exact allowlisted schema"
-    );
-  }
+  exactStringKeys(
+    snapshot,
+    ["capabilities", "checkedAt", "generation", "profileId", "status"],
+    "INVALID_RUNTIME_SNAPSHOT",
+    "runtime snapshot must use the exact allowlisted schema"
+  );
   if (!RUNTIME_PROFILE_IDS.includes(snapshot.profileId)) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
@@ -258,7 +270,7 @@ function bindingInstant(value: unknown, name: string): number {
 }
 
 export function validateRuntimeBinding(
-  binding: RuntimeBinding
+  binding: unknown
 ): Readonly<RuntimeBinding> {
   if (
     binding === null ||
@@ -267,14 +279,13 @@ export function validateRuntimeBinding(
   ) {
     return invalidBinding("runtime binding must be an object");
   }
-  const record = binding as unknown as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  if (
-    keys.length !== RUNTIME_BINDING_KEYS.length ||
-    keys.some((key, index) => key !== RUNTIME_BINDING_KEYS[index])
-  ) {
-    return invalidBinding("runtime binding must use the exact public schema");
-  }
+  const record = binding as Record<string, unknown>;
+  exactStringKeys(
+    record,
+    RUNTIME_BINDING_KEYS,
+    "INVALID_RUNTIME_BINDING",
+    "runtime binding must use the exact public schema"
+  );
   if (record.schemaVersion !== "archon.runtime-binding/v1") {
     return invalidBinding("runtime binding schema is invalid");
   }
@@ -312,7 +323,15 @@ export function validateRuntimeBinding(
       "runtime binding lease must be positive and no longer than two hours"
     );
   }
-  return Object.freeze({ ...binding });
+  return Object.freeze({
+    schemaVersion: "archon.runtime-binding/v1",
+    profileId: record.profileId as RuntimeProfileId,
+    generation: record.generation as string,
+    capabilityDigest: record.capabilityDigest as `sha256:${string}`,
+    resolution: record.resolution as "auto" | "explicit",
+    boundAt: record.boundAt as string,
+    leaseExpiresAt: record.leaseExpiresAt as string,
+  });
 }
 export function selectRuntime(
   requested: RuntimeRequest,
@@ -335,15 +354,16 @@ export function selectRuntime(
       "runtime selection options must be an object"
     );
   }
-  const optionKeys = Object.keys(options);
+  const optionKeys = Reflect.ownKeys(options);
+  const requiredOptionKeys = ["now", "leaseExpiresAt"] as const;
   if (
-    !optionKeys.includes("now") ||
-    !optionKeys.includes("leaseExpiresAt") ||
     optionKeys.some(
       (key) =>
-        key !== "now" &&
-        key !== "leaseExpiresAt" &&
-        key !== "maxHealthAgeMs"
+        typeof key !== "string" ||
+        !["now", "leaseExpiresAt", "maxHealthAgeMs"].includes(key)
+    ) ||
+    requiredOptionKeys.some(
+      (key) => !Object.prototype.hasOwnProperty.call(options, key)
     )
   ) {
     throw new RuntimeSelectionError(
@@ -400,8 +420,8 @@ export function selectRuntime(
 }
 
 export function assertPinnedRuntime(
-  expected: RuntimeBinding,
-  actual: RuntimeBinding
+  expected: unknown,
+  actual: unknown
 ): void {
   let left: Readonly<RuntimeBinding>;
   let right: Readonly<RuntimeBinding>;
