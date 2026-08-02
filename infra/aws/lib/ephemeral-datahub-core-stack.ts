@@ -224,6 +224,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         "DataHub Core host reads its lease and exchanges bounded health/job receipts",
       maxSessionDuration: Duration.hours(1)
     });
+    dataKey.grantEncryptDecrypt(instanceRole);
     instanceRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "ExchangeOnlyCoreRuntimeRecords",
@@ -238,7 +239,12 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         resources: [this.leaseTable.tableArn],
         conditions: {
           "ForAllValues:StringLike": {
-            "dynamodb:LeadingKeys": ["CORE#LEASE", "RUNTIME#core", "SESSION#rs_*"]
+            "dynamodb:LeadingKeys": [
+              "CORE#LEASE",
+              "RUNTIME#core",
+              "SESSION#rs_*",
+              "MUTATION#rs_*"
+            ]
           }
         }
       })
@@ -710,6 +716,12 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "ArchonCoreInferenceEndpointSecurityGroupId",
       inferenceEndpointSecurityGroup.securityGroupId
+    );
+    output(
+      this,
+      "ArchonCoreDataKeyArn",
+      dataKey.keyArn,
+      "archon-" + stage + "-core-data-key-arn"
     );
     output(
       this,
