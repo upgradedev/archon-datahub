@@ -53,10 +53,11 @@ REAP_KEYS = (
         "deadlineEpoch",
     },
 )
-ACTIVE_STATES = {"STARTING", "ACTIVE", "UNHEALTHY", "FAILED"}
+ACTIVE_STATES = {"STARTING", "READY", "FAILED"}
 TERMINAL_STATES = {"STOPPED", "EXPIRED"}
 CAPABILITIES = {
-    "dataHubMcpServer": True,
+    "mcpRead": True,
+    "mcpGovernedWrite": True,
     "agentContextKit": True,
     "dataHubSkills": True,
     "analyticsAgent": True,
@@ -351,7 +352,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         and current.get("sessionId") == session_id
         and current.get("generation") == GENERATION
         and current.get("capabilityDigest") == CAPABILITY_DIGEST
-        and current.get("state") in {"STARTING", "ACTIVE"}
+        and current.get("state") in {"STARTING", "READY"}
         and int(current.get("revision", -1)) >= revision
     ):
         return _decision("NONE", code="IDEMPOTENT")
@@ -372,7 +373,7 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "SET idleExpiresAt=:idle, updatedAt=:updated, revision=:next"
             ),
             ConditionExpression=(
-                "sessionId=:session AND #state=:active AND revision=:expected "
+                "sessionId=:session AND #state=:ready AND revision=:expected "
                 "AND generation=:generation AND capabilityDigest=:digest "
                 "AND hardExpiresAt=:hard AND hardExpiresAt>:now "
                 "AND attribute_not_exists(operationId)"
@@ -383,7 +384,7 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 ":updated": _iso(now),
                 ":next": revision,
                 ":session": session_id,
-                ":active": "ACTIVE",
+                ":ready": "READY",
                 ":expected": expected,
                 ":generation": GENERATION,
                 ":digest": CAPABILITY_DIGEST,
@@ -436,18 +437,18 @@ def _begin_down(
         _TABLE.update_item(
             Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
             UpdateExpression=(
-                "SET #state=:stopping, revision=:next, updatedAt=:updated, "
+                "SET #state=:draining, revision=:next, updatedAt=:updated, "
                 "operationId=:operation, operationExpiresAt=:operationExpiry"
             ),
             ConditionExpression=(
                 "sessionId=:session AND revision=:expected "
-                "AND #state IN (:starting,:active,:unhealthy,:failed) "
+                "AND #state IN (:starting,:ready,:failed) "
                 "AND (attribute_not_exists(operationId) "
                 "OR operationExpiresAt<=:now)"
             ),
             ExpressionAttributeNames={"#state": "state"},
             ExpressionAttributeValues={
-                ":stopping": "STOPPING",
+                ":draining": "DRAINING",
                 ":next": revision,
                 ":updated": _iso(now),
                 ":operation": operation_id,
@@ -455,8 +456,7 @@ def _begin_down(
                 ":session": session_id,
                 ":expected": expected,
                 ":starting": "STARTING",
-                ":active": "ACTIVE",
-                ":unhealthy": "UNHEALTHY",
+                ":ready": "READY",
                 ":failed": "FAILED",
                 ":now": _epoch(now),
             },
