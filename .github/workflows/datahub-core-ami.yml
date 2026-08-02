@@ -54,6 +54,8 @@ jobs:
           test "${CONFIRMATION}" = "BUILD_EPHEMERAL_DATAHUB_CORE_AMI"
           [[ "${COMPANION_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${COMPANION_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${COMPANION_SOURCE_SHA}" = "${GITHUB_SHA}"
           [[ "${GENERATION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,10 +158,22 @@ jobs:
           SOURCE_SHA: ${{ inputs.companion_source_sha }}
         run: |
           set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${SOURCE_SHA}"
+          test "$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha
+          )" = "${SOURCE_SHA}"
           run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
           jq --exit-status \
-            --arg sourceSha "${SOURCE_SHA}" '
+            --argjson runId "${RUN_ID}" \
+            --arg sourceSha "${SOURCE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
               .name == "DataHub companion OCI" and
+              .path == ".github/workflows/datahub-companion-image.yml" and
+              .event == "push" and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
               .head_sha == $sourceSha and
               .status == "completed" and
               .conclusion == "success"
@@ -182,6 +196,7 @@ jobs:
           run-id: ${{ inputs.companion_run_id }}
       - name: Revalidate immutable companion evidence
         env:
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.companion_source_sha }}
         run: |
           set -euo pipefail
@@ -197,6 +212,15 @@ jobs:
           test -f image.openvex.json
           sha256sum --check --strict evidence/SHA256SUMS
           sha256sum --check --strict evidence/image-subject.sha256
+          gh attestation verify evidence/companion-image.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-companion-image.yml" \
+            --signer-digest "${SOURCE_SHA}" \
+            --source-digest "${SOURCE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/datahub-companion-image/v1" \
+            --deny-self-hosted-runners \
+            >/dev/null
           archive_sha="$(sha256sum evidence/companion-image.tar.gz | awk '{print $1}')"
           jq --exit-status \
             --arg sourceSha "${SOURCE_SHA}" \
