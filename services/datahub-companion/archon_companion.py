@@ -16,6 +16,7 @@ import re
 import stat
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -94,9 +95,14 @@ PRIVATE_MCP_ENDPOINTS = {
     "http://127.0.0.1:8000/mcp": "http://127.0.0.1:8000",
     "http://localhost:8000/mcp": "http://localhost:8000",
 }
+@dataclass
+class _ModelProbeState:
+    success: tuple[str, float, dict[str, Any]] | None = None
+    failure: tuple[str, float] | None = None
+
+
 _model_probe_lock = asyncio.Lock()
-_model_probe_cache: tuple[str, float, dict[str, Any]] | None = None
-_model_probe_failure: tuple[str, float] | None = None
+_model_probe_state = _ModelProbeState()
 
 
 class RuntimeBinding(BaseModel):
@@ -887,37 +893,37 @@ def aged_model_receipt(
 
 
 async def analytics_model_preflight() -> dict[str, Any]:
-    global _model_probe_cache, _model_probe_failure
+    state = _model_probe_state
     identity = analytics_model_identity()
     key = digest({
         "runtime": configured_runtime_identity(),
         "model": identity,
     })
     now = time.monotonic()
-    cached = _model_probe_cache
+    cached = state.success
     if cached is not None and cached[0] == key and now - cached[1] < MODEL_PROBE_SUCCESS_TTL_SECONDS:
         return aged_model_receipt(cached[2], cached[1])
-    failed = _model_probe_failure
+    failed = state.failure
     if failed is not None and failed[0] == key and now < failed[1]:
         raise RuntimeError("Analytics model connectivity probe is unavailable")
 
     async with _model_probe_lock:
         now = time.monotonic()
-        cached = _model_probe_cache
+        cached = state.success
         if (
             cached is not None
             and cached[0] == key
             and now - cached[1] < MODEL_PROBE_SUCCESS_TTL_SECONDS
         ):
             return aged_model_receipt(cached[2], cached[1])
-        failed = _model_probe_failure
+        failed = state.failure
         if failed is not None and failed[0] == key and now < failed[1]:
             raise RuntimeError("Analytics model connectivity probe is unavailable")
         try:
             receipt = await probe_analytics_model(identity)
         except Exception as error:
-            _model_probe_cache = None
-            _model_probe_failure = (
+            state.success = None
+            state.failure = (
                 key,
                 time.monotonic() + MODEL_PROBE_FAILURE_TTL_SECONDS,
             )
@@ -925,8 +931,8 @@ async def analytics_model_preflight() -> dict[str, Any]:
                 "Analytics model connectivity probe is unavailable"
             ) from error
         verified_monotonic = time.monotonic()
-        _model_probe_cache = (key, verified_monotonic, receipt)
-        _model_probe_failure = None
+        state.success = (key, verified_monotonic, receipt)
+        state.failure = None
         return aged_model_receipt(receipt, verified_monotonic)
 
 

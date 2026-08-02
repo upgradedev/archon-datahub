@@ -447,9 +447,10 @@ async def test_mcp_preflight_binds_live_health_to_provenance(
         "load_mcp_provenance",
         lambda: provenance,
     )
-    transport = httpx.MockTransport(
-        lambda _: httpx.Response(200, json={"status": "ok"}),
-    )
+    def healthy_response(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok"})
+
+    transport = httpx.MockTransport(healthy_response)
     monkeypatch.setattr(
         companion,
         "mcp_client",
@@ -476,9 +477,10 @@ async def test_mcp_preflight_rejects_process_only_health_drift(
             "toolSurfaceDigest": companion.digest(list(companion.MCP_TOOLS)),
         },
     )
-    transport = httpx.MockTransport(
-        lambda _: httpx.Response(200, json={"status": "starting"}),
-    )
+    def starting_response(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "starting"})
+
+    transport = httpx.MockTransport(starting_response)
     monkeypatch.setattr(
         companion,
         "mcp_client",

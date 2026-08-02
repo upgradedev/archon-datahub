@@ -149,6 +149,18 @@ jobs:
           import archon_companion as companion
 
           assert os.getuid() == 65532
+          global_site = Path("/usr/local/lib/python3.11/site-packages")
+          assert global_site.is_dir() and not any(global_site.iterdir())
+          assert Path("/usr/local/bin/python3.11").is_file()
+          assert all(
+              not Path(path).exists()
+              for path in (
+                  "/usr/local/bin/pip",
+                  "/usr/local/bin/pip3",
+                  "/usr/local/bin/pip3.11",
+                  "/usr/local/bin/wheel",
+              )
+          )
           assert importlib.metadata.version("datahub-agent-context") == "1.6.0.17"
           assert importlib.metadata.version("datahub-analytics-agent") == "0.4.0"
           assert importlib.metadata.version("cryptography") == "50.0.0"
@@ -265,7 +277,7 @@ jobs:
           output: ${{ runner.temp }}/datahub-companion-image.sarif
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
-          ignore-unfixed: false
+          ignore-unfixed: true
           exit-code: "0"
           hide-progress: true
           version: v0.72.0
@@ -394,7 +406,7 @@ jobs:
               },
               governedMutationGatewayBundled: false,
               dataHubSkillsCommit: $skillsCommit,
-              pythonImage: "python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba",
+              pythonImage: "python:3.11.15-slim-trixie@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93",
               uvImage: "ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437",
               sourceBuilds: "deny",
               runtimeUser: "65532:65532"

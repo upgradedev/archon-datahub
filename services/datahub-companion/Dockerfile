@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-ARG PYTHON_IMAGE=python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
+ARG PYTHON_IMAGE=python:3.11.15-slim-trixie@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
 ARG UV_IMAGE=ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437
 
 FROM ${UV_IMAGE} AS uv
@@ -62,6 +62,20 @@ LABEL org.opencontainers.image.source="https://github.com/upgradedev/archon-data
       org.opencontainers.image.title="Archon DataHub Runtime" \
       org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /opt/archon/companion
+RUN <<'PYTHON_RUNTIME'
+set -eu
+rm -rf /usr/local/lib/python3.11/site-packages
+mkdir -p /usr/local/lib/python3.11/site-packages
+rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11 /usr/local/bin/wheel
+test -x /usr/local/bin/python3.11
+/usr/local/bin/python3.11 --version
+test -z "$(ls -A /usr/local/lib/python3.11/site-packages)"
+/usr/local/bin/python3.11 -c 'import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ("pip", "setuptools", "wheel"))'
+test ! -e /usr/local/bin/pip
+test ! -e /usr/local/bin/pip3
+test ! -e /usr/local/bin/pip3.11
+test ! -e /usr/local/bin/wheel
+PYTHON_RUNTIME
 COPY --from=companion-builder --chown=65532:65532 /opt/archon/companion/.venv ./.venv
 COPY --from=mcp-builder --chown=65532:65532 /opt/archon/mcp/.venv /opt/archon/mcp/.venv
 COPY --from=mcp-builder --chown=65532:65532 /opt/archon/mcp/.archon-evidence/resolved-lock-binding.json /opt/archon/mcp/.archon-evidence/resolved-lock-binding.json

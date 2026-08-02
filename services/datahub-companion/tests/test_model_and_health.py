@@ -50,8 +50,8 @@ def runtime(monkeypatch):
         "ARCHON_RUN_HANDLE_FERNET_KEY",
         Fernet.generate_key().decode("ascii"),
     )
-    monkeypatch.setattr(companion, "_model_probe_cache", None)
-    monkeypatch.setattr(companion, "_model_probe_failure", None)
+    monkeypatch.setattr(companion, "_model_probe_state", companion._ModelProbeState())
+
 
 
 @pytest.mark.parametrize(
