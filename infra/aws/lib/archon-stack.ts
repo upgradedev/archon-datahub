@@ -689,7 +689,29 @@ export class ArchonPlatformStack extends Stack {
       dataKey
     );
 
-    const readSecret = bootstrapSecret(
+    const runtimeSessionTable = retainedTable(
+      this,
+      "RuntimeSessionTable",
+      `${stage}-runtime-sessions`,
+      dataKey
+    );
+    const coreLeaseTable = dynamodb.Table.fromTableName(
+      this,
+      "ImportedCoreLeaseTable",
+      Fn.importValue(`archon-${stage}-core-lease-table-name`)
+    );
+    const coreSessionStateMachine = sfn.StateMachine.fromStateMachineArn(
+      this,
+      "ImportedCoreSessionStateMachine",
+      Fn.importValue(
+        `archon-${stage}-core-session-state-machine-arn`
+      )
+    );
+    const coreDataKey = kms.Key.fromKeyArn(
+      this,
+      "ImportedCoreDataKey",
+      Fn.importValue(`archon-${stage}-core-data-key-arn`)
+    );
       this,
       "DataHubReadSecret",
       `archon/${stage}/datahub-read`,
@@ -1499,7 +1521,70 @@ export class ArchonPlatformStack extends Stack {
     // no DataHub or LLM secret grants and cannot invent or execute a mutation.
     approvalFunction.addToRolePolicy(callbackPolicy(["states:SendTaskSuccess"]));
 
-    const controlLambdaLogGroup = retainedLogGroup(
+    const runtimeControlLogGroup = retainedLogGroup(
+      this,
+      "RuntimeControlLogs",
+      `/archon/${stage}/runtime-control`,
+      logsKey
+    );
+    const runtimeControlFunction = new lambda.Function(
+      this,
+      "RuntimeControlFunction",
+      {
+        functionName: `archon-${stage}-runtime-control`,
+        description:
+          "Owns immutable Cloud/Core runtime sessions and server-side leases",
+        runtime: lambda.Runtime.NODEJS_24_X,
+        architecture: lambda.Architecture.X86_64,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(
+          join(__dirname, "../lambda/runtime-control")
+        ),
+        timeout: Duration.seconds(20),
+        memorySize: 384,
+        reservedConcurrentExecutions: isProduction ? 30 : 10,
+        tracing: lambda.Tracing.ACTIVE,
+        logGroup: runtimeControlLogGroup,
+        environment: {
+          RUNTIME_SESSION_TABLE: runtimeSessionTable.tableName,
+          CORE_LEASE_TABLE: coreLeaseTable.tableName,
+          CORE_SESSION_STATE_MACHINE_ARN:
+            coreSessionStateMachine.stateMachineArn,
+          RUNTIME_OPERATOR_GROUP: approverGroup.groupName!
+        }
+      }
+    );
+    runtimeControlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "OwnOnlyRuntimeSessionsAndCloudHealth",
+        actions: [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ],
+        resources: [runtimeSessionTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["SESSION#*", "RUNTIME#cloud"]
+          }
+        }
+      })
+    );
+    runtimeControlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ObserveOnlyCoreLeaseAndHealth",
+        actions: ["dynamodb:GetItem"],
+        resources: [coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["CORE#LEASE", "RUNTIME#core"]
+          }
+        }
+      })
+    );
+    coreSessionStateMachine.grantStartExecution(runtimeControlFunction);
+    dataKey.grantEncryptDecrypt(runtimeControlFunction);
+    coreDataKey.grantEncryptDecrypt(runtimeControlFunction);
       this,
       "ControlLambdaLogs",
       `/archon/${stage}/control-lambda`,
@@ -1523,11 +1608,45 @@ export class ArchonPlatformStack extends Stack {
         CHECKPOINT_TABLE: idempotencyTable.tableName,
         APPROVAL_TABLE: approvalTable.tableName,
         EVIDENCE_BUCKET: evidenceBucket.bucketName,
-        ARCHON_DEMO_QUERY: demoQuery.valueAsString
-      }
+        ARCHON_DEMO_QUERY: demoQuery.valueAsString,
+        RUNTIME_SESSION_TABLE: runtimeSessionTable.tableName,
+        CORE_LEASE_TABLE: coreLeaseTable.tableName,
+        CORE_SESSION_STATE_MACHINE_ARN:
+          coreSessionStateMachine.stateMachineArn,
+        RUNTIME_OPERATOR_GROUP: approverGroup.groupName!      }
     });
     stateMachine.grantStartExecution(controlFunction);
+    coreSessionStateMachine.grantStartExecution(controlFunction);
     controlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "OwnOnlyRuntimeBoundAuditRecordsAndSessions",
+        actions: [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ],
+        resources: [runtimeSessionTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["SESSION#*", "AUDIT#*"]
+          }
+        }
+      })
+    );
+    controlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ObserveOnlySelectedCoreLease",
+        actions: ["dynamodb:GetItem"],
+        resources: [coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["CORE#LEASE"]
+          }
+        }
+      })
+    );
+    dataKey.grantEncryptDecrypt(controlFunction);
+    coreDataKey.grantEncryptDecrypt(controlFunction);    controlFunction.addToRolePolicy(
       new iam.PolicyStatement({
         sid: "DescribeOnlyThisControlLoopExecutions",
         actions: ["states:DescribeExecution"],

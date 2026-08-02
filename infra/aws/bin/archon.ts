@@ -76,6 +76,8 @@ const platform = new ArchonPlatformStack(app, `Archon-${stage}`, {
 });
 if (registry !== undefined) {
   platform.addStackDependency(registry);
+}if (core !== undefined) {
+  platform.addStackDependency(core);
 }
 
 for (const stack of [
