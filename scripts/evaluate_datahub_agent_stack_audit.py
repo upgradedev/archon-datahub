@@ -267,20 +267,15 @@ def main() -> None:
 
     projection = json.loads(json.dumps(sarif))
     if rules:
-        justification = (
-            f"Accepted by {EXPECTED_VEX_ID}; expires "
-            f"{expires.isoformat().replace('+00:00', 'Z')}; "
-            "Linux wheel-only runtime with source builds denied."
-        )
         for run in projection["runs"]:
-            for result in run.get("results") or []:
-                result["suppressions"] = [
-                    {
-                        "kind": "external",
-                        "status": "accepted",
-                        "justification": justification,
-                    }
-                ]
+            run["results"] = []
+            properties = run.setdefault("properties", {})
+            properties["archon/vexDecision"] = "not_affected"
+            properties["archon/vexId"] = EXPECTED_VEX_ID
+            properties["archon/vexExpiresAt"] = (
+                expires.isoformat().replace("+00:00", "Z")
+            )
+            properties["archon/rawSarifRetained"] = True
 
     decision = {
         "schemaVersion": "archon.datahub-agent-stack-audit-decision/v1",
