@@ -379,7 +379,7 @@ def validate_workflow(workflow: str) -> None:
             "JUDGE_PASSWORD",
             "JUDGE_PRODUCTION_ACCOUNT_ID",
             "AWS_ACCOUNT_ID",
-            "AWS_OBSERVER_ROLE_ARN",
+            "AWS_READ_ROLE_ARN",
         },
         "workflow contains an unexpected or missing protected reference",
     )
@@ -399,8 +399,8 @@ def validate_workflow(workflow: str) -> None:
         "read-only observer binding",
         (
             "${{ vars.AWS_ACCOUNT_ID }}",
-            "${{ vars.AWS_OBSERVER_ROLE_ARN }}",
-            "role/archon-production-observer",
+            "${{ vars.AWS_READ_ROLE_ARN }}",
+            "role/archon-production-posture-observer",
             "aws-actions/configure-aws-credentials@",
             "Archon-production-Judge",
             "aws sts get-caller-identity",

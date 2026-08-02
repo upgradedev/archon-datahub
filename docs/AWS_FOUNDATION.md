@@ -58,10 +58,13 @@ manual console grants are not evidence.
 
 The sealed staging IAM incident is closed. Its authoritative
 `contracts/aws-incident-recovery-v1.json` record has status
-`recovered-delete-complete-cleanup-proven`: exactly one bounded `DeleteStack`
-was executed, canonical target absence and cleanup were proven, and the
-short-lived recovery authorization was revoked. This is retained evidence, not
-permission to rerun recovery against the now-absent target.
+`recovered-delete-complete-cleanup-proven`. Exact-master run `30582684638`
+executed exactly one `STANDARD` `DeleteStack`; canonical target absence and
+cleanup were proven, and the short-lived recovery authorization was revoked.
+Artifact `8775321544` and GitHub attestation `38051531` bind the sanitized
+recovery receipt. The cleanup follower `30582939537` skipped on success. This is
+retained evidence, not permission to rerun recovery against the now-absent
+target; future reconciliation uses the ordinary idempotent foundation workflow.
 
 ## Protected foundation-policy version migrations
 
