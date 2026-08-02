@@ -317,7 +317,13 @@ def validate_workflow(source: str) -> None:
         '"insufficientDataActionsEmpty": True',
         'canary_dir.parent / "verification" / "recovery-evidence.json.json"',
         'recovery["deploymentEvidenceSha256"]',
-        'manifest["endpointBindingSha256"]',
+        (
+            'exact(\n'
+            '    manifest["endpointBindingSha256"],\n'
+            '    recovery["endpointBindingSha256"],\n'
+            '    "canary endpoint binding",\n'
+            ')'
+        ),
         'positive_decimal(source["runId"]',
         '"canary source runAttempt exceeds ten digits"',
         "dt.timedelta(hours=2)",
