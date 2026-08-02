@@ -56,7 +56,7 @@ testing_required = (
     "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
     "ACK context · changed",
     "Analytics result · changed",
-    "`governed-canary-rollback`",
+    "`governed-canary-recovery`",
     "requires a fresh human approval",
     "workflow automatically enters the rollback job",
     "Archon does not mutate autonomously",
