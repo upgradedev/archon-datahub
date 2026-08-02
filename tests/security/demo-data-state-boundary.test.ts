@@ -46,6 +46,7 @@ test("live proof binds exact lean deployment and dual runtime identity", () => {
     "deployment_run_id:",
     "deployment_artifact_id:",
     "deployment_artifact_digest:",
+    "governed_canary_run_id:",
     "profile:",
     "runtime_session_id:",
     "query:",
@@ -66,7 +67,33 @@ test("live proof binds exact lean deployment and dual runtime identity", () => {
   assert.match(liveProof, /credentialed-live-semantic/);
   assert.match(liveProof, /active-session-capability/);
   assert.match(liveProof, /all\(\.fourComponents\[\]; \. == true\)/);
-  assert.match(liveProof, /retention-days: 90/);
+  assert.match(liveProof, /\.github\/workflows\/governed-canary\.yml/);
+  assert.match(
+    liveProof,
+    /governed-canary-rollback-\$\{GOVERNED_CANARY_RUN_ID\}-1/
+  );
+  assert.match(liveProof, /--deny-self-hosted-runners/);
+  assert.match(liveProof, /archon\.governed-canary-recovery-evidence\/v2/);
+  assert.match(liveProof, /archon\.live-datahub-proof\/v3/);
+  assert.match(liveProof, /archon\.deployed-datahub-semantic-proof\/v2/);
+  assert.match(liveProof, /archon\.live-datahub-proof-attestation\/v4/);
+  assert.match(
+    liveProof,
+    /attestations\/live-datahub-proof\/v4/
+  );
+  assert.match(liveProof, /proof-subject\.sha256/);
+  for (const subject of [
+    "proof.json",
+    "deployment-evidence.json",
+    "deployed-datahub-semantic-proof.json",
+  ]) {
+    assert.match(liveProof, new RegExp(subject.replaceAll(".", "\\.")));
+  }
+  assert.match(
+    liveProof,
+    /name: live-datahub-proof-\$\{\{ inputs\.release_sha \}\}-\$\{\{ github\.run_attempt \}\}/
+  );
+  assert.match(liveProof, /write-verified-and-rollback-proven/);  assert.match(liveProof, /retention-days: 90/);
   assert.match(liveProof, /rm -rf -- "\$\{RUNNER_TEMP\}\/live-proof"/);
   assert.doesNotMatch(
     liveProof,

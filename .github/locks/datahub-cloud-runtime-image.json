@@ -74,7 +74,7 @@
   "sourceBlobs": [
     {
       "path": ".github/workflows/datahub-cloud-runtime-image.yml",
-      "blobSha": "b0bc75daf3d1fafa02c051921d1b4dabb4a73f81"
+      "blobSha": "a02ec2758cc6c87912ff33ddcb23aba4e997379a"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile",
@@ -150,7 +150,7 @@
     },
     {
       "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",
-      "blobSha": "c5cdb574dd3a80ba4649d65040a4d2c30bef35f9"
+      "blobSha": "cc51f1018125bc1ca50f0bcabc223c22e2138ee5"
     }
   ],
   "handlers": {

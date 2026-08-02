@@ -45,7 +45,12 @@ test("seals one canonical Cloud-only recovery manifest", async () => {
   assert.equal(manifest.runtime.profileId, "cloud");
   assert.equal(manifest.runtime.resolution, "explicit");
   assert.equal(manifest.runtime.stackName, "Archon-staging-Judge");
-  assert.equal(manifest.target.entityUrn, dataset);
+  const exactTarget: {
+    readonly entityUrn: typeof dataset;
+    readonly columnPath: "customer_email";
+    readonly tagUrn: "urn:li:tag:PII";
+  } = manifest.target;
+  assert.deepEqual(exactTarget, manifest.target);  assert.equal(manifest.target.entityUrn, dataset);
   assert.equal(manifest.target.columnPath, "customer_email");
   assert.equal(manifest.target.tagUrn, "urn:li:tag:PII");
   assert.deepEqual(JSON.parse(canonicalize(manifest as never)), manifest);

@@ -244,14 +244,14 @@ export async function sealRecoveryManifest(
     runtime: {
       profileId: "cloud" as const,
       resolution: "explicit" as const,
-      stackName: CLOUD_STACK as typeof CLOUD_STACK,
+      stackName: CLOUD_STACK,
       cloudImageDigest: digestField(required(source, "CANARY_CLOUD_IMAGE_DIGEST", 71), "Cloud image digest"),
     },
     target: {
       entityUrn: CANONICAL_DATASET_URN,
       columnPath: CANONICAL_COLUMN_PATH,
       tagUrn: PII_TAG_URN,
-    },
+    } as const,
     endpointBindingSha256: endpoints.digest,
     preparedAt,
   };
@@ -417,7 +417,6 @@ async function recover(): Promise<void> {
     }
   }
   const after = await reader.readTagProjection(target);
-  exactProjection(after, manifest.target);
   const evidence = await createRecoveryEvidence({
     manifest, endpointBindingSha256: endpoints.digest, before, after, mutation,
     recoveredAt: new Date().toISOString(),

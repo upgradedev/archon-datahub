@@ -419,6 +419,7 @@ def select_run_artifact(
 
     if not isinstance(policy, str) or policy not in {
         "exact-current",
+        "exact-run-id",
         "single-retained",
         "latest-retained",
     }:
@@ -473,7 +474,7 @@ def select_run_artifact(
             if not re.fullmatch(r"[1-9][0-9]*", suffix):
                 fail("registered artifact prefix has a malformed attempt suffix")
             attempt = int(suffix)
-            if attempt > maximum_attempt:
+            if policy != "exact-run-id" and attempt > maximum_attempt:
                 fail("registered artifact has a future producer attempt")
             candidates.append((attempt, artifact))
     if expected_total_count != collected_count:
@@ -487,6 +488,14 @@ def select_run_artifact(
         ]
         if len(selected) != 1:
             fail("exact-current policy requires one current-attempt artifact")
+    elif policy == "exact-run-id":
+        selected = [
+            (attempt, artifact)
+            for attempt, artifact in candidates
+            if attempt == run_id
+        ]
+        if len(selected) != 1:
+            fail("exact-run-id policy requires one run-ID-bound artifact")
     elif policy == "single-retained":
         selected = candidates
         if len(selected) != 1:
@@ -504,6 +513,8 @@ def select_run_artifact(
             fail("latest-retained producer attempt is ambiguous")
 
     producer_attempt, metadata = selected[0]
+    if policy == "exact-run-id":
+        producer_attempt = maximum_attempt
     artifact_id = metadata.get("id")
     artifact_digest = metadata.get("digest")
     artifact_size = metadata.get("size_in_bytes")
@@ -1012,13 +1023,13 @@ def validate_deployment_binding(value: Any, label: str, release: str) -> None:
     positive_int(deployment["artifactId"], f"{label}.artifactId")
     exact(
         deployment["artifactName"],
-        f"deployment-evidence-{release}-{attempt}",
+        f"deployment-evidence-production-{release}-{run_id}",
         f"{label}.artifactName",
     )
     sha256_digest(deployment["artifactDigest"], f"{label}.artifactDigest")
     exact(
         deployment["predicateType"],
-        "https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1",
+        "https://github.com/upgradedev/archon-datahub/attestations/aws-deployment/v2",
         f"{label}.predicateType",
     )
     sha256_digest(deployment["predicateDigest"], f"{label}.predicateDigest")
@@ -1301,7 +1312,7 @@ def validate_facts(
         )
         exact(
             observation["availabilityArtifactName"],
-            f"production-availability-{release}-{availability_attempt}",
+            f"production-availability-{release}-{observation['availabilityRunId']}",
             f"{label}.observation.availabilityArtifactName",
         )
         sha256_digest(
@@ -1310,7 +1321,7 @@ def validate_facts(
         )
         exact(
             observation["availabilityPredicateType"],
-            "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v1",
+            "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v2",
             f"{label}.observation.availabilityPredicateType",
         )
         sha256_digest(
@@ -2297,13 +2308,13 @@ def validate_facts(
             )
         exact(
             availability["artifactName"],
-            f"production-availability-{release}-{availability_attempt}",
+            f"production-availability-{release}-{observation['availabilityRunId']}",
             f"{label}.availability.artifactName",
         )
         sha256_digest(availability["artifactDigest"], f"{label}.availability.artifactDigest")
         exact(
             availability["predicateType"],
-            "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v1",
+            "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v2",
             f"{label}.availability.predicateType",
         )
         sha256_digest(availability["predicateDigest"], f"{label}.availability.predicateDigest")
@@ -4116,6 +4127,7 @@ def derive_live(
     semantic_path = source_dir / "deployed-datahub-semantic-proof.json"
     deployment_path = source_dir / "deployment-evidence.json"
     predicate_path = source_dir / "attestation-predicate.json"
+
     proof = exact_keys(
         load_json(proof_path, "live proof"),
         {
@@ -4130,153 +4142,237 @@ def derive_live(
             "stableSourceCount",
             "recoveredContradictions",
             "contradictionAttributeCount",
-            "demoState",
+            "runtimeBinding",
+            "governedWrite",
         },
         "live proof",
     )
-    exact(proof["schemaVersion"], "archon.live-datahub-proof/v2", "live proof.schemaVersion")
+    exact(
+        proof["schemaVersion"],
+        "archon.live-datahub-proof/v3",
+        "live proof.schemaVersion",
+    )
     exact(proof["ok"], True, "live proof.ok")
-    exact(proof["result"], "retained-history-contradiction-proven", "live proof.result")
+    exact(
+        proof["result"],
+        "retained-history-contradiction-proven",
+        "live proof.result",
+    )
     raw_sha256(proof["querySha256"], "live proof.querySha256")
-    dataset_digest = prefixed(proof["datasetUrnSha256"], "live proof.datasetUrnSha256")
+    dataset_digest = prefixed(
+        proof["datasetUrnSha256"],
+        "live proof.datasetUrnSha256",
+    )
     exact(proof["datasetsDiscovered"], 1, "live proof.datasetsDiscovered")
     positive_int(proof["aspectHistories"], "live proof.aspectHistories")
     exact(proof["retainedHistories"], 1, "live proof.retainedHistories")
     exact(proof["stableSourceCount"], 2, "live proof.stableSourceCount")
-    exact(proof["recoveredContradictions"], 1, "live proof.recoveredContradictions")
-    exact(proof["contradictionAttributeCount"], 1, "live proof.contradictionAttributeCount")
-    demo_state = exact_keys(
-        proof["demoState"],
-        {
-            "receiptSha256",
-            "stateContractSha256",
-            "postStateSha256",
-            "gmsEndpointFingerprint",
-            "queryBindingSha256",
-        },
-        "live proof.demoState",
+    exact(
+        proof["recoveredContradictions"],
+        1,
+        "live proof.recoveredContradictions",
     )
-    for key in demo_state:
-        raw_sha256(demo_state[key], f"live proof.demoState.{key}")
+    exact(
+        proof["contradictionAttributeCount"],
+        1,
+        "live proof.contradictionAttributeCount",
+    )
+    runtime_binding = exact_keys(
+        proof["runtimeBinding"],
+        {
+            "profileId",
+            "availability",
+            "generation",
+            "capabilityDigest",
+            "bindingDigest",
+        },
+        "live proof.runtimeBinding",
+    )
+    exact(
+        runtime_binding["profileId"],
+        "cloud",
+        "live proof.runtimeBinding.profileId",
+    )
+    exact(
+        runtime_binding["availability"],
+        "READY",
+        "live proof.runtimeBinding.availability",
+    )
+    nonempty(
+        runtime_binding["generation"],
+        "live proof.runtimeBinding.generation",
+        128,
+    )
+    sha256_digest(
+        runtime_binding["capabilityDigest"],
+        "live proof.runtimeBinding.capabilityDigest",
+    )
+    sha256_digest(
+        runtime_binding["bindingDigest"],
+        "live proof.runtimeBinding.bindingDigest",
+    )
+    governed_write = exact_keys(
+        proof["governedWrite"],
+        {
+            "workflowRunId",
+            "result",
+            "rollbackSubjectDigest",
+            "rollbackEvidenceDigest",
+            "attestationPredicateDigest",
+            "attestationVerificationDigest",
+        },
+        "live proof.governedWrite",
+    )
+    positive_int(
+        governed_write["workflowRunId"],
+        "live proof.governedWrite.workflowRunId",
+    )
+    exact(
+        governed_write["result"],
+        "write-verified-and-rollback-proven",
+        "live proof.governedWrite.result",
+    )
+    for key in (
+        "rollbackSubjectDigest",
+        "rollbackEvidenceDigest",
+        "attestationPredicateDigest",
+        "attestationVerificationDigest",
+    ):
+        sha256_digest(
+            governed_write[key],
+            f"live proof.governedWrite.{key}",
+        )
 
     semantic = exact_keys(
         load_json(semantic_path, "deployed semantic proof"),
-        {"schemaVersion", "demoState", "classification", "findings"},
+        {
+            "schemaVersion",
+            "evidenceClass",
+            "classification",
+            "findings",
+        },
         "deployed semantic proof",
     )
     exact(
         semantic["schemaVersion"],
-        "archon.deployed-datahub-semantic-proof/v1",
+        "archon.deployed-datahub-semantic-proof/v2",
         "deployed semantic proof.schemaVersion",
     )
-    semantic_demo = exact_keys(
-        semantic["demoState"],
-        {
-            "receiptSha256",
-            "stateContractSha256",
-            "postStateSha256",
-            "semanticContractSha256",
-            "gmsEndpointFingerprint",
-        },
-        "deployed semantic proof.demoState",
-    )
-    for key in ("receiptSha256", "stateContractSha256", "postStateSha256", "gmsEndpointFingerprint"):
-        exact(
-            semantic_demo[key],
-            demo_state[key],
-            f"live/semantic demoState.{key}",
-        )
-    raw_sha256(
-        semantic_demo["semanticContractSha256"],
-        "deployed semantic proof.demoState.semanticContractSha256",
+    exact(
+        semantic["evidenceClass"],
+        "credentialed-live-cloud",
+        "deployed semantic proof.evidenceClass",
     )
 
     deployment = exact_keys(
         load_json(deployment_path, "deployment evidence"),
         {
             "schemaVersion",
-            "promotionPolicy",
-            "rollbackSelector",
-            "source",
-            "immutableArtifacts",
-            "dataHubDemoState",
-            "pipelineSecurity",
-            "staging",
-            "production",
+            "stage",
+            "releaseSha",
+            "ciRunId",
+            "deploymentRunId",
+            "applicationUrl",
+            "promotion",
+            "verification",
+            "secretsProjected",
+            "generatedAt",
         },
         "deployment evidence",
     )
-    exact(deployment["schemaVersion"], 1, "deployment evidence.schemaVersion")
     exact(
-        deployment["promotionPolicy"],
-        "build-once-promote-same-artifacts",
-        "deployment evidence.promotionPolicy",
+        deployment["schemaVersion"],
+        "archon.aws-deployment-evidence/v2",
+        "deployment evidence.schemaVersion",
     )
+    exact(deployment["stage"], "production", "deployment evidence.stage")
     exact(
-        record(deployment["rollbackSelector"], "deployment evidence.rollbackSelector")[
-            "releaseSha"
-        ],
+        deployment["releaseSha"],
         release,
-        "deployment evidence.rollbackSelector.releaseSha",
+        "deployment evidence.releaseSha",
     )
-    exact(record(deployment["staging"], "deployment evidence.staging")["result"], "passed", "deployment evidence.staging.result")
-    production = record(deployment["production"], "deployment evidence.production")
-    exact(production["result"], "passed", "deployment evidence.production.result")
+    positive_int(deployment["ciRunId"], "deployment evidence.ciRunId")
+    deployment_run = positive_int(
+        deployment["deploymentRunId"],
+        "deployment evidence.deploymentRunId",
+    )
     application_url = public_https_url(
-        production["applicationUrl"],
-        "deployment evidence.production.applicationUrl",
+        deployment["applicationUrl"],
+        "deployment evidence.applicationUrl",
         origin_only=True,
     )
-    pipeline_security = record(
-        deployment["pipelineSecurity"], "deployment evidence.pipelineSecurity"
-    )
-    canary = exact_keys(
-        pipeline_security["preProductionGovernedCanary"],
+    promotion = exact_keys(
+        deployment["promotion"],
         {
-            "deploymentWorkflowRunId",
-            "workflowRunId",
-            "workflowRunUrl",
-            "releaseSha",
-            "controlPlaneSha",
-            "artifactSha256",
-            "rollbackSubjectSha256",
-            "rollbackEvidenceDigest",
-            "attestationPredicateSha256",
-            "attestationVerificationSha256",
-            "fixtureBindingDigest",
-            "result",
+            "policy",
+            "webArtifactDigest",
+            "lambdaArtifactDigest",
+            "cloudRuntimeReleaseDigest",
+            "coreCapabilityDigest",
+            "coreImageManifestDigest",
         },
-        "deployment evidence.pipelineSecurity.preProductionGovernedCanary",
+        "deployment evidence.promotion",
     )
-    positive_int(canary["deploymentWorkflowRunId"], "canary.deploymentWorkflowRunId")
-    canary_run = positive_int(canary["workflowRunId"], "canary.workflowRunId")
     exact(
-        canary["workflowRunUrl"],
-        f"https://github.com/{repository}/actions/runs/{canary_run}",
-        "canary.workflowRunUrl",
+        promotion["policy"],
+        "build-once-promote-exact-artifacts",
+        "deployment evidence.promotion.policy",
     )
-    exact(canary["releaseSha"], release, "canary.releaseSha")
-    release_sha(canary["controlPlaneSha"], "canary.controlPlaneSha")
-    exact(canary["result"], "write-verified-and-rollback-proven", "canary.result")
-    canary_artifact = prefixed(canary["artifactSha256"], "canary.artifactSha256")
-    del canary_artifact
-    rollback_subject = prefixed(
-        canary["rollbackSubjectSha256"], "canary.rollbackSubjectSha256"
+    for key in (
+        "webArtifactDigest",
+        "lambdaArtifactDigest",
+        "cloudRuntimeReleaseDigest",
+        "coreCapabilityDigest",
+        "coreImageManifestDigest",
+    ):
+        sha256_digest(
+            promotion[key],
+            f"deployment evidence.promotion.{key}",
+        )
+    verification = exact_keys(
+        deployment["verification"],
+        {
+            "result",
+            "zeroIdleCore",
+            "httpBoundary",
+            "securityHeaders",
+            "directApiRejected",
+            "canonicalHostEnforced",
+            "observationSha256",
+        },
+        "deployment evidence.verification",
     )
-    rollback_evidence = sha256_digest(
-        canary["rollbackEvidenceDigest"], "canary.rollbackEvidenceDigest"
+    exact(
+        verification["result"],
+        "passed",
+        "deployment evidence.verification.result",
     )
-    canary_predicate = prefixed(
-        canary["attestationPredicateSha256"], "canary.attestationPredicateSha256"
+    for key in (
+        "zeroIdleCore",
+        "httpBoundary",
+        "securityHeaders",
+        "directApiRejected",
+        "canonicalHostEnforced",
+    ):
+        exact(
+            verification[key],
+            True,
+            f"deployment evidence.verification.{key}",
+        )
+    raw_sha256(
+        verification["observationSha256"],
+        "deployment evidence.verification.observationSha256",
     )
-    canary_verification = prefixed(
-        canary["attestationVerificationSha256"],
-        "canary.attestationVerificationSha256",
+    exact(
+        deployment["secretsProjected"],
+        False,
+        "deployment evidence.secretsProjected",
     )
-    fixture_binding = sha256_digest(
-        canary["fixtureBindingDigest"], "canary.fixtureBindingDigest"
+    fresh(
+        deployment["generatedAt"],
+        "deployment evidence.generatedAt",
+        dt.timedelta(days=7),
     )
-    del fixture_binding
 
     predicate = exact_keys(
         load_json(predicate_path, "live predicate"),
@@ -4286,10 +4382,10 @@ def derive_live(
             "workflow",
             "releaseSha",
             "deploymentRunId",
+            "governedCanaryRunId",
             "provenAt",
             "querySha256",
-            "queryBindingSha256",
-            "dataHubDemoState",
+            "runtimeBinding",
             "evidence",
             "result",
             "datasetUrnSha256",
@@ -4308,14 +4404,27 @@ def derive_live(
         "live predicate.workflow",
     )
     exact(predicate["releaseSha"], release, "live predicate.releaseSha")
-    positive_int(int(predicate["deploymentRunId"]), "live predicate.deploymentRunId")
+    exact(
+        predicate["deploymentRunId"],
+        str(deployment_run),
+        "live predicate.deploymentRunId",
+    )
+    exact(
+        predicate["governedCanaryRunId"],
+        str(governed_write["workflowRunId"]),
+        "live predicate.governedCanaryRunId",
+    )
     proven_at = nonempty(predicate["provenAt"], "live predicate.provenAt", 40)
     fresh(proven_at, "live predicate.provenAt", dt.timedelta(days=7))
-    exact(predicate["querySha256"], proof["querySha256"], "live predicate.querySha256")
     exact(
-        predicate["queryBindingSha256"],
-        demo_state["queryBindingSha256"],
-        "live predicate.queryBindingSha256",
+        predicate["querySha256"],
+        proof["querySha256"],
+        "live predicate.querySha256",
+    )
+    exact(
+        predicate["runtimeBinding"],
+        runtime_binding,
+        "live predicate.runtimeBinding",
     )
     exact(predicate["result"], proof["result"], "live predicate.result")
     exact(
@@ -4323,7 +4432,15 @@ def derive_live(
         proof["datasetUrnSha256"],
         "live predicate.datasetUrnSha256",
     )
-    evidence = record(predicate["evidence"], "live predicate.evidence")
+    evidence = exact_keys(
+        predicate["evidence"],
+        {
+            "proofSha256",
+            "deploymentEvidenceSha256",
+            "deployedDataHubSemanticProofSha256",
+        },
+        "live predicate.evidence",
+    )
     for key, path in {
         "proofSha256": proof_path,
         "deploymentEvidenceSha256": deployment_path,
@@ -4347,14 +4464,7 @@ def derive_live(
         "retainedHistoryRead": True,
         "stableSourceCount": proof["stableSourceCount"],
         "recoveredContradictions": proof["recoveredContradictions"],
-        "governedWrite": {
-            "workflowRunId": canary_run,
-            "result": canary["result"],
-            "rollbackSubjectDigest": rollback_subject,
-            "rollbackEvidenceDigest": rollback_evidence,
-            "attestationPredicateDigest": canary_predicate,
-            "attestationVerificationDigest": canary_verification,
-        },
+        "governedWrite": governed_write,
         "provenAt": proven_at,
     }
     u3_facts = {
@@ -4416,7 +4526,6 @@ def derive_live(
             u3_subjects,
         ),
     ]
-
 
 def standard_subject_names(
     source_registry: dict[str, Any],
@@ -5818,7 +5927,12 @@ def parser() -> argparse.ArgumentParser:
     select_artifact = commands.add_parser("select-run-artifact")
     select_artifact.add_argument(
         "--policy",
-        choices=("exact-current", "single-retained", "latest-retained"),
+        choices=(
+            "exact-current",
+            "exact-run-id",
+            "single-retained",
+            "latest-retained",
+        ),
         required=True,
     )
     select_artifact.add_argument("--artifact-prefix", required=True)

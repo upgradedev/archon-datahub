@@ -26,6 +26,10 @@ on:
         description: Exact GitHub sha256 artifact digest
         required: true
         type: string
+      governed_canary_run_id:
+        description: Successful governed-canary workflow run ID that proves rollback
+        required: true
+        type: string
       profile:
         description: Runtime binding to prove
         required: true
@@ -67,6 +71,7 @@ jobs:
       DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
       DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
       DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
+      GOVERNED_CANARY_RUN_ID: ${{ inputs.governed_canary_run_id }}
       PROFILE: ${{ inputs.profile }}
       RUNTIME_SESSION_ID: ${{ inputs.runtime_session_id }}
       ARCHON_DEMO_QUERY: ${{ inputs.query }}
@@ -85,6 +90,7 @@ jobs:
           [[ "${DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${GOVERNED_CANARY_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${PROFILE}" =~ ^(cloud|core)$ ]]
           test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
           test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha)" = \
@@ -350,12 +356,203 @@ jobs:
             .querySha256 == $query and .datasetUrnSha256 == $urn and
             .datasetsDiscovered == 1 and
             .retainedHistories >= 1 and
-            .stableSourceCount >= 2 and
-            .recoveredContradictions >= 1
+            .stableSourceCount == 2 and
+            .recoveredContradictions == 1 and
+            .retainedHistories == 1 and
+            .contradictionAttributeCount == 1 and
+            (.semanticProof |
+              .schemaVersion == "archon.deployed-datahub-semantic-proof/v2" and
+              .evidenceClass == "credentialed-live-cloud" and
+              keys == ["classification","evidenceClass","findings","schemaVersion"])
           ' "${raw}" >/dev/null
+          semantic="${RUNNER_TEMP}/live-proof/runtime/deployed-datahub-semantic-proof.json"
+          jq -cS '.semanticProof' "${raw}" >"${semantic}"
+          jq -e '
+            .schemaVersion == "archon.deployed-datahub-semantic-proof/v2" and
+            .evidenceClass == "credentialed-live-cloud"
+          ' "${semantic}" >/dev/null
           echo "path=${raw}" >>"${GITHUB_OUTPUT}"
           echo "digest=sha256:$(sha256sum "${raw}" | awk '{print $1}')" >>"${GITHUB_OUTPUT}"
+          echo "semantic_path=${semantic}" >>"${GITHUB_OUTPUT}"
 
+      - name: Verify exact governed canary rollback attestation
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        id: canary
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/live-proof/governed-canary"
+          source="${root}/source"
+          mkdir -p "${source}"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GOVERNED_CANARY_RUN_ID}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GOVERNED_CANARY_RUN_ID}" '
+              .id == $runId and
+              .path == ".github/workflows/governed-canary.yml" and
+              .event == "workflow_dispatch" and
+              .head_branch == "master" and .head_sha == $release and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              .status == "completed" and .conclusion == "success" and
+              .run_attempt == 1
+            ' <<<"${run_json}" >/dev/null
+          artifacts="$(
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GOVERNED_CANARY_RUN_ID}/artifacts?per_page=100"
+          )"
+          expected_name="governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-1"
+          artifact="$(
+            jq -ce \
+              --arg name "${expected_name}" \
+              --argjson runId "${GOVERNED_CANARY_RUN_ID}" '
+                [.[].artifacts[] |
+                  select(
+                    .name == $name and .expired == false and
+                    .workflow_run.id == $runId and
+                    (.id | type) == "number" and .id > 0 and
+                    (.size_in_bytes | type) == "number" and
+                    .size_in_bytes > 0 and .size_in_bytes <= 52428800 and
+                    (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  )] |
+                if length == 1 then .[0]
+                else error("exact governed-canary rollback artifact is not unique") end
+              ' <<<"${artifacts}"
+          )"
+          artifact_id="$(jq -er .id <<<"${artifact}")"
+          artifact_digest="$(jq -er .digest <<<"${artifact}")"
+          archive="${root}/source.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" >"${archive}"
+          test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = \
+            "${artifact_digest}"
+          python3 - "${archive}" "${source}" <<'PY'
+          import pathlib
+          import shutil
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          expected = {
+              "attestation-predicate.json",
+              "recovery-evidence.json",
+              "recovery-evidence.sha256",
+              "recovery.json",
+          }
+          total = 0
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              names = [entry.filename for entry in entries]
+              if set(names) != expected or len(names) != len(expected):
+                  raise SystemExit("governed-canary artifact inventory is not exact")
+              for entry in entries:
+                  path = pathlib.PurePosixPath(entry.filename)
+                  mode = stat.S_IFMT(entry.external_attr >> 16)
+                  if (
+                      path.is_absolute()
+                      or ".." in path.parts
+                      or entry.is_dir()
+                      or mode not in (0, stat.S_IFREG)
+                      or entry.flag_bits & 0x1
+                      or entry.file_size > 2 * 1024 * 1024
+                  ):
+                      raise SystemExit("unsafe governed-canary artifact member")
+                  total += entry.file_size
+                  if total > 6 * 1024 * 1024:
+                      raise SystemExit("governed-canary artifact is oversized")
+                  target = destination / entry.filename
+                  with bundle.open(entry) as input_file, target.open("xb") as output:
+                      shutil.copyfileobj(input_file, output)
+          PY
+          test "$(wc -l <"${source}/recovery-evidence.sha256" | tr -d ' ')" = 1
+          grep -Eq '^[0-9a-f]{64}  recovery-evidence\.json$' \
+            "${source}/recovery-evidence.sha256"
+          (
+            cd "${source}"
+            sha256sum --check --strict recovery-evidence.sha256
+          )
+          cmp --silent \
+            "${source}/recovery-evidence.json" \
+            "${source}/attestation-predicate.json"
+          evidence="${source}/recovery-evidence.json"
+          jq -e \
+            --arg run "${GOVERNED_CANARY_RUN_ID}" \
+            --arg release "${RELEASE_SHA}" '
+              keys == [
+                "afterDigest","beforeDigest","deploymentEvidenceSha256","digest",
+                "disposition","endpointBindingSha256","mutation","recoveredAt",
+                "recoveryDigest","runtimeProfile","schemaVersion","sourceWorkflow","target"
+              ] and
+              .schemaVersion == "archon.governed-canary-recovery-evidence/v2" and
+              .runtimeProfile == "cloud" and .disposition == "restored" and
+              (.sourceWorkflow |
+                keys == ["controlPlaneGatesSha256","controlPlaneSha","runAttempt","runId"] and
+                .runId == $run and .runAttempt == "1" and
+                .controlPlaneSha == $release) and
+              (.target |
+                keys == ["columnPath","entityUrn","tagUrn"] and
+                .entityUrn == "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)" and
+                .columnPath == "customer_email" and .tagUrn == "urn:li:tag:PII") and
+              (.mutation |
+                keys == ["performed","requestDigest","responseDigest"] and
+                .performed == true) and
+              ([
+                .recoveryDigest,.deploymentEvidenceSha256,.endpointBindingSha256,
+                .beforeDigest,.afterDigest,.mutation.requestDigest,
+                .mutation.responseDigest,.sourceWorkflow.controlPlaneGatesSha256,.digest
+              ] | all(.[]; test("^sha256:[0-9a-f]{64}$")))
+            ' "${evidence}" >/dev/null
+          stored_digest="$(jq -er .digest "${evidence}")"
+          calculated_digest="$(
+            jq -cS 'del(.digest)' "${evidence}" |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          test "${stored_digest}" = "${calculated_digest}"
+          expected_predicate="$(jq -cS . "${source}/attestation-predicate.json")"
+          expected_subjects="$(
+            jq -Rn '
+              [inputs |
+                capture("^(?<sha>[0-9a-f]{64})  (?<name>[A-Za-z0-9][A-Za-z0-9._-]*)$") |
+                {name:.name,digest:{sha256:.sha}}] | sort_by(.name)
+            ' <"${source}/recovery-evidence.sha256"
+          )"
+          raw_verification="${root}/attestation.raw.json"
+          statement="${root}/attestation-statement.json"
+          gh attestation verify "${evidence}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/governed-canary.yml" \
+            --signer-digest "${RELEASE_SHA}" \
+            --source-digest "${RELEASE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2" \
+            --deny-self-hosted-runners \
+            --format json >"${raw_verification}"
+          jq -ceS \
+            --arg predicateType "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2" \
+            --arg subjectName "recovery-evidence.json" \
+            --arg subjectSha "$(awk '{print $1}' "${source}/recovery-evidence.sha256")" \
+            --argjson expectedPredicate "${expected_predicate}" \
+            --argjson expectedSubjects "${expected_subjects}" '
+              [.[] |
+                select(
+                  .verificationResult.statement.predicateType == $predicateType and
+                  .verificationResult.statement.predicate == $expectedPredicate and
+                  (.verificationResult.statement.subject | sort_by(.name)) == $expectedSubjects and
+                  any(.verificationResult.statement.subject[];
+                    .name == $subjectName and .digest.sha256 == $subjectSha)
+                ) | .verificationResult.statement] |
+              unique |
+              if length == 1 then .[0]
+              else error("exactly one governed-canary attestation must match") end
+            ' "${raw_verification}" >"${statement}"
+          {
+            echo "workflow_run_id=${GOVERNED_CANARY_RUN_ID}"
+            echo "rollback_subject_digest=sha256:$(sha256sum "${evidence}" | awk '{print $1}')"
+            echo "rollback_evidence_digest=${stored_digest}"
+            echo "attestation_predicate_digest=sha256:$(sha256sum "${source}/attestation-predicate.json" | awk '{print $1}')"
+            echo "attestation_verification_digest=sha256:$(sha256sum "${statement}" | awk '{print $1}')"
+          } >>"${GITHUB_OUTPUT}"
       - name: Seal exact runtime-bound live proof
         id: evidence
         env:
@@ -487,6 +684,166 @@ jobs:
           retention-days: 90
           compression-level: 9
 
+      - name: Seal submission-native live proof bundle
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        id: submission_evidence
+        env:
+          DEPLOYMENT_EVIDENCE: ${{ steps.deployment.outputs.evidence }}
+          RUNTIME_BINDING: ${{ steps.runtime.outputs.binding }}
+          LIVE_SUMMARY: ${{ steps.semantic.outputs.path }}
+          SEMANTIC_PROOF: ${{ steps.semantic.outputs.semantic_path }}
+          CANARY_RUN_ID: ${{ steps.canary.outputs.workflow_run_id }}
+          ROLLBACK_SUBJECT_DIGEST: ${{ steps.canary.outputs.rollback_subject_digest }}
+          ROLLBACK_EVIDENCE_DIGEST: ${{ steps.canary.outputs.rollback_evidence_digest }}
+          CANARY_PREDICATE_DIGEST: ${{ steps.canary.outputs.attestation_predicate_digest }}
+          CANARY_VERIFICATION_DIGEST: ${{ steps.canary.outputs.attestation_verification_digest }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/live-proof/submission-native"
+          mkdir -p "${root}"
+          cp -- "${DEPLOYMENT_EVIDENCE}" "${root}/deployment-evidence.json"
+          cp -- "${SEMANTIC_PROOF}" "${root}/deployed-datahub-semantic-proof.json"
+          binding_digest="sha256:$(sha256sum "${RUNTIME_BINDING}" | awk '{print $1}')"
+          jq -nS \
+            --slurpfile live "${LIVE_SUMMARY}" \
+            --slurpfile binding "${RUNTIME_BINDING}" \
+            --arg generation "${{ steps.runtime.outputs.generation }}" \
+            --arg capabilityDigest "${{ steps.runtime.outputs.capability }}" \
+            --arg bindingDigest "${binding_digest}" \
+            --argjson canaryRunId "${CANARY_RUN_ID}" \
+            --arg rollbackSubjectDigest "${ROLLBACK_SUBJECT_DIGEST}" \
+            --arg rollbackEvidenceDigest "${ROLLBACK_EVIDENCE_DIGEST}" \
+            --arg attestationPredicateDigest "${CANARY_PREDICATE_DIGEST}" \
+            --arg attestationVerificationDigest "${CANARY_VERIFICATION_DIGEST}" '
+              {
+                schemaVersion:"archon.live-datahub-proof/v3",
+                ok:$live[0].ok,
+                result:$live[0].result,
+                querySha256:$live[0].querySha256,
+                datasetUrnSha256:$live[0].datasetUrnSha256,
+                datasetsDiscovered:$live[0].datasetsDiscovered,
+                aspectHistories:$live[0].aspectHistories,
+                retainedHistories:$live[0].retainedHistories,
+                stableSourceCount:$live[0].stableSourceCount,
+                recoveredContradictions:$live[0].recoveredContradictions,
+                contradictionAttributeCount:$live[0].contradictionAttributeCount,
+                runtimeBinding:{
+                  profileId:"cloud",
+                  availability:$binding[0].availability,
+                  generation:$generation,
+                  capabilityDigest:$capabilityDigest,
+                  bindingDigest:$bindingDigest
+                },
+                governedWrite:{
+                  workflowRunId:$canaryRunId,
+                  result:"write-verified-and-rollback-proven",
+                  rollbackSubjectDigest:$rollbackSubjectDigest,
+                  rollbackEvidenceDigest:$rollbackEvidenceDigest,
+                  attestationPredicateDigest:$attestationPredicateDigest,
+                  attestationVerificationDigest:$attestationVerificationDigest
+                }
+              }
+            ' >"${root}/proof.json"
+          jq -e '
+            keys == [
+              "aspectHistories","contradictionAttributeCount","datasetUrnSha256",
+              "datasetsDiscovered","governedWrite","ok","querySha256",
+              "recoveredContradictions","result","retainedHistories","runtimeBinding",
+              "schemaVersion","stableSourceCount"
+            ] and
+            .schemaVersion == "archon.live-datahub-proof/v3" and
+            .ok == true and .result == "retained-history-contradiction-proven" and
+            .datasetsDiscovered == 1 and .retainedHistories == 1 and
+            .stableSourceCount == 2 and .recoveredContradictions == 1 and
+            .contradictionAttributeCount == 1 and
+            (.runtimeBinding |
+              keys == ["availability","bindingDigest","capabilityDigest","generation","profileId"] and
+              .profileId == "cloud" and .availability == "READY") and
+            (.governedWrite |
+              keys == [
+                "attestationPredicateDigest","attestationVerificationDigest","result",
+                "rollbackEvidenceDigest","rollbackSubjectDigest","workflowRunId"
+              ] and
+              .result == "write-verified-and-rollback-proven")
+          ' "${root}/proof.json" >/dev/null
+          (
+            cd "${root}"
+            sha256sum \
+              deployment-evidence.json \
+              deployed-datahub-semantic-proof.json \
+              proof.json >proof-subject.sha256
+          )
+          proven_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -cnS \
+            --slurpfile proof "${root}/proof.json" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
+            --arg governedCanaryRunId "${CANARY_RUN_ID}" \
+            --arg provenAt "${proven_at}" \
+            --arg proofSha256 "$(sha256sum "${root}/proof.json" | awk '{print $1}')" \
+            --arg deploymentEvidenceSha256 "$(sha256sum "${root}/deployment-evidence.json" | awk '{print $1}')" \
+            --arg deployedDataHubSemanticProofSha256 "$(sha256sum "${root}/deployed-datahub-semantic-proof.json" | awk '{print $1}')" '
+              {
+                schemaVersion:"archon.live-datahub-proof-attestation/v4",
+                repository:$repository,
+                workflow:{runId:$runId,runAttempt:$runAttempt},
+                releaseSha:$releaseSha,
+                deploymentRunId:$deploymentRunId,
+                governedCanaryRunId:$governedCanaryRunId,
+                provenAt:$provenAt,
+                querySha256:$proof[0].querySha256,
+                runtimeBinding:$proof[0].runtimeBinding,
+                evidence:{
+                  proofSha256:$proofSha256,
+                  deploymentEvidenceSha256:$deploymentEvidenceSha256,
+                  deployedDataHubSemanticProofSha256:$deployedDataHubSemanticProofSha256
+                },
+                result:$proof[0].result,
+                datasetUrnSha256:$proof[0].datasetUrnSha256
+              }
+            ' >"${root}/attestation-predicate.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" '
+              keys == [
+                "datasetUrnSha256","deploymentRunId","evidence","governedCanaryRunId",
+                "provenAt","querySha256","releaseSha","repository","result",
+                "runtimeBinding","schemaVersion","workflow"
+              ] and
+              .schemaVersion == "archon.live-datahub-proof-attestation/v4" and
+              .repository == $repository and .releaseSha == $release and
+              .result == "retained-history-contradiction-proven"
+            ' "${root}/attestation-predicate.json" >/dev/null
+          (
+            cd "${root}"
+            sha256sum --check --strict proof-subject.sha256
+          )
+          {
+            echo "directory=${root}"
+            echo "inventory=${root}/proof-subject.sha256"
+            echo "predicate=${root}/attestation-predicate.json"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Attest submission-native live proof subjects
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.submission_evidence.outputs.inventory }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4
+          predicate-path: ${{ steps.submission_evidence.outputs.predicate }}
+
+      - name: Retain submission-native live proof bundle
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-datahub-proof-${{ inputs.release_sha }}-${{ github.run_attempt }}
+          path: ${{ steps.submission_evidence.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
       - name: Publish proof summary
         run: |
           {
