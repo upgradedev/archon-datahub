@@ -292,7 +292,7 @@ MUTATIONS = {
     "trial role output removed from one allowlist": (
         "reconcile",
         '"GitHubDataHubCloudTrialRoleName",',
-        '"GitHubDataHubCloudTrialRoleNameRemoved",',
+        '"RemovedTrialRoleName",',
     ),
     "trial staging receipt renamed": (
         "reconcile",
