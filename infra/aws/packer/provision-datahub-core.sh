@@ -255,10 +255,11 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
+upstream_datahub_secret = "DATAHUB_SECRET=" + ("0123456789abcdef" * 4)
 replacements = {
     "DATAHUB_SYSTEM_CLIENT_SECRET=JohnSnowKnowsNothing":
         ("DATAHUB_SYSTEM_CLIENT_SECRET=${DATAHUB_SYSTEM_CLIENT_SECRET}", 1),
-    "DATAHUB_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":
+    upstream_datahub_secret:
         ("DATAHUB_SECRET=${DATAHUB_SECRET}", 1),
     "EBEAN_DATASOURCE_PASSWORD=datahub":
         ("EBEAN_DATASOURCE_PASSWORD=${ARCHON_MYSQL_PASSWORD}", 2),

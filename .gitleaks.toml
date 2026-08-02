@@ -10,3 +10,15 @@ regexTarget = "match"
 regexes = [
   '''(?i)(certificatekeyalgorithm|keyalgorithm)[^\r\n]{0,64}EC_prime256v1''',
 ]
+[[allowlists]]
+description = "Pinned DataHub Quickstart default inspected only so provisioning can replace it"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+commits = ["442145990a089c7549bdda3d004e5e66cf778458"]
+paths = [
+  '''^infra/aws/packer/provision-datahub-core\.sh$''',
+]
+regexes = [
+  '''DATAHUB_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+]
