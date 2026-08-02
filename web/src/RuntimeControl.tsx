@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -17,8 +18,13 @@ import {
 } from "./runtime-api";
 
 interface RuntimeControlProps {
+  getAccessToken?: () => string;
   onSessionChange?: (session: RuntimeSessionStatus | undefined) => void;
 }
+
+const SESSION_STORAGE_KEY = "archon.runtime-session/v1";
+const SESSION_ID = /^rs_[A-Za-z0-9_-]{43}$/u;
+const TERMINAL_STATES = new Set(["STOPPED", "EXPIRED", "UNAVAILABLE"]);
 
 const requestLabels: Record<RuntimeRequest, string> = {
   auto: "Auto · best available",
@@ -118,6 +124,7 @@ function Registry({
 }
 
 export function RuntimeControl({
+  getAccessToken,
   onSessionChange,
 }: RuntimeControlProps) {
   const [requestedProfile, setRequestedProfile] =
@@ -126,25 +133,87 @@ export function RuntimeControl({
   const [session, setSession] = useState<RuntimeSessionStatus>();
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [pending, setPending] = useState<
-    "registry" | "start" | "extend" | "stop"
+    "registry" | "recover" | "start" | "extend" | "stop"
   >();
   const [error, setError] = useState<string>();
   const controller = useRef<AbortController | null>(null);
   const receivedAt = useRef(0);
   const receivedRemaining = useRef(0);
 
-  const publish = (next: RuntimeSessionStatus | undefined) => {
-    setSession(next);
-    onSessionChange?.(next);
-    if (next) {
-      receivedAt.current = Date.now();
-      receivedRemaining.current = next.remainingSeconds;
-      setRemainingSeconds(next.remainingSeconds);
-    } else {
-      receivedRemaining.current = 0;
-      setRemainingSeconds(0);
+  const publish = useCallback(
+    (next: RuntimeSessionStatus | undefined) => {
+      setSession(next);
+      onSessionChange?.(next);
+      try {
+        if (next && !TERMINAL_STATES.has(next.state)) {
+          window.sessionStorage.setItem(
+            SESSION_STORAGE_KEY,
+            next.sessionId,
+          );
+        } else {
+          window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        }
+      } catch {
+        // Session recovery is an availability convenience. The server remains
+        // authoritative and no binding or credential is ever persisted.
+      }
+      if (next) {
+        receivedAt.current = Date.now();
+        receivedRemaining.current = next.remainingSeconds;
+        setRemainingSeconds(next.remainingSeconds);
+      } else {
+        receivedRemaining.current = 0;
+        setRemainingSeconds(0);
+      }
+    },
+    [onSessionChange],
+  );
+
+  useEffect(() => {
+    let stored: string | null = null;
+    try {
+      stored = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    } catch {
+      return undefined;
     }
-  };
+    if (stored === null) return undefined;
+    if (!SESSION_ID.test(stored)) {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      setError("An invalid saved runtime capability was discarded.");
+      return undefined;
+    }
+    let active = true;
+    setPending("recover");
+    void getRuntimeSession(stored)
+      .then((recovered) => {
+        if (active) {
+          setError(undefined);
+          publish(recovered);
+        }
+      })
+      .catch((recoveryError: unknown) => {
+        if (!active) return;
+        if (
+          recoveryError &&
+          typeof recoveryError === "object" &&
+          "status" in recoveryError &&
+          recoveryError.status === 404
+        ) {
+          window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        }
+        setError(
+          recoveryError instanceof Error
+            ? recoveryError.message
+            : "The saved runtime session could not be recovered.",
+        );
+      })
+      .finally(() => {
+        if (active) setPending(undefined);
+      });
+    return () => {
+      active = false;
+    };
+  }, [publish]);
 
   useEffect(() => {
     if (
@@ -235,6 +304,7 @@ export function RuntimeControl({
       publish(
         await startRuntimeSession(
           requestedProfile,
+          getAccessToken?.() ?? "",
           nextController.signal,
         ),
       );
@@ -260,6 +330,7 @@ export function RuntimeControl({
       publish(
         await extendRuntimeSession(
           session.sessionId,
+          getAccessToken?.() ?? "",
           nextController.signal,
         ),
       );
@@ -285,6 +356,7 @@ export function RuntimeControl({
       publish(
         await stopRuntimeSession(
           session.sessionId,
+          getAccessToken?.() ?? "",
           nextController.signal,
         ),
       );
@@ -301,9 +373,7 @@ export function RuntimeControl({
     }
   };
 
-  const terminal =
-    session &&
-    ["STOPPED", "EXPIRED", "UNAVAILABLE"].includes(session.state);
+  const terminal = session && TERMINAL_STATES.has(session.state);
 
   return (
     <section
@@ -359,7 +429,7 @@ export function RuntimeControl({
             </label>
             <button
               className="run-button min-h-11 justify-center"
-              disabled={pending !== undefined}
+              disabled={pending !== undefined || getAccessToken === undefined}
               onClick={() => void launch()}
               type="button"
             >
@@ -370,6 +440,11 @@ export function RuntimeControl({
                   : "Launch pinned session"}
             </button>
           </div>
+          {getAccessToken === undefined ? (
+            <p className="mt-2 text-[10px] text-amber-100/80">
+              Sign in as the judge or steward to launch a paid runtime.
+            </p>
+          ) : null}
         ) : (
           <div
             aria-live="polite"
@@ -411,6 +486,7 @@ export function RuntimeControl({
                   className="rounded-lg border border-emerald-300/20 bg-emerald-300/[0.06] px-3 py-2 text-[10px] font-semibold text-emerald-100 disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={
                     pending !== undefined ||
+                    getAccessToken === undefined ||
                     !session.canExtend ||
                     session.state !== "READY"
                   }
@@ -421,7 +497,7 @@ export function RuntimeControl({
                 </button>
                 <button
                   className="rounded-lg border border-rose-300/20 bg-rose-300/[0.05] px-3 py-2 text-[10px] font-semibold text-rose-100 disabled:cursor-not-allowed disabled:opacity-40"
-                  disabled={pending !== undefined}
+                  disabled={pending !== undefined || getAccessToken === undefined}
                   onClick={() => void stop()}
                   type="button"
                 >
