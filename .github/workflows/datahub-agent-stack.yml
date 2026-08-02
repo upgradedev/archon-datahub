@@ -126,7 +126,30 @@ jobs:
           assert app.title
           print("ACK and Analytics Agent runtime contracts verified")
           PY
-      - name: Audit the exact Python dependency closure
+      - name: Verify hardened companion v2
+        if: steps.lock.outputs.adopted == 'true'
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          set -euo pipefail
+          uv sync \
+            --project services/datahub-companion \
+            --python 3.11.15 \
+            --frozen \
+            --no-build \
+            --group test
+          (
+            cd services/datahub-companion
+            uv run --frozen --group test pytest \
+              --cov=archon_companion \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-report="xml:$RUNNER_TEMP/datahub-companion-coverage.xml" \
+              --cov-fail-under=80 \
+              --junitxml="$RUNNER_TEMP/datahub-companion-junit.xml"
+          )
+          test -s "$RUNNER_TEMP/datahub-companion-coverage.xml"
+          test -s "$RUNNER_TEMP/datahub-companion-junit.xml"      - name: Audit the exact Python dependency closure
         id: audit
         if: steps.lock.outputs.adopted == 'true'
         continue-on-error: true
@@ -175,6 +198,8 @@ jobs:
             ${{ runner.temp }}/datahub-agent-stack.cdx.json
             .github/security/datahub-agent-stack.openvex.json
             ${{ runner.temp }}/datahub-agent-stack-vex-decision.json
+            ${{ runner.temp }}/datahub-companion-coverage.xml
+            ${{ runner.temp }}/datahub-companion-junit.xml
           if-no-files-found: error
           retention-days: 90
           overwrite: true
