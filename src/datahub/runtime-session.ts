@@ -168,7 +168,7 @@ function parseRequestedProfile(value: unknown): RuntimeRequest {
   return value as RuntimeRequest;
 }
 
-function nextRevision(session: RuntimeSession): number {
+function nextRevision(session: Readonly<RuntimeSession>): number {
   if (session.revision >= Number.MAX_SAFE_INTEGER) {
     return fail("INVALID_RUNTIME_SESSION", "session revision is exhausted");
   }
@@ -176,7 +176,7 @@ function nextRevision(session: RuntimeSession): number {
 }
 
 function evolve(
-  session: RuntimeSession,
+  session: Readonly<RuntimeSession>,
   change: Partial<RuntimeSession>
 ): Readonly<RuntimeSession> {
   return validateRuntimeSession({
@@ -378,7 +378,7 @@ export function createRuntimeSession(input: {
 }
 
 function expireIfDue(
-  session: RuntimeSession,
+  session: Readonly<RuntimeSession>,
   at: string
 ): Readonly<RuntimeSession> {
   if (session.state !== "STARTING" && session.state !== "ACTIVE") {
@@ -405,7 +405,7 @@ function expireIfDue(
 }
 
 export function transitionRuntimeSession(
-  value: RuntimeSession,
+  value: Readonly<RuntimeSession>,
   event: RuntimeSessionEvent
 ): Readonly<RuntimeSession> {
   const original = validateRuntimeSession(value);
@@ -512,7 +512,7 @@ export function transitionRuntimeSession(
 }
 
 export function publicRuntimeSessionStatus(
-  value: RuntimeSession,
+  value: Readonly<RuntimeSession>,
   now: string
 ): Readonly<PublicRuntimeSessionStatus> {
   const session = transitionRuntimeSession(value, {
