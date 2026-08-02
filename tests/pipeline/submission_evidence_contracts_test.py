@@ -3291,8 +3291,9 @@ def assert_availability_contract(workflow: str) -> None:
         "subject-path: ${{ steps.probe.outputs.evidence }}",
         "predicate-path: ${{ steps.probe.outputs.evidence }}",
         "name: production-availability-${{ github.sha }}-${{ github.run_id }}",
-        "${{ runner.temp }}/availability/evidence.json",
-        "${{ runner.temp }}/availability/observation.json",
+        "path: |\n"
+        "            ${{ runner.temp }}/availability/evidence.json\n"
+        "            ${{ runner.temp }}/availability/observation.json",
         "retention-days: 90",
         "Remove runner-only evidence",
     ):
@@ -3369,8 +3370,8 @@ availability_tamper_cases = (
     ),
     (
         availability.replace(
-            "${{ runner.temp }}/availability/observation.json\n",
-            "${{ runner.temp }}/availability/index.html\n",
+            "            ${{ runner.temp }}/availability/observation.json\n",
+            "            ${{ runner.temp }}/availability/index.html\n",
             1,
         ),
         "availability dropped the sanitized topology observation",
@@ -3393,6 +3394,9 @@ availability_tamper_cases = (
     ),
 )
 for tampered_availability, tamper_message in availability_tamper_cases:
+    assert tampered_availability != availability, (
+        f"availability mutation was a no-op: {tamper_message}"
+    )
     expect_availability_contract_rejected(
         tampered_availability,
         tamper_message,
