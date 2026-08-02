@@ -3,7 +3,9 @@
 const { createHash, randomBytes } = require("node:crypto");
 const {
   DynamoDBClient,
-  GetItemCommand
+  GetItemCommand,
+  PutItemCommand,
+  UpdateItemCommand
 } = require("@aws-sdk/client-dynamodb");
 const {
   GetObjectCommand,
@@ -23,8 +25,24 @@ const checkpointTable = process.env.CHECKPOINT_TABLE;
 const approvalTable = process.env.APPROVAL_TABLE;
 const evidenceBucket = process.env.EVIDENCE_BUCKET;
 const demoQuery = process.env.ARCHON_DEMO_QUERY;
+const runtimeSessionTable = process.env.RUNTIME_SESSION_TABLE;
+const coreLeaseTable = process.env.CORE_LEASE_TABLE;
+const coreSessionStateMachineArn =
+  process.env.CORE_SESSION_STATE_MACHINE_ARN;
+const runtimeOperatorGroup =
+  process.env.RUNTIME_OPERATOR_GROUP || "archon-approvers";
 
 const AUDIT_ID = /^[a-f0-9]{64}$/;
+const RUNTIME_SESSION_ID = /^rs_[A-Za-z0-9_-]{43}$/u;
+const RUNTIME_GENERATION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const RUNTIME_STATES = [
+  "STARTING",
+  "ACTIVE",
+  "STOPPING",
+  "STOPPED",
+  "EXPIRED",
+  "FAILED"
+];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RFC3339_INSTANT =
   /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
@@ -144,7 +162,7 @@ function boundedString(value, maximum = 2048) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u001f\u007f]/u.test(value)
+    !/[^@-^_\u007f]/u.test(value)
   );
 }
 
@@ -154,7 +172,7 @@ function configuredDemoQuery() {
     demoQuery !== demoQuery.trim() ||
     demoQuery.length < 1 ||
     demoQuery.length > 256 ||
-    /[\u0000-\u001f\u007f]/u.test(demoQuery) ||
+    /[^@-^_\u007f]/u.test(demoQuery) ||
     /[*?]/u.test(demoQuery) ||
     demoQuery === "{}"
   ) {
@@ -215,7 +233,7 @@ function parseStartBody(input) {
   if (
     typeof body.query !== "string" ||
     body.query.length > 256 ||
-    /[\u0000-\u001f\u007f]/u.test(body.query)
+    /[^@-^_\u007f]/u.test(body.query)
   ) {
     return { error: response(400, { error: "invalid_query" }) };
   }
@@ -1008,7 +1026,7 @@ function boundedReportText(value, maximum) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+    !/[^@-^H\u000B^L^N-^_\u007F]/u.test(value)
   );
 }
 
