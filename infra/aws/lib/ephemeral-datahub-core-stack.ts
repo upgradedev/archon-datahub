@@ -54,7 +54,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     const runtimeBoundary = iam.ManagedPolicy.fromManagedPolicyArn(
       this,
       "RuntimePermissionsBoundary",
-      `arn:${{Aws.PARTITION}:iam::${{Aws.ACCOUNT_ID}:policy/archon-datahub-runtime-boundary-${{stage}`
+      `arn:${Aws.PARTITION}:iam::${Aws.ACCOUNT_ID}:policy/archon-datahub-runtime-boundary-${stage}`
     );
     iam.PermissionsBoundary.of(this).apply(runtimeBoundary);
 
@@ -102,14 +102,14 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
     );
 
     const dataKey = new kms.Key(this, "DataKey", {
-      alias: `alias/archon/${{stage}/datahub-core-data`,
+      alias: `alias/archon/${stage}/datahub-core-data`,
       description: "DataHub Core lease, health, job, and receipt encryption",
       enableKeyRotation: true,
       pendingWindow: Duration.days(30),
       removalPolicy: RemovalPolicy.RETAIN
     });
     const logsKey = new kms.Key(this, "LogsKey", {
-      alias: `alias/archon/${{stage}/datahub-core-logs`,
+      alias: `alias/archon/${stage}/datahub-core-logs`,
       description: "DataHub Core lifecycle observability encryption",
       enableKeyRotation: true,
       pendingWindow: Duration.days(30),
@@ -132,7 +132,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       contributorInsightsSpecification: { enabled: true },
       removalPolicy: RemovalPolicy.RETAIN
     });
-    Tags.of(this.leaseTable).add("Purpose", `${{stage}-datahub-core-runtime`);
+    Tags.of(this.leaseTable).add("Purpose", `${stage}-datahub-core-runtime`);
 
     const vpc = new ec2.Vpc(this, "CoreVpc", {
       ipAddresses: ec2.IpAddresses.cidr("10.77.0.0/24"),
@@ -217,13 +217,13 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       "umask 077",
       "install -d -m 0750 -o root -g root /etc/archon",
       "cat > /etc/archon/datahub-core.env <<'ARCHON_ENV'",
-      `AWS_REGION=${{Aws.REGION}`,
-      `ARCHON_STAGE=${{stage}`,
-      `CORE_LEASE_TABLE=${{this.leaseTable.tableName}`,
+      `AWS_REGION=${Aws.REGION}`,
+      `ARCHON_STAGE=${stage}`,
+      `CORE_LEASE_TABLE=${this.leaseTable.tableName}`,
       "ARCHON_RUNTIME_PROFILE_ID=core",
-      `ARCHON_RUNTIME_GENERATION=${{generation.valueAsString}`,
-      `ARCHON_RUNTIME_CAPABILITY_DIGEST=${{capabilityDigest.valueAsString}`,
-      `ARCHON_IMAGE_MANIFEST_DIGEST=${{imageManifestDigest.valueAsString}`,
+      `ARCHON_RUNTIME_GENERATION=${generation.valueAsString}`,
+      `ARCHON_RUNTIME_CAPABILITY_DIGEST=${capabilityDigest.valueAsString}`,
+      `ARCHON_IMAGE_MANIFEST_DIGEST=${imageManifestDigest.valueAsString}`,
       "ARCHON_COMPANION_URL=http://127.0.0.1:8080",
       "ARCHON_ANALYTICS_AGENT_URL=http://127.0.0.1:8100",
       "ARCHON_DATAHUB_GMS_URL=https://127.0.0.1:9443/gms",
@@ -236,7 +236,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreAutoScalingGroup",
       {
-        autoScalingGroupName: `archon-${{stage}-datahub-core`,
+        autoScalingGroupName: `archon-${stage}-datahub-core`,
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
         instanceType: new ec2.InstanceType("t3a.xlarge"),
@@ -280,7 +280,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreLifecycleLogGroup",
       {
-        logGroupName: `/archon/${{stage}/datahub-core/lifecycle`,
+        logGroupName: `/archon/${stage}/datahub-core/lifecycle`,
         encryptionKey: logsKey,
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.RETAIN
@@ -290,7 +290,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreLifecycleFunction",
       {
-        functionName: `Archon-${{stage}-datahub-core-lifecycle`,
+        functionName: `Archon-${stage}-datahub-core-lifecycle`,
         description:
           "Owns lease/CAS decisions and AMI verification; it has no Auto Scaling permission",
         runtime: lambda.Runtime.PYTHON_3_13,
@@ -333,7 +333,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreStateMachineLogGroup",
       {
-        logGroupName: `/archon/${{stage}/datahub-core/state-machine`,
+        logGroupName: `/archon/${stage}/datahub-core/state-machine`,
         encryptionKey: logsKey,
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.RETAIN
@@ -403,7 +403,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreSessionStateMachine",
       {
-        stateMachineName: `archon-${{stage}-datahub-core-session`,
+        stateMachineName: `archon-${stage}-datahub-core-session`,
         stateMachineType: sfn.StateMachineType.STANDARD,
         definitionBody: sfn.DefinitionBody.fromChainable(definition),
         timeout: Duration.minutes(5),
@@ -437,14 +437,14 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "CoreObserverLogGroup",
       {
-        logGroupName: `/archon/${{stage}/datahub-core/observer`,
+        logGroupName: `/archon/${stage}/datahub-core/observer`,
         encryptionKey: logsKey,
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: RemovalPolicy.RETAIN
       }
     );
     const observerFunction = new lambda.Function(this, "CoreObserverFunction", {
-      functionName: `Archon-${{stage}-datahub-core-observer`,
+      functionName: `Archon-${stage}-datahub-core-observer`,
       description:
         "Projects redacted lease and health transitions to CloudWatch; never owns liveness",
       runtime: lambda.Runtime.PYTHON_3_13,
@@ -515,7 +515,7 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
     });
     new cloudwatch.Dashboard(this, "CoreOperationsDashboard", {
-      dashboardName: `archon-${{stage}-datahub-core`,
+      dashboardName: `archon-${stage}-datahub-core`,
       widgets: [
         [
           new cloudwatch.GraphWidget({
@@ -540,31 +540,31 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       this,
       "ArchonCoreSessionStateMachineArn",
       this.sessionStateMachine.stateMachineArn,
-      `archon-${{stage}-core-session-state-machine-arn`
+      `archon-${stage}-core-session-state-machine-arn`
     );
     output(
       this,
       "ArchonCoreLeaseTableName",
       this.leaseTable.tableName,
-      `archon-${{stage}-core-lease-table-name`
+      `archon-${stage}-core-lease-table-name`
     );
     output(
       this,
       "ArchonCoreAutoScalingGroupName",
       this.autoScalingGroup.autoScalingGroupName,
-      `archon-${{stage}-core-asg-name`
+      `archon-${stage}-core-asg-name`
     );
     output(
       this,
       "ArchonCoreGeneration",
       generation.valueAsString,
-      `archon-${{stage}-core-generation`
+      `archon-${stage}-core-generation`
     );
     output(
       this,
       "ArchonCoreCapabilityDigest",
       capabilityDigest.valueAsString,
-      `archon-${{stage}-core-capability-digest`
+      `archon-${stage}-core-capability-digest`
     );
     output(this, "ArchonCoreVpcId", vpc.vpcId);
   }
@@ -576,7 +576,7 @@ function allowCloudWatchLogs(key: kms.Key, stage: string): void {
     new iam.PolicyStatement({
       sid: "AllowCloudWatchLogsEncryption",
       principals: [
-        new iam.ServicePrincipal(`logs.${{Aws.REGION}.${{Aws.URL_SUFFIX}`)
+        new iam.ServicePrincipal(`logs.${Aws.REGION}.${Aws.URL_SUFFIX}`)
       ],
       actions: [
         "kms:Decrypt",
@@ -591,7 +591,7 @@ function allowCloudWatchLogs(key: kms.Key, stage: string): void {
           "kms:EncryptionContext:aws:logs:arn": stack.formatArn({
             service: "logs",
             resource: "log-group",
-            resourceName: `/archon/${{stage}/datahub-core/*`,
+            resourceName: `/archon/${stage}/datahub-core/*`,
             arnFormat: ArnFormat.COLON_RESOURCE_NAME
           })
         }
