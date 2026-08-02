@@ -14,5 +14,8 @@ package = false
 required-version = "==0.11.31"
 exclude-newer = "2026-08-02T00:00:00Z"
 constraint-dependencies = [
-  "setuptools==83.0.0",
+  # Latest version allowed by the exact upstream ACK dependency.
+  # The sdist-only macOS advisory is dispositioned by an exact expiring
+  # CI-validated OpenVEX statement; production installs are Linux wheels only.
+  "setuptools==81.0.0",
 ]
