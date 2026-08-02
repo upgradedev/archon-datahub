@@ -33,18 +33,15 @@ case "${ALLOW_ROLE_MIGRATION}" in
 esac
 
 if [[ "${EXPECTED_STAGE}" == "staging" ]]; then
-  bindings=(
-    "Archon-Registry|eu-west-1|archonstg"
-    "Archon-staging-Edge|us-east-1|archonstg"
-    "Archon-staging|eu-west-1|archonstg"
-  )
+  bootstrap_qualifier="archonstg"
 else
-  bindings=(
-    "Archon-Registry|eu-west-1|archonstg"
-    "Archon-production-Edge|us-east-1|archonprd"
-    "Archon-production|eu-west-1|archonprd"
-  )
+  bootstrap_qualifier="archonprd"
 fi
+bindings=(
+  "Archon-${EXPECTED_STAGE}-Edge|us-east-1|${bootstrap_qualifier}"
+  "Archon-${EXPECTED_STAGE}-Core|eu-west-1|${bootstrap_qualifier}"
+  "Archon-${EXPECTED_STAGE}-Judge|eu-west-1|${bootstrap_qualifier}"
+)
 
 verified='[]'
 for binding in "${bindings[@]}"; do

@@ -99,11 +99,12 @@
       "Effect": "Allow",
       "Action": "cloudformation:DescribeStacks",
       "Resource": [
-        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Registry/*",
-        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging/*",
         "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
-        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production/*",
-        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*"
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Core/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Judge/*",
+        "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Core/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Judge/*"
       ]
     },
     {

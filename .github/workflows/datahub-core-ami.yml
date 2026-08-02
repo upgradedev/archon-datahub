@@ -55,19 +55,19 @@ jobs:
           [[ "${COMPANION_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
           [[ "${COMPANION_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${GENERATION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: infra/aws/package-lock.json
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v7.1.5
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
-      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.1.0
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
         with:
           version: ${{ env.PACKER_VERSION }}
       - name: Run Core Python contracts independently
@@ -133,15 +133,15 @@ jobs:
       id-token: write
       security-events: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v7.1.5
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
-      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.1.0
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
         with:
           version: ${{ env.PACKER_VERSION }}
       - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
@@ -174,7 +174,7 @@ jobs:
           )"
           test "$(jq 'length' <<<"${artifact_json}")" = "1"
           echo "artifact_name=${artifact_name}" >>"${GITHUB_OUTPUT}"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4.3.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ steps.companion.outputs.artifact_name }}
           path: ${{ runner.temp }}/companion
@@ -437,7 +437,7 @@ jobs:
           sarif_file: ${{ runner.temp }}/core-supply-chain/images
           category: datahub-core-images
       - name: Retain raw scans and SBOMs before the billable build
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: datahub-core-supply-chain-${{ github.sha }}-${{ github.run_id }}
           path: ${{ steps.core_images.outputs.directory }}
@@ -1290,12 +1290,12 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
       - name: Attest AMI evidence projection
         if: steps.packer.outcome == 'success'
-        uses: actions/attest-build-provenance@59d89421af93a897026c735860bf21b6eb4f7b26 # v2.4.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: ${{ steps.evidence.outputs.path }}
       - name: Upload sealed AMI evidence
         if: steps.packer.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: datahub-core-ami-${{ steps.packer.outputs.ami_id }}
           path: |

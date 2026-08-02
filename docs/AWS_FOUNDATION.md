@@ -23,6 +23,35 @@ Required specialized boundaries include:
 - Core AMI: temporary no-ingress builder resources with exact request tags and
   teardown, followed by immutable evidence.
 
+## Exact stage deployment authority
+
+Before any AWS trust is acquired, the protected deployment job proves that
+`AWS_DEPLOY_ROLE_ARN` equals the exact foundation-owned
+`archon-datahub-github-<stage>-deploy` role in the configured 12-digit account.
+The validated ARN is then passed to the OIDC credential action, which also
+pins the allowed account ID and clears inherited credentials.
+
+The role-binding validator checks exactly three bindings for the selected stage:
+
+- `Archon-<stage>-Edge` in `us-east-1`;
+- `Archon-<stage>-Core` in `eu-west-1`;
+- `Archon-<stage>-Judge` in `eu-west-1`.
+
+Stage stacks use `archonstg` for staging and `archonprd` for production.
+A preflight may report an absent stage stack so the first deployment can create
+it, but role migration is never implicit. After CDK deploys Edge, Core and
+Judge, the final check uses `ALLOW_ABSENT=false` and
+`ALLOW_ROLE_MIGRATION=false`; every binding must be present and exact.
+
+## Bounded CloudFormation drift evidence
+
+Foundation reconciliation uses bounded CloudFormation drift polling with a
+hard 900-second wall-clock deadline. SDK retries are fixed and every accepted
+result is tied to the exact stack incarnation plus a monotonic
+`LastCheckTimestamp` lower bound. Raw provider responses are deleted on every
+exit. Coverage is recorded as `cloudformation-supported-resources`; timeout,
+malformed, stale, indeterminate and drifted states all fail closed.
+
 `contracts/aws-foundation-v1.json` and the rendered policy validator are the
 machine-readable authority. Policy changes are promoted and verified in CI;
 manual console grants are not evidence.

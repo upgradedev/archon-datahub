@@ -492,16 +492,18 @@ export function addJudgeEdgeApi(
     {
       resourceArn: regionalWebAcl.attrArn,
       logDestinationConfigs: [wafLogArn],
+      // CDK models LoggingFilter as `any`; use the exact CloudFormation
+      // property casing so synthesis cannot emit an invalid lowercase shape.
       loggingFilter: {
-        defaultBehavior: "DROP",
-        filters: [
+        DefaultBehavior: "DROP",
+        Filters: [
           {
-            behavior: "KEEP",
-            conditions: [
-              { actionCondition: { action: "BLOCK" } },
-              { actionCondition: { action: "COUNT" } }
+            Behavior: "KEEP",
+            Conditions: [
+              { ActionCondition: { Action: "BLOCK" } },
+              { ActionCondition: { Action: "COUNT" } }
             ],
-            requirement: "MEETS_ANY"
+            Requirement: "MEETS_ANY"
           }
         ]
       },

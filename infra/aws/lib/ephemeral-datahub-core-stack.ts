@@ -494,6 +494,34 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
       "systemctl enable --now archon-datahub-core.service"
     );
 
+    const coreLaunchTemplate = new ec2.LaunchTemplate(
+      this,
+      "CoreLaunchTemplate",
+      {
+        associatePublicIpAddress: false,
+        blockDevices: [
+          {
+            deviceName: "/dev/xvda",
+            volume: ec2.BlockDeviceVolume.ebs(50, {
+              encrypted: true,
+              deleteOnTermination: true,
+              volumeType: ec2.EbsDeviceVolumeType.GP3,
+              iops: 3000,
+              throughput: 125
+            })
+          }
+        ],
+        httpEndpoint: true,
+        instanceType: new ec2.InstanceType("t3a.xlarge"),
+        machineImage: ec2.MachineImage.genericLinux({
+          "eu-west-1": imageId.valueAsString
+        }),
+        requireImdsv2: true,
+        role: instanceRole,
+        securityGroup: hostSecurityGroup,
+        userData
+      }
+    );
     this.autoScalingGroup = new autoscaling.AutoScalingGroup(
       this,
       "CoreAutoScalingGroup",
@@ -501,49 +529,16 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         autoScalingGroupName: `archon-${stage}-datahub-core`,
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-        instanceType: new ec2.InstanceType("t3a.xlarge"),
-        machineImage: ec2.MachineImage.genericLinux({
-          "eu-west-1": imageId.valueAsString
-        }),
+        launchTemplate: coreLaunchTemplate,
         minCapacity: 0,
         desiredCapacity: 0,
         maxCapacity: 1,
-        associatePublicIpAddress: false,
-        requireImdsv2: true,
-        securityGroup: hostSecurityGroup,
-        role: instanceRole,
-        userData,
         healthChecks: autoscaling.HealthChecks.ec2({
           gracePeriod: Duration.minutes(20)
         }),
         groupMetrics: [autoscaling.GroupMetrics.all()],
-        terminationPolicies: [autoscaling.TerminationPolicy.OLDEST_INSTANCE],
-        blockDevices: [
-          {
-            deviceName: "/dev/xvda",
-            volume: autoscaling.BlockDeviceVolume.ebs(50, {
-              encrypted: true,
-              deleteOnTermination: true,
-              volumeType: autoscaling.EbsDeviceVolumeType.GP3,
-              iops: 3000,
-              throughput: 125
-            })
-          }
-        ]
+        terminationPolicies: [autoscaling.TerminationPolicy.OLDEST_INSTANCE]
       }
-    );
-    const cfnLaunchTemplate =
-      this.autoScalingGroup.node.findAll().find(
-        (child) => child instanceof ec2.CfnLaunchTemplate
-      );
-    if (!cfnLaunchTemplate) {
-      throw new Error(
-        "DataHub Core requires an explicit EC2 launch template"
-      );
-    }
-    cfnLaunchTemplate.addPropertyOverride(
-      "LaunchTemplateData.MetadataOptions.HttpEndpoint",
-      "enabled"
     );
     Tags.of(this.autoScalingGroup).add("Runtime", "datahub-core", {
       applyToLaunchedInstances: true

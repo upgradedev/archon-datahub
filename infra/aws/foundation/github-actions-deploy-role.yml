@@ -115,8 +115,7 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/${BootstrapStackName}/*
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${BootstrapStackName}/*
-                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
-                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Core/*
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Judge/*
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Edge/*
               - Sid: DetectExactStageIamFoundationDrift

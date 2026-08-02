@@ -36,6 +36,7 @@ failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure
 iam_resource_arn_verifier="${repository_root}/scripts/verify-iam-policy-resource-arns.mjs"
 iam_resource_arn_verifier_test="${repository_root}/tests/pipeline/iam-policy-resource-arn-verifier.test.mjs"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
+role_binding_validator="${repository_root}/scripts/validate-cloudformation-role-bindings.sh"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
 fail() {
@@ -95,6 +96,7 @@ for path in \
   "${iam_resource_arn_verifier}" \
   "${iam_resource_arn_verifier_test}" \
   "${runtime_verifier}" \
+  "${role_binding_validator}" \
   "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
@@ -323,8 +325,55 @@ jq --exit-status '
     route53DomainsAllowed: false,
     validationRecordTypes: ["CNAME"]
   } and
+  .aws.applicationStackRoleBinding == {
+    deployRoleArnTemplate:
+      "arn:aws:iam::<account-id>:role/archon-datahub-github-<stage>-deploy",
+    postDeploy: {
+      allowAbsent: false,
+      allowRoleMigration: false
+    },
+    preflight: {
+      allowAbsent: true,
+      allowRoleMigration: false
+    },
+    validator: "scripts/validate-cloudformation-role-bindings.sh"
+  } and
   .aws.stages.staging.qualifier == "archonstg" and
   .aws.stages.production.qualifier == "archonprd" and
+  .aws.stages.staging.applicationStackRoleBindings == [
+    {
+      stackName: "Archon-staging-Edge",
+      region: "us-east-1",
+      bootstrapQualifier: "archonstg"
+    },
+    {
+      stackName: "Archon-staging-Core",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonstg"
+    },
+    {
+      stackName: "Archon-staging-Judge",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonstg"
+    }
+  ] and
+  .aws.stages.production.applicationStackRoleBindings == [
+    {
+      stackName: "Archon-production-Edge",
+      region: "us-east-1",
+      bootstrapQualifier: "archonprd"
+    },
+    {
+      stackName: "Archon-production-Core",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonprd"
+    },
+    {
+      stackName: "Archon-production-Judge",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonprd"
+    }
+  ] and
   (.aws.stages.staging.executionPolicyNames | length) == 10 and
   (.aws.stages.production.executionPolicyNames | length) == 10 and
   .aws.stages.staging.executionPolicyAttachments == {
@@ -370,7 +419,8 @@ jq --exit-status '
       "requires-explicit-deploy-migration"
     ],
     deployFinalPostcheckRequiresExactBindings: true,
-    entryCount: 5,
+    entryCount: 6,
+    perStageDeployEntryCount: 3,
     migrationRequiredState:
       "foundation-complete-deploy-migration-required",
     readyState: "ready-for-deploy"
@@ -623,7 +673,14 @@ require_text "${bootstrap_sealer}" \
 require_text "${bootstrap_patcher}" \
   "Default: 'AWS CDK: Default Resources'" \
   'Default: "AWS CDK: Default Resources"' \
+  '"Archon-staging-Core"' \
+  '"Archon-staging-Judge"' \
+  '"Archon-production-Core"' \
+  '"Archon-production-Judge"' \
   'defaultVariantCount !== 1'
+forbid_text "${bootstrap_patcher}" \
+  '["Archon-staging", "Archon-Registry"]' \
+  '["Archon-production"]'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi
@@ -665,6 +722,22 @@ jq --exit-status '
     map(select(contains("governed-canary"))) |
     length
   ) == 3 and
+  (
+    [.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles")][0] |
+    .Resource |
+    sort
+  ) == (
+    [
+      "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Core/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Judge/*",
+      "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Core/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Judge/*"
+    ] |
+    sort
+  ) and
   (
     [.Statement[] |
       select(.Sid == "ReconcileExactCoreAmiFoundationStack")] |
@@ -1305,10 +1378,66 @@ require_text "${ci_workflow}" \
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
   'cancel-in-progress: false' \
+  'permissions: {}' \
+  '    permissions:' \
+  '      actions: read' \
+  '      attestations: write' \
+  '      contents: read' \
+  '      id-token: write' \
+  'Fail closed on exact stage deployment role before AWS trust' \
+  'id: deploy_authority' \
   'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
+  'expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-deploy"' \
+  'printf '\''role_arn=%s\\n'\'' "${AWS_DEPLOY_ROLE_ARN}" >>"${GITHUB_OUTPUT}"' \
+  'role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}' \
+  'allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}' \
+  'mask-aws-account-id: true' \
+  'unset-current-credentials: true' \
+  'Preflight exact lean stack execution-role bindings' \
+  'ALLOW_ABSENT=true' \
+  'Verify exact post-deploy CloudFormation role bindings' \
   'ALLOW_ABSENT=false' \
   'ALLOW_ROLE_MIGRATION=false' \
   'bash scripts/validate-cloudformation-role-bindings.sh'
+forbid_text "${deploy_workflow}" \
+  'role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}'
+test "$(
+  grep -Ec '^permissions: \{\}
+test "$(
+  grep -Fc 'bash scripts/validate-cloudformation-role-bindings.sh' \
+    "${deploy_workflow}"
+)" -eq 2 || fail 'deploy workflow must verify role bindings twice'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=true' "${deploy_workflow}"
+)" -eq 1 || fail 'deploy preflight must allow only first-deploy absence'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=false' "${deploy_workflow}"
+)" -eq 1 || fail 'post-deploy role verification must forbid absence'
+test "$(
+  grep -Fc 'ALLOW_ROLE_MIGRATION=false' "${deploy_workflow}"
+)" -eq 2 || fail 'deploy role verification must always forbid migration'
+
+require_text "${role_binding_validator}" \
+  'bootstrap_qualifier="archonstg"' \
+  'bootstrap_qualifier="archonprd"' \
+  '"Archon-${EXPECTED_STAGE}-Edge|us-east-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Core|eu-west-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Judge|eu-west-1|${bootstrap_qualifier}"' \
+  'state: "present-and-exact"'
+forbid_text "${role_binding_validator}" \
+  '"Archon-staging|eu-west-1|archonstg"' \
+  '"Archon-production|eu-west-1|archonprd"'
+require_text "${reconciler}" \
+  'Archon-staging-Core "${staging_cfn_eu}"' \
+  'Archon-staging-Judge "${staging_cfn_eu}"' \
+  'Archon-production-Core "${production_cfn_eu}"' \
+  'Archon-production-Judge "${production_cfn_eu}"' \
+  'application stack role preflight inventory must contain six entries' \
+  'stack_names='\''["Archon-staging-Core","Archon-staging-Judge"]'\''' \
+  'stack_names='\''["Archon-production-Core","Archon-production-Judge"]'\'''
+forbid_text "${reconciler}" \
+  'stack_names='\''["Archon-staging","Archon-Registry"]'\''' \
+  'stack_names='\''["Archon-production"]'\'''
 require_text "${foundation_workflow}" \
   'Render the inline-safe IAM foundation template' \
   'scripts/render-canonical-flow-yaml.mjs' \
@@ -1349,7 +1478,12 @@ require_text "${deploy_role}" \
   'ec2:DescribeSecurityGroups' \
   'ec2:DescribeSubnets' \
   'ec2:DescribeVpcEndpointServices' \
-  'ec2:DescribeVpcEndpoints'
+  'ec2:DescribeVpcEndpoints' \
+  'stack/Archon-${DeploymentEnvironment}-Core/*' \
+  'stack/Archon-${DeploymentEnvironment}-Judge/*' \
+  'stack/Archon-${DeploymentEnvironment}-Edge/*'
+forbid_text "${deploy_role}" \
+  'stack/Archon-${DeploymentEnvironment}/*'
 test "$(
   grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
 )" -eq 6
@@ -1447,57 +1581,21 @@ if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
 fi
 
 require_text "${runbook}" \
-  'exact committed `infra/aws/package-lock.json` entry' \
-  'installed CLI version must exactly match that decoded lock entry' \
-  'version `32`' \
-  'Nine CloudFormation stack instances are always managed by Archon' \
-  'ten managed stacks' \
-  'nine managed stacks plus one pinned external account binding' \
-  '`AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`' \
-  '`foundation-managed`' \
-  '`external-pinned`' \
-  '`pinned-and-unchanged`' \
-  'no API Gateway account mutation' \
-  'managed stack must be absent' \
-  '`Archon-Governed-Canary-Roles`' \
-  '`archon-aws-foundation-control`' \
-  '`archon-aws-foundation-assets`' \
-  '`archon-aws-foundation-identity`' \
-  '`archon-aws-foundation-attachments`' \
-  '`STAGING_CLOUDFRONT_DOMAIN_NAME`' \
-  '`STAGING_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`PRODUCTION_CLOUDFRONT_DOMAIN_NAME`' \
-  '`PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`AWS_CANARY_PREPARE_ROLE_ARN`' \
-  '`AWS_CANARY_APPROVAL_ROLE_ARN`' \
-  '`AWS_CANARY_RECOVERY_ROLE_ARN`' \
-  '`prevent_self_review=false`' \
-  'not account-grade isolation' \
-  'policy-first' \
-  'On a fresh account' \
-  'On an existing account' \
-  'current policyless role' \
-  'Before any role update' \
-  'missing canonical `Sid`' \
-  'Every other mismatch fails closed' \
-  '`foundation-complete-deploy-migration-required`' \
-  '`requires-explicit-deploy-migration`' \
-  '`ready-for-deploy`' \
-  'Sanitized managed-stack failure evidence' \
-  'stdout and stderr are suppressed before capture' \
-  'selects the newest failed event whose safe reason category is not' \
-  '`unknown` remains eligible' \
-  'fall back to the newest failed event' \
-  'exact recursive inventory of two root regular non-symlink files' \
-  'recomputes the diagnostic digest from the seven safe fields' \
-  'never stores, prints, or hashes the raw CloudFormation' \
-  'does not delete, recreate, or' \
-  '`cfn-failure.json`' \
-  'retained for 90 days'
+  'The active application topology is Edge, zero-idle Core and Judge.' \
+  'exact three-stack resources' \
+  'Before any AWS trust is acquired' \
+  '`AWS_DEPLOY_ROLE_ARN` equals the exact foundation-owned' \
+  '`archon-datahub-github-<stage>-deploy`' \
+  'exactly three bindings for the selected stage' \
+  '`Archon-<stage>-Edge` in `us-east-1`' \
+  '`Archon-<stage>-Core` in `eu-west-1`' \
+  '`Archon-<stage>-Judge` in `eu-west-1`' \
+  '`ALLOW_ABSENT=false`' \
+  '`ALLOW_ROLE_MIGRATION=false`' \
+  'machine-readable authority'
 forbid_text "${runbook}" \
-  'ten CloudFormation stack instances' \
-  'reconciles all ten stacks' \
-  'ten-stack drift evidence'
+  'always-on container cluster is the active topology' \
+  'implicit role migration'
 require_text "${ci_workflow}" \
   'scripts/aws-cloudformation-drift.sh \' \
   'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
@@ -1614,13 +1712,14 @@ test "${reconciler_poll_line}" -lt "${reconciler_exact_line}" || fail 'poll resu
 test "${reconciler_exact_line}" -lt "${reconciler_verify_line}" || fail 'exact binding must precede resource proof'
 test "${reconciler_verify_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
 require_text "${runbook}" \
-  'Bounded CloudFormation drift polling' \
+  'Bounded CloudFormation drift evidence' \
+  'bounded CloudFormation drift polling' \
   'hard 900-second wall-clock deadline' \
   'SDK retries are fixed' \
   'LastCheckTimestamp' \
   'deleted on every' \
-  '30596290772' \
-  'cloudformation-supported-resources'
+  'cloudformation-supported-resources' \
+  'all fail closed'
 require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
@@ -1652,11 +1751,12 @@ require_text "${reconciler}" \
   "foundation_phase='preflight:foundation-stack-role-binding:shared-api'" \
   "foundation_phase='preflight:foundation-stack-role-binding:governed-canary'" \
   "foundation_phase='preflight:shared-api-gateway'" \
-  "foundation_phase='preflight:application-stack-role-binding:staging:registry'" \
-  "foundation_phase='preflight:application-stack-role-binding:staging:primary'" \
   "foundation_phase='preflight:application-stack-role-binding:staging:edge'" \
-  "foundation_phase='preflight:application-stack-role-binding:production:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:judge'" \
   "foundation_phase='preflight:application-stack-role-binding:production:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:judge'" \
   "foundation_phase='preflight:application-stack-role-transition'" \
   "foundation_phase='stage-iam'" \
   "foundation_phase='shared-api-gateway'" \
@@ -1670,5 +1770,376 @@ forbid_text "${reconciler}" \
   'set -x' \
   'printenv' \
   'declare -p'
-test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 37 ||
-  fail 'reconciler diagnostic phases must be the 37 reviewed public labels'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
+  fail 'reconciler diagnostic phases must be the 38 reviewed public labels'
+ "${deploy_workflow}"
+)" -eq 1 || fail 'deploy workflow must deny permissions by default at root'
+test "$(
+  grep -Fc 'bash scripts/validate-cloudformation-role-bindings.sh' \
+    "${deploy_workflow}"
+)" -eq 2 || fail 'deploy workflow must verify role bindings twice'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=true' "${deploy_workflow}"
+)" -eq 1 || fail 'deploy preflight must allow only first-deploy absence'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=false' "${deploy_workflow}"
+)" -eq 1 || fail 'post-deploy role verification must forbid absence'
+test "$(
+  grep -Fc 'ALLOW_ROLE_MIGRATION=false' "${deploy_workflow}"
+)" -eq 2 || fail 'deploy role verification must always forbid migration'
+
+require_text "${role_binding_validator}" \
+  'bootstrap_qualifier="archonstg"' \
+  'bootstrap_qualifier="archonprd"' \
+  '"Archon-${EXPECTED_STAGE}-Edge|us-east-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Core|eu-west-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Judge|eu-west-1|${bootstrap_qualifier}"' \
+  'state: "present-and-exact"'
+forbid_text "${role_binding_validator}" \
+  '"Archon-staging|eu-west-1|archonstg"' \
+  '"Archon-production|eu-west-1|archonprd"'
+require_text "${reconciler}" \
+  'Archon-staging-Core "${staging_cfn_eu}"' \
+  'Archon-staging-Judge "${staging_cfn_eu}"' \
+  'Archon-production-Core "${production_cfn_eu}"' \
+  'Archon-production-Judge "${production_cfn_eu}"' \
+  'application stack role preflight inventory must contain six entries' \
+  'stack_names='\''["Archon-staging-Core","Archon-staging-Judge"]'\''' \
+  'stack_names='\''["Archon-production-Core","Archon-production-Judge"]'\'''
+forbid_text "${reconciler}" \
+  'stack_names='\''["Archon-staging","Archon-Registry"]'\''' \
+  'stack_names='\''["Archon-production"]'\'''
+require_text "${foundation_workflow}" \
+  'Render the inline-safe IAM foundation template' \
+  'scripts/render-canonical-flow-yaml.mjs' \
+  'IAM_FOUNDATION_TEMPLATE: ${{ steps.iam_foundation_template.outputs.path }}' \
+  'IAM_FOUNDATION_TEMPLATE_SHA: ${{ steps.iam_foundation_template.outputs.sha }}' \
+  'IAM_FOUNDATION_CANONICAL_JSON: ${{ steps.iam_foundation_template.outputs.canonical_path }}' \
+  'IAM_FOUNDATION_SEMANTIC_SHA: ${{ steps.iam_foundation_template.outputs.canonical_sha }}' \
+  'IAM_FOUNDATION_YQ_BIN: ${{ steps.iam_foundation_template.outputs.yq_path }}' \
+  'IAM_FOUNDATION_YQ_SHA: ${{ steps.iam_foundation_template.outputs.yq_sha }}' \
+  'STAGING_CLOUDFRONT_DOMAIN_NAME: ${{ vars.STAGING_CLOUDFRONT_DOMAIN_NAME }}' \
+  'STAGING_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.STAGING_CLOUDFRONT_HOSTED_ZONE_ID }}' \
+  'PRODUCTION_CLOUDFRONT_DOMAIN_NAME: ${{ vars.PRODUCTION_CLOUDFRONT_DOMAIN_NAME }}' \
+  'PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}' \
+  'APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}' \
+  'OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}' \
+  'Application stack RoleARN transition:'
+require_text "${deploy_role}" \
+  'CloudFrontHostedZoneId:' \
+  'RoleName: !Sub archon-datahub-github-${DeploymentEnvironment}-cloud-trial' \
+  'StageAndPromoteExactCloudRuntimeSecrets' \
+  'RoleName: !Sub archon-${DeploymentEnvironment}-judge-user' \
+  'RoleName: archon-production-posture-observer' \
+  'RoleName: archon-production-runtime-read' \
+  'RoleName: archon-production-paging-test' \
+  'environment:judge-access-${DeploymentEnvironment}' \
+  'environment:production-observer' \
+  'environment:production-paging-test' \
+  'ProductionPostureObserverRoleArn:' \
+  'ProductionRuntimeReadRoleArn:' \
+  'ProductionPagingTestRoleArn:' \
+  'acm:DescribeCertificate' \
+  'cloudfront:GetDistributionConfig' \
+  'cloudfront:DescribeFunction' \
+  'route53:GetHostedZone' \
+  'route53:ListResourceRecordSets' \
+  'ec2:DescribeAvailabilityZones' \
+  'ec2:DescribeSecurityGroupRules' \
+  'ec2:DescribeSecurityGroups' \
+  'ec2:DescribeSubnets' \
+  'ec2:DescribeVpcEndpointServices' \
+  'ec2:DescribeVpcEndpoints' \
+  'stack/Archon-${DeploymentEnvironment}-Core/*' \
+  'stack/Archon-${DeploymentEnvironment}-Judge/*' \
+  'stack/Archon-${DeploymentEnvironment}-Edge/*'
+forbid_text "${deploy_role}" \
+  'stack/Archon-${DeploymentEnvironment}/*'
+test "$(
+  grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
+)" -eq 6
+if grep -Eq \
+  "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
+  "${deploy_role}"; then
+  fail "deploy and operational roles contain a wildcard action"
+fi
+require_text "${foundation_policy}" \
+  'cloudformation:DescribeStackEvents' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
+  'role/archon-datahub-github-staging-cloud-trial' \
+  'role/archon-datahub-github-production-cloud-trial' \
+  'role/archon-staging-judge-user' \
+  'role/archon-production-judge-user' \
+  'role/archon-production-posture-observer' \
+  'role/archon-production-runtime-read' \
+  'role/archon-production-paging-test'
+
+jq --exit-status \
+  --slurpfile migration "${migration_contract}" '
+    $migration[0] as $m |
+    . as $policy |
+
+    $m.policy.group == "assets" and
+    $m.policy.name == "archon-aws-foundation-assets" and
+    ($m.policy.exactDelta.statements | length) == 2 and
+    all($m.policy.exactDelta.statements[];
+      . as $spec |
+      ([$policy.Statement[] | select(.Sid == $spec.sid)]) as $added |
+      ([$policy.Statement[] |
+        select(.Sid == $spec.resourcesMatchStatement)]) as $source |
+      ($added | length) == 1 and
+      ($source | length) == 1 and
+      $added[0].Effect == "Allow" and
+      (($added[0].Action |
+        if type == "array" then sort else [.] end) ==
+        ($spec.actions | sort)) and
+      ($added[0].Resource | type) == "array" and
+      (($added[0].Resource | sort) == ($source[0].Resource | sort)) and
+      all($added[0].Resource[]; . != "*")) and
+    all($m.policy.exactDelta.statements[].actions[];
+      . as $action |
+      (([$policy.Statement[].Action] | flatten |
+        map(select(. == $action))) | length) == 1)
+  ' "${foundation_policy}" >/dev/null
+
+test "$(grep -Fc 'cloudformation:DetectStackResourceDrift' "${deploy_role}")" -eq 2
+test "$(grep -Fc 'cloudformation:BatchDescribeTypeConfigurations' "${deploy_role}")" -eq 2
+for sid in \
+  DetectExactStageIamFoundationDrift \
+  ReadStageIamDriftDetection \
+  ReadAndDetectExactProductionStacks \
+  ReadStackDriftDetectionStatus; do
+  require_text "${deploy_role}" "- Sid: ${sid}"
+done
+require_text "${foundation_workflow}" \
+  'contracts/aws-foundation-policy-migration-v1.json' \
+  '--from-file scripts/validate-aws-foundation-policy.jq' \
+  'cloudformation:DetectStackResourceDrift' \
+  'cloudformation:BatchDescribeTypeConfigurations' \
+  'queue: max'
+forbid_text "${foundation_workflow}" \
+  '.policy.exactDelta.stackScopedStatement' \
+  '.policy.exactDelta.wildcardStatement'
+require_text "${foundation_policy_validator}" \
+  '($m.policy.exactDelta.statements) as $delta' \
+  '$spec.resourcesMatchStatement' \
+  'all($delta[];' \
+  'all($delta[].actions[];'
+
+require_text "${api_gateway_account}" \
+  'AWS::ApiGateway::Account' \
+  'RoleName: archon-datahub-apigateway-cloudwatch-logs' \
+  'PolicyName: archon-apigateway-cloudwatch-logs'
+
+for path in \
+  "${foundation_policy}" \
+  "${foundation_role}" \
+  "${canary_roles}"; do
+  if grep -Eiq '(^|[^[:alnum:]_-])(acm|route53|route53domains):' "${path}"; then
+    fail "${path#${repository_root}/} must not grant or deny ACM/Route53"
+  fi
+  if grep -Fq 'AdministratorAccess' "${path}"; then
+    fail "${path#${repository_root}/} must not refer to AdministratorAccess"
+  fi
+done
+forbid_text "${deploy_role}" \
+  'route53domains:*' \
+  'acm:*' \
+  'route53:*'
+if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
+  fail "execution template must not refer to AdministratorAccess"
+fi
+
+require_text "${runbook}" \
+  'The active application topology is Edge, zero-idle Core and Judge.' \
+  'exact three-stack resources' \
+  'Before any AWS trust is acquired' \
+  '`AWS_DEPLOY_ROLE_ARN` equals the exact foundation-owned' \
+  '`archon-datahub-github-<stage>-deploy`' \
+  'exactly three bindings for the selected stage' \
+  '`Archon-<stage>-Edge` in `us-east-1`' \
+  '`Archon-<stage>-Core` in `eu-west-1`' \
+  '`Archon-<stage>-Judge` in `eu-west-1`' \
+  '`ALLOW_ABSENT=false`' \
+  '`ALLOW_ROLE_MIGRATION=false`' \
+  'machine-readable authority'
+forbid_text "${runbook}" \
+  'always-on container cluster is the active topology' \
+  'implicit role migration'
+require_text "${ci_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
+  'bash tests/pipeline/aws-cloudformation-drift-poll.test.sh'
+require_text "${foundation_workflow}" \
+  'scripts/aws-cloudformation-drift.sh \' \
+  'globalDeadline: "hard-wall-clock"' \
+  'exactStackIncarnation: true'
+require_text "${reconciler}" \
+  "readonly CFN_DRIFT_HELPER='scripts/aws-cloudformation-drift.sh'" \
+  'source "${CFN_DRIFT_HELPER}"' \
+  'readonly CFN_DRIFT_MAX_ATTEMPTS=120' \
+  'readonly CFN_DRIFT_DELAY_SECONDS=2' \
+  'readonly CFN_DRIFT_MAX_API_FAILURES=3' \
+  'readonly CFN_DRIFT_PHASE_TIMEOUT_SECONDS=900' \
+  'check_drift() (' \
+  'trap cleanup_drift_raw EXIT' \
+  'detect_and_wait_for_cloudformation_stack_in_sync \' \
+  'exact_stack_id="$(jq -er' \
+  'detection_timestamp="$(jq -er' \
+  'verify_cloudformation_stack_resource_drifts \' \
+  'cloudformation_drift_remaining_seconds "${CFN_DRIFT_DEADLINE_EPOCH}"' \
+  'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' \
+  'scripts/aws-cloudformation-drift.sh \'
+test "$(grep -Fc 'stackIncarnationBinding: "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt producers must have two exact monotonic bindings'
+test "$(grep -Fc '.stackIncarnationBinding == "exact-stack-id-and-monotonic-detection-lower-bound"' "${reconciler}")" -eq 2 ||
+  fail 'drift receipt validators must have two exact monotonic bindings'
+
+require_text "${drift_poller}" \
+  'cloudformation_drift_remaining_seconds() {' \
+  'run_bounded_cloudformation_drift_aws() {' \
+  'cloudformation_drift_utc_key() {' \
+  'verify_cloudformation_stack_resource_drifts() (' \
+  'timeout --foreground --signal=TERM --kill-after=2s' \
+  'AWS_MAX_ATTEMPTS=1' \
+  '--cli-connect-timeout 5' \
+  '--cli-read-timeout 15' \
+  'cloudformation detect-stack-drift' \
+  'cloudformation describe-stack-drift-detection-status' \
+  'cloudformation describe-stack-resource-drifts' \
+  'cloudformation describe-stacks' \
+  '.StackDriftDetectionId == $detectionId' \
+  'ltrimstr($stackPrefix)' \
+  '.StackId == $exactStackId' \
+  'CFN_DRIFT_FINAL_BINDING_MAX_ATTEMPTS:-5' \
+  'CFN_DRIFT_FINAL_BINDING_DELAY_SECONDS:-2' \
+  'def leap_year($year):' \
+  'month_days($year; $month)' \
+  'final_max_attempts > 5' \
+  'final_delay_seconds > 2' \
+  'if $drift == null then "stale"' \
+  'if $actualKey < $detectionKey then "stale"' \
+  'elif $drift.StackDriftStatus == "IN_SYNC" then "match"' \
+  'elif $drift.StackDriftStatus == "DRIFTED" then "current-drifted"' \
+  'else "current-indeterminate" end' \
+  'final-stack-binding-stale' \
+  'final-stack-current-drifted' \
+  'final-stack-current-indeterminate' \
+  'final-stack-selection-mismatch' \
+  '.StackResourceDriftStatus == "IN_SYNC"' \
+  'trap cleanup EXIT' \
+  'max_api_failures > 3' \
+  'response_bytes > 65536'
+require_text "${drift_poller_test}" \
+  'progress-success' 'transient-success' 'persistent-error' \
+  'perpetual-progress' 'detection-failed' 'drifted' 'missing-count' \
+  'missing-timestamp' 'wrong-detection-id' 'wrong-stack-id' \
+  'deadline-during-status' 'different-incarnation' 'stale-resource' \
+  'subsecond-stale-resource' 'not-checked-resource' \
+  'leap-day-success' 'invalid-detection-calendar' 'invalid-resource-calendar' \
+  'final-equivalent-utc' 'final-nonzero-equivalent' 'final-stale-then-current' \
+  'final-absent-drift-info-then-current' 'final-not-checked-missing-then-current' \
+  'final-drifted-stale-then-current' 'final-stale-default' 'final-stale-persistent' \
+  'invalid-final-max' 'invalid-final-delay' 'final-api-transient' 'final-api-persistent' \
+  'final-newer-in-sync' 'final-newer-subsecond-in-sync' \
+  'final-newer-drifted' 'final-newer-unknown' 'final-newer-not-checked' \
+  'final-indeterminate-default' \
+  'final-unknown-current-then-current' 'final-not-checked-current-then-current' \
+  'final-different-incarnation' \
+  'final-invalid-calendar' 'final-invalid-second' 'final-invalid-fraction' \
+  'final-invalid-drift-status' \
+  'final-malformed' 'final-oversize' 'deadline-resource' 'deadline-final' \
+  'assert_category' 'assert_sleep_arguments' 'PRIVATE_AWS_MARKER' 'left raw files' \
+  'leaked exact stack id' 'leaked detection timestamp'
+forbid_text "${reconciler}" \
+  'stack-drift-detection-complete' \
+  '(.DriftedStackResourceCount // 0) == 0' \
+  '.StackResourceDrifts[]?' \
+  'exact-stack-id-and-detection-timestamp'
+forbid_text "${drift_poller}" 'stack-drift-detection-complete' 'DetectionStatusReason' \
+  'final_max_attempts > 10' 'final_delay_seconds > 30' \
+  'fromdateiso8601' 'strptime(' 'mktime' \
+  'elif $actualKey > $detectionKey then "mismatch"' \
+  'final-stack-binding-mismatch'
+helper_detect_line="$(grep -nF 'cloudformation detect-stack-drift' "${drift_poller}" | cut -d: -f1)"
+helper_status_line="$(grep -nF 'cloudformation describe-stack-drift-detection-status' "${drift_poller}" | cut -d: -f1)"
+helper_terminal_line="$(grep -nF '.DetectionStatus == "DETECTION_COMPLETE"' "${drift_poller}" | tail -n 1 | cut -d: -f1)"
+helper_publish_line="$(grep -nF 'mv -T -- "${candidate}" "${status_json}"' "${drift_poller}" | cut -d: -f1)"
+helper_resource_line="$(grep -nF 'cloudformation describe-stack-resource-drifts' "${drift_poller}" | cut -d: -f1)"
+helper_final_line="$(grep -nF 'cloudformation describe-stacks' "${drift_poller}" | cut -d: -f1)"
+helper_binding_line="$(grep -nF 'if $actualKey < $detectionKey then "stale"' "${drift_poller}" | cut -d: -f1)"
+test "${helper_detect_line}" -lt "${helper_status_line}" || fail 'drift helper must detect before polling'
+test "${helper_status_line}" -lt "${helper_terminal_line}" || fail 'drift helper must poll before terminal validation'
+test "${helper_terminal_line}" -lt "${helper_publish_line}" || fail 'drift helper must validate before publishing'
+test "${helper_publish_line}" -lt "${helper_resource_line}" || fail 'terminal binding must precede resource proof'
+test "${helper_resource_line}" -lt "${helper_final_line}" || fail 'resource proof must precede final stack read'
+test "${helper_final_line}" -lt "${helper_binding_line}" || fail 'final read must precede timestamp binding'
+reconciler_poll_line="$(grep -nF 'detect_and_wait_for_cloudformation_stack_in_sync \' "${reconciler}" | cut -d: -f1)"
+reconciler_exact_line="$(grep -nF 'exact_stack_id="$(jq -er' "${reconciler}" | cut -d: -f1)"
+reconciler_verify_line="$(grep -nF 'verify_cloudformation_stack_resource_drifts \' "${reconciler}" | cut -d: -f1)"
+reconciler_evidence_line="$(grep -nF 'checkedResourceCount: $checkedResourceCount' "${reconciler}" | cut -d: -f1)"
+test "${reconciler_poll_line}" -lt "${reconciler_exact_line}" || fail 'poll result must precede exact binding extraction'
+test "${reconciler_exact_line}" -lt "${reconciler_verify_line}" || fail 'exact binding must precede resource proof'
+test "${reconciler_verify_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
+require_text "${runbook}" \
+  'Bounded CloudFormation drift evidence' \
+  'bounded CloudFormation drift polling' \
+  'hard 900-second wall-clock deadline' \
+  'SDK retries are fixed' \
+  'LastCheckTimestamp' \
+  'deleted on every' \
+  'cloudformation-supported-resources' \
+  'all fail closed'
+require_text "${reconciler}" \
+  'set -Eeuo pipefail' \
+  "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
+  "foundation_phase='startup'" \
+  'report_foundation_error() {' \
+  "trap 'report_foundation_error \"\$?\" \"\$LINENO\"' ERR" \
+  'shopt -s inherit_errexit' \
+  "printf '::error file=%s,line=%s,title=AWS foundation reconciliation failed::phase=%s; exit=%s\\n'" \
+  "foundation_phase='preflight:revalidate-master'" \
+  "foundation_phase='preflight:validate-template:api-gateway-account'" \
+  "foundation_phase='preflight:validate-template:iam-foundation'" \
+  "foundation_phase='preflight:validate-template:github-actions-deploy-role'" \
+  "foundation_phase='preflight:validate-template:github-actions-foundation-role'" \
+  "foundation_phase='preflight:validate-template:governed-canary-roles'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:staging:us-east-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:eu-west-1'" \
+  "foundation_phase='preflight:validate-template:bootstrap:production:us-east-1'" \
+  "foundation_phase='preflight:legacy-role'" \
+  "foundation_phase='preflight:legacy-stacks'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:staging:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:iam'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:deploy'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:eu-west-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:production:bootstrap:us-east-1'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:shared-api'" \
+  "foundation_phase='preflight:foundation-stack-role-binding:governed-canary'" \
+  "foundation_phase='preflight:shared-api-gateway'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:judge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:judge'" \
+  "foundation_phase='preflight:application-stack-role-transition'" \
+  "foundation_phase='stage-iam'" \
+  "foundation_phase='shared-api-gateway'" \
+  "foundation_phase='governed-canary-roles'" \
+  "foundation_phase='bootstrap'" \
+  "foundation_phase='deploy-roles'" \
+  "foundation_phase='drift-verification'" \
+  "foundation_phase='evidence'"
+forbid_text "${reconciler}" \
+  'BASH_COMMAND' \
+  'set -x' \
+  'printenv' \
+  'declare -p'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
+  fail 'reconciler diagnostic phases must be the 38 reviewed public labels'

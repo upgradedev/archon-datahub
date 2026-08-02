@@ -290,10 +290,39 @@
       "route53VpcArnConditionAllowed": false,
       "disassociateVpcFromHostedZoneAllowed": false
     },
+    "applicationStackRoleBinding": {
+      "deployRoleArnTemplate": "arn:aws:iam::<account-id>:role/archon-datahub-github-<stage>-deploy",
+      "postDeploy": {
+        "allowAbsent": false,
+        "allowRoleMigration": false
+      },
+      "preflight": {
+        "allowAbsent": true,
+        "allowRoleMigration": false
+      },
+      "validator": "scripts/validate-cloudformation-role-bindings.sh"
+    },
     "stages": {
       "staging": {
         "bootstrapStackName": "CDKToolkit-archonstg",
         "qualifier": "archonstg",
+        "applicationStackRoleBindings": [
+          {
+            "stackName": "Archon-staging-Edge",
+            "region": "us-east-1",
+            "bootstrapQualifier": "archonstg"
+          },
+          {
+            "stackName": "Archon-staging-Core",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonstg"
+          },
+          {
+            "stackName": "Archon-staging-Judge",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonstg"
+          }
+        ],
         "executionPolicyNames": [
           "archon-datahub-cdk-guard-staging",
           "archon-datahub-cdk-identity-staging",
@@ -329,6 +358,23 @@
       "production": {
         "bootstrapStackName": "CDKToolkit-archonprd",
         "qualifier": "archonprd",
+        "applicationStackRoleBindings": [
+          {
+            "stackName": "Archon-production-Edge",
+            "region": "us-east-1",
+            "bootstrapQualifier": "archonprd"
+          },
+          {
+            "stackName": "Archon-production-Core",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonprd"
+          },
+          {
+            "stackName": "Archon-production-Judge",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonprd"
+          }
+        ],
         "executionPolicyNames": [
           "archon-datahub-cdk-guard-production",
           "archon-datahub-cdk-identity-production",
@@ -692,7 +738,8 @@
       ]
     },
     "applicationStackRolePreflight": {
-      "entryCount": 5,
+      "entryCount": 6,
+      "perStageDeployEntryCount": 3,
       "allowedEntryValidations": [
         "passed",
         "requires-explicit-deploy-migration"

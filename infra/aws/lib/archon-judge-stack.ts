@@ -1,12 +1,12 @@
 import {
   Aws,
   CfnParameter,
-  CfnRule,
   Duration,
   Fn,
   RemovalPolicy,
   Size,
   Stack,
+  Token,
   type StackProps
 } from "aws-cdk-lib";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
@@ -91,11 +91,23 @@ export class ArchonJudgeStack extends Stack {
       "Exact CLOUDFRONT-scope WAF ARN from ArchonEdgeStack",
       "^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]{1,128}/[0-9a-fA-F-]{36}$"
     );
+    const deploymentAccount = this.account;
+    const deploymentRegion = this.region;
+    if (
+      Token.isUnresolved(deploymentAccount) ||
+      Token.isUnresolved(deploymentRegion) ||
+      !/^[0-9]{12}$/u.test(deploymentAccount) ||
+      !/^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]$/u.test(deploymentRegion)
+    ) {
+      throw new Error(
+        "ArchonJudgeStack requires an explicit AWS account and region"
+      );
+    }
     const cloudRuntimeImageUri = parameter(
       this,
       "CloudRuntimeImageUri",
       "CI-scanned immutable DataHub Cloud Lambda image URI",
-      "^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(?:\\.cn)?/[a-z0-9][a-z0-9._/-]{1,255}@sha256:[a-f0-9]{64}$"
+      `^${deploymentAccount}\\.dkr\\.ecr\\.${deploymentRegion}\\.amazonaws\\.com(?:\\.cn)?/[a-z0-9][a-z0-9._/-]{1,255}@sha256:[a-f0-9]{64}$`
     );
     const spaArtifactSha256 = parameter(
       this,
@@ -133,30 +145,6 @@ export class ArchonJudgeStack extends Stack {
       "Exact source commit represented by every deployed artifact",
       "^[a-f0-9]{40}$"
     );
-    new CfnRule(this, "ExactCloudRuntimeImageAccountAndRegion", {
-      assertions: [
-        {
-          assert: Fn.conditionAnd(
-            Fn.conditionEquals(
-              Fn.select(
-                0,
-                Fn.split(".", cloudRuntimeImageUri)
-              ),
-              Aws.ACCOUNT_ID
-            ),
-            Fn.conditionEquals(
-              Fn.select(
-                3,
-                Fn.split(".", cloudRuntimeImageUri)
-              ),
-              Aws.REGION
-            )
-          ),
-          assertDescription:
-            "CloudRuntimeImageUri must belong to this account and region"
-        }
-      ]
-    });
 
     const dataKey = retainedKey(
       this,

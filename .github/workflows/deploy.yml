@@ -41,11 +41,7 @@ on:
         required: false
         type: string
 
-permissions:
-  actions: read
-  attestations: write
-  contents: read
-  id-token: write
+permissions: {}
 
 concurrency:
   group: archon-aws-control-plane
@@ -63,6 +59,11 @@ jobs:
     if: github.repository == 'upgradedev/archon-datahub'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
     environment:
       name: ${{ inputs.stage }}
       url: ${{ steps.release.outputs.application_url }}
@@ -439,12 +440,43 @@ jobs:
           test "$(npm --version)" = "10.9.8"
           npm --prefix infra/aws run build
 
+      - name: Fail closed on exact stage deployment role before AWS trust
+        id: deploy_authority
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${STAGE}" =~ ^(staging|production)$ ]]
+          expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-deploy"
+          if [[ "${AWS_DEPLOY_ROLE_ARN}" != "${expected_deploy_role_arn}" ]]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not the exact foundation-owned ${STAGE} deploy role"
+            exit 1
+          fi
+          printf 'role_arn=%s\n' "${AWS_DEPLOY_ROLE_ARN}" >>"${GITHUB_OUTPUT}"
+
       - name: Acquire short-lived deployment authority
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}
           role-session-name: archon-${{ inputs.stage }}-${{ github.run_id }}
+          role-duration-seconds: 3600
           aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Preflight exact lean stack execution-role bindings
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+          ALLOW_ABSENT=true \
+            ALLOW_ROLE_MIGRATION=false \
+            bash scripts/validate-cloudformation-role-bindings.sh >/dev/null
 
       - name: Revalidate live immutable image and AMI
         env:
@@ -588,6 +620,16 @@ jobs:
             echo "core_outputs=${core_outputs}"
             echo "judge_outputs=${judge_outputs}"
           } >>"${GITHUB_OUTPUT}"
+
+      - name: Verify exact post-deploy CloudFormation role bindings
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          EXPECTED_STAGE: ${{ inputs.stage }}
+        run: |
+          set -euo pipefail
+          ALLOW_ABSENT=false \
+            ALLOW_ROLE_MIGRATION=false \
+            bash scripts/validate-cloudformation-role-bindings.sh >/dev/null
 
       - name: Publish exact SPA bytes and runtime authentication config
         id: release

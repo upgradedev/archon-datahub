@@ -123,8 +123,8 @@ describe("ArchonJudgeStack", () => {
       actions(statement).includes("kms:Sign")
     );
     expect(sign).toHaveLength(1);
+    expect(actions(sign[0])).toEqual(["kms:Sign"]);
     expect(sign[0]).toMatchObject({
-      Action: ["kms:Sign"],
       Condition: {
         StringEquals: {
           "kms:SigningAlgorithm": "ECDSA_SHA_256"
@@ -212,14 +212,24 @@ describe("ArchonJudgeStack", () => {
     for (const mapping of cloudMappings) {
       expect(mapping.Properties.MaximumRetryAttempts).toBe(5);
       expect(mapping.Properties.MaximumRecordAgeInSeconds).toBe(3600);
-      expect(
-        mapping.Properties.ScalingConfig.MaximumConcurrency
-      ).toBeGreaterThan(0);
     }
+    expect(
+      cloudMappings
+        .map(
+          (mapping) =>
+            mapping.Properties.ScalingConfig?.MaximumConcurrency
+        )
+        .filter((value) => value !== undefined)
+    ).toEqual([2]);
     for (const mapping of remediationMappings) {
       expect(mapping.Properties.MaximumRetryAttempts).toBe(3);
     }
-    const serialized = JSON.stringify(mappings);
+    const filterPatterns = mappings.map((mapping) =>
+      JSON.parse(
+        mapping.Properties.FilterCriteria.Filters[0].Pattern
+      )
+    );
+    const serialized = JSON.stringify(filterPatterns);
     expect(serialized).toContain(
       "archon.runtime-bound-job/v2"
     );
@@ -227,7 +237,15 @@ describe("ArchonJudgeStack", () => {
     expect(serialized).toContain("IMPROVE_CONTEXT");
     expect(serialized).toContain("CORE#LEASE");
     expect(serialized).toContain('"cloud"');
-    expect(serialized).toContain("SESSION#rs_");
+    expect(filterPatterns).toContainEqual({
+      eventName: ["MODIFY"],
+      dynamodb: {
+        NewImage: {
+          pk: { S: [{ prefix: "SESSION#rs_" }] },
+          sk: { S: ["RUNTIME"] }
+        }
+      }
+    });
   });
 
   test("uses private versioned KMS buckets and CloudFront OAC", () => {
@@ -240,16 +258,19 @@ describe("ArchonJudgeStack", () => {
       expect(bucket.Properties.VersioningConfiguration).toEqual({
         Status: "Enabled"
       });
-      expect(bucket.Properties.BucketEncryption).toMatchObject({
-        ServerSideEncryptionConfiguration: [
-          Match.objectLike({
-            BucketKeyEnabled: true,
-            ServerSideEncryptionByDefault: {
-              SSEAlgorithm: "aws:kms"
-            }
-          })
-        ]
+      const encryption =
+        bucket.Properties.BucketEncryption
+          .ServerSideEncryptionConfiguration;
+      expect(encryption).toHaveLength(1);
+      expect(encryption[0]).toMatchObject({
+        BucketKeyEnabled: true,
+        ServerSideEncryptionByDefault: {
+          SSEAlgorithm: "aws:kms"
+        }
       });
+      expect(
+        encryption[0].ServerSideEncryptionByDefault.KMSMasterKeyID
+      ).toBeDefined();
       expect(bucket.Properties.PublicAccessBlockConfiguration).toEqual({
         BlockPublicAcls: true,
         BlockPublicPolicy: true,
@@ -401,15 +422,40 @@ describe("ArchonJudgeStack", () => {
     for (const config of visibility) {
       expect(config.SampledRequestsEnabled).toBe(false);
     }
+
+    const loggingConfigurations = Object.values(
+      template.findResources("AWS::WAFv2::LoggingConfiguration")
+    ) as any[];
+    expect(loggingConfigurations).toHaveLength(1);
+    const loggingFilter =
+      loggingConfigurations[0].Properties.LoggingFilter;
+    expect(loggingFilter).toEqual({
+      DefaultBehavior: "DROP",
+      Filters: [
+        {
+          Behavior: "KEEP",
+          Conditions: [
+            { ActionCondition: { Action: "BLOCK" } },
+            { ActionCondition: { Action: "COUNT" } }
+          ],
+          Requirement: "MEETS_ANY"
+        }
+      ]
+    });
+    expect(loggingFilter).not.toHaveProperty("defaultBehavior");
+    expect(loggingFilter).not.toHaveProperty("filters");
   });
 
   test("pins the Cloud image to account, region and digest", () => {
     const template = judgeTemplate().toJSON();
-    expect(
-      template.Parameters.CloudRuntimeImageUri.AllowedPattern
-    ).toContain("@sha256:[a-f0-9]{64}");
-    expect(
-      template.Rules.ExactCloudRuntimeImageAccountAndRegion
-    ).toBeDefined();
+    const allowedPattern =
+      template.Parameters.CloudRuntimeImageUri.AllowedPattern;
+    expect(allowedPattern).toContain(
+      "^123456789012\\.dkr\\.ecr\\.eu-west-1\\.amazonaws\\.com"
+    );
+    expect(allowedPattern).toContain("@sha256:[a-f0-9]{64}$");
+    expect(JSON.stringify(template.Rules ?? {})).not.toContain(
+      "Fn::Split"
+    );
   });
 });

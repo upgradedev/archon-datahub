@@ -59,6 +59,57 @@ describe("lean deploy workflow contract", () => {
     );
   });
 
+  test("gates exact stage authority and post-deploy role bindings", () => {
+    for (const required of [
+      "Fail closed on exact stage deployment role before AWS trust",
+      "AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}",
+      "archon-datahub-github-${STAGE}-deploy",
+      "role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}",
+      "allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}",
+      "Preflight exact lean stack execution-role bindings",
+      "ALLOW_ABSENT=true",
+      "Verify exact post-deploy CloudFormation role bindings",
+      "ALLOW_ABSENT=false",
+      "ALLOW_ROLE_MIGRATION=false",
+      "bash scripts/validate-cloudformation-role-bindings.sh"
+    ]) {
+      expect(source).toContain(required);
+    }
+    expect(source.match(
+      /bash scripts\/validate-cloudformation-role-bindings[.]sh/g
+    )).toHaveLength(2);
+    expect(source).not.toContain(
+      "role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}"
+    );
+
+    const beforeTrust = source.indexOf(
+      "Fail closed on exact stage deployment role before AWS trust"
+    );
+    const acquire = source.indexOf(
+      "Acquire short-lived deployment authority"
+    );
+    const preflight = source.indexOf(
+      "Preflight exact lean stack execution-role bindings"
+    );
+    const deploy = source.indexOf(
+      "Deploy Edge, zero-idle Core, then serverless Judge"
+    );
+    const postDeploy = source.indexOf(
+      "Verify exact post-deploy CloudFormation role bindings"
+    );
+    expect(beforeTrust).toBeLessThan(acquire);
+    expect(acquire).toBeLessThan(preflight);
+    expect(preflight).toBeLessThan(deploy);
+    expect(deploy).toBeLessThan(postDeploy);
+  });
+
+  test("scopes AWS mutation permissions to only the deploy job", () => {
+    expect(source).toMatch(/^permissions: \{\}$/m);
+    expect(source).toMatch(
+      /jobs:\n  deploy:[\s\S]*?    permissions:\n      actions: read\n      attestations: write\n      contents: read\n      id-token: write\n/
+    );
+  });
+
   test("does not rebuild candidates or restore retired topology", () => {
     expect(source).not.toMatch(/docker build/);
     expect(source).not.toMatch(/Archon-.*Registry/);

@@ -593,9 +593,10 @@ jobs:
                 "requires-explicit-deploy-migration"
               ],
               deployFinalPostcheckRequiresExactBindings: true,
-              entryCount: 5,
+              entryCount: 6,
               migrationRequiredState:
                 "foundation-complete-deploy-migration-required",
+              perStageDeployEntryCount: 3,
               readyState: "ready-for-deploy"
             } and
             .evidence.driftVerification == {

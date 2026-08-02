@@ -867,21 +867,24 @@ staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 production_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
-foundation_phase='preflight:application-stack-role-binding:staging:registry'
-assert_application_stack_role_exact_if_present \
-  staging "${PRIMARY_REGION}" Archon-Registry "${staging_cfn_eu}"
-foundation_phase='preflight:application-stack-role-binding:staging:primary'
-assert_application_stack_role_exact_if_present \
-  staging "${PRIMARY_REGION}" Archon-staging "${staging_cfn_eu}"
 foundation_phase='preflight:application-stack-role-binding:staging:edge'
 assert_application_stack_role_exact_if_present \
   staging "${EDGE_REGION}" Archon-staging-Edge "${staging_cfn_us}"
-foundation_phase='preflight:application-stack-role-binding:production:primary'
+foundation_phase='preflight:application-stack-role-binding:staging:core'
 assert_application_stack_role_exact_if_present \
-  production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
+  staging "${PRIMARY_REGION}" Archon-staging-Core "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:judge'
+assert_application_stack_role_exact_if_present \
+  staging "${PRIMARY_REGION}" Archon-staging-Judge "${staging_cfn_eu}"
 foundation_phase='preflight:application-stack-role-binding:production:edge'
 assert_application_stack_role_exact_if_present \
   production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
+foundation_phase='preflight:application-stack-role-binding:production:core'
+assert_application_stack_role_exact_if_present \
+  production "${PRIMARY_REGION}" Archon-production-Core "${production_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:production:judge'
+assert_application_stack_role_exact_if_present \
+  production "${PRIMARY_REGION}" Archon-production-Judge "${production_cfn_eu}"
 foundation_phase='preflight:application-stack-role-transition'
 application_stack_role_transition_json="$(
   jq -cnS \
@@ -891,8 +894,8 @@ application_stack_role_transition_json="$(
           .validation == "requires-explicit-deploy-migration"
         )) |
         length) as $migrationRequiredCount |
-      if ($entries | length) != 5 then
-        error("application stack role preflight inventory must contain five entries")
+      if ($entries | length) != 6 then
+        error("application stack role preflight inventory must contain six entries")
       elif (
         all($entries[];
           .validation == "passed" or
@@ -1922,9 +1925,9 @@ for stage in staging production; do
     if [[ "${region}" == "${EDGE_REGION}" ]]; then
       stack_names="[\"Archon-${stage}-Edge\"]"
     elif [[ "${stage}" == "staging" ]]; then
-      stack_names='["Archon-staging","Archon-Registry"]'
+      stack_names='["Archon-staging-Core","Archon-staging-Judge"]'
     else
-      stack_names='["Archon-production"]'
+      stack_names='["Archon-production-Core","Archon-production-Judge"]'
     fi
     expected_bootstrap_deploy_policy="${RUNNER_TEMP}/${stage}-expected-bootstrap-deploy-policy-${region}.json"
     jq -cnS \

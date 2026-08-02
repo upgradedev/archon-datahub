@@ -191,6 +191,12 @@ function eventMapping(
     )
   );
   failureQueue.grantSendMessages(config.role);
+  // Event-source MaximumConcurrency has a service minimum of two. The
+  // mutation/reset workers remain serialized by reserved concurrency instead.
+  const scalingConfig =
+    config.maximumConcurrency >= 2
+      ? { maximumConcurrency: config.maximumConcurrency }
+      : undefined;
   const mapping = new lambda.CfnEventSourceMapping(
     scope,
     config.id,
@@ -202,9 +208,7 @@ function eventMapping(
       maximumBatchingWindowInSeconds:
         config.batchingWindowSeconds,
       parallelizationFactor: 1,
-      scalingConfig: {
-        maximumConcurrency: config.maximumConcurrency
-      },
+      scalingConfig,
       maximumRetryAttempts: 5,
       maximumRecordAgeInSeconds: 3600,
       bisectBatchOnFunctionError: true,
@@ -526,7 +530,10 @@ export function addCloudRuntime(
     filter: {
       eventName: ["MODIFY"],
       dynamodb: {
-        NewImage: { sk: { S: ["RUNTIME"] } }
+        NewImage: {
+          pk: { S: [{ prefix: "SESSION#rs_" }] },
+          sk: { S: ["RUNTIME"] }
+        }
       }
     }
   });
