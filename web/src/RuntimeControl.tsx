@@ -94,7 +94,7 @@ function RuntimeProfile({
               "rounded-full border px-2 py-1 text-[9px] " +
               (profile.capabilities[key]
                 ? "border-emerald-300/15 bg-emerald-300/[0.04] text-emerald-100/80"
-                : "border-white/[0.06] bg-white/[0.02] text-slate-500")
+                : "border-white/[0.06] bg-white/[0.02] text-slate-400")
             }
             key={key}
           >
@@ -102,7 +102,7 @@ function RuntimeProfile({
           </span>
         ))}
       </div>
-      <p className="mt-2 truncate font-mono text-[9px] text-slate-500">
+      <p className="mt-2 truncate font-mono text-[9px] text-slate-400">
         {profile.generation ?? "No verified generation"}
       </p>
     </div>
@@ -378,11 +378,11 @@ export function RuntimeControl({
   return (
     <section
       aria-labelledby="runtime-control-title"
-      className="panel mt-6 overflow-hidden"
+      className="panel mt-6 min-w-0 overflow-hidden"
       id="runtime-control"
     >
       <div className="panel-heading">
-        <div>
+        <div className="min-w-0">
           <p className="eyebrow">Portable DataHub runtime</p>
           <h2 className="section-title" id="runtime-control-title">
             Judge runtime control
@@ -404,19 +404,19 @@ export function RuntimeControl({
         </button>
       </div>
 
-      <div className="border-t border-white/[0.06] p-5">
+      <div className="min-w-0 border-t border-white/[0.06] p-5">
         {registry ? <Registry registry={registry} /> : null}
 
         {!session || terminal ? (
           <>
-            <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <label className="block">
+            <div className="mt-4 grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <label className="block min-w-0">
                 <span className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
                   Runtime preference
                 </span>
                 <select
                   aria-label="DataHub runtime preference"
-                  className="w-full rounded-xl border border-white/[0.08] bg-[#091512] px-3 py-3 text-xs text-slate-100 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
+                  className="block min-w-0 max-w-full w-full rounded-xl border border-white/[0.08] bg-[#091512] px-3 py-3 text-xs text-slate-100 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
                   disabled={pending !== undefined}
                   onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                     setRequestedProfile(event.target.value as RuntimeRequest)
@@ -463,7 +463,7 @@ export function RuntimeControl({
                       ? "DataHub Cloud"
                       : "Ephemeral DataHub Core"}
                   </span>
-                  <span className="text-[10px] text-slate-500">
+                  <span className="text-[10px] text-slate-400">
                     {session.requestedProfile === "auto"
                       ? "resolved automatically"
                       : "explicit selection"}
@@ -477,7 +477,7 @@ export function RuntimeControl({
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-2 text-right">
-                  <p className="text-[9px] uppercase tracking-[0.12em] text-slate-500">
+                  <p className="text-[9px] uppercase tracking-[0.12em] text-slate-400">
                     Server lease
                   </p>
                   <p className="mt-1 font-mono text-lg font-semibold text-white">
@@ -520,7 +520,7 @@ export function RuntimeControl({
           </p>
         ) : null}
 
-        <p className="mt-3 text-[9px] leading-4 text-slate-500">
+        <p className="mt-3 text-[9px] leading-4 text-slate-400">
           DynamoDB is the lease authority. CloudWatch records telemetry only;
           the Core sandbox tears down after 30 minutes idle and always by the
           two-hour hard limit.

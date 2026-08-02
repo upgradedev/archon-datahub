@@ -73,7 +73,7 @@
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile",
-      "blobSha": "65e3d10e232f0af6d1b8355cb7b22d20899853fe"
+      "blobSha": "1c921a009a8fb8945770380d1e033b8907d034ab"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile.dockerignore",

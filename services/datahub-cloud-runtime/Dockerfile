@@ -69,8 +69,14 @@ RUN test -x /opt/archon/runtime/.venv/bin/python \
     && chmod 0444 /opt/archon/demo/archon_demo.sql \
       /opt/archon/contracts/core-mutation-authorization-golden.json \
       /opt/archon/.github/locks/*.json \
-    && find /opt/archon/datahub-skills /opt/archon/contrib \
-      -type f -exec chmod 0444 {} +
+    && chmod 0444 \
+      /opt/archon/licenses/datahub-skills-LICENSE \
+      /opt/archon/datahub-skills/skills/datahub-search/SKILL.md \
+      /opt/archon/datahub-skills/skills/datahub-lineage/SKILL.md \
+      /opt/archon/datahub-skills/skills/datahub-quality/SKILL.md \
+      /opt/archon/datahub-skills/skills/datahub-enrich/SKILL.md \
+      /opt/archon/datahub-skills/skills/using-datahub/SKILL.md \
+      /opt/archon/contrib/datahub-audit/SKILL.md
 CMD ["handlers.read_handler"]
 
 FROM runtime AS test

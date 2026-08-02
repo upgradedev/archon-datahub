@@ -1116,11 +1116,11 @@ function JsonEvidence({ value }: { value: JsonValue }) {
 function DigestPill({ label, value }: { label: string; value?: string }) {
   return (
     <span
-      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.025] px-2.5 py-1 font-mono text-[9px] text-slate-400"
+      className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden rounded-full border border-white/[0.07] bg-white/[0.025] px-2.5 py-1 font-mono text-[9px] text-slate-400"
       title={value}
     >
-      <span className="font-sans uppercase tracking-[0.12em] text-slate-500">{label}</span>
-      <span className="truncate">{shortDigest(value)}</span>
+      <span className="shrink-0 font-sans uppercase tracking-[0.12em] text-slate-300">{label}</span>
+      <span className="min-w-0 truncate">{shortDigest(value)}</span>
     </span>
   );
 }
@@ -1443,7 +1443,7 @@ export function App() {
     envelope: previewAudit,
     source: "fixture",
     fallbackReason:
-      "Deterministic regression fixture. The live DataHub Agent Stack is shown in its dedicated panel.",
+      "Deterministic showcase mode: this regression fixture is non-mutating. The live DataHub Agent Stack is shown in its dedicated panel.",
   });
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [type, setType] = useState<FindingType | "all">("all");
