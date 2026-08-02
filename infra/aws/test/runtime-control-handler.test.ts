@@ -102,7 +102,7 @@ function healthItem(
 }
 
 const identity = {
-  subject: "judge-user-123",
+  subject: "2f6dcb5a-9f76-4f65-960d-f2637d65b9cb",
   issuer: "https://cognito-idp.eu-west-1.amazonaws.com/eu-west-1_TEST",
   groups: "[archon-approvers]"
 };
@@ -225,7 +225,7 @@ describe("runtime session control Lambda", () => {
               pk: { S: "CORE#LEASE" },
               sk: { S: "CURRENT" },
               state: { S: "STOPPED" },
-              revision: { N: "0" }
+              revision: { N: "17" }
             }
           };
         }
@@ -258,7 +258,7 @@ describe("runtime session control Lambda", () => {
       schema: "archon.core-runtime-command/v1",
       action: "START",
       sessionId: result.payload.sessionId,
-      expectedRevision: 0,
+      expectedRevision: 17,
       binding: expect.objectContaining({
         schemaVersion: "archon.runtime-binding/v1",
         profileId: "core",
@@ -276,8 +276,8 @@ describe("runtime session control Lambda", () => {
         requestId: "request-runtime-123",
         body: { requestedProfile: "auto" }
       },
-      404,
-      "not_found"
+      401,
+      "authenticated_runtime_operator_required"
     ],
     [
       "wrong operator group",
@@ -293,6 +293,18 @@ describe("runtime session control Lambda", () => {
       event("sessionStart", {
         body: { requestedProfile: "auto" },
         identity: { ...identity, issuer: "http://not-trusted.example" }
+      }),
+      401,
+      "authenticated_runtime_operator_required"
+    ],
+    [
+      "control character in subject",
+      event("sessionStart", {
+        body: { requestedProfile: "auto" },
+        identity: {
+          ...identity,
+          subject: "2f6dcb5a-9f76-4f65-960d-f2637d65b9cb" + String.fromCharCode(0)
+        }
       }),
       401,
       "authenticated_runtime_operator_required"
