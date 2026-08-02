@@ -43,6 +43,11 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/u;
 const RAW_DIGEST = /^[a-f0-9]{64}$/u;
 const RELEASE_SHA = /^[a-f0-9]{40}$/u;
 const AUDIT_ID = /^[a-f0-9]{64}$/u;
+const SESSION_ID = /^rs_[A-Za-z0-9_-]{43}$/u;
+const CANONICAL_DATASET_URN =
+  "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)";
+const CANONICAL_QUESTION =
+  "Which customer segment generated the highest net revenue in Q2 2026, and is customers.customer_email governed as PII?";
 const UUID =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const RFC3339_INSTANT =
@@ -154,6 +159,13 @@ interface TerminalProjection {
 interface NetworkObservation {
   startRequests: number;
   decisionRequests: number;
+  runtimeSessionStarts: number;
+  runtimeSessionReads: number;
+  runtimeSessionStops: number;
+  runtimeAgentStarts: number;
+  runtimeAgentReads: number;
+  runtimeImproveRequests: number;
+  runtimeApprovalRequests: number;
   tokenRequests: number;
   authorizationRequests: number;
   callbackRequests: number;
@@ -1208,6 +1220,13 @@ async function installNetworkBoundary(
   const observation: NetworkObservation = {
     startRequests: 0,
     decisionRequests: 0,
+    runtimeSessionStarts: 0,
+    runtimeSessionReads: 0,
+    runtimeSessionStops: 0,
+    runtimeAgentStarts: 0,
+    runtimeAgentReads: 0,
+    runtimeImproveRequests: 0,
+    runtimeApprovalRequests: 0,
     tokenRequests: 0,
     authorizationRequests: 0,
     callbackRequests: 0,
@@ -1279,6 +1298,162 @@ async function installNetworkBoundary(
             url.pathname,
           ));
       if (authorizationCallback || staticApplicationRead) {
+        await route.continue();
+        return;
+      }
+      if (
+        method === "POST" &&
+        url.pathname === "/api/runtime-sessions" &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeSessionStarts += 1;
+        try {
+          const body: unknown = request.postDataJSON();
+          const authorization = await request.headerValue("authorization");
+          observation.requestContractValid =
+            observation.requestContractValid &&
+            isRecord(body) &&
+            hasExactKeys(body, ["requestedProfile"]) &&
+            body.requestedProfile === "core" &&
+            typeof authorization === "string" &&
+            /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        } catch {
+          observation.requestContractValid = false;
+        }
+        await route.continue();
+        return;
+      }
+      if (
+        method === "GET" &&
+        /^\/api\/runtime-sessions\/rs_[A-Za-z0-9_-]{43}$/u.test(url.pathname) &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeSessionReads += 1;
+        await route.continue();
+        return;
+      }
+      if (
+        method === "POST" &&
+        /^\/api\/runtime-sessions\/rs_[A-Za-z0-9_-]{43}\/stop$/u.test(
+          url.pathname,
+        ) &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeSessionStops += 1;
+        try {
+          const body: unknown = request.postDataJSON();
+          const authorization = await request.headerValue("authorization");
+          observation.requestContractValid =
+            observation.requestContractValid &&
+            isRecord(body) &&
+            hasExactKeys(body, []) &&
+            typeof authorization === "string" &&
+            /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        } catch {
+          observation.requestContractValid = false;
+        }
+        await route.continue();
+        return;
+      }
+      if (
+        method === "POST" &&
+        url.pathname === "/api/control-loops-v2" &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeAgentStarts += 1;
+        try {
+          const body: unknown = request.postDataJSON();
+          const authorization = await request.headerValue("authorization");
+          observation.requestContractValid =
+            observation.requestContractValid &&
+            isRecord(body) &&
+            hasExactKeys(body, [
+              "query",
+              "question",
+              "datasetUrn",
+              "sessionId",
+              "mode",
+            ]) &&
+            body.query === CANONICAL_DATASET_URN &&
+            body.datasetUrn === CANONICAL_DATASET_URN &&
+            body.question === CANONICAL_QUESTION &&
+            typeof body.sessionId === "string" &&
+            SESSION_ID.test(body.sessionId) &&
+            body.mode === "GOVERNED" &&
+            typeof authorization === "string" &&
+            /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        } catch {
+          observation.requestContractValid = false;
+        }
+        await route.continue();
+        return;
+      }
+      if (
+        method === "GET" &&
+        /^\/api\/control-loops-v2\/[a-f0-9]{64}$/u.test(url.pathname) &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeAgentReads += 1;
+        const authorization = await request.headerValue("authorization");
+        observation.requestContractValid =
+          observation.requestContractValid &&
+          typeof authorization === "string" &&
+          /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        await route.continue();
+        return;
+      }
+      if (
+        method === "POST" &&
+        /^\/api\/control-loops-v2\/[a-f0-9]{64}\/improve-context$/u.test(
+          url.pathname,
+        ) &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeImproveRequests += 1;
+        try {
+          const body: unknown = request.postDataJSON();
+          const authorization = await request.headerValue("authorization");
+          observation.requestContractValid =
+            observation.requestContractValid &&
+            isRecord(body) &&
+            hasExactKeys(body, []) &&
+            typeof authorization === "string" &&
+            /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        } catch {
+          observation.requestContractValid = false;
+        }
+        await route.continue();
+        return;
+      }
+      if (
+        method === "POST" &&
+        /^\/api\/control-loops-v2\/[a-f0-9]{64}\/approval$/u.test(
+          url.pathname,
+        ) &&
+        url.search === "" &&
+        url.hash === ""
+      ) {
+        observation.runtimeApprovalRequests += 1;
+        try {
+          const body: unknown = request.postDataJSON();
+          const authorization = await request.headerValue("authorization");
+          observation.requestContractValid =
+            observation.requestContractValid &&
+            isRecord(body) &&
+            hasExactKeys(body, ["decision", "comment"]) &&
+            body.decision === "APPROVE" &&
+            body.comment === "Judge approved the exact content-addressed PII tag plan." &&
+            typeof authorization === "string" &&
+            /^Bearer [^\s\u0000-\u001f\u007f]{20,16384}$/u.test(authorization);
+        } catch {
+          observation.requestContractValid = false;
+        }
         await route.continue();
         return;
       }
@@ -1503,6 +1678,21 @@ async function fetchStatus(
   return value;
 }
 
+async function waitForStatus(
+  request: APIRequestContext,
+  applicationOrigin: string,
+  start: StartProjection,
+  expectedStatus: "AWAITING_APPROVAL" | "SUCCEEDED",
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await fetchStatus(request, applicationOrigin, start);
+    if (value.status === expectedStatus) return value;
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("The live control loop did not reach " + expectedStatus + ".");
+}
 function validateApproval(
   value: unknown,
   expectedStatus: "PENDING" | "DECIDED",
@@ -1846,6 +2036,99 @@ function atomicWriteNoReplace(
   return target;
 }
 
+async function runV2DataHubJourney(page: Page): Promise<void> {
+  const runtimePreference = page.getByRole("combobox", {
+    name: "DataHub runtime preference",
+  });
+  await expect(runtimePreference).toBeVisible({ timeout: 30_000 });
+  await runtimePreference.selectOption("core");
+  await page.getByRole("button", { name: "Launch pinned session" }).click();
+
+  const teardown = page.getByRole("button", { name: "Stop & teardown" });
+  let runtimeWasLaunched = false;
+  try {
+    await expect(teardown).toBeVisible({ timeout: 30_000 });
+    runtimeWasLaunched = true;
+    await expect(page.getByText("READY", { exact: true }).first()).toBeVisible({
+      timeout: 600_000,
+    });
+
+    const run = page.getByRole("button", {
+      name: "Run canonical Agent Stack",
+    });
+    await expect(run).toBeEnabled({ timeout: 30_000 });
+    await run.click();
+
+    const panel = page.getByTestId("agent-stack-panel");
+    await expect(panel.getByTestId("agent-runtime-profile")).toHaveText(
+      "DataHub Core · ephemeral",
+    );
+    for (const component of [
+      "DataHub MCP Server",
+      "Agent Context Kit",
+      "DataHub Skills",
+      "Analytics Agent",
+    ]) {
+      await expect(panel.getByText(component, { exact: true })).toBeVisible({
+        timeout: 30_000,
+      });
+    }
+    await expect(panel.locator("ol li")).toHaveCount(5);
+    await expect(
+      page.getByRole("status", { name: "Live DataHub" }),
+    ).toBeVisible({ timeout: 30_000 });
+
+    const improve = panel.getByRole("button", { name: "Generate proposal" });
+    await expect(improve).toBeEnabled({ timeout: 300_000 });
+    await expect(panel.getByText("SQL", { exact: true })).toBeVisible();
+    await expect(panel.getByText("CHART", { exact: true })).toBeVisible();
+    await improve.click();
+
+    const approve = panel.getByRole("button", { name: "Approve exact plan" });
+    await expect(approve).toBeEnabled({ timeout: 300_000 });
+    await expect(panel.getByText("Proposal only", { exact: true })).toBeVisible();
+    await approve.click();
+    await expect(
+      panel.getByText("SUCCEEDED · COMPLETE", { exact: true }),
+    ).toBeVisible({ timeout: 300_000 });
+    const governedProof = panel.getByTestId("governed-proof");
+    await expect(governedProof).toContainText(
+      "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
+    );
+    await expect(panel.getByTestId("kms-authority-proof")).toHaveText(
+      "KMS-signed authority verified",
+    );
+    await expect(panel.getByTestId("enrich-skill-completion")).toHaveText(
+      "datahub-enrich · executed-with-human-approval",
+    );
+    for (const proofLabel of [
+      "skill artifact",
+      "skill preview",
+      "skill grounding",
+      "skill execution",
+    ]) {
+      await expect(governedProof).toContainText(proofLabel);
+    }
+    await expect(governedProof).toContainText("KMS key ref");
+    await expect(governedProof).toContainText("signed envelope");
+    await expect(governedProof).not.toContainText("arn:aws:kms:");
+    await expect(panel.getByTestId("context-delta")).toContainText(
+      "ACK context · changed",
+    );
+    await expect(panel.getByTestId("context-delta")).toContainText(
+      "Analytics result · changed",
+    );
+  } finally {
+    if (runtimeWasLaunched) {
+      await expect(teardown).toBeEnabled({ timeout: 30_000 });
+      await teardown.click();
+      await expect(
+        page.getByRole("button", { name: "Start new pinned session" }),
+      ).toBeVisible({ timeout: 180_000 });
+    }
+  }
+}
+
 function hostedCredentialInputs(page: Page) {
   return {
     username: page
@@ -1861,7 +2144,7 @@ function hostedCredentialInputs(page: Page) {
   };
 }
 
-test("rejects one protected live proposal and seals a sanitized journey receipt", async ({
+test("proves one governed v2 context delta and seals the sanitized legacy rejection receipt", async ({
   browser,
   page,
   request,
@@ -2013,55 +2296,54 @@ test("rejects one protected live proposal and seals a sanitized journey receipt"
     "The protected sign-in did not consume exactly one scrubbed credential set.",
   );
 
-  const scopeInput = page.getByLabel(
-    "Scope audit by asset, domain, or platform",
-  );
-  ensure(
-    (await scopeInput.inputValue()) === runtime.demoQuery,
-    "The live audit did not use the prefilled narrow runtime scope.",
-  );
+  await runV2DataHubJourney(page);
+
   const startResponsePromise = page.waitForResponse(
     (response) =>
-      response.url() === `${expected.applicationOrigin}/api/control-loops` &&
+      response.url() === expected.applicationOrigin + "/api/control-loops" &&
       response.request().method() === "POST",
     { timeout: 30_000 },
   );
-  await page.getByRole("button", { name: "Run audit" }).click();
+  const [startResponse] = await Promise.all([
+    startResponsePromise,
+    page.evaluate(async ({ applicationOrigin, query }) => {
+      const response = await fetch(applicationOrigin + "/api/control-loops", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query }),
+      });
+      await response.text();
+    }, {
+      applicationOrigin: expected.applicationOrigin,
+      query: runtime.demoQuery,
+    }),
+  ]);
   const start = await parseStartResponse(
-    await startResponsePromise,
+    startResponse,
     expected.applicationOrigin,
   );
 
-  await expect(
-    page.getByRole("button", { name: "Awaiting steward approval" }),
-  ).toBeVisible({ timeout: 180_000 });
   const awaiting = validateAwaitingStatus(
-    await fetchStatus(request, expected.applicationOrigin, start),
+    await waitForStatus(
+      request,
+      expected.applicationOrigin,
+      start,
+      "AWAITING_APPROVAL",
+      180_000,
+    ),
     start,
     expected.releaseSha,
   );
-  const g6Finding = page
-    .getByRole("list", { name: "Audit findings" })
-    .getByRole("button")
-    .filter({ hasText: /\bG6\b/u });
-  ensure(
-    (await g6Finding.count()) === 1,
-    "The browser did not render one exact approval-bound G6 finding.",
-  );
-  await g6Finding.click();
-  const reject = page.getByRole("button", { name: "Reject proposal" });
-  await expect(reject).toBeVisible();
-  ensure(
-    await reject.isEnabled(),
-    "The authenticated rejection control remained locked.",
-  );
 
-  const decisionUrl = `${expected.applicationOrigin}/api/approvals/${encodeURIComponent(
-    awaiting.approvalId,
-  )}/decisions`;
+  const decisionUrl = expected.applicationOrigin +
+    "/api/approvals/" + encodeURIComponent(awaiting.approvalId) + "/decisions";
   const decisionRequestPromise = page.context().waitForEvent("request", {
-    predicate: (request) =>
-      request.url() === decisionUrl && request.method() === "POST",
+    predicate: (candidate) =>
+      candidate.url() === decisionUrl && candidate.method() === "POST",
     timeout: 30_000,
   });
   const decisionResponsePromise = page.waitForResponse(
@@ -2075,7 +2357,23 @@ test("rejects one protected live proposal and seals a sanitized journey receipt"
     | Awaited<ReturnType<typeof validateDecisionAck>>
     | undefined;
   try {
-    await reject.click();
+    await page.evaluate(async ({ accessToken, url }) => {
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer " + accessToken,
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({ decision: "REJECT" }),
+      });
+      await response.text();
+    }, {
+      accessToken: verifiedAccessToken,
+      url: decisionUrl,
+    });
     const decisionRequest = await decisionRequestPromise;
     decisionRequestSha256 = await validateDecisionRequest(
       decisionRequest,
@@ -2094,18 +2392,19 @@ test("rejects one protected live proposal and seals a sanitized journey receipt"
     decisionAck !== undefined && decisionRequestSha256 !== undefined,
     "The live rejection request or acknowledgement evidence is missing.",
   );
-  await expect(page.getByText(/^Rejection recorded\./u)).toBeVisible();
 
-  await expect(page.getByTestId("terminal-evidence")).toBeVisible({
-    timeout: 120_000,
-  });
   const terminal = validateTerminalStatus(
-    await fetchStatus(request, expected.applicationOrigin, start),
+    await waitForStatus(
+      request,
+      expected.applicationOrigin,
+      start,
+      "SUCCEEDED",
+      120_000,
+    ),
     start,
     awaiting,
     expected.releaseSha,
   );
-
   const logoutRequestPromise = page.context().waitForEvent("request", {
     predicate: (candidate) =>
       candidate.method() === "GET" &&
@@ -2231,6 +2530,13 @@ test("rejects one protected live proposal and seals a sanitized journey receipt"
       (await freshPage.getByText("Steward signed in").count()) === 0 &&
         freshObservation.startRequests === 0 &&
         freshObservation.decisionRequests === 0 &&
+        freshObservation.runtimeSessionStarts === 0 &&
+        freshObservation.runtimeSessionReads === 0 &&
+        freshObservation.runtimeSessionStops === 0 &&
+        freshObservation.runtimeAgentStarts === 0 &&
+        freshObservation.runtimeAgentReads === 0 &&
+        freshObservation.runtimeImproveRequests === 0 &&
+        freshObservation.runtimeApprovalRequests === 0 &&
         freshObservation.tokenRequests === 0 &&
         freshObservation.authorizationRequests === 0 &&
         freshObservation.callbackRequests === 0 &&
@@ -2250,6 +2556,13 @@ test("rejects one protected live proposal and seals a sanitized journey receipt"
   ensure(
     observation.startRequests === 1 &&
       observation.decisionRequests === 1 &&
+      observation.runtimeSessionStarts === 1 &&
+      observation.runtimeSessionReads > 0 &&
+      observation.runtimeSessionStops === 1 &&
+      observation.runtimeAgentStarts === 1 &&
+      observation.runtimeAgentReads > 0 &&
+      observation.runtimeImproveRequests === 1 &&
+      observation.runtimeApprovalRequests === 1 &&
       observation.tokenRequests === 1 &&
       observation.authorizationRequests === 2 &&
       observation.callbackRequests === 1 &&

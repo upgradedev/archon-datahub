@@ -194,6 +194,7 @@ regional_web_acl_arn=""
 user_pool_arn=""
 aws_partition=""
 approver_group=""
+runtime_operator_group=""
 canonical=""
 contain_on_failure=false
 containment_mode=""
@@ -218,7 +219,8 @@ cleanup() {
   if [[ "${contain_on_failure}" == "true" &&
     "${operation_complete}" != "true" &&
     -n "${user_pool_id}" &&
-    -n "${approver_group}" ]]; then
+    -n "${approver_group}" &&
+    -n "${runtime_operator_group}" ]]; then
     if ! declare -F automatic_containment >/dev/null ||
       ! automatic_containment; then
       printf '%s\n' \
@@ -501,11 +503,26 @@ approver_group="$(
     .[0]
   ' <<<"${stack_document}"
 )" || fail "ArchonApproverGroupName is missing or ambiguous"
+runtime_operator_group="$(
+  jq -er '
+    [
+      (.Stacks[0].Outputs // [])[] |
+      select(.OutputKey == "ArchonRuntimeOperatorGroupName") |
+      .OutputValue
+    ] |
+    select(length == 1) |
+    .[0]
+  ' <<<"${stack_document}"
+)" || fail "ArchonRuntimeOperatorGroupName is missing or ambiguous"
 
 [[ "${user_pool_id}" =~ ^${AWS_REGION}_[A-Za-z0-9]+$ ]] ||
   fail "ArchonUserPoolId does not belong to the configured region"
 test "${approver_group}" = "archon-approvers" ||
   fail "The approver group output is not the exact expected group"
+test "${runtime_operator_group}" = "archon-runtime-operators" ||
+  fail "The runtime operator group output is not the exact expected group"
+test "${runtime_operator_group}" != "${approver_group}" ||
+  fail "Runtime operator and approver groups must remain separate"
 
 if [[ "${JUDGE_USER_OPERATION}" != "deactivate" ]]; then
 user_pool_client_id="$(
@@ -1079,13 +1096,15 @@ read_groups() {
     fail "Cognito returned an invalid group-membership document"
 }
 
-require_only_approver_group() {
-  jq -e --arg group "${approver_group}" '
-    ((.Groups // []) | map(.GroupName)) as $groups |
-    ($groups | length) == 1 and
-    $groups[0] == $group
-  ' "${groups_document}" >/dev/null ||
-    fail "The judge identity does not have exactly the approver group"
+require_exact_runtime_groups() {
+  jq -e \
+    --arg approver "${approver_group}" \
+    --arg operator "${runtime_operator_group}" '
+      ((.Groups // []) | map(.GroupName) | sort) as $groups |
+      ($groups | length) == 2 and
+      $groups == ([$approver, $operator] | sort)
+    ' "${groups_document}" >/dev/null ||
+    fail "The judge identity does not have exactly the operator and approver groups"
 }
 
 require_no_groups() {
@@ -1094,17 +1113,19 @@ require_no_groups() {
     fail "The judge identity must have no group before reactivation"
 }
 
-wait_for_only_approver_group() {
+wait_for_exact_runtime_groups() {
   local username="$1"
   local attempt
 
   for attempt in {1..5}; do
     read_groups "${username}"
-    if jq -e --arg group "${approver_group}" '
-      ((.Groups // []) | map(.GroupName)) as $groups |
-      ($groups | length) == 1 and
-      $groups[0] == $group
-    ' "${groups_document}" >/dev/null; then
+    if jq -e \
+      --arg approver "${approver_group}" \
+      --arg operator "${runtime_operator_group}" '
+        ((.Groups // []) | map(.GroupName) | sort) as $groups |
+        ($groups | length) == 2 and
+        $groups == ([$approver, $operator] | sort)
+      ' "${groups_document}" >/dev/null; then
       return 0
     fi
     if (( attempt < 5 )); then
@@ -1114,16 +1135,37 @@ wait_for_only_approver_group() {
   return 1
 }
 
-add_approver_group() {
+add_runtime_groups() {
   local username="$1"
+  local group
 
-  aws cognito-idp admin-add-user-to-group \
-    --region "${AWS_REGION}" \
-    --user-pool-id "${user_pool_id}" \
-    --username "${username}" \
-    --group-name "${approver_group}" \
-    --no-cli-pager >/dev/null 2>"${aws_error}" ||
-    fail "Unable to add the exact judge user to the approver group"
+  for group in "${runtime_operator_group}" "${approver_group}"; do
+    aws cognito-idp admin-add-user-to-group \
+      --region "${AWS_REGION}" \
+      --user-pool-id "${user_pool_id}" \
+      --username "${username}" \
+      --group-name "${group}" \
+      --no-cli-pager >/dev/null 2>"${aws_error}" ||
+      fail "Unable to add the exact judge user to both runtime authority groups"
+  done
+}
+
+remove_runtime_groups() {
+  local username="$1"
+  local group
+  local removed=true
+
+  for group in "${runtime_operator_group}" "${approver_group}"; do
+    if ! aws cognito-idp admin-remove-user-from-group \
+      --region "${AWS_REGION}" \
+      --user-pool-id "${user_pool_id}" \
+      --username "${username}" \
+      --group-name "${group}" \
+      --no-cli-pager >/dev/null 2>"${aws_error}"; then
+      removed=false
+    fi
+  done
+  test "${removed}" = "true"
 }
 
 global_sign_out() {
@@ -1224,14 +1266,9 @@ automatic_containment() {
       "::warning::The containment global-sign-out response was ambiguous" \
       >&2
   fi
-  if ! aws cognito-idp admin-remove-user-from-group \
-    --region "${AWS_REGION}" \
-    --user-pool-id "${user_pool_id}" \
-    --username "${containment_username}" \
-    --group-name "${approver_group}" \
-    --no-cli-pager >/dev/null 2>"${aws_error}"; then
+  if ! remove_runtime_groups "${containment_username}"; then
     printf '%s\n' \
-      "::warning::The containment group-removal response was ambiguous; exact state read-back will decide" \
+      "::warning::A containment group-removal response was ambiguous; exact empty membership read-back will decide" \
       >&2
   fi
 
@@ -1329,8 +1366,8 @@ case "${JUDGE_USER_OPERATION}" in
 
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The provisioned judge identity is not confirmed"
-    add_approver_group "${canonical}"
-    wait_for_only_approver_group "${canonical}" ||
+    add_runtime_groups "${canonical}"
+    wait_for_exact_runtime_groups "${canonical}" ||
       fail "The provisioned judge group could not be read back"
     wait_for_enabled_status \
       "CONFIRMED" "${canonical}" "${operation_binding}" ||
@@ -1338,7 +1375,7 @@ case "${JUDGE_USER_OPERATION}" in
     final_identity_state="exact-bound"
     final_access_state="enabled"
     final_authentication_state="confirmed-permanent"
-    final_authorization_state="sole-approver-group"
+    final_authorization_state="dual-runtime-operator-and-approver-groups"
     session_revocation_result="not-applicable-fresh-identity"
     transition_result="provisioned-and-readback-verified"
     ;;
@@ -1356,11 +1393,11 @@ case "${JUDGE_USER_OPERATION}" in
     jq -e '.UserStatus == "CONFIRMED"' "${user_document}" >/dev/null ||
       fail "The exact judge identity is not in the stable confirmed state"
     read_groups "${canonical}"
-    require_only_approver_group
+    require_exact_runtime_groups
     prior_identity_state="exact-bound"
     prior_access_state="enabled"
     prior_authentication_state="confirmed-permanent"
-    prior_authorization_state="sole-approver-group"
+    prior_authorization_state="dual-runtime-operator-and-approver-groups"
 
     password_request="$(
       printf '%s' "${judge_password}" |
@@ -1393,13 +1430,13 @@ case "${JUDGE_USER_OPERATION}" in
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The rotated judge identity is not confirmed"
     read_groups "${canonical}"
-    require_only_approver_group
+    require_exact_runtime_groups
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The final rotated judge identity is not confirmed"
     final_identity_state="exact-bound"
     final_access_state="enabled"
     final_authentication_state="confirmed-permanent-rotated"
-    final_authorization_state="sole-approver-group"
+    final_authorization_state="dual-runtime-operator-and-approver-groups"
     session_revocation_result="response-confirmed"
     transition_result="rotated-and-readback-verified"
     ;;
@@ -1476,15 +1513,15 @@ case "${JUDGE_USER_OPERATION}" in
     fi
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The reactivated judge identity did not become confirmed"
-    add_approver_group "${canonical}"
-    wait_for_only_approver_group "${canonical}" ||
+    add_runtime_groups "${canonical}"
+    wait_for_exact_runtime_groups "${canonical}" ||
       fail "The reactivated judge group could not be read back"
     wait_for_enabled_status "CONFIRMED" "${canonical}" ||
       fail "The final reactivated judge identity is not confirmed"
     final_identity_state="exact-bound"
     final_access_state="enabled"
     final_authentication_state="confirmed-permanent-rotated"
-    final_authorization_state="sole-approver-group"
+    final_authorization_state="dual-runtime-operator-and-approver-groups"
     session_revocation_result="response-confirmed"
     transition_result="reactivated-and-readback-verified"
     ;;
@@ -1523,12 +1560,7 @@ case "${JUDGE_USER_OPERATION}" in
       sign_out_response_proved=false
     fi
     group_removal_response_proved=true
-    if ! aws cognito-idp admin-remove-user-from-group \
-      --region "${AWS_REGION}" \
-      --user-pool-id "${user_pool_id}" \
-      --username "${canonical}" \
-      --group-name "${approver_group}" \
-      --no-cli-pager >/dev/null 2>"${aws_error}"; then
+    if ! remove_runtime_groups "${canonical}"; then
       group_removal_response_proved=false
     fi
 

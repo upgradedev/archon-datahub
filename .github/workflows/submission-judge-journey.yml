@@ -871,7 +871,7 @@ jobs:
                       identity: "exact-bound",
                       access: "enabled",
                       authentication: "confirmed-permanent",
-                      authorization: "sole-approver-group"
+                      authorization: "dual-runtime-operator-and-approver-groups"
                     } and
                     .sessionRevocation ==
                       "not-applicable-fresh-identity"
@@ -880,13 +880,13 @@ jobs:
                       identity: "exact-bound",
                       access: "enabled",
                       authentication: "confirmed-permanent",
-                      authorization: "sole-approver-group"
+                      authorization: "dual-runtime-operator-and-approver-groups"
                     } and
                     .finalState == {
                       identity: "exact-bound",
                       access: "enabled",
                       authentication: "confirmed-permanent-rotated",
-                      authorization: "sole-approver-group"
+                      authorization: "dual-runtime-operator-and-approver-groups"
                     } and
                     .sessionRevocation == "response-confirmed"
                   elif $operation == "deactivate" then
@@ -926,7 +926,7 @@ jobs:
                       identity: "exact-bound",
                       access: "enabled",
                       authentication: "confirmed-permanent-rotated",
-                      authorization: "sole-approver-group"
+                      authorization: "dual-runtime-operator-and-approver-groups"
                     } and
                     .sessionRevocation == "response-confirmed"
                   end

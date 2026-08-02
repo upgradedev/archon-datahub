@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extendRuntimeSession,
+  getRuntimeAgentStackStatus,
   getRuntimeProfiles,
   getRuntimeSession,
   startRuntimeSession,
@@ -334,5 +335,411 @@ describe("runtime API trust boundary", () => {
       message:
         "That DataHub runtime is not fully ready with all five capabilities.",
     });
+  });
+});
+
+function digest(character: string): string {
+  return "sha256:" + character.repeat(64);
+}
+
+function successfulAgentStatus(
+  profileId: "core" | "cloud" = "core",
+): Record<string, unknown> {
+  const auditId = "a".repeat(64);
+  const runtimeBinding = {
+    schemaVersion: "archon.runtime-binding/v1",
+    profileId,
+    generation: profileId + "-g1",
+    capabilityDigest: digest("1"),
+    resolution: "auto",
+    boundAt: "2026-08-02T08:00:00.000Z",
+    leaseExpiresAt: "2026-08-02T08:30:00.000Z",
+  };
+  const runtimeEvidence = {
+    schemaVersion: "archon.runtime-binding-evidence/v2",
+    auditId,
+    runtimeSessionId: "rs_" + "B".repeat(43),
+    runtimeBinding,
+    capabilities: allCapabilities,
+    bindingDigest: digest("2"),
+    sessionRevision: 1,
+    recordedAt: "2026-08-02T08:00:01.000Z",
+    digest: digest("3"),
+  };
+  const beforeState = {
+    entityUrn:
+      "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+    columnPath: "customer_email",
+    tagUrns: [],
+    stateDigest: digest("4"),
+  };
+  const afterState = {
+    ...beforeState,
+    tagUrns: ["urn:li:tag:PII"],
+    stateDigest: digest("5"),
+  };
+  const ackTools = [
+    "search",
+    "get_entities",
+    "list_schema_fields",
+    "get_lineage_upstream",
+    "get_lineage_downstream",
+    "get_dataset_assertions",
+  ];
+  const officialMcpTools = [
+    "search",
+    "get_entities",
+    "list_schema_fields",
+    "get_lineage",
+    "get_dataset_queries",
+  ];
+  const executionPlan = {
+    phase: "governed-enrichment-preview",
+    requiredCalls: {
+      ack: ackTools,
+      officialMcp: officialMcpTools,
+    },
+    mode: "preview-only",
+  };
+  const enrichArtifact = {
+    skill: "datahub-enrich",
+    artifactDigest: digest("3"),
+    gitBlob: "3".repeat(40),
+    bytes: 4096,
+    reviewedExecution: {
+      executionPlan,
+      executionPlanDigest: digest("4"),
+    },
+  };
+  const skills = {
+    schemaVersion: "archon.datahub-skills-receipt/v2",
+    sourceCommit: "f7c7c53648b71dc0841742781e108051d46fa360",
+    official: [
+      { skill: "datahub-search" },
+      { skill: "datahub-lineage" },
+      { skill: "datahub-quality" },
+      enrichArtifact,
+      { skill: "using-datahub" },
+    ],
+    custom: [{ skill: "datahub-audit" }],
+    workflow: [
+      "datahub-search",
+      "datahub-lineage",
+      "datahub-quality",
+      "datahub-audit",
+      "datahub-enrich",
+    ],
+    reviewedSkillCount: 6,
+    mutationAuthority: "archon-remediation-worker",
+    digest: digest("8"),
+  };
+  const satisfiedAckCalls = ackTools.map((tool, index) => ({
+    tool,
+    receiptDigest: digest(String((index + 1) % 10)),
+  }));
+  const satisfiedOfficialMcpCalls = officialMcpTools.map((tool, index) => ({
+    tool,
+    receiptDigest: digest(String.fromCharCode("a".charCodeAt(0) + index)),
+  }));
+  const previewSkillReceipt = {
+    schemaVersion: "archon.datahub-skill-execution-receipt/v2",
+    skill: "datahub-enrich",
+    sourceArtifactDigest: enrichArtifact.artifactDigest,
+    executionPlan,
+    executionPlanDigest: enrichArtifact.reviewedExecution.executionPlanDigest,
+    status: "previewed",
+    satisfiedAckCalls,
+    satisfiedOfficialMcpCalls,
+    ackReceiptDigests: satisfiedAckCalls.map((call) => call.receiptDigest),
+    officialMcpReadReceiptDigests: satisfiedOfficialMcpCalls.map(
+      (call) => call.receiptDigest,
+    ),
+    mode: "preview-only",
+    requiredCallsSatisfied: true,
+    mutationsEnabled: false,
+    providerPayloadStored: false,
+    digest: digest("5"),
+  };
+  const skillGrounding = {
+    schemaVersion: "archon.datahub-skill-grounding/v2",
+    skillsReceiptDigest: skills.digest,
+    ackContextDigest: digest("7"),
+    officialMcpReadReceiptsDigest: digest("6"),
+    executionOrder: skills.workflow,
+    allRequiredCallsSatisfied: true,
+    receipts: [previewSkillReceipt],
+    digest: digest("9"),
+  };
+  const agentStackResult = {
+    schemaVersion: "archon.datahub-agent-stack-result-projection/v2",
+    resultDigest: digest("6"),
+    runtimeBinding,
+    context: { digest: digest("7"), source: "DataHub Agent Context Kit" },
+    skills,
+    skillGrounding,
+    analytics: {
+      digest: digest("a"),
+      answer: "Enterprise",
+      skillGroundingDigest: skillGrounding.digest,
+    },
+    enrichment: {
+      status: "preview-only",
+      writeAuthority: "archon-remediation-worker",
+      requiresFreshDigestBoundApproval: true,
+    },
+    digest: digest("b"),
+  };
+  const improveContext = {
+    schemaVersion: "archon.datahub-improve-context-projection/v2",
+    resultDigest: digest("c"),
+    runtimeBinding,
+    events: [],
+    contextQuality: { score: 92 },
+    preflightDigest: digest("d"),
+    contextDigest: digest("e"),
+    skillGroundingDigest: digest("f"),
+    status: "proposal-only",
+    writeAuthority: "archon-remediation-worker",
+    requiresFreshDigestBoundApproval: true,
+    digest: digest("0"),
+  };
+  const plan = {
+    schemaVersion: "archon.runtime-remediation-plan/v2",
+    auditId,
+    runtimeEvidenceDigest: runtimeEvidence.digest,
+    auditEvidenceDigest: digest("1"),
+    policyDigest: digest("2"),
+    agentStackResultDigest: agentStackResult.resultDigest,
+    analysisReceiptDigest: digest("3"),
+    readReceiptDigest: digest("4"),
+    improveContextResultDigest: improveContext.resultDigest,
+    improveReceiptDigest: digest("5"),
+    action: "ADD_TAGS",
+    arguments: {
+      tagUrns: ["urn:li:tag:PII"],
+      entityUrns: [afterState.entityUrn],
+      columnPaths: ["customer_email"],
+    },
+    expectedBefore: beforeState,
+    expectedBeforeDigest: beforeState.stateDigest,
+    expectedAfter: afterState,
+    expectedAfterDigest: afterState.stateDigest,
+    requiresHumanApproval: true,
+    createdAt: "2026-08-02T08:00:03.000Z",
+    digest: digest("6"),
+  };
+  const approval = {
+    approvalId: "approval-" + "b".repeat(24),
+    status: "APPROVED",
+    requestedAt: "2026-08-02T08:00:04.000Z",
+    expiresAt: "2026-08-02T08:05:04.000Z",
+    planDigest: plan.digest,
+    requestDigest: digest("7"),
+    decision: "APPROVE",
+    decisionDigest: digest("8"),
+    decidedAt: "2026-08-02T08:00:05.000Z",
+  };
+  const remediation = {
+    schemaVersion: "archon.governed-remediation-projection/v2",
+    jobId: "job_" + "C".repeat(22),
+    receiptDigest: digest("9"),
+    requestDigest: digest("a"),
+    beforeDigest: beforeState.stateDigest,
+    afterDigest: afterState.stateDigest,
+    responseDigest: digest("b"),
+    policyDigest: plan.policyDigest,
+    mutationExecutor: "official-datahub-mcp",
+    officialMcpMutation: {
+      tool: "add_tags",
+      policyDigest: plan.policyDigest,
+      approvalDigest: approval.decisionDigest,
+      requestDigest: digest("a"),
+      responseDigest: digest("b"),
+    },
+    authorizationEvidence: {
+      algorithm: "ECDSA_SHA_256",
+      canonicalization: "archon.sorted-json-utf8/v1",
+      keyReferenceDigest: digest("c"),
+      envelopeDigest: digest("d"),
+      signatureDigest: digest("e"),
+      consumedAt: "2026-08-02T08:00:06.000Z",
+    },
+    verified: true,
+  };
+  return {
+    schemaVersion: "archon.control-loop-status/v2",
+    auditId,
+    status: "SUCCEEDED",
+    phase: "COMPLETE",
+    submittedAt: "2026-08-02T08:00:00.000Z",
+    updatedAt: "2026-08-02T08:00:08.000Z",
+    completedAt: "2026-08-02T08:00:08.000Z",
+    runtimeEvidence,
+    agentStackResult,
+    governedState: afterState,
+    improveContext,
+    plan,
+    approval,
+    remediation,
+    skillCompletion: {
+      schemaVersion: "archon.datahub-skill-completion/v1",
+      skill: "datahub-enrich",
+      status: "executed-with-human-approval",
+      sourceArtifactDigest: previewSkillReceipt.sourceArtifactDigest,
+      executionPlanDigest: previewSkillReceipt.executionPlanDigest,
+      previewSkillReceiptDigest: previewSkillReceipt.digest,
+      skillGroundingDigest: agentStackResult.skillGrounding.digest,
+      approvalDigest: approval.decisionDigest,
+      officialMcpMutationReceiptDigest: remediation.receiptDigest,
+      completedAt: "2026-08-02T08:00:07.000Z",
+      digest: digest("6"),
+    },
+    contextDelta: {
+      schemaVersion: "archon.context-delta/v1",
+      sourceMutationReceiptDigest: remediation.receiptDigest,
+      beforeContextDigest: improveContext.contextDigest,
+      afterContextDigest: agentStackResult.context.digest,
+      beforeAnalyticsDigest: digest("f"),
+      afterAnalyticsDigest: agentStackResult.analytics.digest,
+      beforeTagStateDigest: beforeState.stateDigest,
+      afterTagStateDigest: afterState.stateDigest,
+      addedTagUrns: ["urn:li:tag:PII"],
+      ackContextChanged: true,
+      analyticsResultChanged: true,
+      sourceReadVerified: true,
+      postAnalysisReceiptDigest: digest("0"),
+      postReadReceiptDigest: digest("1"),
+      digest: digest("2"),
+    },
+  };
+}
+
+describe("v2 governed agent-stack projection", () => {
+  it("accepts a KMS-authorized official MCP mutation and verified post-write delta", async () => {
+    const value = successfulAgentStatus();
+    const fetchMock = vi.fn().mockResolvedValue(json(value));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getRuntimeAgentStackStatus(
+      "a".repeat(64),
+      ACCESS_TOKEN,
+    );
+
+    expect(result.remediation).toMatchObject({
+      mutationExecutor: "official-datahub-mcp",
+      verified: true,
+      authorizationEvidence: {
+        algorithm: "ECDSA_SHA_256",
+        canonicalization: "archon.sorted-json-utf8/v1",
+        keyReferenceDigest: digest("c"),
+      },
+    });
+    expect(result.skillCompletion).toMatchObject({
+      skill: "datahub-enrich",
+      status: "executed-with-human-approval",
+      approvalDigest: result.approval?.decisionDigest,
+      officialMcpMutationReceiptDigest: result.remediation?.receiptDigest,
+    });
+    expect(result.contextDelta).toMatchObject({
+      ackContextChanged: true,
+      analyticsResultChanged: true,
+      sourceReadVerified: true,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/control-loops-v2/" + "a".repeat(64),
+      expect.objectContaining({
+        method: "GET",
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          Authorization: "Bearer " + ACCESS_TOKEN,
+        }),
+      }),
+    );
+  });
+
+  it("accepts the same closed-loop contract for an immutable Cloud binding", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      json(successfulAgentStatus("cloud")),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getRuntimeAgentStackStatus(
+      "a".repeat(64),
+      ACCESS_TOKEN,
+    );
+
+    expect(result.runtimeEvidence.runtimeBinding.profileId).toBe("cloud");
+    expect(result.agentStackResult?.runtimeBinding.profileId).toBe("cloud");
+    expect(result.remediation?.verified).toBe(true);
+    expect(result.contextDelta?.ackContextChanged).toBe(true);
+  });
+
+  it("fails closed if raw KMS material crosses the browser boundary", async () => {
+    const withKeyArn = successfulAgentStatus();
+    const keyEvidence = (
+      withKeyArn.remediation as { authorizationEvidence: Record<string, unknown> }
+    ).authorizationEvidence;
+    keyEvidence.keyArn =
+      "arn:aws:kms:eu-west-1:111111111111:key/00000000-0000-0000-0000-000000000000";
+    const withSignature = successfulAgentStatus();
+    const signatureEvidence = (
+      withSignature.remediation as { authorizationEvidence: Record<string, unknown> }
+    ).authorizationEvidence;
+    signatureEvidence.signatureBase64 = "MEQCIFIXTURE";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json(withKeyArn))
+      .mockResolvedValueOnce(json(withSignature));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("rejects an unbound or unverified context delta", async () => {
+    const wrongReceipt = successfulAgentStatus();
+    (wrongReceipt.contextDelta as Record<string, unknown>).sourceMutationReceiptDigest =
+      digest("f");
+    const unverified = successfulAgentStatus();
+    (unverified.contextDelta as Record<string, unknown>).sourceReadVerified = false;
+    const unboundSkill = successfulAgentStatus();
+    (unboundSkill.skillCompletion as Record<string, unknown>).approvalDigest =
+      digest("f");
+    const unboundPreviewReceipt = successfulAgentStatus();
+    (
+      unboundPreviewReceipt.skillCompletion as Record<string, unknown>
+    ).previewSkillReceiptDigest = digest("f");
+    const unboundArtifact = successfulAgentStatus();
+    (
+      unboundArtifact.skillCompletion as Record<string, unknown>
+    ).sourceArtifactDigest = digest("f");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json(wrongReceipt))
+      .mockResolvedValueOnce(json(unverified))
+      .mockResolvedValueOnce(json(unboundSkill))
+      .mockResolvedValueOnce(json(unboundPreviewReceipt))
+      .mockResolvedValueOnce(json(unboundArtifact));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
+    await expect(
+      getRuntimeAgentStackStatus("a".repeat(64), ACCESS_TOKEN),
+    ).rejects.toMatchObject({ status: 502 });
   });
 });

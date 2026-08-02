@@ -221,6 +221,8 @@ export class ArchonPlatformStack extends Stack {
       type: "String",
       description:
         "Exact non-wildcard dataset query exposed by the public judge application",
+      default:
+        "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
       minLength: 1,
       maxLength: 256,
       allowedPattern:
@@ -228,6 +230,42 @@ export class ArchonPlatformStack extends Stack {
       constraintDescription:
         "must be a trimmed, non-wildcard, control-free query"
     });
+    const agentStackDatasetUrn = new CfnParameter(
+      this,
+      "AgentStackDatasetUrn",
+      {
+        type: "String",
+        default:
+          "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+        description:
+          "Exact deterministic SQLite customers dataset used by both runtimes",
+        allowedPattern: "^urn:li:dataset:\\(.{1,900}\\)$",
+        maxLength: 1024
+      }
+    );
+    const analyticsQuestion = new CfnParameter(
+      this,
+      "AnalyticsQuestion",
+      {
+        type: "String",
+        default:
+          "Which customer segment generated the highest net revenue in Q2 2026, and is customers.customer_email governed as PII?",
+        minLength: 1,
+        maxLength: 512,
+        allowedPattern: "^[^\\u0000-\\u001F\\u007F]{1,512}$"
+      }
+    );
+    const governedColumnPath = new CfnParameter(
+      this,
+      "GovernedColumnPath",
+      {
+        type: "String",
+        default: "customer_email",
+        minLength: 1,
+        maxLength: 512,
+        allowedPattern: "^[^\\u0000-\\u001F\\u007F]{1,512}$"
+      }
+    );
     const cloudFrontDomainName = new CfnParameter(
       this,
       "CloudFrontDomainName",
@@ -695,10 +733,15 @@ export class ArchonPlatformStack extends Stack {
       `${stage}-runtime-sessions`,
       dataKey
     );
-    const coreLeaseTable = dynamodb.Table.fromTableName(
+    const coreLeaseTable = dynamodb.Table.fromTableAttributes(
       this,
       "ImportedCoreLeaseTable",
-      Fn.importValue(`archon-${stage}-core-lease-table-name`)
+      {
+        tableName: Fn.importValue(`archon-${stage}-core-lease-table-name`),
+        tableStreamArn: Fn.importValue(
+          `archon-${stage}-core-lease-table-stream-arn`
+        )
+      }
     );
     const coreSessionStateMachine = sfn.StateMachine.fromStateMachineArn(
       this,
@@ -712,6 +755,12 @@ export class ArchonPlatformStack extends Stack {
       "ImportedCoreDataKey",
       Fn.importValue(`archon-${stage}-core-data-key-arn`)
     );
+    const coreMutationSigningKey = kms.Key.fromKeyArn(
+      this,
+      "ImportedCoreMutationSigningKey",
+      Fn.importValue(`archon-${stage}-core-mutation-signing-key-arn`)
+    );
+    const readSecret = bootstrapSecret(
       this,
       "DataHubReadSecret",
       `archon/${stage}/datahub-read`,
@@ -1429,8 +1478,18 @@ export class ArchonPlatformStack extends Stack {
     const approverGroup = new cognito.CfnUserPoolGroup(this, "ApproverGroup", {
       userPoolId: userPool.userPoolId,
       groupName: "archon-approvers",
-      description: "Users allowed to decide governed remediation proposals"
+      description: "Users allowed only to decide governed remediation proposals"
     });
+    const runtimeOperatorGroup = new cognito.CfnUserPoolGroup(
+      this,
+      "RuntimeOperatorGroup",
+      {
+        userPoolId: userPool.userPoolId,
+        groupName: "archon-runtime-operators",
+        description:
+          "Users allowed to launch, inspect, and improve owner-bound DataHub runtime runs"
+      }
+    );
 
     const approvalLambdaLogGroup = retainedLogGroup(
       this,
@@ -1550,7 +1609,9 @@ export class ArchonPlatformStack extends Stack {
           CORE_LEASE_TABLE: coreLeaseTable.tableName,
           CORE_SESSION_STATE_MACHINE_ARN:
             coreSessionStateMachine.stateMachineArn,
-          RUNTIME_OPERATOR_GROUP: approverGroup.groupName!
+          RUNTIME_OPERATOR_GROUP: runtimeOperatorGroup.groupName!,
+          RUNTIME_APPROVER_GROUP: approverGroup.groupName!,
+          EXPECTED_COGNITO_ISSUER: userPool.userPoolProviderUrl
         }
       }
     );
@@ -1585,6 +1646,7 @@ export class ArchonPlatformStack extends Stack {
     coreSessionStateMachine.grantStartExecution(runtimeControlFunction);
     dataKey.grantEncryptDecrypt(runtimeControlFunction);
     coreDataKey.grantEncryptDecrypt(runtimeControlFunction);
+    const controlLambdaLogGroup = retainedLogGroup(
       this,
       "ControlLambdaLogs",
       `/archon/${stage}/control-lambda`,
@@ -1613,7 +1675,16 @@ export class ArchonPlatformStack extends Stack {
         CORE_LEASE_TABLE: coreLeaseTable.tableName,
         CORE_SESSION_STATE_MACHINE_ARN:
           coreSessionStateMachine.stateMachineArn,
-        RUNTIME_OPERATOR_GROUP: approverGroup.groupName!      }
+        RUNTIME_OPERATOR_GROUP: runtimeOperatorGroup.groupName!,
+        RUNTIME_APPROVER_GROUP: approverGroup.groupName!,
+        EXPECTED_COGNITO_ISSUER: userPool.userPoolProviderUrl,
+        ARCHON_STAGE: stage,
+        MUTATION_SIGNING_KEY_ARN: coreMutationSigningKey.keyArn,
+        MUTATION_SIGNING_ALGORITHM: "ECDSA_SHA_256",
+        ARCHON_AGENT_STACK_DATASET_URN: agentStackDatasetUrn.valueAsString,
+        ARCHON_ANALYTICS_QUESTION: analyticsQuestion.valueAsString,
+        ARCHON_GOVERNED_COLUMN_PATH: governedColumnPath.valueAsString
+      }
     });
     stateMachine.grantStartExecution(controlFunction);
     coreSessionStateMachine.grantStartExecution(controlFunction);
@@ -1623,7 +1694,8 @@ export class ArchonPlatformStack extends Stack {
         actions: [
           "dynamodb:GetItem",
           "dynamodb:PutItem",
-          "dynamodb:UpdateItem"
+          "dynamodb:UpdateItem",
+          "dynamodb:TransactWriteItems"
         ],
         resources: [runtimeSessionTable.tableArn],
         conditions: {
@@ -1640,13 +1712,43 @@ export class ArchonPlatformStack extends Stack {
         resources: [coreLeaseTable.tableArn],
         conditions: {
           "ForAllValues:StringLike": {
-            "dynamodb:LeadingKeys": ["CORE#LEASE"]
+            "dynamodb:LeadingKeys": [
+              "CORE#LEASE",
+              "RUNTIME#core",
+              "SESSION#rs_*",
+              "MUTATION#rs_*"
+            ]
           }
         }
       })
     );
     dataKey.grantEncryptDecrypt(controlFunction);
-    coreDataKey.grantEncryptDecrypt(controlFunction);    controlFunction.addToRolePolicy(
+    coreDataKey.grantEncryptDecrypt(controlFunction);
+    controlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "DispatchOnlyCoreSessionJobs",
+        actions: ["dynamodb:PutItem"],
+        resources: [coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["SESSION#rs_*"]
+          }
+        }
+      })
+    );
+    controlFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "AtomicallyBindRuntimeAuditDispatch",
+        actions: ["dynamodb:TransactWriteItems"],
+        resources: [runtimeSessionTable.tableArn, coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["AUDIT#*", "SESSION#rs_*"]
+          }
+        }
+      })
+    );
+    controlFunction.addToRolePolicy(
       new iam.PolicyStatement({
         sid: "DescribeOnlyThisControlLoopExecutions",
         actions: ["states:DescribeExecution"],
@@ -1700,6 +1802,127 @@ export class ArchonPlatformStack extends Stack {
       ["v1/audit/*", "v1/execution/*"],
       []
     );
+
+    const runtimeRemediationLogGroup = retainedLogGroup(
+      this,
+      "RuntimeRemediationLambdaLogs",
+      `/archon/${stage}/runtime-remediation-lambda`,
+      logsKey
+    );
+    const runtimeRemediationFunction = new lambda.Function(
+      this,
+      "RuntimeRemediationFunction",
+      {
+        functionName: `archon-${stage}-runtime-remediation`,
+        description:
+          "Sole authority that KMS-signs an approved official DataHub MCP mutation and seals its post-write verification",
+        runtime: lambda.Runtime.NODEJS_24_X,
+        architecture: lambda.Architecture.X86_64,
+        handler: "remediation.handler",
+        code: lambda.Code.fromAsset(join(__dirname, "../lambda/control")),
+        timeout: Duration.seconds(30),
+        memorySize: 256,
+        reservedConcurrentExecutions: isProduction ? 10 : 3,
+        tracing: lambda.Tracing.ACTIVE,
+        logGroup: runtimeRemediationLogGroup,
+        environment: {
+          RUNTIME_SESSION_TABLE: runtimeSessionTable.tableName,
+          CORE_LEASE_TABLE: coreLeaseTable.tableName,
+          CORE_SESSION_STATE_MACHINE_ARN:
+            coreSessionStateMachine.stateMachineArn,
+          RUNTIME_OPERATOR_GROUP: runtimeOperatorGroup.groupName!,
+          RUNTIME_APPROVER_GROUP: approverGroup.groupName!,
+          EXPECTED_COGNITO_ISSUER: userPool.userPoolProviderUrl,
+          ARCHON_STAGE: stage,
+          MUTATION_SIGNING_KEY_ARN: coreMutationSigningKey.keyArn,
+          MUTATION_SIGNING_ALGORITHM: "ECDSA_SHA_256",
+          ARCHON_AGENT_STACK_DATASET_URN:
+            agentStackDatasetUrn.valueAsString,
+          ARCHON_ANALYTICS_QUESTION: analyticsQuestion.valueAsString,
+          ARCHON_GOVERNED_COLUMN_PATH: governedColumnPath.valueAsString
+        }
+      }
+    );
+    runtimeRemediationFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(runtimeSessionTable, {
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 5,
+        bisectBatchOnError: true,
+        retryAttempts: 5,
+        reportBatchItemFailures: true
+      })
+    );
+    runtimeRemediationFunction.addEventSource(
+      new lambdaEventSources.DynamoEventSource(coreLeaseTable, {
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 5,
+        bisectBatchOnError: true,
+        retryAttempts: 5,
+        reportBatchItemFailures: true
+      })
+    );
+    runtimeRemediationFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadOnlyBoundRuntimeApprovalEvidence",
+        actions: ["dynamodb:GetItem"],
+        resources: [runtimeSessionTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["SESSION#rs_*", "AUDIT#*"]
+          }
+        }
+      })
+    );
+    runtimeRemediationFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "SealOnlyPostMutationVerificationDispatch",
+        actions: ["dynamodb:PutItem", "dynamodb:TransactWriteItems"],
+        resources: [runtimeSessionTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["AUDIT#*"]
+          }
+        }
+      })
+    );
+    runtimeRemediationFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadOnlyCoreReceiptsAndMutationStatus",
+        actions: ["dynamodb:GetItem"],
+        resources: [coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["SESSION#rs_*", "MUTATION#rs_*"]
+          }
+        }
+      })
+    );
+    runtimeRemediationFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "EnqueueOnlyApprovedMutationAndPostWriteVerification",
+        actions: ["dynamodb:PutItem", "dynamodb:TransactWriteItems"],
+        resources: [coreLeaseTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["MUTATION#rs_*", "SESSION#rs_*"]
+          }
+        }
+      })
+    );
+    runtimeRemediationFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "SignOnlyGovernedMutationAuthorization",
+        actions: ["kms:Sign"],
+        resources: [coreMutationSigningKey.keyArn],
+        conditions: {
+          StringEquals: {
+            "kms:SigningAlgorithm": "ECDSA_SHA_256"
+          }
+        }
+      })
+    );
+    dataKey.grantEncryptDecrypt(runtimeRemediationFunction);
+    coreDataKey.grantEncryptDecrypt(runtimeRemediationFunction);
 
     const apiAccessLogGroup = retainedLogGroup(
       this,
@@ -1862,12 +2085,24 @@ export class ArchonPlatformStack extends Stack {
           schema: apigateway.JsonSchemaVersion.DRAFT4,
           type: apigateway.JsonSchemaType.OBJECT,
           additionalProperties: false,
-          required: ["query", "sessionId"],
+          required: ["query", "question", "datasetUrn", "sessionId"],
           properties: {
             query: {
               type: apigateway.JsonSchemaType.STRING,
               minLength: 1,
               maxLength: 256,
+              pattern: "^[^\\u0000-\\u001F\\u007F]*$"
+            },
+            datasetUrn: {
+              type: apigateway.JsonSchemaType.STRING,
+              minLength: 1,
+              maxLength: 1024,
+              pattern: "^urn:li:dataset:\\(.{1,900}\\)$"
+            },
+            question: {
+              type: apigateway.JsonSchemaType.STRING,
+              minLength: 1,
+              maxLength: 512,
               pattern: "^[^\\u0000-\\u001F\\u007F]*$"
             },
             mode: {
@@ -1882,6 +2117,20 @@ export class ArchonPlatformStack extends Stack {
         }
       }
     );
+    const runtimeImproveContextModel = api.addModel(
+      "RuntimeImproveContextRequest",
+      {
+        modelName: `ArchonRuntimeImproveContext${pascal(stage)}`,
+        contentType: "application/json",
+        schema: {
+          schema: apigateway.JsonSchemaVersion.DRAFT4,
+          type: apigateway.JsonSchemaType.OBJECT,
+          additionalProperties: false,
+          properties: {}
+        }
+      }
+    );
+    const approvalDecisionModel = api.addModel("ApprovalDecision", {
       modelName: `ArchonApprovalDecision${pascal(stage)}`,
       contentType: "application/json",
       schema: {
@@ -1971,6 +2220,29 @@ export class ArchonPlatformStack extends Stack {
     "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
   }
 }`;
+    const runtimeControlImproveRequestTemplate = `{
+  "operation": "improveV2",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "auditId": "$util.escapeJavaScript($input.params('auditId')).replaceAll("\\\\'","'")",
+  "body": $input.json('$'),
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const runtimeControlApprovalRequestTemplate = `{
+  "operation": "decideV2",
+  "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
+  "auditId": "$util.escapeJavaScript($input.params('auditId')).replaceAll("\\\\'","'")",
+  "body": $input.json('$'),
+  "identity": {
+    "subject": "$util.escapeJavaScript($context.authorizer.claims.sub).replaceAll("\\\\'","'")",
+    "issuer": "$util.escapeJavaScript($context.authorizer.claims.iss).replaceAll("\\\\'","'")",
+    "groups": "$util.escapeJavaScript($context.authorizer.claims['cognito:groups']).replaceAll("\\\\'","'")"
+  }
+}`;
+    const controlStartRequestTemplate = `{
   "operation": "start",
   "requestId": "$util.escapeJavaScript($context.extendedRequestId).replaceAll("\\\\'","'")",
   "body": $input.json('$')
@@ -2128,7 +2400,9 @@ export class ArchonPlatformStack extends Stack {
         ])
       }
     );
-    runtimeControlLoopsResource.addResource("{auditId}").addMethod(
+    const runtimeControlLoopResource =
+      runtimeControlLoopsResource.addResource("{auditId}");
+    runtimeControlLoopResource.addMethod(
       "GET",
       narrowLambdaIntegration(
         controlFunction,
@@ -2142,6 +2416,42 @@ export class ArchonPlatformStack extends Stack {
         },
         methodResponses: narrowLambdaMethodResponses([
           "200", "400", "401", "403", "404", "409", "410", "502"
+        ])
+      }
+    );
+    runtimeControlLoopResource.addResource("improve-context").addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        controlFunction,
+        runtimeControlImproveRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestParameters: {
+          "method.request.path.auditId": true
+        },
+        requestModels: { "application/json": runtimeImproveContextModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "202", "400", "401", "403", "404", "409", "413", "502"
+        ])
+      }
+    );
+    runtimeControlLoopResource.addResource("approval").addMethod(
+      "POST",
+      narrowLambdaIntegration(
+        controlFunction,
+        runtimeControlApprovalRequestTemplate
+      ),
+      {
+        ...authenticatedMethod,
+        authorizationScopes: [approvalScopeName],
+        requestParameters: {
+          "method.request.path.auditId": true
+        },
+        requestModels: { "application/json": approvalDecisionModel },
+        methodResponses: narrowLambdaMethodResponses([
+          "200", "202", "400", "401", "403", "404", "409", "413", "502"
         ])
       }
     );
@@ -2827,6 +3137,15 @@ export class ArchonPlatformStack extends Stack {
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
       }),
+      new cloudwatch.Alarm(this, "RuntimeRemediationLambdaErrorsAlarm", {
+        metric: runtimeRemediationFunction.metricErrors({
+          statistic: "Sum",
+          period: Duration.minutes(5)
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
+      }),
       new cloudwatch.Alarm(this, "ControlLambdaErrorsAlarm", {
         metric: controlFunction.metricErrors({
           statistic: "Sum",
@@ -2938,13 +3257,29 @@ export class ArchonPlatformStack extends Stack {
     output(this, "ArchonAuthRedirectUri", applicationRootUrl);
     output(this, "ArchonAuthLogoutUri", applicationRootUrl);
     output(this, "ArchonApproverGroupName", approverGroup.groupName!);
+    output(
+      this,
+      "ArchonRuntimeOperatorGroupName",
+      runtimeOperatorGroup.groupName!
+    );
     output(this, "ArchonStateMachineArn", stateMachine.stateMachineArn);
     output(this, "ArchonRuntimeSessionTableName", runtimeSessionTable.tableName);
     output(
       this,
+      "ArchonRuntimeRemediationFunctionArn",
+      runtimeRemediationFunction.functionArn
+    );
+    output(
+      this,
+      "ArchonRuntimeMutationSigningKeyArn",
+      coreMutationSigningKey.keyArn
+    );
+    output(
+      this,
       "ArchonRuntimeControlFunctionArn",
       runtimeControlFunction.functionArn
-    );    output(this, "ArchonAuditQueueUrl", auditQueue.queueUrl);
+    );
+    output(this, "ArchonAuditQueueUrl", auditQueue.queueUrl);
     output(this, "ArchonApprovalQueueUrl", approvalQueue.queueUrl);
     output(this, "ArchonRemediationQueueUrl", remediationQueue.queueUrl);
     output(this, "ArchonApprovalTableName", approvalTable.tableName);

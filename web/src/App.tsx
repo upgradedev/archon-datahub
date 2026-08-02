@@ -11,14 +11,21 @@ import { EvidencePack } from "./EvidencePack";
 import { GuidedTour } from "./GuidedTour";
 import { RuntimeControl } from "./RuntimeControl";
 import {
-  loadRuntimeAudit,
+  AGENT_STACK_DATASET_URN,
+  AGENT_STACK_QUESTION,
+  loadRuntimeAgentStack,
+  requestRuntimeImproveContext,
+  resumeRuntimeAgentStack,
+  submitRuntimeApproval,
+  type JsonObject,
+  type JsonValue,
+  type RuntimeControlLoopStatus,
   type RuntimeSessionStatus,
 } from "./runtime-api";
 import {
   beginSignIn,
   getAccessToken,
   getAuthSnapshot,
-  getDemoQuery,
   initializeAuthentication,
   signOut,
   subscribeToAuth,
@@ -1079,38 +1086,384 @@ function FindingDetail({
   );
 }
 
+function jsonRecord(value: JsonValue | undefined): JsonObject | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : undefined;
+}
+
+function jsonArray(value: JsonValue | undefined): JsonValue[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function jsonText(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function shortDigest(value: string | undefined): string {
+  return value ? `${value.slice(0, 16)}…${value.slice(-8)}` : "Pending";
+}
+
+function JsonEvidence({ value }: { value: JsonValue }) {
+  const serialized = JSON.stringify(value, null, 2) ?? "null";
+  return (
+    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-white/[0.06] bg-black/20 p-3 text-[10px] leading-4 text-slate-300">
+      {serialized.length > 3200 ? `${serialized.slice(0, 3200)}\n… bounded UI projection` : serialized}
+    </pre>
+  );
+}
+
+function DigestPill({ label, value }: { label: string; value?: string }) {
+  return (
+    <span
+      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-white/[0.07] bg-white/[0.025] px-2.5 py-1 font-mono text-[9px] text-slate-400"
+      title={value}
+    >
+      <span className="font-sans uppercase tracking-[0.12em] text-slate-500">{label}</span>
+      <span className="truncate">{shortDigest(value)}</span>
+    </span>
+  );
+}
+
+type AgentStackPanelProps = {
+  status?: RuntimeControlLoopStatus;
+  authStatus: AuthSnapshot["status"];
+  busy: boolean;
+  rerunPiiProof: boolean;
+  onImprove: () => void;
+  onDecision: (decision: "APPROVE" | "REJECT") => void;
+};
+
+function AgentStackPanel({
+  status,
+  authStatus,
+  busy,
+  rerunPiiProof,
+  onImprove,
+  onDecision,
+}: AgentStackPanelProps) {
+  const result = status?.agentStackResult;
+  const context = result?.context;
+  const contextReceipts = jsonArray(context?.receipts);
+  const entityUrns = jsonArray(context?.entityUrns).filter(
+    (value): value is string => typeof value === "string",
+  );
+  const workflow = jsonArray(result?.skills.workflow).filter(
+    (value): value is string => typeof value === "string",
+  );
+  const expectedWorkflow = workflow.length > 0
+    ? workflow
+    : [
+        "datahub-search",
+        "datahub-lineage",
+        "datahub-quality",
+        "datahub-audit",
+        "datahub-enrich",
+      ];
+  const analytics = result?.analytics;
+  const analyticsEvents = jsonArray(analytics?.events);
+  const quality = jsonRecord(analytics?.contextQuality);
+  const improve = status?.improveContext;
+  const improveResult =
+    improve?.schemaVersion === "archon.datahub-improve-context-projection/v2"
+      ? improve
+      : undefined;
+  const improveEvents = improveResult?.events ?? [];
+  const plan = status?.plan;
+  const approval = status?.approval;
+  const canImprove =
+    status?.status === "AWAITING_IMPROVEMENT" &&
+    improve?.schemaVersion === "archon.datahub-improve-context-capability/v2" &&
+    improve.status === "AVAILABLE";
+  const canDecide =
+    status?.status === "AWAITING_APPROVAL" &&
+    approval?.status === "PENDING" &&
+    authStatus === "authenticated";
+
+  return (
+    <section
+      aria-labelledby="agent-stack-title"
+      className="panel mt-6 overflow-hidden"
+      data-testid="agent-stack-panel"
+      id="agent-stack"
+    >
+      <div className="panel-heading border-b border-white/[0.06]">
+        <div>
+          <p className="eyebrow">Closed-loop DataHub context flywheel</p>
+          <h2 className="section-title" id="agent-stack-title">
+            DataHub Agent Stack · live, receipt-bound execution
+          </h2>
+          <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-400">
+            MCP reads feed Agent Context Kit; five pinned Skills ground the Analytics Agent;
+            <code className="mx-1 text-emerald-200">/improve-context</code>
+            remains proposal-only until a steward approves the exact before/after digest.
+          </p>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          {status && (
+            <span className="status-pill status-success" data-testid="agent-runtime-profile">
+              {status.runtimeEvidence.runtimeBinding.profileId === "cloud"
+                ? "DataHub Cloud · managed"
+                : "DataHub Core · ephemeral"}
+            </span>
+          )}
+          <span className={`status-pill ${status ? "status-success" : "status-neutral"}`}>
+            {status ? `${status.status} · ${status.phase}` : "Awaiting live run"}
+          </span>
+          <DigestPill label="run" value={status?.runtimeEvidence.digest} />
+        </div>
+      </div>
+
+      <div aria-live="polite" className="grid gap-4 p-4 lg:grid-cols-2 xl:grid-cols-4">
+        <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
+          <p className="eyebrow">DataHub MCP Server</p>
+          <h3 className="mt-2 text-sm font-semibold text-white">Bounded graph reads</h3>
+          <p className="mt-2 text-[11px] leading-5 text-slate-400">
+            {contextReceipts.length > 0
+              ? `${contextReceipts.length} sanitized tool receipts returned by the ACK SDK.`
+              : "Search, entities, schema, lineage and quality receipts will appear here."}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {contextReceipts.slice(0, 8).map((receipt, index) => {
+              const projected = jsonRecord(receipt);
+              return (
+                <span className="status-pill status-neutral" key={`${jsonText(projected?.tool) ?? "tool"}-${index}`}>
+                  {jsonText(projected?.tool) ?? `receipt-${index + 1}`}
+                </span>
+              );
+            })}
+          </div>
+          <DigestPill label="context" value={jsonText(context?.digest)} />
+        </article>
+
+        <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
+          <p className="eyebrow">Agent Context Kit</p>
+          <h3 className="mt-2 text-sm font-semibold text-white">Provenance envelope</h3>
+          <p className="mt-2 text-[11px] leading-5 text-slate-400">
+            {entityUrns.length > 0
+              ? `${entityUrns.length} canonical dataset URN${entityUrns.length === 1 ? "" : "s"} selected.`
+              : "Unknown stays unknown until a canonical dataset is resolved."}
+          </p>
+          {entityUrns.slice(0, 3).map((urn) => (
+            <p className="mt-2 break-all font-mono text-[9px] leading-4 text-cyan-100/80" key={urn}>
+              {urn}
+            </p>
+          ))}
+          <p className="mt-3 text-[10px] text-slate-400">
+            Unknown preserved: <strong className="text-slate-200">{context?.unknownPreserved === true ? "yes" : "no"}</strong>
+          </p>
+        </article>
+
+        <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
+          <p className="eyebrow">DataHub Skills</p>
+          <h3 className="mt-2 text-sm font-semibold text-white">Five-step grounded workflow</h3>
+          <ol className="mt-3 space-y-2">
+            {expectedWorkflow.map((skill, index) => (
+              <li className="flex items-center gap-2 text-[10px] text-slate-300" key={skill}>
+                <span className={`flex size-5 items-center justify-center rounded-full ${result ? "bg-emerald-300/10 text-emerald-200" : "bg-white/[0.04] text-slate-500"}`}>
+                  {result ? <Icon className="size-3" name="check" /> : index + 1}
+                </span>
+                <span className="font-mono">{skill}</span>
+              </li>
+            ))}
+          </ol>
+          <DigestPill label="skills" value={jsonText(result?.skills.digest)} />
+        </article>
+
+        <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
+          <p className="eyebrow">Analytics Agent</p>
+          <h3 className="mt-2 text-sm font-semibold text-white">SQL · result · chart trace</h3>
+          <div className="mt-3 flex items-end gap-3">
+            <span className="text-3xl font-semibold text-gradient">
+              {typeof quality?.score === "number" ? `${quality.score}/5` : "—"}
+            </span>
+            <span className="pb-1 text-[10px] text-slate-400">
+              {jsonText(quality?.label) ?? "Context score pending"}
+            </span>
+          </div>
+          <p className="mt-2 text-[10px] leading-4 text-slate-400">
+            {jsonText(quality?.reason) ?? `${analyticsEvents.length} bounded streaming events`}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {analyticsEvents.map((event, index) => {
+              const projected = jsonRecord(event);
+              return (
+                <span className="status-pill status-neutral" key={`${jsonText(projected?.event) ?? "event"}-${index}`}>
+                  {jsonText(projected?.event) ?? `event-${index + 1}`}
+                </span>
+              );
+            })}
+          </div>
+          <DigestPill label="analytics" value={jsonText(analytics?.digest)} />
+        </article>
+      </div>
+
+      <div className="grid gap-4 border-t border-white/[0.06] p-4 lg:grid-cols-2">
+        <article className="rounded-xl border border-cyan-300/10 bg-cyan-300/[0.025] p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="eyebrow">Explicit bonus operation</p>
+              <h3 className="mt-2 text-sm font-semibold text-white">/improve-context proposal</h3>
+              <p className="mt-2 max-w-xl text-[11px] leading-5 text-slate-400">
+                The opaque Analytics Agent handle remains backend-only. This button dispatches a
+                separate profile-bound read-only job; its rotated handle is stripped before projection.
+              </p>
+            </div>
+            <button
+              className="run-button"
+              disabled={!canImprove || busy}
+              onClick={onImprove}
+              type="button"
+            >
+              <Icon className={busy ? "size-4 animate-spin" : "size-4"} name={busy ? "refresh" : "spark"} />
+              Generate proposal
+            </button>
+          </div>
+          {improveResult && (
+            <div className="mt-3">
+              <div className="flex flex-wrap gap-2">
+                <span className="status-pill status-success">Proposal only</span>
+                <DigestPill label="proposal" value={improveResult.resultDigest} />
+                <DigestPill label="receipt" value={status?.plan?.improveReceiptDigest} />
+              </div>
+              {improveEvents.length > 0 && <JsonEvidence value={improveEvents} />}
+            </div>
+          )}
+        </article>
+
+        <article className="rounded-xl border border-amber-300/10 bg-amber-300/[0.025] p-4">
+          <p className="eyebrow">Human authority boundary</p>
+          <h3 className="mt-2 text-sm font-semibold text-white">Governed PII tag write-back</h3>
+          {plan ? (
+            <>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <div className="rounded-lg border border-white/[0.06] bg-black/15 p-3">
+                  <p className="text-[9px] uppercase tracking-[0.13em] text-slate-500">Verified before</p>
+                  <p className="mt-2 break-all font-mono text-[10px] text-slate-300">
+                    {plan.expectedBefore.tagUrns.join(", ") || "No tags"}
+                  </p>
+                  <DigestPill label="before" value={plan.expectedBeforeDigest} />
+                </div>
+                <div className="rounded-lg border border-emerald-300/10 bg-emerald-300/[0.025] p-3">
+                  <p className="text-[9px] uppercase tracking-[0.13em] text-emerald-200/70">Expected after</p>
+                  <p className="mt-2 break-all font-mono text-[10px] text-emerald-100">
+                    {plan.expectedAfter.tagUrns.join(", ")}
+                  </p>
+                  <DigestPill label="after" value={plan.expectedAfterDigest} />
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="run-button" disabled={!canDecide || busy} onClick={() => onDecision("APPROVE")} type="button">
+                  <Icon className="size-4" name="check" /> Approve exact plan
+                </button>
+                <button className="secondary-button" disabled={!canDecide || busy} onClick={() => onDecision("REJECT")} type="button">
+                  Reject proposal
+                </button>
+              </div>
+              <p className="mt-2 text-[10px] text-slate-400">
+                {authStatus === "authenticated"
+                  ? `Approval ${approval?.status.toLowerCase() ?? "pending"}; mutation authority is isolated from the control role.`
+                  : "Cognito steward authentication is required; decisions fail closed."}
+              </p>
+            </>
+          ) : (
+            <p className="mt-3 text-[11px] leading-5 text-slate-400">
+              The exact plan appears only after verified tag-read and improve-context receipts.
+            </p>
+          )}
+        </article>
+      </div>
+
+      {(status?.remediation || rerunPiiProof) && (
+        <div className="border-t border-emerald-300/10 bg-emerald-300/[0.025] p-4" data-testid="governed-proof">
+          <div className="flex flex-wrap items-center gap-2">
+            <Icon className="size-4 text-emerald-200" name="check" />
+            <strong className="text-xs text-emerald-100">
+              {rerunPiiProof
+                ? "Run-again proof: a new ACK context read observed PII on the source column."
+                : status?.contextDelta
+                  ? "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified."
+                  : "Official DataHub MCP add_tags verified; post-write context verification is running."}
+            </strong>
+            {status?.remediation?.mutationExecutor === "official-datahub-mcp" && (
+              <span className="status-pill status-success">Official MCP · add_tags</span>
+            )}
+            {status?.remediation?.authorizationEvidence && (
+              <span className="status-pill status-success" data-testid="kms-authority-proof">
+                KMS-signed authority verified
+              </span>
+            )}
+            {status?.skillCompletion && (
+              <span className="status-pill status-success" data-testid="enrich-skill-completion">
+                datahub-enrich · executed-with-human-approval
+              </span>
+            )}
+            <DigestPill label="receipt" value={status?.remediation?.receiptDigest} />
+            <DigestPill label="KMS key ref" value={status?.remediation?.authorizationEvidence.keyReferenceDigest} />
+            <DigestPill label="signed envelope" value={status?.remediation?.authorizationEvidence.envelopeDigest} />
+            <DigestPill label="skill artifact" value={status?.skillCompletion?.sourceArtifactDigest} />
+            <DigestPill label="skill preview" value={status?.skillCompletion?.previewSkillReceiptDigest} />
+            <DigestPill label="skill grounding" value={status?.skillCompletion?.skillGroundingDigest} />
+            <DigestPill label="skill execution" value={status?.skillCompletion?.officialMcpMutationReceiptDigest} />
+            <DigestPill label="policy" value={status?.remediation?.policyDigest} />
+            <DigestPill label="approval" value={status?.remediation?.officialMcpMutation.approvalDigest} />
+            <DigestPill label="after" value={status?.remediation?.afterDigest} />
+          </div>
+          {status?.contextDelta && (
+            <div className="mt-3 grid gap-2 sm:grid-cols-2" data-testid="context-delta">
+              <div className="rounded-lg border border-white/[0.06] bg-black/15 p-3">
+                <p className="text-[9px] uppercase tracking-[0.13em] text-slate-500">
+                  ACK context · changed
+                </p>
+                <DigestPill label="before" value={status.contextDelta.beforeContextDigest} />
+                <DigestPill label="after" value={status.contextDelta.afterContextDigest} />
+              </div>
+              <div className="rounded-lg border border-emerald-300/10 bg-emerald-300/[0.025] p-3">
+                <p className="text-[9px] uppercase tracking-[0.13em] text-emerald-200/70">
+                  Analytics result · changed
+                </p>
+                <DigestPill label="before" value={status.contextDelta.beforeAnalyticsDigest} />
+                <DigestPill label="after" value={status.contextDelta.afterAnalyticsDigest} />
+              </div>
+            </div>
+          )}
+          <p className="mt-2 text-[10px] leading-4 text-slate-400">
+            The profile-bound read companion and ACK path remain read-only. A separate writer-only official MCP process executed the approved tool,
+            then fresh source reads proved PII; no automatic downstream tag propagation is claimed.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function App() {
   const auth = useSyncExternalStore(subscribeToAuth, getAuthSnapshot, getAuthSnapshot);
   const [audit, setAudit] = useState<LoadedAudit>({
     envelope: previewAudit,
     source: "fixture",
     fallbackReason:
-      "Deterministic showcase mode. Run an audit to connect to the hosted control plane.",
+      "Deterministic regression fixture. The live DataHub Agent Stack is shown in its dedicated panel.",
   });
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [type, setType] = useState<FindingType | "all">("all");
-  const [query, setQuery] = useState(() => getDemoQuery() ?? "");
+  const [query, setQuery] = useState(AGENT_STACK_DATASET_URN);
+  const [question, setQuestion] = useState(AGENT_STACK_QUESTION);
   const [loading, setLoading] = useState(false);
   const [runError, setRunError] = useState<string>();
   const [controlLoop, setControlLoop] = useState<ControlLoopStatus>();
+  const [runtimeRun, setRuntimeRun] = useState<RuntimeControlLoopStatus>();
   const [runtimeSession, setRuntimeSession] =
     useState<RuntimeSessionStatus>();
+  const [lastRemediatedAuditId, setLastRemediatedAuditId] = useState<string>();
+  const [rerunOriginAuditId, setRerunOriginAuditId] = useState<string>();
   const [selectedId, setSelectedId] = useState(
     findingIdentity(previewAudit.report.findings[0]!),
   );
   const controller = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    let active = true;
-    void initializeAuthentication().then(() => {
-      const demoQuery = getDemoQuery();
-      if (active && demoQuery) {
-        setQuery((current) => current || demoQuery);
-      }
-    });
-    return () => {
-      active = false;
-    };
+    void initializeAuthentication();
   }, []);
 
   useEffect(
@@ -1132,6 +1485,21 @@ export function App() {
   );
   const selected =
     filtered.find((finding) => findingIdentity(finding) === selectedId) ?? filtered[0];
+  const runtimeContextHasPii = (
+    JSON.stringify(runtimeRun?.agentStackResult?.context) ?? ""
+  ).includes("urn:li:tag:PII");
+  const rerunPiiProof = Boolean(
+    rerunOriginAuditId &&
+      runtimeRun &&
+      runtimeRun.auditId !== rerunOriginAuditId &&
+      runtimeContextHasPii,
+  );
+  const runtimeRunActive = Boolean(
+    runtimeRun &&
+      ["RUNNING", "AWAITING_IMPROVEMENT", "AWAITING_APPROVAL"].includes(
+        runtimeRun.status,
+      ),
+  );
   const reviewProofTarget =
     controlLoop?.status === "SUCCEEDED" &&
     controlLoop.result &&
@@ -1166,18 +1534,14 @@ export function App() {
       ),
   );
 
-  const runAudit = async (event?: FormEvent) => {
-    event?.preventDefault();
-    const scope = query.trim();
-    if (!scope || /[*?]/u.test(scope) || scope === "{}") {
-      setRunError("Enter a narrow, non-wildcard dataset scope.");
-      return;
+  const assertRunnableSession = (): RuntimeSessionStatus | undefined => {
+    if (auth.status !== "authenticated") {
+      setRunError("Sign in as a judge or steward before starting the live Agent Stack.");
+      return undefined;
     }
     if (!runtimeSession) {
-      setRunError(
-        "Launch a pinned DataHub runtime before running a live audit. The visible showcase remains read-only.",
-      );
-      return;
+      setRunError("Launch a pinned DataHub runtime before running the live Agent Stack.");
+      return undefined;
     }
     if (!runtimeSession.canRun) {
       setRunError(
@@ -1185,6 +1549,27 @@ export function App() {
           ? "The pinned runtime is still starting. Wait for READY."
           : "This pinned runtime is not runnable. Start a new session.",
       );
+      return undefined;
+    }
+    return runtimeSession;
+  };
+
+  const applyRuntimeResult = (result: RuntimeControlLoopStatus) => {
+    setRuntimeRun(result);
+    if (result.status === "FAILED") {
+      setRunError(`Agent Stack failed closed (${result.error?.code ?? "unknown"}).`);
+    }
+    if (result.status === "SUCCEEDED" && result.remediation?.verified) {
+      setLastRemediatedAuditId(result.auditId);
+    }
+  };
+
+  const runAudit = async (event?: FormEvent) => {
+    event?.preventDefault();
+    const session = assertRunnableSession();
+    if (!session) return;
+    if (query !== AGENT_STACK_DATASET_URN || question !== AGENT_STACK_QUESTION) {
+      setRunError("Use the canonical deterministic dataset URN and analytics question shown below.");
       return;
     }
     controller.current?.abort();
@@ -1193,40 +1578,80 @@ export function App() {
     setLoading(true);
     setRunError(undefined);
     setControlLoop(undefined);
+    setRerunOriginAuditId(lastRemediatedAuditId);
+    setRuntimeRun(undefined);
     try {
-      const progress = (status: ControlLoopStatus, progressAudit?: LoadedAudit) => {
-          setControlLoop(status);
-          if (progressAudit) {
-            setAudit(progressAudit);
-            setSelectedId((current) =>
-              progressAudit.envelope.report.findings.some(
-                (finding) => findingIdentity(finding) === current,
-              )
-                ? current
-                : progressAudit.envelope.report.findings[0]
-                  ? findingIdentity(progressAudit.envelope.report.findings[0])
-                  : "",
-            );
-          }
-        };
-      const result = await loadRuntimeAudit(
-        scope,
-        runtimeSession.sessionId,
+      const result = await loadRuntimeAgentStack(
+        query,
+        question,
+        session.sessionId,
         getAccessToken(),
         nextController.signal,
-        progress,
+        setRuntimeRun,
       );
-      setAudit(result);
-
-      setControlLoop(result.controlLoop);
-      setSelectedId(
-        result.envelope.report.findings[0]
-          ? findingIdentity(result.envelope.report.findings[0])
-          : "",
-      );
+      applyRuntimeResult(result);
     } catch (error) {
       if (!nextController.signal.aborted) {
-        setRunError(error instanceof Error ? error.message : "The audit could not be completed.");
+        setRunError(error instanceof Error ? error.message : "The Agent Stack could not be completed.");
+      }
+    } finally {
+      if (!nextController.signal.aborted) setLoading(false);
+    }
+  };
+
+  const requestImproveProposal = async () => {
+    if (!runtimeRun || runtimeRun.status !== "AWAITING_IMPROVEMENT") return;
+    if (!assertRunnableSession()) return;
+    controller.current?.abort();
+    const nextController = new AbortController();
+    controller.current = nextController;
+    setLoading(true);
+    setRunError(undefined);
+    try {
+      const result = await requestRuntimeImproveContext(
+        runtimeRun.auditId,
+        getAccessToken(),
+        nextController.signal,
+        setRuntimeRun,
+      );
+      applyRuntimeResult(result);
+    } catch (error) {
+      if (!nextController.signal.aborted) {
+        setRunError(error instanceof Error ? error.message : "The improve-context proposal failed.");
+      }
+    } finally {
+      if (!nextController.signal.aborted) setLoading(false);
+    }
+  };
+
+  const decideRuntimePlan = async (decision: "APPROVE" | "REJECT") => {
+    if (!runtimeRun || runtimeRun.status !== "AWAITING_APPROVAL") return;
+    if (!assertRunnableSession()) return;
+    controller.current?.abort();
+    const nextController = new AbortController();
+    controller.current = nextController;
+    setLoading(true);
+    setRunError(undefined);
+    try {
+      await submitRuntimeApproval(
+        runtimeRun.auditId,
+        decision,
+        getAccessToken(),
+        decision === "APPROVE"
+          ? "Judge approved the exact content-addressed PII tag plan."
+          : "Judge rejected the proposed write-back.",
+        nextController.signal,
+      );
+      const result = await resumeRuntimeAgentStack(
+        runtimeRun.auditId,
+        getAccessToken(),
+        nextController.signal,
+        setRuntimeRun,
+      );
+      applyRuntimeResult(result);
+    } catch (error) {
+      if (!nextController.signal.aborted) {
+        setRunError(error instanceof Error ? error.message : "The governed decision failed.");
       }
     } finally {
       if (!nextController.signal.aborted) setLoading(false);
@@ -1291,7 +1716,7 @@ export function App() {
             onSubmit={(event) => void runAudit(event)}
           >
             <label className="sr-only" htmlFor="catalog-scope">
-              Scope audit by asset, domain, or platform
+              Canonical DataHub dataset URN
             </label>
             <Icon
               className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
@@ -1309,47 +1734,28 @@ export function App() {
           </form>
           <div className="order-1 flex w-full min-w-0 items-center justify-end gap-2 sm:order-2 sm:w-auto sm:shrink-0 sm:gap-3">
             <AuthControl auth={auth} />
-            <SourceBadge source={audit.source} />
+            <SourceBadge source={runtimeRun ? "live" : audit.source} />
             <button
-              aria-label={
-                controlLoop?.status === "AWAITING_APPROVAL"
-                  ? "Awaiting steward approval"
-                  : loading
-                    ? "Audit in progress"
-                    : "Run audit"
-              }
+              aria-label={loading ? "Header Agent Stack in progress" : runtimeRun ? "Run Agent Stack again from header" : "Run Agent Stack from header"}
               className="run-button"
               disabled={
                 loading ||
-                !query.trim() ||
-                /[*?]/u.test(query.trim()) ||
-                query.trim() === "{}" ||
-                runtimeSession?.canRun !== true
+                runtimeRunActive ||
+                query !== AGENT_STACK_DATASET_URN ||
+                question !== AGENT_STACK_QUESTION ||
+                runtimeSession?.canRun !== true ||
+                auth.status !== "authenticated"
               }
               id="judge-tour-run-audit"
               onClick={() => void runAudit()}
               type="button"
             >
               <Icon
-                className={`size-4 ${
-                  loading && controlLoop?.status !== "AWAITING_APPROVAL"
-                    ? "animate-spin"
-                    : ""
-                }`}
-                name={
-                  controlLoop?.status === "AWAITING_APPROVAL"
-                    ? "shield"
-                    : loading
-                      ? "refresh"
-                      : "play"
-                }
+                className={loading ? "size-4 animate-spin" : "size-4"}
+                name={loading ? "refresh" : runtimeRun ? "refresh" : "play"}
               />
               <span className="hidden sm:inline">
-                {controlLoop?.status === "AWAITING_APPROVAL"
-                  ? "Awaiting steward"
-                  : loading
-                    ? "Auditing…"
-                    : "Run audit"}
+                {loading ? "Running…" : runtimeRun ? "Run again" : "Run Agent Stack"}
               </span>
             </button>
           </div>
@@ -1445,7 +1851,7 @@ export function App() {
                   <TerminalEvidence status={controlLoop} />
                 </>
               )}
-              {(audit.fallbackReason || runError) && (
+              {((audit.fallbackReason && !runtimeRun) || runError) && (
                 <div
                   className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-[11px] leading-5 ${
                     runError
@@ -1495,6 +1901,62 @@ export function App() {
             onSessionChange={setRuntimeSession}
           />
 
+          <section aria-labelledby="agent-input-title" className="panel mt-6 p-4">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-end">
+              <div className="min-w-0 flex-1">
+                <p className="eyebrow">Deterministic judge inputs</p>
+                <h2 className="section-title" id="agent-input-title">Run the canonical Agent Stack journey</h2>
+                <label className="mt-4 block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400" htmlFor="agent-dataset-urn">
+                  Dataset URN
+                </label>
+                <input
+                  className="mt-2 w-full rounded-xl border border-white/[0.07] bg-black/15 px-3 py-2.5 font-mono text-[10px] text-slate-200 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
+                  id="agent-dataset-urn"
+                  maxLength={1024}
+                  onChange={(event) => setQuery(event.target.value)}
+                  value={query}
+                />
+              </div>
+              <div className="min-w-0 flex-[1.4]">
+                <label className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400" htmlFor="agent-question">
+                  Analytics question
+                </label>
+                <textarea
+                  className="mt-2 min-h-20 w-full resize-y rounded-xl border border-white/[0.07] bg-black/15 px-3 py-2.5 text-xs leading-5 text-slate-200 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
+                  id="agent-question"
+                  maxLength={512}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  value={question}
+                />
+              </div>
+              <button
+                aria-label={loading ? "Canonical Agent Stack in progress" : runtimeRun ? "Run canonical Agent Stack again" : "Run canonical Agent Stack"}
+                className="run-button shrink-0"
+                disabled={
+                  loading || runtimeRunActive ||
+                  query !== AGENT_STACK_DATASET_URN ||
+                  question !== AGENT_STACK_QUESTION ||
+                  runtimeSession?.canRun !== true ||
+                  auth.status !== "authenticated"
+                }
+                onClick={() => void runAudit()}
+                type="button"
+              >
+                <Icon className={loading ? "size-4 animate-spin" : "size-4"} name={loading ? "refresh" : runtimeRun ? "refresh" : "play"} />
+                {loading ? "Running…" : runtimeRun ? "Run again" : "Run Agent Stack"}
+              </button>
+            </div>
+          </section>
+
+          <AgentStackPanel
+            authStatus={auth.status}
+            busy={loading}
+            onDecision={(decision) => void decideRuntimePlan(decision)}
+            onImprove={() => void requestImproveProposal()}
+            rerunPiiProof={rerunPiiProof}
+            status={runtimeRun}
+          />
+
           <div className="mt-6">
             <PipelineTrace trace={report.trace} />
           </div>
@@ -1507,9 +1969,12 @@ export function App() {
             <div className="panel-heading panel rounded-b-none border-b-0">
               <div>
                 <p className="eyebrow">Evidence explorer</p>
-                <h2 className="section-title" id="findings-title">
-                  Integrity findings
-                </h2>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <h2 className="section-title mt-0" id="findings-title">
+                    Integrity findings
+                  </h2>
+                  <span className="source-badge source-fixture">Deterministic fixture evidence</span>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <label className="filter-control">

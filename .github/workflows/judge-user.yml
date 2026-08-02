@@ -631,7 +631,7 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation ==
                     "not-applicable-fresh-identity" and
@@ -641,13 +641,13 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .finalState == {
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent-rotated",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation == "response-confirmed" and
                   .result == "rotated-and-readback-verified"
@@ -663,7 +663,7 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent-rotated",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation == "response-confirmed" and
                   .result == "reactivated-and-readback-verified"
@@ -1143,7 +1143,7 @@ jobs:
               (.cognitoSubjectDigest | test("^[0-9a-f]{64}$")) and
               .finalState.identity == "exact-bound" and
               .finalState.access == "enabled" and
-              .finalState.authorization == "sole-approver-group" and
+              .finalState.authorization == "dual-runtime-operator-and-approver-groups" and
               .sanitized == true and
               .secretMaterialRetained == false
             ' "${original}" >/dev/null || {
@@ -1413,7 +1413,7 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation ==
                     "not-applicable-fresh-identity" and
@@ -1423,13 +1423,13 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .finalState == {
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent-rotated",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation == "response-confirmed" and
                   .result == "rotated-and-readback-verified"
@@ -1445,7 +1445,7 @@ jobs:
                     identity: "exact-bound",
                     access: "enabled",
                     authentication: "confirmed-permanent-rotated",
-                    authorization: "sole-approver-group"
+                    authorization: "dual-runtime-operator-and-approver-groups"
                   } and
                   .sessionRevocation == "response-confirmed" and
                   .result == "reactivated-and-readback-verified"

@@ -4,8 +4,7 @@ const { createHash, randomBytes } = require("node:crypto");
 const {
   DynamoDBClient,
   GetItemCommand,
-  PutItemCommand,
-  UpdateItemCommand
+  PutItemCommand
 } = require("@aws-sdk/client-dynamodb");
 const {
   GetObjectCommand,
@@ -20,29 +19,19 @@ const {
 const dynamodb = new DynamoDBClient({});
 const s3 = new S3Client({});
 const stepFunctions = new SFNClient({});
+const {
+  decideRuntimeV2,
+  requestImproveRuntimeV2,
+  startRuntimeV2,
+  statusRuntimeV2
+} = require("./runtime-v2.js");
 const stateMachineArn = process.env.STATE_MACHINE_ARN;
 const checkpointTable = process.env.CHECKPOINT_TABLE;
 const approvalTable = process.env.APPROVAL_TABLE;
 const evidenceBucket = process.env.EVIDENCE_BUCKET;
 const demoQuery = process.env.ARCHON_DEMO_QUERY;
-const runtimeSessionTable = process.env.RUNTIME_SESSION_TABLE;
-const coreLeaseTable = process.env.CORE_LEASE_TABLE;
-const coreSessionStateMachineArn =
-  process.env.CORE_SESSION_STATE_MACHINE_ARN;
-const runtimeOperatorGroup =
-  process.env.RUNTIME_OPERATOR_GROUP || "archon-approvers";
 
 const AUDIT_ID = /^[a-f0-9]{64}$/;
-const RUNTIME_SESSION_ID = /^rs_[A-Za-z0-9_-]{43}$/u;
-const RUNTIME_GENERATION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const RUNTIME_STATES = [
-  "STARTING",
-  "ACTIVE",
-  "STOPPING",
-  "STOPPED",
-  "EXPIRED",
-  "FAILED"
-];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RFC3339_INSTANT =
   /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
@@ -1926,568 +1915,6 @@ async function resultProjection(
   return projection;
 }
 
-function runtimeGroupsFrom(claim) {
-  if (typeof claim !== "string") return [];
-  return claim
-    .replace(/[\[\]"]/gu, "")
-    .split(/[,\s]+/u)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function parseRuntimeIdentity(value) {
-  if (
-    !exactKeys(value, ["subject", "issuer", "groups"]) ||
-    typeof value.subject !== "string" ||
-    value.subject.length < 1 ||
-    value.subject.length > 512 ||
-    /[\x00-\x1f\x7f]/u.test(value.subject) ||
-    typeof value.issuer !== "string" ||
-    value.issuer.length < 8 ||
-    value.issuer.length > 2048 ||
-    /[\x00-\x1f\x7f]/u.test(value.issuer) ||
-    typeof value.groups !== "string" ||
-    value.groups.length > 2048 ||
-    /[\x00-\x1f\x7f]/u.test(value.groups)
-  ) {
-    return { error: response(401, {
-      error: "authenticated_runtime_operator_required"
-    }) };
-  }
-  let issuer;
-  try {
-    issuer = new URL(value.issuer);
-  } catch {
-    return { error: response(401, {
-      error: "authenticated_runtime_operator_required"
-    }) };
-  }
-  if (
-    issuer.protocol !== "https:" ||
-    issuer.username !== "" ||
-    issuer.password !== "" ||
-    issuer.search !== "" ||
-    issuer.hash !== "" ||
-    issuer.toString() !== value.issuer
-  ) {
-    return { error: response(401, {
-      error: "authenticated_runtime_operator_required"
-    }) };
-  }
-  if (!runtimeGroupsFrom(value.groups).includes(runtimeOperatorGroup)) {
-    return { error: response(403, {
-      error: "runtime_operator_role_required"
-    }) };
-  }
-  return {
-    identity: {
-      subject: value.subject,
-      issuer: value.issuer
-    },
-    ownerDigest: digest({
-      issuer: value.issuer,
-      subject: value.subject
-    })
-  };
-}
-
-function runtimeTableName() {
-  if (
-    typeof runtimeSessionTable !== "string" ||
-    runtimeSessionTable.length < 1 ||
-    runtimeSessionTable.length > 255
-  ) {
-    throw new Error("runtime session table is not configured");
-  }
-  return runtimeSessionTable;
-}
-
-function coreTableName() {
-  if (
-    typeof coreLeaseTable !== "string" ||
-    coreLeaseTable.length < 1 ||
-    coreLeaseTable.length > 255
-  ) {
-    throw new Error("Core lease table is not configured");
-  }
-  return coreLeaseTable;
-}
-
-function validateRuntimeBindingDocument(value) {
-  if (
-    !exactKeys(value, [
-      "schemaVersion",
-      "profileId",
-      "generation",
-      "capabilityDigest",
-      "resolution",
-      "boundAt",
-      "leaseExpiresAt"
-    ]) ||
-    value.schemaVersion !== "archon.runtime-binding/v1" ||
-    !["cloud", "core"].includes(value.profileId) ||
-    typeof value.generation !== "string" ||
-    !RUNTIME_GENERATION.test(value.generation) ||
-    typeof value.capabilityDigest !== "string" ||
-    !DIGEST.test(value.capabilityDigest) ||
-    !["auto", "explicit"].includes(value.resolution) ||
-    !instant(value.boundAt) ||
-    !instant(value.leaseExpiresAt)
-  ) {
-    throw new Error("invalid stored runtime binding");
-  }
-  const boundAt = Date.parse(value.boundAt);
-  const leaseExpiresAt = Date.parse(value.leaseExpiresAt);
-  if (
-    leaseExpiresAt <= boundAt ||
-    leaseExpiresAt - boundAt > 2 * 60 * 60_000
-  ) {
-    throw new Error("invalid stored runtime binding lease");
-  }
-  return value;
-}
-
-function parseStoredRuntimeSession(item, options = {}) {
-  const payloadText = stringAttribute(item, "payload");
-  const itemRevision = numberAttribute(item, "revision");
-  const principalHash = stringAttribute(item, "principalHash");
-  if (
-    !payloadText ||
-    Buffer.byteLength(payloadText, "utf8") > 16 * 1024 ||
-    itemRevision === undefined ||
-    !principalHash ||
-    !DIGEST.test(principalHash)
-  ) {
-    throw new Error("runtime session item is malformed");
-  }
-  let value;
-  try {
-    value = JSON.parse(payloadText);
-  } catch {
-    throw new Error("runtime session payload is not JSON");
-  }
-  if (
-    !exactKeys(value, [
-      "schemaVersion",
-      "sessionId",
-      "requestedProfile",
-      "binding",
-      "state",
-      "createdAt",
-      "updatedAt",
-      "lastActivityAt",
-      "idleExpiresAt",
-      "hardExpiresAt",
-      "revision",
-      "endReason",
-      "failureCode"
-    ]) ||
-    value.schemaVersion !== "archon.runtime-session/v1" ||
-    !RUNTIME_SESSION_ID.test(value.sessionId) ||
-    !["auto", "cloud", "core"].includes(value.requestedProfile) ||
-    !RUNTIME_STATES.includes(value.state) ||
-    !instant(value.createdAt) ||
-    !instant(value.updatedAt) ||
-    !instant(value.lastActivityAt) ||
-    !instant(value.idleExpiresAt) ||
-    !instant(value.hardExpiresAt) ||
-    !Number.isSafeInteger(value.revision) ||
-    value.revision < 0 ||
-    value.revision !== itemRevision
-  ) {
-    throw new Error("stored runtime session has an invalid contract");
-  }
-  const binding = validateRuntimeBindingDocument(value.binding);
-  if (
-    value.createdAt !== binding.boundAt ||
-    value.hardExpiresAt !== binding.leaseExpiresAt ||
-    Date.parse(value.updatedAt) < Date.parse(value.createdAt) ||
-    Date.parse(value.lastActivityAt) < Date.parse(value.createdAt) ||
-    Date.parse(value.lastActivityAt) > Date.parse(value.updatedAt) ||
-    Date.parse(value.idleExpiresAt) <= Date.parse(value.lastActivityAt) ||
-    Date.parse(value.idleExpiresAt) > Date.parse(value.hardExpiresAt) ||
-    (value.requestedProfile === "auto" &&
-      binding.resolution !== "auto") ||
-    (value.requestedProfile !== "auto" &&
-      (binding.resolution !== "explicit" ||
-        binding.profileId !== value.requestedProfile))
-  ) {
-    throw new Error("stored runtime session binding is inconsistent");
-  }
-  if (
-    options.ownerDigest !== undefined &&
-    principalHash !== options.ownerDigest
-  ) {
-    return { error: response(403, {
-      error: "runtime_session_owner_mismatch"
-    }) };
-  }
-  if (options.requireActive === true) {
-    const currentTime = Date.parse(options.now);
-    if (
-      value.state !== "ACTIVE" ||
-      currentTime >= Date.parse(value.idleExpiresAt) ||
-      currentTime >= Date.parse(value.hardExpiresAt)
-    ) {
-      return { error: response(409, {
-        error: "runtime_session_not_active"
-      }) };
-    }
-  }
-  return {
-    session: { ...value, binding },
-    principalHash
-  };
-}
-
-async function readRuntimeSession(sessionId) {
-  if (typeof sessionId !== "string" || !RUNTIME_SESSION_ID.test(sessionId)) {
-    return { error: response(400, {
-      error: "invalid_runtime_session_id"
-    }) };
-  }
-  const result = await dynamodb.send(
-    new GetItemCommand({
-      TableName: runtimeTableName(),
-      Key: {
-        pk: { S: "SESSION#" + sessionId },
-        sk: { S: "RUNTIME" }
-      },
-      ConsistentRead: true,
-      ProjectionExpression: "payload, revision, principalHash"
-    })
-  );
-  if (!result.Item) {
-    return { error: response(404, {
-      error: "runtime_session_not_found"
-    }) };
-  }
-  return { item: result.Item };
-}
-
-function parseStartV2Body(input) {
-  let body = input;
-  let text;
-  if (record(input)) {
-    text = JSON.stringify(input);
-  } else if (typeof input === "string") {
-    text = input;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return { error: response(400, { error: "invalid_json" }) };
-    }
-  } else {
-    return { error: response(400, { error: "invalid_body" }) };
-  }
-  if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
-    return { error: response(413, { error: "request_too_large" }) };
-  }
-  if (
-    !record(body) ||
-    Object.keys(body).some(
-      (key) => !["query", "mode", "sessionId"].includes(key)
-    ) ||
-    typeof body.sessionId !== "string" ||
-    !RUNTIME_SESSION_ID.test(body.sessionId)
-  ) {
-    return { error: response(400, {
-      error: "invalid_runtime_control_request"
-    }) };
-  }
-  const audit = parseStartBody({
-    query: body.query,
-    ...(body.mode === undefined ? {} : { mode: body.mode })
-  });
-  if (audit.error) return audit;
-  return {
-    query: audit.query,
-    mode: audit.mode,
-    sessionId: body.sessionId
-  };
-}
-
-async function readCoreLeaseForRuntime(sessionId) {
-  const result = await dynamodb.send(
-    new GetItemCommand({
-      TableName: coreTableName(),
-      Key: {
-        pk: { S: "CORE#LEASE" },
-        sk: { S: "CURRENT" }
-      },
-      ConsistentRead: true,
-      ProjectionExpression: "sessionId, #state, revision",
-      ExpressionAttributeNames: { "#state": "state" }
-    })
-  );
-  const state = stringAttribute(result.Item, "state");
-  const currentSessionId = stringAttribute(result.Item, "sessionId");
-  const revision = numberAttribute(result.Item, "revision");
-  if (
-    state !== "READY" ||
-    currentSessionId !== sessionId ||
-    revision === undefined
-  ) {
-    return { error: response(409, {
-      error: "runtime_identity_mismatch"
-    }) };
-  }
-  return { revision };
-}
-
-async function dispatchCoreActivity(session) {
-  if (session.binding.profileId !== "core") return {};
-  const lease = await readCoreLeaseForRuntime(session.sessionId);
-  if (lease.error) return lease;
-  if (
-    typeof coreSessionStateMachineArn !== "string" ||
-    !coreSessionStateMachineArn.includes(":stateMachine:")
-  ) {
-    throw new Error("Core session state machine is not configured");
-  }
-  await stepFunctions.send(
-    new StartExecutionCommand({
-      stateMachineArn: coreSessionStateMachineArn,
-      name: (
-        "activity-" +
-        session.sessionId +
-        "-" +
-        String(lease.revision)
-      ).slice(0, 80),
-      input: JSON.stringify({
-        schema: "archon.core-runtime-command/v1",
-        action: "ACTIVITY",
-        sessionId: session.sessionId,
-        expectedRevision: lease.revision,
-        binding: session.binding
-      })
-    })
-  );
-  return {};
-}
-
-async function recordRuntimeActivity(session, at) {
-  const core = await dispatchCoreActivity(session);
-  if (core.error) return core;
-  const hardExpiresAt = Date.parse(session.hardExpiresAt);
-  const next = {
-    ...session,
-    updatedAt: at,
-    lastActivityAt: at,
-    idleExpiresAt: new Date(
-      Math.min(Date.parse(at) + 30 * 60_000, hardExpiresAt)
-    ).toISOString(),
-    revision: session.revision + 1
-  };
-  await dynamodb.send(
-    new UpdateItemCommand({
-      TableName: runtimeTableName(),
-      Key: {
-        pk: { S: "SESSION#" + session.sessionId },
-        sk: { S: "RUNTIME" }
-      },
-      UpdateExpression: "SET payload = :payload, revision = :next",
-      ConditionExpression: "revision = :expected",
-      ExpressionAttributeValues: {
-        ":payload": { S: JSON.stringify(next) },
-        ":next": { N: String(next.revision) },
-        ":expected": { N: String(session.revision) }
-      }
-    })
-  );
-  return { session: next };
-}
-
-function runtimeEvidenceFor(auditId, session, recordedAt) {
-  const payload = {
-    schemaVersion: "archon.runtime-binding-evidence/v1",
-    auditId,
-    runtimeSessionId: session.sessionId,
-    profileId: session.binding.profileId,
-    generation: session.binding.generation,
-    capabilityDigest: session.binding.capabilityDigest,
-    bindingDigest: digest(session.binding),
-    sessionRevision: session.revision,
-    recordedAt
-  };
-  return {
-    ...payload,
-    digest: digest(payload)
-  };
-}
-
-function verifyRuntimeEvidence(value, auditId) {
-  return (
-    exactKeys(value, [
-      "schemaVersion",
-      "auditId",
-      "runtimeSessionId",
-      "profileId",
-      "generation",
-      "capabilityDigest",
-      "bindingDigest",
-      "sessionRevision",
-      "recordedAt",
-      "digest"
-    ]) &&
-    value.schemaVersion === "archon.runtime-binding-evidence/v1" &&
-    value.auditId === auditId &&
-    RUNTIME_SESSION_ID.test(value.runtimeSessionId) &&
-    ["cloud", "core"].includes(value.profileId) &&
-    typeof value.generation === "string" &&
-    RUNTIME_GENERATION.test(value.generation) &&
-    DIGEST.test(value.capabilityDigest) &&
-    DIGEST.test(value.bindingDigest) &&
-    Number.isSafeInteger(value.sessionRevision) &&
-    value.sessionRevision >= 1 &&
-    instant(value.recordedAt) &&
-    DIGEST.test(value.digest) &&
-    digest(without(value, ["digest"])) === value.digest
-  );
-}
-
-async function putRuntimeEvidence(evidence, principalHash) {
-  await dynamodb.send(
-    new PutItemCommand({
-      TableName: runtimeTableName(),
-      Item: {
-        pk: { S: "AUDIT#" + evidence.auditId },
-        sk: { S: "RUNTIME" },
-        payload: { S: JSON.stringify(evidence) },
-        principalHash: { S: principalHash },
-        expiresAt: {
-          N: String(
-            Math.floor(Date.parse(evidence.recordedAt) / 1000) +
-              DECIDED_RETENTION_SECONDS
-          )
-        }
-      },
-      ConditionExpression: "attribute_not_exists(pk)"
-    })
-  );
-}
-
-async function readRuntimeEvidence(auditId) {
-  const result = await dynamodb.send(
-    new GetItemCommand({
-      TableName: runtimeTableName(),
-      Key: {
-        pk: { S: "AUDIT#" + auditId },
-        sk: { S: "RUNTIME" }
-      },
-      ConsistentRead: true,
-      ProjectionExpression: "payload"
-    })
-  );
-  const text = stringAttribute(result.Item, "payload");
-  if (!text || Buffer.byteLength(text, "utf8") > 16 * 1024) {
-    return { error: response(404, {
-      error: "runtime_bound_audit_not_found"
-    }) };
-  }
-  let evidence;
-  try {
-    evidence = JSON.parse(text);
-  } catch {
-    throw new Error("runtime evidence is not JSON");
-  }
-  if (!verifyRuntimeEvidence(evidence, auditId)) {
-    throw new Error("runtime evidence integrity verification failed");
-  }
-  return { evidence };
-}
-
-async function startV2(body, identity) {
-  const parsedIdentity = parseRuntimeIdentity(identity);
-  if (parsedIdentity.error) return parsedIdentity.error;
-  const parsed = parseStartV2Body(body);
-  if (parsed.error) return parsed.error;
-  const submittedAt = new Date().toISOString();
-  const loaded = await readRuntimeSession(parsed.sessionId);
-  if (loaded.error) return loaded.error;
-  const stored = parseStoredRuntimeSession(loaded.item, {
-    ownerDigest: parsedIdentity.ownerDigest,
-    requireActive: true,
-    now: submittedAt
-  });
-  if (stored.error) return stored.error;
-  const touched = await recordRuntimeActivity(
-    stored.session,
-    submittedAt
-  );
-  if (touched.error) return touched.error;
-
-  const auditId = randomBytes(32).toString("hex");
-  const evidence = runtimeEvidenceFor(
-    auditId,
-    touched.session,
-    submittedAt
-  );
-  await putRuntimeEvidence(evidence, parsedIdentity.ownerDigest);
-  const input = {
-    schemaVersion: "archon.audit-request/v1",
-    requestId: auditId,
-    requestedAt: submittedAt,
-    mode: parsed.mode ?? "GOVERNED",
-    query: parsed.query
-  };
-  await stepFunctions.send(
-    new StartExecutionCommand({
-      stateMachineArn,
-      name: auditId,
-      input: JSON.stringify(input)
-    })
-  );
-  const pollUrl = "/api/control-loops-v2/" + auditId;
-  return response(
-    202,
-    {
-      schemaVersion: "archon.control-loop-start/v2",
-      auditId,
-      status: "RUNNING",
-      pollUrl,
-      submittedAt,
-      runtimeEvidence: evidence
-    },
-    {
-      location: pollUrl,
-      retryAfter: "2"
-    }
-  );
-}
-
-async function statusV2(auditId) {
-  if (typeof auditId !== "string" || !AUDIT_ID.test(auditId)) {
-    return response(400, { error: "invalid_audit_id" });
-  }
-  const runtime = await readRuntimeEvidence(auditId);
-  if (runtime.error) return runtime.error;
-  const loaded = await readRuntimeSession(
-    runtime.evidence.runtimeSessionId
-  );
-  if (loaded.error) return loaded.error;
-  const stored = parseStoredRuntimeSession(loaded.item);
-  if (stored.error) return stored.error;
-  if (
-    stored.session.binding.profileId !==
-      runtime.evidence.profileId ||
-    stored.session.binding.generation !==
-      runtime.evidence.generation ||
-    stored.session.binding.capabilityDigest !==
-      runtime.evidence.capabilityDigest ||
-    digest(stored.session.binding) !==
-      runtime.evidence.bindingDigest
-  ) {
-    throw new Error("runtime binding changed after audit start");
-  }
-  const base = await status(auditId);
-  if (base.statusCode !== 200) return base;
-  return response(200, {
-    schemaVersion: "archon.control-loop-status/v2",
-    ...without(base.payload, ["schemaVersion"]),
-    runtimeEvidence: runtime.evidence
-  });
-}
 async function start(body) {
   const parsed = parseStartBody(body);
   if (parsed.error) return parsed.error;
@@ -2614,13 +2041,45 @@ exports.handler = async (event) => {
       ]) &&
       event.operation === "startV2"
     ) {
-      return await startV2(event.body, event.identity);
+      return await startRuntimeV2(event.body, event.identity);
     }
     if (
-      exactKeys(event, ["operation", "requestId", "auditId"]) &&
+      exactKeys(event, ["operation", "requestId", "auditId", "identity"]) &&
       event.operation === "statusV2"
     ) {
-      return await statusV2(event.auditId);
+      return await statusRuntimeV2(event.auditId, event.identity);
+    }
+    if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "auditId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "improveV2"
+    ) {
+      return await requestImproveRuntimeV2(
+        event.auditId,
+        event.body,
+        event.identity
+      );
+    }
+    if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "auditId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "decideV2"
+    ) {
+      return await decideRuntimeV2(
+        event.auditId,
+        event.body,
+        event.identity
+      );
     }
     if (
       exactKeys(event, ["operation", "requestId", "body"]) &&
