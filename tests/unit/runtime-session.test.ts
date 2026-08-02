@@ -162,15 +162,23 @@ test("activity extends idle by 30 minutes but never changes the hard lease", () 
     at: "2026-08-02T08:05:00.000Z",
     binding: initial.binding,
   });
-  const active = transitionRuntimeSession(ready, {
-    type: "ACTIVITY",
-    at: "2026-08-02T09:45:00.000Z",
-    binding: ready.binding,
-  });
+  let active = ready;
+  for (const at of [
+    "2026-08-02T08:25:00.000Z",
+    "2026-08-02T08:50:00.000Z",
+    "2026-08-02T09:15:00.000Z",
+    "2026-08-02T09:40:00.000Z",
+  ]) {
+    active = transitionRuntimeSession(active, {
+      type: "ACTIVITY",
+      at,
+      binding: ready.binding,
+    });
+  }
   assert.equal(active.idleExpiresAt, TWO_HOURS);
   assert.equal(active.hardExpiresAt, TWO_HOURS);
   assert.deepEqual(active.binding, initial.binding);
-  assert.equal(active.revision, 2);
+  assert.equal(active.revision, 5);
 });
 
 test("idle and hard deadlines expire without allowing revival", () => {
