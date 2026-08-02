@@ -138,10 +138,10 @@ def validate(sources: dict[str, str]) -> None:
     require_all(
         live,
         (
-            "environment:\n      name: ${\{ inputs.stage }}",
+            "environment:\n      name: ${{ inputs.stage }}",
             "aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c",
-            "role-to-assume: ${\{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}",
-            "allowed-account-ids: ${\{ vars.AWS_ACCOUNT_ID }}",
+            "role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}",
+            "allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}",
             "output-env-credentials: false",
             "output-credentials: true",
             "inline-session-policy: >-",
@@ -227,7 +227,7 @@ def validate(sources: dict[str, str]) -> None:
             (
                 "AWS_CANARY_RECOVERY_ROLE_ARN",
                 "aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c",
-                "allowed-account-ids: ${\{ vars.AWS_ACCOUNT_ID }}",
+                "allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}",
                 "output-env-credentials: false",
                 "output-credentials: true",
                 "source scripts/load-datahub-cloud-canary-credentials.sh",
@@ -311,7 +311,7 @@ MUTATIONS = {
     ),
     "static live proof environment": (
         "live",
-        "name: ${\{ inputs.stage }}",
+        "name: ${{ inputs.stage }}",
         "name: datahub-demo",
     ),
     "mutable AWS credential action": (
@@ -387,8 +387,9 @@ MUTATIONS = {
 }
 
 for label, (file_key, old, new) in MUTATIONS.items():
+    mutant = mutate(SOURCES, file_key, old, new)
     try:
-        validate(mutate(SOURCES, file_key, old, new))
+        validate(mutant)
     except (ContractError, json.JSONDecodeError):
         continue
     raise AssertionError(f"post-merge readiness contract accepted mutant: {label}")
