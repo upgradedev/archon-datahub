@@ -1,0 +1,96 @@
+{
+  "schemaVersion": "archon.datahub-core-image-lock/v1",
+  "dataHubCore": {
+    "license": "Apache-2.0",
+    "repository": "datahub-project/datahub",
+    "version": "v1.6.0",
+    "commit": "059a36c0b035a6057de00114ccac0ea9003d6bc2",
+    "tree": "7b444fc729abbd5c831862b3821c06ee323aeb9d",
+    "compose": {
+      "path": "docker/quickstart/docker-compose.quickstart.yml",
+      "gitBlob": "8c8cac35f53aff8a2e6a67398c57a2ff7b96448c",
+      "sha256": "e74f42d5382e2a3cf98620322f8e20f1cbd7fb356af078a233001085b734108a",
+      "size": 10258
+    },
+    "environment": {
+      "DATAHUB_VERSION": "v1.6.0",
+      "DATAHUB_CONFLUENT_VERSION": "7.9.2",
+      "DATAHUB_SEARCH_TAG": "7.16.1",
+      "DATAHUB_MYSQL_VERSION": "8.2"
+    },
+    "containerPolicy": {
+      "pullDuringAmiBuild": true,
+      "recordEveryRepoDigest": true,
+      "rejectMissingRepoDigest": true,
+      "runtimePullsAllowed": false
+    }
+  },
+  "agentStack": {
+    "lockPath": ".github/locks/datahub-agent-stack.json",
+    "frozenInstall": "uv sync --frozen --no-dev --no-build",
+    "requiredComponents": [
+      "mcp-server-datahub",
+      "datahub-agent-context",
+      "datahub-skills",
+      "datahub-analytics-agent"
+    ]
+  },
+  "runtime": {
+    "architecture": "x86_64",
+    "instanceType": "t3a.xlarge",
+    "rootVolume": {
+      "deleteOnTermination": true,
+      "encrypted": true,
+      "sizeGiB": 50,
+      "type": "gp3"
+    },
+    "imdsv2Required": true,
+    "publicIpAllowed": false,
+    "sshKeyAllowed": false,
+    "companion": {
+      "host": "0.0.0.0",
+      "port": 8080,
+      "health": "/healthz"
+    },
+    "analyticsAgent": {
+      "host": "127.0.0.1",
+      "port": 8100,
+      "health": "/health"
+    },
+    "mcp": {
+      "readPort": 8000,
+      "governedWritePort": 8001,
+      "transport": "http",
+      "host": "127.0.0.1"
+    },
+    "dataHubGms": {
+      "host": "127.0.0.1",
+      "mappedPort": 18080,
+      "tlsProxyPort": 9443
+    }
+  },
+  "builder": {
+    "packerVersion": "1.16.0",
+    "setupPackerAction": {
+      "repository": "hashicorp/setup-packer",
+      "commit": "ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789"
+    },
+    "amazonPlugin": {
+      "source": "github.com/hashicorp/amazon",
+      "constraint": "= 1.8.0"
+    },
+    "baseImagePolicy": {
+      "owner": "amazon",
+      "namePrefix": "al2023-ami-2023.",
+      "architecture": "x86_64",
+      "rootDeviceType": "ebs",
+      "virtualizationType": "hvm"
+    }
+  },
+  "requiredAmiTags": {
+    "Application": "archon-datahub",
+    "ArchonDataHubCore": "verified",
+    "ArchonFourComponents": "mcp,ack,skills,analytics",
+    "ManagedBy": "github-actions"
+  }
+}
