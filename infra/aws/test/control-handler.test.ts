@@ -448,6 +448,7 @@ function resealSkillCompletionFixture(
     (receipt) => receipt.skill === "datahub-enrich"
   );
   const enrich = receipts[enrichIndex];
+  if (!enrich) throw new Error("missing datahub-enrich receipt");
   receipts[enrichIndex] = signed(without(enrich, ["digest"]));
   const reboundGrounding = signed(without(grounding, ["digest"]));
   const analytics = result.analytics as Record<string, any>;
@@ -1406,7 +1407,9 @@ describe("async audit control Lambda", () => {
       submittedAt: runtimeEvidence.recordedAt
     };
     const run = { ...runUnsigned, digest: digest(runUnsigned) };
-    const sealed = (value: Record<string, unknown>) => ({
+    const sealed = <T extends Record<string, unknown>>(
+      value: T
+    ): T & { digest: string } => ({
       ...value,
       digest: digest(value)
     });

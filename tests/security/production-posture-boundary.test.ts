@@ -63,6 +63,7 @@ const expectedOperationalAlarmIds = [
   "StateMachineFailuresAlarm",
   "ApprovalLambdaErrorsAlarm",
   "ApprovalHandoffLambdaErrorsAlarm",
+  "RuntimeRemediationLambdaErrorsAlarm",
   "ControlLambdaErrorsAlarm"
 ] as const;
 
@@ -1283,9 +1284,9 @@ test("judge-user manager keeps operations distinct and verifies exact state", ()
     judgeUserManager.indexOf("\n  deactivate)")
   );
   for (const [operation, groupProof] of [
-    [provisionOperation, "wait_for_only_approver_group"],
-    [rotateOperation, "require_only_approver_group"],
-    [reactivateOperation, "wait_for_only_approver_group"]
+    [provisionOperation, "wait_for_exact_runtime_groups"],
+    [rotateOperation, "require_exact_runtime_groups"],
+    [reactivateOperation, "wait_for_exact_runtime_groups"]
   ] as const) {
     assert.equal(
       [...operation.matchAll(/Permanent: true/gu)].length,

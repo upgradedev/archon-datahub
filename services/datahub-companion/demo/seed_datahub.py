@@ -365,7 +365,8 @@ def emit_metadata(gms_url: str, credential_file: Path) -> int:
                 ]
             ),
         ),
-    ]    assertion_urn = make_assertion_urn(
+    ]
+    assertion_urn = make_assertion_urn(
         datahub_guid({"entity": SOURCE_URN, "type": "required-columns"})
     )
     proposals.append(

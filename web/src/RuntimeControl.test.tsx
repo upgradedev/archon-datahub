@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -196,12 +197,16 @@ describe("judge runtime control", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<RuntimeControl getAccessToken={getAccessToken} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Launch pinned session" }),
-    );
-    await waitFor(() => expect(screen.getByText("01:05")).toBeInTheDocument());
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Launch pinned session" }),
+      );
+    });
+    expect(screen.getByText("01:05")).toBeInTheDocument();
 
-    vi.advanceTimersByTime(5000);
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
 
     expect(screen.getByText("01:00")).toBeInTheDocument();
   });

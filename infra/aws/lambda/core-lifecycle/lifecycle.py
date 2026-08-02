@@ -999,7 +999,8 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 else "ACTIVITY_RECORDED"
             ),
             watchdog_deadline=idle,
-        )    except ClientError as error:
+        )
+    except ClientError as error:
         if not _conditional_failure(error):
             raise
     current = _lease()
