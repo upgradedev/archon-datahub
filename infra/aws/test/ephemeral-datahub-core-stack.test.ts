@@ -83,8 +83,11 @@ describe("ephemeral DataHub Core stack", () => {
     });
     expect(flow.Properties.ResourceId.Ref).toMatch(/^CoreVpc/u);
 
-    const logGroupLogicalId =
-      flow.Properties.LogDestination["Fn::GetAtt"][0];
+    expect(flow.Properties.LogDestination).toBeUndefined();
+    expect(flow.Properties.LogGroupName).toEqual({
+      Ref: expect.stringMatching(/^CoreVpcFlowLogGroup/u)
+    });
+    const logGroupLogicalId = flow.Properties.LogGroupName.Ref;
     const logGroup = template.Resources[logGroupLogicalId];
     expect(logGroup.Type).toBe("AWS::Logs::LogGroup");
     expect(logGroup.Properties).toEqual(
@@ -433,7 +436,17 @@ describe("ephemeral DataHub Core stack", () => {
     const logGroups = Object.values(
       resources(template, "AWS::Logs::LogGroup")
     ) as any[];
-    expect(logGroups).toHaveLength(3);
+    expect(logGroups).toHaveLength(4);
+    expect(
+      logGroups.map((logGroup) => logGroup.Properties.LogGroupName).sort()
+    ).toEqual(
+      [
+        "/archon/staging/datahub-core/lifecycle",
+        "/archon/staging/datahub-core/observer",
+        "/archon/staging/datahub-core/state-machine",
+        "/archon/staging/datahub-core/vpc-flow"
+      ].sort()
+    );
     for (const logGroup of logGroups) {
       expect(logGroup.Properties.KmsKeyId).toBeDefined();
       expect(logGroup.Properties.RetentionInDays).toBe(365);
