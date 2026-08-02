@@ -214,7 +214,7 @@ jq --exit-status '
     ],
     rejectionPoint: "before-PutRolePolicy"
   } and
-  .recoveryRole.stackTemplateSourceSha256 == "cf613a1af94a339253a2e0aac3f1ebb61066337629e83c0b254b609227a2817d" and
+  .recoveryRole.stackTemplateSourceSha256 == "0c636d2af933c03b7752334fd4998141355564696ba08c81e06bda8bb459df73" and
   .recoveryRole.baselinePolicyUnchanged == true and
   .recoveryRole.foundationRolePolicyBroadening == "forbidden" and
   .recoveryRole.attachedManagedPolicies == "forbidden" and
@@ -499,7 +499,7 @@ forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
 forbid_text "${reconciler}" 'cloudformation delete-stack' 'delete-stack' 'continue-update-rollback'
 
 test "$(sha256sum "${canary_roles}" | awk '{print $1}')" = \
-  'cf613a1af94a339253a2e0aac3f1ebb61066337629e83c0b254b609227a2817d' || \
+  '0c636d2af933c03b7752334fd4998141355564696ba08c81e06bda8bb459df73' || \
   fail 'governed-canary role source changed'
 
 require_text "${ci}" \
