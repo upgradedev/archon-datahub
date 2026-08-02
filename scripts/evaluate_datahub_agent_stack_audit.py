@@ -121,7 +121,7 @@ def validate_environment(workspace: Path) -> tuple[dict[str, Any], dict[str, Any
         "uv sync --project services/datahub-companion --python 3.11.15 "
         "--frozen --no-dev --no-build"
     ) in normalized
-    assert "UV_PYTHON_DOWNLOADS: manual" in workflow
+    assert 'UV_PYTHON_DOWNLOADS: "manual"' in workflow
     return lock, frozen
 
 
