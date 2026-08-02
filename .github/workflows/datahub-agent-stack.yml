@@ -8,12 +8,16 @@ on:
       - ".github/workflows/datahub-agent-stack.yml"
       - "services/datahub-companion/**"
       - "scripts/verify_datahub_agent_stack.py"
+      - "scripts/evaluate_datahub_agent_stack_audit.py"
+      - ".github/security/datahub-agent-stack.openvex.json"
   pull_request:
     paths:
       - ".github/locks/datahub-agent-stack.json"
       - ".github/workflows/datahub-agent-stack.yml"
       - "services/datahub-companion/**"
       - "scripts/verify_datahub_agent_stack.py"
+      - "scripts/evaluate_datahub_agent_stack_audit.py"
+      - ".github/security/datahub-agent-stack.openvex.json"
   workflow_dispatch:
 
 permissions:
@@ -128,6 +132,18 @@ jobs:
           set -euo pipefail
           uv audit             --project services/datahub-companion             --python-version 3.11.15             --python-platform linux             --output-format sarif >"${RUNNER_TEMP}/datahub-agent-stack.sarif"
           test -s "${RUNNER_TEMP}/datahub-agent-stack.sarif"
+      - name: Evaluate exact OpenVEX disposition
+        id: disposition
+        if: steps.lock.outputs.adopted == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          CI=true GITHUB_ACTIONS=true \
+            "$(uv python find 3.11.15)" \
+            scripts/evaluate_datahub_agent_stack_audit.py \
+            --sarif "$RUNNER_TEMP/datahub-agent-stack.sarif" \
+            --vex ".github/security/datahub-agent-stack.openvex.json" \
+            --decision "$RUNNER_TEMP/datahub-agent-stack-vex-decision.json"
       - name: Export the frozen CycloneDX inventory
         if: steps.lock.outputs.adopted == 'true'
         run: |
@@ -153,11 +169,13 @@ jobs:
           path: |
             ${{ runner.temp }}/datahub-agent-stack.sarif
             ${{ runner.temp }}/datahub-agent-stack.cdx.json
+            .github/security/datahub-agent-stack.openvex.json
+            ${{ runner.temp }}/datahub-agent-stack-vex-decision.json
           if-no-files-found: error
           retention-days: 90
           overwrite: true
       - name: Fail on actionable Python findings
-        if: steps.lock.outputs.adopted == 'true' && steps.audit.outcome != 'success'
+        if: steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'success'
         run: |
-          echo "::error::The frozen DataHub agent stack has actionable vulnerabilities"
+          echo "::error::The frozen DataHub agent stack has unresolved or unauthorized findings"
           exit 1
