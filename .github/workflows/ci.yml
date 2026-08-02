@@ -1993,10 +1993,12 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
-          # aws-cdk-lib@2.262.1 immutably bundles the sole affected path.
-          # The infra job replaces it with integrity-pinned 5.0.8 and accepts
-          # no other advisory/path through its exact compensating audit gate.
-          allow-ghsas: GHSA-mh99-v99m-4gvg
+          # aws-cdk-lib@2.262.1 immutably bundles the first affected path; the
+          # infra job replaces it with integrity-pinned 5.0.8.
+          # ACK pins setuptools<82; its sdist-only macOS finding is governed by
+          # the expiring Linux wheel-only OpenVEX gate in datahub-agent-stack.
+          # No advisory outside these exact two identifiers is accepted.
+          allow-ghsas: GHSA-mh99-v99m-4gvg, GHSA-h35f-9h28-mq5c
 
   load:
     name: Offline SLO
