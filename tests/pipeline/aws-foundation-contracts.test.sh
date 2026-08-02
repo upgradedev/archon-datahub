@@ -1613,3 +1613,361 @@ forbid_text "${reconciler}" \
   'declare -p'
 test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 37 ||
   fail 'reconciler diagnostic phases must be the 37 reviewed public labels'
+
+# DataHub Core AMI builder foundation and control-policy migration
+core_ami_contract="${repository_root}/contracts/aws-foundation-core-ami-policy-migration-v1.json"
+core_ami_template="${repository_root}/infra/aws/foundation/datahub-core-ami-builder.yml"
+core_ami_iam_contract="${repository_root}/infra/aws/packer/datahub-core-ami-builder-policy-contract.json"
+core_ami_reconciler="${repository_root}/scripts/reconcile-datahub-core-ami-foundation.sh"
+core_ami_migration_common="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-common.sh"
+core_ami_migration_authorization="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-authorization.sh"
+core_ami_migration_state="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-state.sh"
+core_ami_migration_driver="${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
+core_ami_migration_entry="${repository_root}/.github/workflows/aws-foundation-core-ami-policy-migration.yml"
+core_ami_migration_workflow_driver="${repository_root}/.github/workflows/aws-foundation-core-ami-policy-migration-driver.yml"
+core_ami_migration_cleanup="${repository_root}/.github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml"
+core_ami_build_workflow="${repository_root}/.github/workflows/datahub-core-ami.yml"
+
+for path in \
+  "${core_ami_contract}" \
+  "${core_ami_template}" \
+  "${core_ami_iam_contract}" \
+  "${core_ami_reconciler}" \
+  "${core_ami_migration_common}" \
+  "${core_ami_migration_authorization}" \
+  "${core_ami_migration_state}" \
+  "${core_ami_migration_driver}" \
+  "${core_ami_migration_entry}" \
+  "${core_ami_migration_workflow_driver}" \
+  "${core_ami_migration_cleanup}" \
+  "${core_ami_build_workflow}"; do
+  test -f "${path}"
+  test ! -L "${path}"
+done
+
+jq -e '
+  .schemaVersion ==
+    "archon.aws-foundation-core-ami-policy-migration/v1" and
+  .status == "ready-for-migration" and
+  .workflow == {
+    automaticCleanupCurrentHeadIndependent: true,
+    automaticCleanupOnNonSuccess: true,
+    branch: "master",
+    cleanup:
+      ".github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml",
+    cleanupConfirmation:
+      "RECOVER EXACT CORE AMI FOUNDATION CONTROL POLICY MIGRATION",
+    confirmation: "MIGRATE EXACT CORE AMI FOUNDATION CONTROL POLICY",
+    driver:
+      ".github/workflows/aws-foundation-core-ami-policy-migration-driver.yml",
+    entry: ".github/workflows/aws-foundation-core-ami-policy-migration.yml",
+    exactHeadRequired: true,
+    exactParentAttemptJobsRequired: true,
+    executorEnvironment: "governed-canary-recovery",
+    innerConcurrencyGroup: "archon-governed-canary-mutation-recovery",
+    installerEnvironment: "aws-foundation",
+    outerConcurrencyGroup: "archon-aws-control-plane",
+    ownerActorOnly: true,
+    queue: "max"
+  } and
+  .policy.group == "control" and
+  .policy.name == "archon-aws-foundation-control" and
+  .policy.liveBaseline == [
+    {
+      canonicalSha256:
+        "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5",
+      isDefault: false,
+      versionId: "v1"
+    },
+    {
+      canonicalSha256:
+        "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b",
+      isDefault: true,
+      versionId: "v2"
+    }
+  ] and
+  .policy.target == {
+    canonicalSha256:
+      "52e0a5d619c426b8c58b111a8e410e41548522411ff18a9ffbe346d89e6bd3cf",
+    expectedVersionId: "v3"
+  } and
+  .policy.exactDeltaSids == [
+    "ReconcileExactCoreAmiFoundationStack",
+    "ReconcileExactCoreAmiFoundationRoles",
+    "ReconcileExactCoreAmiBuilderProfile",
+    "AttachExactCoreAmiBuilderSsmPolicy",
+    "PassExactCoreAmiBuilderRoleForProfile"
+  ] and
+  .transaction.rollback == "set-v2-default-delete-only-v3" and
+  .transaction.historicalV1Mutation == "forbidden" and
+  .transaction.cancellationRecovery == "workflow-run-cleanup" and
+  .authorization.temporaryInlinePolicyName ==
+    "archon-foundation-core-ami-control-policy-migration" and
+  .authorization.selfPersistenceAllowed == false and
+  .authorization.mandatoryRevocation == true
+' "${core_ami_contract}" >/dev/null
+
+jq -e '
+  .aws.coreAmiFoundation.stackName ==
+    "Archon-DataHub-Core-AMI-Builder-Foundation" and
+  .aws.coreAmiFoundation.region == "eu-west-1" and
+  .aws.coreAmiFoundation.terminationProtection == true and
+  .aws.coreAmiFoundation.idleAwsCost == "zero" and
+  .aws.coreAmiFoundation.githubBuildRole.maxSessionDurationSeconds == 7200 and
+  .aws.coreAmiFoundation.githubBuildRole.workflowRequestedSessionSeconds ==
+    7200 and
+  .aws.coreAmiFoundation.githubBuildRole.tags == {
+    Application: "archon-datahub",
+    Environment: "staging",
+    ManagedBy: "aws-foundation",
+    "archon:Purpose": "datahub-core-ami-build"
+  } and
+  .aws.coreAmiFoundation.githubBuildRole.packerAmazonPluginVersion == "1.8.0" and
+  .aws.coreAmiFoundation.githubBuildRole.inlinePolicyCharacterLimit == 10240 and
+  .aws.coreAmiFoundation.githubBuildRole.inlinePolicySizeValidation ==
+    "compact-live-policy-document-before-evidence" and
+  .aws.coreAmiFoundation.githubBuildRole.policyContract ==
+    "infra/aws/packer/datahub-core-ami-builder-policy-contract.json" and
+  .aws.coreAmiFoundation.githubBuildRole.requestTagObservation == {
+    accountBinding: "validate-active-caller-then-omit-before-digest",
+    action: "cloudtrail:LookupEvents",
+    buildIdPattern: "^[1-9][0-9]{0,19}$",
+    evidenceSchemaVersion: "archon.packer-request-tag-proof/v1",
+    events: ["CreateKeyPair", "CreateSecurityGroup", "RunInstances"],
+    principalBinding: "exact-oidc-role-session-and-build-window",
+    region: "eu-west-1",
+    requiredTags: {
+      Application: "archon-datahub",
+      Environment: "staging",
+      ManagedBy: "github-actions",
+      "archon:BuildRun": "exact-buildId",
+      "archon:Purpose": "datahub-core-ami"
+    },
+    resource: "*",
+    resourceScopeReason:
+      "aws-action-does-not-support-resource-level-permissions",
+    retainedEvidence: "sanitized-counts-and-canonical-digests-only",
+    sanitizedProjection: [
+      "eventName",
+      "eventTime",
+      "awsRegion",
+      "roleSessionName",
+      "requestTagSpecifications"
+    ]
+  } and
+  .aws.coreAmiFoundation.ec2Builder.attachedManagedPolicies == [
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  ] and
+  .aws.coreAmiFoundation.ec2Builder.inlinePolicyCount == 0 and
+  .aws.coreAmiFoundation.ephemeralBoundary.workflowIamMutationAllowed == false
+' "${contract}" >/dev/null
+
+for sid in \
+  ReconcileExactCoreAmiFoundationStack \
+  ReconcileExactCoreAmiFoundationRoles \
+  ReconcileExactCoreAmiBuilderProfile \
+  AttachExactCoreAmiBuilderSsmPolicy \
+  PassExactCoreAmiBuilderRoleForProfile; do
+  test "$(
+    jq -r --arg sid "${sid}" '
+      [.Statement[] | select(.Sid == $sid)] | length
+    ' "${foundation_policy}"
+  )" = "1"
+done
+jq -e '
+  [
+    .Statement[] |
+    select(.Sid | IN(
+      "ReconcileExactCoreAmiFoundationStack",
+      "ReconcileExactCoreAmiFoundationRoles",
+      "ReconcileExactCoreAmiBuilderProfile",
+      "AttachExactCoreAmiBuilderSsmPolicy",
+      "PassExactCoreAmiBuilderRoleForProfile"
+    ))
+  ] as $delta |
+  ($delta | length) == 5 and
+  all($delta[];
+    .Effect == "Allow" and
+    ((.Resource | if type == "array" then . else [.] end) |
+      all(.; . != "*"))) and
+  all([$delta[].Action] | flatten[];
+    . != "iam:*" and . != "cloudformation:*")
+' "${foundation_policy}" >/dev/null
+
+require_text "${core_ami_template}" \
+  'MaxSessionDuration: 7200' \
+  'Value: datahub-core-ami-build' \
+  'archon-datahub-core-ami-build-staging' \
+  'archon-datahub-core-ami-builder-staging' \
+  'AmazonSSMManagedInstanceCore' \
+  'upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master' \
+  'repo:upgradedev/archon-datahub:environment:staging' \
+  'Sid: ObserveOwnPackerRequestTags' \
+  'Action: cloudtrail:LookupEvents' \
+  'aws:RequestedRegion: eu-west-1' \
+  'aws:RequestTag/Environment: staging' \
+  'aws:ResourceTag/Environment: staging' \
+  'ssm:resourceTag/Environment: staging' \
+  'Sid: CreateTaggedCoreAmiResources' \
+  'Sid: RunOnlyTaggedBuilderCompute' \
+  'Sid: PassOnlyStableBuilderRole'
+forbid_text "${core_ami_template}" \
+  'bedrock:' 'dynamodb:' 'kms:' \
+  'ec2:AuthorizeSecurityGroupIngress' \
+  'iam:CreateAccessKey' \
+  'iam:*'
+
+require_text "${core_ami_reconciler}" \
+  'readonly STACK_NAME="Archon-DataHub-Core-AMI-Builder-Foundation"' \
+  'readonly BUILD_ROLE="archon-datahub-core-ami-build-staging"' \
+  'readonly BUILDER_ROLE="archon-datahub-core-ami-builder-staging"' \
+  'readonly BUILDER_PROFILE="archon-datahub-core-ami-builder-staging"' \
+  'iam tag-instance-profile' \
+  'ObserveOwnPackerRequestTags' \
+  'cloudtrail:LookupEvents' \
+  'maxSessionDurationSeconds:7200' \
+  'IAM_ROLE_INLINE_POLICY_AGGREGATE_CHARACTER_LIMIT=10240' \
+  'inlinePolicyCharacters:$inlinePolicyCharacters' \
+  'build-policy-exceeds-inline-character-limit' \
+  'requestTagObservation:{' \
+  'cloudformation-supported-resources' \
+  'globalTimeoutSeconds:900' \
+  'idleAwsCost:"zero"'
+forbid_text "${core_ami_reconciler}" 'set -x' 'printenv' 'declare -p'
+
+require_text "${foundation_workflow}" \
+  'contracts/aws-foundation-core-ami-policy-migration-v1.json' \
+  'infra/aws/foundation/datahub-core-ami-builder.yml' \
+  'infra/aws/packer/datahub-core-ami-builder-policy-contract.json' \
+  'scripts/reconcile-datahub-core-ami-foundation.sh' \
+  'Reconcile, drift-check, and seal Core AMI builder identities' \
+  'Attest exact sanitized Core AMI foundation evidence' \
+  'aws-core-ami-foundation-' \
+  'workflowRequestedSessionSeconds == ' \
+  'packerAmazonPluginVersion ==' \
+  'inlinePolicyCharacterLimit ==' \
+  'inlinePolicySizeValidation ==' \
+  'cloudtrail:LookupEvents' \
+  'CORE_AMI_BUILD_ROLE_ARN' \
+  'CORE_AMI_BUILDER_INSTANCE_PROFILE'
+
+require_text "${core_ami_migration_entry}" \
+  'MIGRATE EXACT CORE AMI FOUNDATION CONTROL POLICY' \
+  '.github/workflows/aws-foundation-core-ami-policy-migration-driver.yml' \
+  'verify-github-control-plane.sh' \
+  'queue: max'
+require_text "${core_ami_migration_cleanup}" \
+  'workflow_run:' \
+  'Migrate AWS foundation Core AMI control policy' \
+  'RECOVER EXACT CORE AMI FOUNDATION CONTROL POLICY MIGRATION' \
+  'exact parent-job conclusion' \
+  'cleanup-rollback' \
+  'cleanup-migrated' \
+  'no-aws'
+require_text "${core_ami_migration_workflow_driver}" \
+  'environment:' \
+  'name: aws-foundation' \
+  'name: governed-canary-recovery' \
+  'role-session-name: archon-core-ami-authorize-' \
+  'role-session-name: archon-core-ami-migrate-' \
+  'role-session-name: archon-core-ami-rollback-' \
+  'role-session-name: archon-core-ami-revoke-' \
+  'scripts/run-aws-foundation-core-ami-policy-migration.sh' \
+  'Attest sanitized migration receipt'
+require_text "${core_ami_migration_common}" \
+  'HISTORICAL_POLICY_SHA' \
+  '52e0a5d619c426b8c58b111a8e410e41548522411ff18a9ffbe346d89e6bd3cf' \
+  'archon-foundation-core-ami-control-policy-migration'
+require_text "${core_ami_migration_state}" \
+  'test "${historical_id}" = "v1"' \
+  'test "${old_id}" = "v2"' \
+  'test "${new_id}" = "v3"' \
+  '--version-id v2' \
+  '--version-id v3'
+require_text "${core_ami_migration_driver}" \
+  'test "${new_version}" = v3' \
+  'reviewed-v3-default-v1-v2-retained' \
+  'exact-v2-default-v3-absent-v1-unchanged' \
+  'absenceReadCount: 3'
+
+require_text "${core_ami_build_workflow}" \
+  'role-duration-seconds: 7200' \
+  'CreateKeyPair' \
+  'CreateSecurityGroup' \
+  'RunInstances' \
+  '"aws", "cloudtrail", "lookup-events"' \
+  'tagSpecificationSet' \
+  'archon.packer-request-tag-proof/v1'
+grep -Eq -- '^[[:space:]]*--arg trivyDbMetadataSha256 "\$\{trivy_db_sha\}" \\$' \
+  "${core_ami_build_workflow}"
+
+jq -e '
+  .schemaVersion == "archon.datahub-core-ami-builder-iam/v1" and
+  .region == "eu-west-1" and
+  .packerAmazonPluginVersion == "1.8.0" and
+  .oidcTrust.maxSessionDurationSeconds == 7200 and
+  .oidcTrust.workflowRef ==
+    "upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master" and
+  .stableBuilderIdentity.roleName ==
+    "archon-datahub-core-ami-builder-staging" and
+  .stableBuilderIdentity.inlinePolicyCount == 0 and
+  .requestTagObservation.action == "cloudtrail:LookupEvents" and
+  .requestTagObservation.resource == "*" and
+  .requestTagObservation.region == "eu-west-1" and
+  .requestTagObservation.events ==
+    ["CreateKeyPair", "CreateSecurityGroup", "RunInstances"] and
+  .requestTagObservation.evidenceSchemaVersion ==
+    "archon.packer-request-tag-proof/v1" and
+  .requestTagObservation.accountBinding ==
+    "validate-active-caller-then-omit-before-digest" and
+  .requestTagObservation.sanitizedProjection == [
+    "eventName", "eventTime", "awsRegion", "roleSessionName",
+    "requestTagSpecifications"
+  ] and
+  .requestTagObservation.requiredTags == {
+    Application: "archon-datahub",
+    Environment: "staging",
+    ManagedBy: "github-actions",
+    "archon:BuildRun": "exact-buildId",
+    "archon:Purpose": "datahub-core-ami"
+  } and
+  .inlinePolicy.iamMutationActionsAllowed == false and
+  .inlinePolicy.aggregateRoleInlinePolicyCharacterLimit == 10240 and
+  .inlinePolicy.sizeValidation ==
+    "compact-live-policy-document-before-evidence" and
+  .inlinePolicy.cloudTrailWildcardResourceException == {
+    action: "cloudtrail:LookupEvents",
+    condition: {"aws:RequestedRegion": "eu-west-1"},
+    reason: "LookupEvents does not support resource-level permissions",
+    resource: "*",
+    sid: "ObserveOwnPackerRequestTags"
+  } and
+  .deployment.foundationStack ==
+    "Archon-DataHub-Core-AMI-Builder-Foundation" and
+  .deployment.reconciler ==
+    "scripts/reconcile-datahub-core-ami-foundation.sh" and
+  .deployment.controlPolicyMigrationContract ==
+    "contracts/aws-foundation-core-ami-policy-migration-v1.json" and
+  .deployment.workflowIamMutationAllowed == false and
+  ([.actionGroups[][]] | length) ==
+    ([.actionGroups[][]] | unique | length) and
+  all(.actionGroups[][]; (contains("*") | not)) and
+  ([.actionGroups[][]] | index("cloudtrail:LookupEvents") != null) and
+  ([.actionGroups[][]] | index("ec2:CreateKeyPair") != null) and
+  ([.actionGroups[][]] | index("ec2:CreateSecurityGroup") != null) and
+  ([.actionGroups[][]] | index("ec2:RunInstances") != null) and
+  ([.deniedByContract | index("ec2:AuthorizeSecurityGroupIngress")] |
+    all(. != null))
+' "${core_ami_iam_contract}" >/dev/null
+require_text "${runbook}" \
+  '## DataHub Core AMI builder foundation' \
+  'exactly 7,200 seconds' \
+  'CreateKeyPair' \
+  'CreateSecurityGroup' \
+  'RunInstances' \
+  'CloudTrail Event History' \
+  'Packer Amazon v1.8.0' \
+  '10,240-character role limit' \
+  'zero AWS service cost' \
+  'Historical ' \
+  'do not create workstation build artifacts'

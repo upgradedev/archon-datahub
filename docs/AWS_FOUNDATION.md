@@ -619,3 +619,85 @@ job also holds `archon-governed-canary-mutation-recovery`. This outer-to-inner
 order prevents its governed-canary role-stack reconciliation from racing
 fixture, canary, compensation, or explicit incident recovery mutations without
 the parent-child deadlock an inner child would create by taking the outer lock.
+## DataHub Core AMI builder foundation
+
+The DataHub Core AMI pipeline uses two stable, pre-provisioned identities and
+does not create, change, or delete IAM resources during an image build:
+
+- `archon-datahub-core-ami-build-staging` is the GitHub OIDC role for the exact
+  `staging` environment and exact
+  `.github/workflows/datahub-core-ami.yml@refs/heads/master` workflow. Its
+  maximum session duration is exactly 7,200 seconds and the workflow requests
+  exactly 7,200 seconds.
+- `archon-datahub-core-ami-builder-staging` and the same-named instance profile
+  are attached to the short-lived Packer instance. The role has no inline
+  policy and attaches only AWS `AmazonSSMManagedInstanceCore`. The build role has
+  one CloudFormation-managed inline policy; reconciliation compacts the live policy
+  document and fails closed above IAM's aggregate 10,240-character role limit.
+- Runtime KMS, Bedrock, DynamoDB, lease, and sandbox permissions remain in
+  runtime roles. They are deliberately absent from both AMI-builder identities.
+
+The identities live in the termination-protected
+`Archon-DataHub-Core-AMI-Builder-Foundation` stack in `eu-west-1`. With no
+image build running, these IAM resources have zero AWS service cost.
+`AWS::IAM::InstanceProfile` does not support CloudFormation tags, so the
+foundation reconciler applies and then verifies the exact four tags through
+`iam:TagInstanceProfile`. Existing extra or mismatched tags fail closed.
+
+The build role resolves only the public Amazon Linux 2023 parameter
+`/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` in
+`eu-west-1` and pins the Amazon owner account `137112412989`. Ephemeral
+instances, volumes, temporary key pairs, temporary security groups, AMIs, and
+snapshots remain constrained by exact `Application=archon-datahub`,
+`Environment=staging`, `ManagedBy=github-actions`,
+`archon:Purpose=datahub-core-ami`, and
+`archon:BuildRun=<numeric GitHub run ID>` tags. Public ingress and IAM mutations
+are absent.
+
+The workflow pre-creates its run-owned key pair and no-ingress security group
+with exact tag specifications; Packer Amazon v1.8.0 applies the same boundary
+through `run_tags` when it calls `RunInstances`. After the image is created, CI
+performs a live request-tag proof. It polls CloudTrail Event History for the
+exact OIDC role session and
+build window, then verifies exact `tagSpecificationSet` values for
+`CreateKeyPair`, `CreateSecurityGroup`, and `RunInstances`. The retained receipt
+contains only canonical digests and event counts. It validates the active AWS
+account before projection, then omits the account identifier before hashing;
+raw CloudTrail events, account IDs, ARNs, resource IDs, and user identity are
+never printed, stored, or hashed. `cloudtrail:LookupEvents` is
+read-only, restricted to `eu-west-1`, and necessarily uses `Resource: "*"`
+because AWS does not expose a resource-level ARN for that API. This does not
+relax any provisioning tag condition.
+
+### One-time controlled activation
+
+The existing control managed policy is intentionally migrated before ordinary
+foundation reconciliation:
+
+1. Dispatch `Migrate AWS foundation Core AMI control policy` from an exact,
+   signed current `master` SHA and enter
+   `MIGRATE EXACT CORE AMI FOUNDATION CONTROL POLICY`.
+2. The `aws-foundation` role proves the live exact baseline
+   `v1(nondefault) + v2(default)` and installs a 20-minute inline authorization
+   on the separately approved recovery role.
+3. The `governed-canary-recovery` role creates exact `v3` as nondefault,
+   canonically reads it back, and switches the default exactly once.
+4. The `aws-foundation` role revokes the temporary policy, proves three
+   consecutive absences, and seals a sanitized attested receipt.
+5. Dispatch `Bootstrap AWS foundation` at the same signed `master` SHA. It
+   creates or updates the Core AMI identity stack, verifies termination
+   protection and CloudFormation-supported resource drift, and publishes a
+   separate checksum-sealed attested receipt.
+6. Set the protected `staging` environment variables from the handoff:
+   `AWS_CORE_AMI_BUILD_ROLE_ARN` and
+   `AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE`.
+
+If migration is interrupted, the automatic `workflow_run` follower classifies
+the exact parent attempt. Recovery may revoke only, retain an already exact
+migrated state, or set `v2` default and delete only `v3`. Historical `v1` is
+never mutated. Manual recovery requires
+`RECOVER EXACT CORE AMI FOUNDATION CONTROL POLICY MIGRATION`.
+
+All validation, Packer initialization, image build, security checks, request-tag
+proofs, cleanup checks, and evidence generation run in GitHub Actions runner
+temporary storage. They do not create workstation build artifacts.

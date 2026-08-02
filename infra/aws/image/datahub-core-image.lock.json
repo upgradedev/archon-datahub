@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "archon.datahub-core-image-lock/v1",
+  "schemaVersion": "archon.datahub-core-image-lock/v2",
   "dataHubCore": {
     "license": "Apache-2.0",
     "repository": "datahub-project/datahub",
@@ -10,7 +10,10 @@
       "path": "docker/quickstart/docker-compose.quickstart.yml",
       "gitBlob": "8c8cac35f53aff8a2e6a67398c57a2ff7b96448c",
       "sha256": "e74f42d5382e2a3cf98620322f8e20f1cbd7fb356af078a233001085b734108a",
-      "size": 10258
+      "size": 10258,
+      "credentialHardening": "exact-count parameterization before image resolution",
+      "immutableOverride": "docker-compose.images.yml",
+      "runtimePullPolicy": "never"
     },
     "environment": {
       "DATAHUB_VERSION": "v1.6.0",
@@ -19,10 +22,26 @@
       "DATAHUB_MYSQL_VERSION": "8.2"
     },
     "containerPolicy": {
+      "resolution": "resolve-once-in-ci",
+      "resolutionCount": 1,
       "pullDuringAmiBuild": true,
+      "amiBuildPullReference": "exact RepoDigest only",
       "recordEveryRepoDigest": true,
       "rejectMissingRepoDigest": true,
-      "runtimePullsAllowed": false
+      "scanOrder": "sequential",
+      "removeAfterEachScan": true,
+      "runtimePullsAllowed": false,
+      "rawJsonRetained": true,
+      "rawSarifRetained": true,
+      "unfixedFindingsRetained": true,
+      "actionableGate": "fixed HIGH,CRITICAL",
+      "vexGenerated": false,
+      "sbom": {
+        "perImageCycloneDx": true,
+        "perImageSpdx": true,
+        "aggregateCycloneDx": true,
+        "aggregateSpdx": true
+      }
     }
   },
   "agentStack": {
@@ -33,7 +52,9 @@
       "datahub-agent-context",
       "datahub-skills",
       "datahub-analytics-agent"
-    ]
+    ],
+    "sourceBuildsAllowed": false,
+    "runtimePackageDownloadsAllowed": false
   },
   "runtime": {
     "architecture": "x86_64",
@@ -44,18 +65,37 @@
       "sizeGiB": 50,
       "type": "gp3"
     },
+    "lease": {
+      "idleSeconds": 1800,
+      "hardSeconds": 7200,
+      "operationSeconds": 300,
+      "independentReaperMinutes": 5,
+      "idleCompute": "zero"
+    },
     "imdsv2Required": true,
     "publicIpAllowed": false,
     "sshKeyAllowed": false,
     "companion": {
-      "host": "0.0.0.0",
+      "host": "127.0.0.1",
       "port": 8080,
       "health": "/healthz"
     },
     "analyticsAgent": {
       "host": "127.0.0.1",
       "port": 8100,
-      "health": "/health"
+      "health": "/health",
+      "oauthMasterKey": {
+        "format": "Fernet-32-byte-urlsafe-base64",
+        "path": "/run/archon/analytics.env",
+        "mode": "0600",
+        "stableAcrossCredentialRotation": true
+      },
+      "plaintextDataHubTokenAtRestAllowed": false,
+      "readinessTokenScan": [
+        "state.sqlite",
+        "state.sqlite-wal",
+        "state.sqlite-shm"
+      ]
     },
     "mcp": {
       "readPort": 8000,
@@ -66,7 +106,112 @@
     "dataHubGms": {
       "host": "127.0.0.1",
       "mappedPort": 18080,
-      "tlsProxyPort": 9443
+      "scheme": "http"
+    },
+    "networkIsolation": {
+      "bridges": [
+        "archon-read",
+        "archon-writer",
+        "archon-bedrock-egress"
+      ],
+      "officialWriterIsolated": true,
+      "hostEgressDefaultDeny": true,
+      "interfaceEndpoints": [
+        "bedrock-runtime",
+        "kms",
+        "sts"
+      ],
+      "interfaceEndpointsSessionOwned": true,
+      "dynamoDbGatewayEndpoint": true,
+      "stsEndpointPolicy": {
+        "action": "sts:GetCallerIdentity",
+        "principal": "exact analytics role"
+      }
+    },
+    "credentials": {
+      "strategy": "per-session-pats-and-scoped-sts",
+      "path": "/run/archon/datahub-credentials.json",
+      "mode": "0600",
+      "readTokenConsumers": [
+        "official-read-mcp",
+        "companion"
+      ],
+      "writeTokenConsumers": [
+        "official-writer-mcp",
+        "archon-governed-gateway"
+      ],
+      "seedToken": "one-hour, revoked after deterministic seed",
+      "staticSecretsAllowed": false,
+      "analyticsRoleProof": {
+        "endpoint": "regional private STS",
+        "operation": "GetCallerIdentity",
+        "expectedRoleArnSource": "server-owned ARCHON_EXPECTED_ANALYTICS_ROLE_ARN",
+        "failClosed": true
+      }
+    },
+    "governedGateway": {
+      "identity": "Archon governed DataHub gateway (not the official DataHub MCP Server)",
+      "host": "127.0.0.1",
+      "port": 8001,
+      "runtime": "/opt/archon/governed/.venv",
+      "tools": [
+        "get_entities",
+        "add_tags",
+        "remove_tags"
+      ],
+      "exactDataset": "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+      "exactColumn": "customer_email",
+      "exactTag": "urn:li:tag:PII",
+      "authorization": {
+        "algorithm": "KMS_ECDSA_SHA_256",
+        "keySpec": "ECC_NIST_P256",
+        "canonicalContract": "contracts/datahub-core-mutation-authorization-golden.json",
+        "signer": "core-job-adapter",
+        "verifier": "archon-governed-gateway",
+        "gatewayKeyAccess": "public-key-only",
+        "boundFields": [
+          "schemaVersion",
+          "jobId",
+          "sessionId",
+          "toolName",
+          "canonicalArguments",
+          "credentialVersion",
+          "expiresAt"
+        ]
+      },
+      "unauthenticatedCallsAllowed": false
+    },
+    "portableDemo": {
+      "sql": "services/datahub-companion/demo/archon_demo.sql",
+      "seeder": "services/datahub-companion/demo/seed_datahub.py",
+      "database": "/run/archon/demo/archon-demo.sqlite",
+      "generatedDatabaseCommitted": false,
+      "sourceDataset": "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+      "downstreamDataset": "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customer_segment_revenue,PROD)",
+      "governedColumn": "customer_email",
+      "initialPiiTag": "missing",
+      "automaticDownstreamTagPropagationClaimed": false
+    },
+    "bedrock": {
+      "provider": "bedrock",
+      "region": "eu-west-1",
+      "inferenceProfile": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "baseModel": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "foundationModelRegions": [
+        "eu-central-1",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3"
+      ],
+      "tiers": [
+        "main",
+        "chart",
+        "quality",
+        "delight"
+      ],
+      "readyRequiresConverse": true
     }
   },
   "builder": {
@@ -84,13 +229,100 @@
       "namePrefix": "al2023-ami-2023.",
       "architecture": "x86_64",
       "rootDeviceType": "ebs",
-      "virtualizationType": "hvm"
-    }
+      "virtualizationType": "hvm",
+      "dnfUpgradeDuringBake": true,
+      "applicableSecurityUpdatesRequired": 0,
+      "osCycloneDx": true,
+      "osSpdx": true,
+      "installedRpmInventory": true
+    },
+    "scanner": {
+      "name": "Trivy",
+      "version": "0.70.0",
+      "databaseMetadataRetained": true,
+      "rawJsonRetained": true,
+      "rawSarifRetained": true,
+      "unfixedFindingsRetained": true,
+      "scannerBinaryRemovedFromAmi": true,
+      "scannerDatabaseRemovedFromAmi": true,
+      "vexGenerated": false
+    },
+    "dockerCompose": {
+      "version": "v5.3.1",
+      "sha256": "f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959"
+    },
+    "iamContract": "infra/aws/packer/datahub-core-ami-builder-policy-contract.json",
+    "network": {
+      "communicator": "ssh-over-session-manager",
+      "ingressAllowed": false,
+      "temporaryPublicIpForBuildEgress": true,
+      "outboundTcpPorts": [
+        443
+      ],
+      "vpcDnsOnly": true
+    },
+    "temporaryKeyPair": {
+      "precreatedByWorkflow": true,
+      "ed25519": true,
+      "exactRunOwnedName": "archon-datahub-core-ami-{workflowRunId}",
+      "privateKeyPath": "runner.temp only",
+      "deletedInAlwaysCleanup": true,
+      "authorizedKeysClearedFromAmi": true
+    },
+    "requestTagProof": {
+      "source": "CloudTrail LookupEvents",
+      "schemaVersion": "archon.packer-request-tag-proof/v1",
+      "events": [
+        "CreateKeyPair",
+        "CreateSecurityGroup",
+        "RunInstances"
+      ],
+      "requiredTags": {
+        "Application": "archon-datahub",
+        "Environment": "staging",
+        "ManagedBy": "github-actions",
+        "archon:Purpose": "datahub-core-ami",
+        "archon:BuildRun": "{workflowRunId}"
+      },
+      "accountIdentifierRetained": false
+    },
+    "bakeEvidence": {
+      "downloadedBeforeAmiFinalization": true,
+      "validatedForSafeExtraction": true,
+      "sourceDeletedAfterDownload": true,
+      "sealedInFinalArtifact": true
+    },
+    "githubOidcBuildRole": "archon-datahub-core-ami-build-staging",
+    "stableInstanceProfile": "archon-datahub-core-ami-builder-staging",
+    "workflowIamMutationAllowed": false
   },
   "requiredAmiTags": {
     "Application": "archon-datahub",
+    "Environment": "staging",
     "ArchonDataHubCore": "verified",
     "ArchonFourComponents": "mcp,ack,skills,analytics",
-    "ManagedBy": "github-actions"
+    "ManagedBy": "github-actions",
+    "archon:Purpose": "datahub-core-ami",
+    "archon:BuildRun": "{workflowRunId}"
+  },
+  "evidence": {
+    "amiBuildSchema": "archon.datahub-core-ami-build/v2",
+    "resolvedImagesSchema": "archon.datahub-core-resolved-images/v1",
+    "amiManifestSchema": "archon.datahub-core-ami-manifest/v2",
+    "requestTagProofSchema": "archon.packer-request-tag-proof/v1",
+    "attestedProjection": "ami-build-evidence.json",
+    "retentionDays": 90
+  },
+  "companionArtifact": {
+    "workflow": ".github/workflows/datahub-companion-image.yml",
+    "workflowName": "DataHub companion OCI",
+    "artifactNameTemplate": "datahub-companion-image-{sourceSha}",
+    "archive": "evidence/companion-image.tar.gz",
+    "subject": "evidence/image-subject.sha256",
+    "checksums": "evidence/SHA256SUMS",
+    "provenance": "evidence/provenance.json",
+    "provenanceSchema": "archon.datahub-companion-image-provenance/v1",
+    "immutableSourceShaRequired": true,
+    "rebuildInAmiWorkflow": false
   }
 }

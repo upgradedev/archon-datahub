@@ -1,0 +1,405 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Zero-idle, foundation-managed identities for the no-ingress DataHub Core AMI
+  pipeline. The GitHub workflow can build only tagged eu-west-1 resources and
+  the EC2 builder receives only the AWS-managed SSM core policy.
+
+Parameters:
+  GitHubOrganization:
+    Type: String
+    Default: upgradedev
+    AllowedValues:
+      - upgradedev
+  GitHubRepository:
+    Type: String
+    Default: archon-datahub
+    AllowedValues:
+      - archon-datahub
+  GitHubEnvironment:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+  GitHubBranch:
+    Type: String
+    Default: master
+    AllowedValues:
+      - master
+
+Resources:
+  CoreAmiBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-core-ami-builder-staging
+      Description: >-
+        Stable EC2 identity for the no-ingress DataHub Core AMI builder.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Ec2Only
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: aws-foundation
+        - Key: archon:Purpose
+          Value: datahub-core-ami-builder
+
+  CoreAmiBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: archon-datahub-core-ami-builder-staging
+      Path: /
+      Roles:
+        - !Ref CoreAmiBuilderRole
+
+  GitHubCoreAmiBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: archon-datahub-core-ami-build-staging
+      Description: >-
+        Short-lived GitHub OIDC role for the protected DataHub Core AMI build.
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ExactProtectedCoreAmiWorkflow
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:${GitHubEnvironment}
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:environment: !Ref GitHubEnvironment
+                token.actions.githubusercontent.com:ref: !Sub refs/heads/${GitHubBranch}
+                token.actions.githubusercontent.com:workflow_ref: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}/.github/workflows/datahub-core-ami.yml@refs/heads/${GitHubBranch}
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: aws-foundation
+        - Key: archon:Purpose
+          Value: datahub-core-ami-build
+      Policies:
+        - PolicyName: archon-datahub-core-ami-build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: VerifyCaller
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: ReadEuWestOneEc2BuildState
+                Effect: Allow
+                Action:
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeImageAttribute
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeRegions
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSnapshots
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeTags
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeVpcs
+                  - ec2:GetPasswordData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:Region: eu-west-1
+              - Sid: ReadExactStableBuilderIdentity
+                Effect: Allow
+                Action:
+                  - iam:GetInstanceProfile
+                  - iam:GetRole
+                  - iam:ListInstanceProfileTags
+                  - iam:ListRoleTags
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/archon-datahub-core-ami-builder-staging
+                  - !GetAtt CoreAmiBuilderRole.Arn
+              - Sid: ReadExactAmazonLinux2023Parameter
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:ssm:eu-west-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+              - Sid: CreateTaggedCoreAmiResources
+                Effect: Allow
+                Action:
+                  - ec2:CreateImage
+                  - ec2:CreateInternetGateway
+                  - ec2:CreateKeyPair
+                  - ec2:CreateRouteTable
+                  - ec2:CreateSecurityGroup
+                  - ec2:CreateSnapshot
+                  - ec2:CreateSubnet
+                  - ec2:CreateVolume
+                  - ec2:CreateVpc
+                  - ec2:RegisterImage
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:key-pair/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:route-table/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:snapshot/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:subnet/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:volume/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1::image/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: archon-datahub
+                    aws:RequestTag/Environment: staging
+                    aws:RequestTag/ManagedBy: github-actions
+                    aws:RequestTag/archon:Purpose: datahub-core-ami
+                    ec2:Region: eu-west-1
+                  StringLike:
+                    aws:RequestTag/archon:BuildRun: "[1-9]*"
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Application
+                      - Environment
+                      - ArchonBuildRun
+                      - ArchonCapabilityDigest
+                      - ArchonCompanionSourceSha
+                      - ArchonDataHubCore
+                      - ArchonFourComponents
+                      - ArchonGeneration
+                      - ArchonImageManifestDigest
+                      - ArchonReleaseSha
+                      - ManagedBy
+                      - archon:BuildRun
+                      - archon:Purpose
+              - Sid: TagOnlyDuringOwnedCreation
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:key-pair/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:route-table/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:snapshot/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:subnet/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:volume/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1::image/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: archon-datahub
+                    aws:RequestTag/Environment: staging
+                    aws:RequestTag/ManagedBy: github-actions
+                    aws:RequestTag/archon:Purpose: datahub-core-ami
+                    ec2:Region: eu-west-1
+                  StringLike:
+                    aws:RequestTag/archon:BuildRun: "[1-9]*"
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Application
+                      - Environment
+                      - ArchonBuildRun
+                      - ArchonCapabilityDigest
+                      - ArchonCompanionSourceSha
+                      - ArchonDataHubCore
+                      - ArchonFourComponents
+                      - ArchonGeneration
+                      - ArchonImageManifestDigest
+                      - ArchonReleaseSha
+                      - ManagedBy
+                      - archon:BuildRun
+                      - archon:Purpose
+              - Sid: RunOnlyAmazonLinux2023Family
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1::image/ami-*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:137112412989:snapshot/*
+                Condition:
+                  StringEquals:
+                    ec2:Owner: "137112412989"
+                    ec2:Region: eu-west-1
+              - Sid: RunOnlyInsideOwnedBoundary
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:key-pair/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:subnet/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: archon-datahub
+                    aws:ResourceTag/Environment: staging
+                    aws:ResourceTag/ManagedBy: github-actions
+                    aws:ResourceTag/archon:Purpose: datahub-core-ami
+                    ec2:Region: eu-west-1
+                  StringLike:
+                    aws:ResourceTag/archon:BuildRun: "[1-9]*"
+              - Sid: RunOnlyTaggedBuilderCompute
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:volume/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Application: archon-datahub
+                    aws:RequestTag/Environment: staging
+                    aws:RequestTag/ManagedBy: github-actions
+                    aws:RequestTag/archon:Purpose: datahub-core-ami
+                    ec2:AssociatePublicIpAddress: "true"
+                    ec2:InstanceProfile: !Sub >-
+                      arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/archon-datahub-core-ami-builder-staging
+                    ec2:InstanceType: t3a.xlarge
+                    ec2:MetadataHttpEndpoint: enabled
+                    ec2:MetadataHttpTokens: required
+                    ec2:Region: eu-west-1
+                  StringLike:
+                    aws:RequestTag/archon:BuildRun: "[1-9]*"
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Application
+                      - Environment
+                      - ArchonBuildRun
+                      - ManagedBy
+                      - archon:BuildRun
+                      - archon:Purpose
+              - Sid: MutateOnlyOwnedCoreAmiResources
+                Effect: Allow
+                Action:
+                  - ec2:AssociateRouteTable
+                  - ec2:AttachInternetGateway
+                  - ec2:AttachVolume
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:CreateRoute
+                  - ec2:DeleteInternetGateway
+                  - ec2:DeleteKeyPair
+                  - ec2:DeleteRoute
+                  - ec2:DeleteRouteTable
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DeleteSnapshot
+                  - ec2:DeleteSubnet
+                  - ec2:DeleteVolume
+                  - ec2:DeleteVpc
+                  - ec2:DeregisterImage
+                  - ec2:DetachInternetGateway
+                  - ec2:DetachVolume
+                  - ec2:DisassociateRouteTable
+                  - ec2:ModifyImageAttribute
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:ModifySnapshotAttribute
+                  - ec2:ModifyVpcAttribute
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:StopInstances
+                  - ec2:TerminateInstances
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:internet-gateway/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:key-pair/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:route-table/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:snapshot/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:subnet/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:volume/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:vpc/*
+                  - !Sub arn:${AWS::Partition}:ec2:eu-west-1::image/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Application: archon-datahub
+                    aws:ResourceTag/Environment: staging
+                    aws:ResourceTag/ManagedBy: github-actions
+                    aws:ResourceTag/archon:Purpose: datahub-core-ami
+                    ec2:Region: eu-west-1
+                  StringLike:
+                    aws:ResourceTag/archon:BuildRun: "[1-9]*"
+              - Sid: ObserveOwnPackerRequestTags
+                Effect: Allow
+                Action: cloudtrail:LookupEvents
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-1
+              - Sid: StartSessionOnlyOnOwnedBuilder
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Application: archon-datahub
+                    ssm:resourceTag/Environment: staging
+                    ssm:resourceTag/ManagedBy: github-actions
+                    ssm:resourceTag/archon:Purpose: datahub-core-ami
+                  StringLike:
+                    ssm:resourceTag/archon:BuildRun: "[1-9]*"
+              - Sid: UseOnlyAwsStartSshSession
+                Effect: Allow
+                Action: ssm:StartSession
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:ssm:eu-west-1::document/AWS-StartSSHSession
+              - Sid: ObserveOnlyEuWestOneSessions
+                Effect: Allow
+                Action:
+                  - ssm:DescribeSessions
+                  - ssm:GetConnectionStatus
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-1
+              - Sid: TerminateOnlyOwnSessions
+                Effect: Allow
+                Action: ssm:TerminateSession
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:ssm:eu-west-1:${AWS::AccountId}:session/${!aws:userid}-*
+              - Sid: PassOnlyStableBuilderRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CoreAmiBuilderRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+                  ArnLike:
+                    iam:AssociatedResourceArn: !Sub >-
+                      arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:instance/*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: aws-foundation
+        - Key: archon:Purpose
+          Value: datahub-core-ami-build
+
+Outputs:
+  GitHubCoreAmiBuildRoleArn:
+    Value: !GetAtt GitHubCoreAmiBuildRole.Arn
+  CoreAmiBuilderRoleArn:
+    Value: !GetAtt CoreAmiBuilderRole.Arn
+  CoreAmiBuilderInstanceProfileName:
+    Value: !Ref CoreAmiBuilderInstanceProfile
+  CoreAmiBuilderInstanceProfileArn:
+    Value: !GetAtt CoreAmiBuilderInstanceProfile.Arn

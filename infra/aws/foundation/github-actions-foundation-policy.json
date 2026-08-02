@@ -410,6 +410,99 @@
         "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-staging",
         "arn:aws:iam::${aws:PrincipalAccount}:policy/archon-datahub-runtime-boundary-production"
       ]
+    },
+    {
+      "Sid": "ReconcileExactCoreAmiFoundationStack",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateChangeSet",
+        "cloudformation:CreateStack",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:DetectStackDrift",
+        "cloudformation:DetectStackResourceDrift",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResource",
+        "cloudformation:DescribeStackResourceDrifts",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:DescribeStacks",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:GetTemplate",
+        "cloudformation:ListStackResources",
+        "cloudformation:UpdateStack",
+        "cloudformation:UpdateTerminationProtection"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-DataHub-Core-AMI-Builder-Foundation/*",
+        "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:changeSet/awscli-cloudformation-package-*/*"
+      ]
+    },
+    {
+      "Sid": "ReconcileExactCoreAmiFoundationRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": [
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-build-staging",
+        "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-builder-staging"
+      ]
+    },
+    {
+      "Sid": "ReconcileExactCoreAmiBuilderProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AddRoleToInstanceProfile",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfileTags",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:instance-profile/archon-datahub-core-ami-builder-staging"
+    },
+    {
+      "Sid": "AttachExactCoreAmiBuilderSsmPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-builder-staging",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        }
+      }
+    },
+    {
+      "Sid": "PassExactCoreAmiBuilderRoleForProfile",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-builder-staging",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        },
+        "ArnLike": {
+          "iam:AssociatedResourceArn": "arn:aws:ec2:*:${aws:PrincipalAccount}:instance/*"
+        }
+      }
     }
   ]
 }

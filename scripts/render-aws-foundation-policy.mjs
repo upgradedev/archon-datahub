@@ -99,7 +99,12 @@ const statementGroups = {
     "ReconcileExactFoundationStacks",
     "InspectFoundationTemplates",
     "InspectExistingApplicationStackRoles",
-    "ConfigureSharedApiGatewayLogging"
+    "ConfigureSharedApiGatewayLogging",
+    "ReconcileExactCoreAmiFoundationStack",
+    "ReconcileExactCoreAmiFoundationRoles",
+    "ReconcileExactCoreAmiBuilderProfile",
+    "AttachExactCoreAmiBuilderSsmPolicy",
+    "PassExactCoreAmiBuilderRoleForProfile"
   ]),
   assets: new Set([
     "ReadExactBootstrapBucketsForDrift",

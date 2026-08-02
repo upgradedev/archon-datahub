@@ -191,6 +191,10 @@ jobs:
           for path in \
             contracts/aws-foundation-v1.json \
             contracts/aws-foundation-policy-migration-v1.json \
+            contracts/aws-foundation-core-ami-policy-migration-v1.json \
+            .github/workflows/aws-foundation-core-ami-policy-migration.yml \
+            .github/workflows/aws-foundation-core-ami-policy-migration-driver.yml \
+            .github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml \
             infra/aws/package.json \
             infra/aws/package-lock.json \
             infra/aws/foundation/api-gateway-account.yml \
@@ -199,6 +203,8 @@ jobs:
             infra/aws/foundation/github-actions-foundation-policy.json \
             infra/aws/foundation/github-actions-foundation-role.yml \
             infra/aws/foundation/governed-canary-roles.yml \
+            infra/aws/foundation/datahub-core-ami-builder.yml \
+            infra/aws/packer/datahub-core-ami-builder-policy-contract.json \
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/aws-cloudformation-drift.sh \
             scripts/patch-cdk-brace-expansion.sh \
@@ -207,6 +213,11 @@ jobs:
             scripts/render-inline-cloudformation-template.sh \
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/reconcile-datahub-core-ami-foundation.sh \
+            scripts/aws-foundation-core-ami-policy-migration-common.sh \
+            scripts/aws-foundation-core-ami-policy-migration-authorization.sh \
+            scripts/aws-foundation-core-ami-policy-migration-state.sh \
+            scripts/run-aws-foundation-core-ami-policy-migration.sh \
             scripts/sanitize-cloudformation-failure.mjs \
             scripts/render-aws-foundation-policy.mjs \
             scripts/validate-aws-foundation-policy.jq \
@@ -296,6 +307,144 @@ jobs:
                 name: "mikefarah/yq",
                 version: "v4.47.2"
               }
+            } and
+            .aws.coreAmiFoundation.stackName ==
+              "Archon-DataHub-Core-AMI-Builder-Foundation" and
+            .aws.coreAmiFoundation.template ==
+              "infra/aws/foundation/datahub-core-ami-builder.yml" and
+            .aws.coreAmiFoundation.region == "eu-west-1" and
+            .aws.coreAmiFoundation.terminationProtection == true and
+            .aws.coreAmiFoundation.idleAwsCost == "zero" and
+            .aws.coreAmiFoundation.reconciler ==
+              "scripts/reconcile-datahub-core-ami-foundation.sh" and
+            .aws.coreAmiFoundation.evidenceSchemaVersion ==
+              "archon.aws-core-ami-foundation-evidence/v1" and
+            .aws.coreAmiFoundation.policyMigration.contract ==
+              "contracts/aws-foundation-core-ami-policy-migration-v1.json" and
+            .aws.coreAmiFoundation.policyMigration.workflow ==
+              ".github/workflows/aws-foundation-core-ami-policy-migration.yml" and
+            .aws.coreAmiFoundation.policyMigration.policyName ==
+              "archon-aws-foundation-control" and
+            .aws.coreAmiFoundation.policyMigration.baselineDefaultVersion ==
+              "v2" and
+            .aws.coreAmiFoundation.policyMigration.targetVersion == "v3" and
+            .aws.coreAmiFoundation.policyMigration.deltaSids == [
+              "ReconcileExactCoreAmiFoundationStack",
+              "ReconcileExactCoreAmiFoundationRoles",
+              "ReconcileExactCoreAmiBuilderProfile",
+              "AttachExactCoreAmiBuilderSsmPolicy",
+              "PassExactCoreAmiBuilderRoleForProfile"
+            ] and
+            .aws.coreAmiFoundation.githubBuildRole.roleName ==
+              "archon-datahub-core-ami-build-staging" and
+            .aws.coreAmiFoundation.githubBuildRole.variable ==
+              "AWS_CORE_AMI_BUILD_ROLE_ARN" and
+            .aws.coreAmiFoundation.githubBuildRole.environment == "staging" and
+            .aws.coreAmiFoundation.githubBuildRole.maxSessionDurationSeconds ==
+              7200 and
+            .aws.coreAmiFoundation.githubBuildRole.workflowRequestedSessionSeconds ==
+              7200 and
+            .aws.coreAmiFoundation.githubBuildRole.policyContract ==
+              "infra/aws/packer/datahub-core-ami-builder-policy-contract.json" and
+            .aws.coreAmiFoundation.githubBuildRole.packerAmazonPluginVersion ==
+              "1.8.0" and
+            .aws.coreAmiFoundation.githubBuildRole.inlinePolicyCharacterLimit ==
+              10240 and
+            .aws.coreAmiFoundation.githubBuildRole.inlinePolicySizeValidation ==
+              "compact-live-policy-document-before-evidence" and
+            .aws.coreAmiFoundation.githubBuildRole.requestTagObservation == {
+              accountBinding:
+                "validate-active-caller-then-omit-before-digest",
+              action: "cloudtrail:LookupEvents",
+              buildIdPattern: "^[1-9][0-9]{0,19}$",
+              evidenceSchemaVersion:
+                "archon.packer-request-tag-proof/v1",
+              events: [
+                "CreateKeyPair",
+                "CreateSecurityGroup",
+                "RunInstances"
+              ],
+              principalBinding:
+                "exact-oidc-role-session-and-build-window",
+              region: "eu-west-1",
+              requiredTags: {
+                Application: "archon-datahub",
+                Environment: "staging",
+                ManagedBy: "github-actions",
+                "archon:BuildRun": "exact-buildId",
+                "archon:Purpose": "datahub-core-ami"
+              },
+              resource: "*",
+              resourceScopeReason:
+                "aws-action-does-not-support-resource-level-permissions",
+              retainedEvidence:
+                "sanitized-counts-and-canonical-digests-only",
+              sanitizedProjection: [
+                "eventName",
+                "eventTime",
+                "awsRegion",
+                "roleSessionName",
+                "requestTagSpecifications"
+              ]
+            } and
+            .aws.coreAmiFoundation.githubBuildRole.inlinePolicyName ==
+              "archon-datahub-core-ami-build" and
+            .aws.coreAmiFoundation.githubBuildRole.tags == {
+              Application: "archon-datahub",
+              Environment: "staging",
+              ManagedBy: "aws-foundation",
+              "archon:Purpose": "datahub-core-ami-build"
+            } and
+            .aws.coreAmiFoundation.githubBuildRole.trust == {
+              audience: "sts.amazonaws.com",
+              environment: "staging",
+              ref: "refs/heads/master",
+              repository: "upgradedev/archon-datahub",
+              subject:
+                "repo:upgradedev/archon-datahub:environment:staging",
+              workflowRef:
+                "upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master"
+            } and
+            .aws.coreAmiFoundation.ec2Builder.roleName ==
+              "archon-datahub-core-ami-builder-staging" and
+            .aws.coreAmiFoundation.ec2Builder.instanceProfileName ==
+              "archon-datahub-core-ami-builder-staging" and
+            .aws.coreAmiFoundation.ec2Builder.instanceProfileVariable ==
+              "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE" and
+            .aws.coreAmiFoundation.ec2Builder.maxSessionDurationSeconds ==
+              3600 and
+            .aws.coreAmiFoundation.ec2Builder.attachedManagedPolicies == [
+              "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+            ] and
+            .aws.coreAmiFoundation.ec2Builder.inlinePolicyCount == 0 and
+            .aws.coreAmiFoundation.ec2Builder.tags == {
+              Application: "archon-datahub",
+              Environment: "staging",
+              ManagedBy: "aws-foundation",
+              "archon:Purpose": "datahub-core-ami-builder"
+            } and
+            .aws.coreAmiFoundation.ec2Builder.profileTagging == {
+              cloudFormationNative: false,
+              extraOrMismatchedTags: "fail-closed",
+              method:
+                "foundation-reconciler-exact-iam-tag-instance-profile"
+            } and
+            .aws.coreAmiFoundation.baseImage.ownerAccount == "137112412989" and
+            .aws.coreAmiFoundation.baseImage.ssmParameter ==
+              "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64" and
+            .aws.coreAmiFoundation.ephemeralBoundary.region == "eu-west-1" and
+            .aws.coreAmiFoundation.ephemeralBoundary.publicIngressAllowed ==
+              false and
+            .aws.coreAmiFoundation.ephemeralBoundary.workflowIamMutationAllowed ==
+              false and
+            .aws.coreAmiFoundation.githubEnvironment == {
+              name: "staging",
+              requiredVariables: [
+                "AWS_ACCOUNT_ID",
+                "AWS_REGION",
+                "AWS_CORE_AMI_BUILD_ROLE_ARN",
+                "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE"
+              ]
             } and
             .aws.sharedApiGatewayLogging == {
               external: {
@@ -553,6 +702,10 @@ jobs:
           jq -e \
             --slurpfile migration \
               contracts/aws-foundation-policy-migration-v1.json \
+            contracts/aws-foundation-core-ami-policy-migration-v1.json \
+            .github/workflows/aws-foundation-core-ami-policy-migration.yml \
+            .github/workflows/aws-foundation-core-ami-policy-migration-driver.yml \
+            .github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml \
             --from-file scripts/validate-aws-foundation-policy.jq \
             infra/aws/foundation/github-actions-foundation-policy.json \
             >/dev/null
@@ -939,6 +1092,14 @@ jobs:
           PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID: ${{ vars.PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID }}
         run: bash scripts/reconcile-aws-foundation.sh
 
+      - name: Reconcile, drift-check, and seal Core AMI builder identities
+        id: core_ami_foundation
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/reconcile-datahub-core-ami-foundation.sh
+
       - name: Revalidate master before credential clearing
         env:
           CONTROL_PLANE_SHA: ${{ github.sha }}
@@ -1150,6 +1311,96 @@ jobs:
           compression-level: 0
           include-hidden-files: false
 
+      - name: Reverify sanitized Core AMI foundation evidence
+        env:
+          EVIDENCE_DIR: ${{ steps.core_ami_foundation.outputs.path }}
+          EXPECTED_EVIDENCE_SHA: ${{ steps.core_ami_foundation.outputs.evidence_sha }}
+        run: |
+          set -euo pipefail
+          for variable in \
+            AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+            AWS_SECURITY_TOKEN; do
+            test -z "${!variable:-}"
+          done
+          test -d "${EVIDENCE_DIR}"
+          test ! -L "${EVIDENCE_DIR}"
+          expected="$({
+            printf '%s\n' \
+              SHA256SUMS attestation-predicate.json \
+              core-ami-foundation.json
+          } | sort)"
+          actual="$(
+            find "${EVIDENCE_DIR}" -mindepth 1 -maxdepth 1 -type f \
+              -printf '%f\n' | sort
+          )"
+          test "${actual}" = "${expected}"
+          for file in \
+            SHA256SUMS attestation-predicate.json \
+            core-ami-foundation.json; do
+            test -f "${EVIDENCE_DIR}/${file}"
+            test ! -L "${EVIDENCE_DIR}/${file}"
+            test "$(stat -c '%s' "${EVIDENCE_DIR}/${file}")" -le 16384
+          done
+          (
+            cd "${EVIDENCE_DIR}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            sha256sum "${EVIDENCE_DIR}/core-ami-foundation.json" |
+              awk '{print $1}'
+          )" = "${EXPECTED_EVIDENCE_SHA}"
+          jq -e '
+            .schemaVersion ==
+              "archon.aws-core-ami-foundation-evidence/v1" and
+            .source.repository == "upgradedev/archon-datahub" and
+            .source.ref == "refs/heads/master" and
+            .stack.name == "Archon-DataHub-Core-AMI-Builder-Foundation" and
+            .stack.region == "eu-west-1" and
+            .stack.terminationProtection == true and
+            .stack.drift.status == "IN_SYNC" and
+            .stack.drift.coverage ==
+              "cloudformation-supported-resources" and
+            .stack.drift.globalTimeoutSeconds == 900 and
+            .identities.githubBuildRole.maxSessionDurationSeconds == 7200 and
+            .identities.githubBuildRole.requestTagObservation == {
+              action: "cloudtrail:LookupEvents",
+              region: "eu-west-1",
+              requiredTags: {
+                Application: "archon-datahub",
+                Environment: "staging",
+                ManagedBy: "github-actions",
+                "archon:BuildRun": "exact-build-id",
+                "archon:Purpose": "datahub-core-ami"
+              },
+              resourceScope: "wildcard-required-by-aws-action"
+            } and
+            .identities.ec2Builder.managedPolicy ==
+              "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" and
+            .githubVariables == {
+              buildRole: "AWS_CORE_AMI_BUILD_ROLE_ARN",
+              instanceProfile: "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE"
+            } and
+            .idleAwsCost == "zero" and
+            .validation == "passed"
+          ' "${EVIDENCE_DIR}/core-ami-foundation.json" >/dev/null
+
+      - name: Attest exact sanitized Core AMI foundation evidence
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.core_ami_foundation.outputs.subject }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-core-ami-foundation/v1
+          predicate-path: ${{ steps.core_ami_foundation.outputs.predicate }}
+
+      - name: Retain sanitized Core AMI foundation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aws-core-ami-foundation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.core_ami_foundation.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: false
+
       - name: Reverify sanitized foundation evidence
         env:
           CONTROL_PLANE_SHA: ${{ github.sha }}
@@ -1210,6 +1461,9 @@ jobs:
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
           SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}
           DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}
+          CORE_AMI_FOUNDATION_SHA: ${{ steps.core_ami_foundation.outputs.evidence_sha }}
+          CORE_AMI_BUILD_ROLE_ARN: ${{ steps.core_ami_foundation.outputs.build_role_arn }}
+          CORE_AMI_BUILDER_INSTANCE_PROFILE: ${{ steps.core_ami_foundation.outputs.instance_profile }}
         run: |
           set -euo pipefail
           {
@@ -1242,5 +1496,10 @@ jobs:
             echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
             echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"
-            echo "- Foundation evidence digest: \`${FOUNDATION_SHA}\`"
+            echo "- Core AMI builder: stable zero-idle-cost role/profile, independent of runtime KMS/Bedrock permissions"
+            echo "- Core AMI build OIDC role max/session request: 7200 seconds"
+            echo "- Set staging AWS_CORE_AMI_BUILD_ROLE_ARN to ${CORE_AMI_BUILD_ROLE_ARN}"
+            echo "- Set staging AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE to ${CORE_AMI_BUILDER_INSTANCE_PROFILE}"
+            echo "- Core AMI foundation evidence digest: ${CORE_AMI_FOUNDATION_SHA}"
+            echo "- Foundation evidence digest: ${FOUNDATION_SHA}"
           } >>"${GITHUB_STEP_SUMMARY}"

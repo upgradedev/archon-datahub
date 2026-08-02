@@ -1,0 +1,327 @@
+{
+  "schemaVersion": "archon.datahub-core-ami-builder-iam/v1",
+  "region": "eu-west-1",
+  "purpose": "datahub-core-ami",
+  "requiredTags": {
+    "Application": "archon-datahub",
+    "Environment": "staging",
+    "ManagedBy": "github-actions",
+    "archon:Purpose": "datahub-core-ami",
+    "archon:BuildRun": "^[1-9][0-9]{0,19}$"
+  },
+  "namePatterns": {
+    "githubOidcBuildRole": "^archon-datahub-core-ami-build-staging$",
+    "builderRole": "^archon-datahub-core-ami-builder-staging$",
+    "builderInstanceProfile": "^archon-datahub-core-ami-builder-staging$",
+    "securityGroup": "^archon-datahub-core-ami-[1-9][0-9]{0,19}$",
+    "ami": "^archon-datahub-core-[A-Za-z0-9][A-Za-z0-9._-]{0,127}-[0-9]{14}$",
+    "keyPair": "^archon-datahub-core-ami-[1-9][0-9]{0,19}$"
+  },
+  "resourcePatterns": {
+    "githubOidcBuildRole": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-build-staging",
+    "builderRole": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-core-ami-builder-staging",
+    "builderInstanceProfile": "arn:aws:iam::${aws:PrincipalAccount}:instance-profile/archon-datahub-core-ami-builder-staging",
+    "ssmManagedPolicy": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "ssmSshDocument": "arn:aws:ssm:eu-west-1::document/AWS-StartSSHSession",
+    "al2023Parameter": "arn:aws:ssm:eu-west-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+    "cloudTrailLookup": "*",
+    "amazonLinux2023OwnerAccount": "137112412989"
+  },
+  "conditions": {
+    "create": {
+      "StringEquals": {
+        "aws:RequestTag/Application": "archon-datahub",
+        "aws:RequestTag/Environment": "staging",
+        "aws:RequestTag/ManagedBy": "github-actions",
+        "aws:RequestTag/archon:Purpose": "datahub-core-ami",
+        "ec2:Region": "eu-west-1"
+      },
+      "StringLike": {
+        "aws:RequestTag/archon:BuildRun": "[1-9]*"
+      },
+      "ForAllValues:StringEquals": {
+        "aws:TagKeys": [
+          "Application",
+          "Environment",
+          "ArchonBuildRun",
+          "ArchonCapabilityDigest",
+          "ArchonCompanionSourceSha",
+          "ArchonDataHubCore",
+          "ArchonFourComponents",
+          "ArchonGeneration",
+          "ArchonImageManifestDigest",
+          "ArchonReleaseSha",
+          "ManagedBy",
+          "archon:BuildRun",
+          "archon:Purpose"
+        ]
+      }
+    },
+    "ownedResource": {
+      "StringEquals": {
+        "aws:ResourceTag/Application": "archon-datahub",
+        "aws:ResourceTag/Environment": "staging",
+        "aws:ResourceTag/ManagedBy": "github-actions",
+        "aws:ResourceTag/archon:Purpose": "datahub-core-ami",
+        "ec2:Region": "eu-west-1"
+      },
+      "StringLike": {
+        "aws:ResourceTag/archon:BuildRun": "[1-9]*"
+      }
+    },
+    "passRole": {
+      "StringEquals": {
+        "iam:PassedToService": "ec2.amazonaws.com"
+      },
+      "ArnLike": {
+        "iam:AssociatedResourceArn": "arn:aws:ec2:eu-west-1:${aws:PrincipalAccount}:instance/*"
+      }
+    },
+    "requestTagObservation": {
+      "StringEquals": {
+        "aws:RequestedRegion": "eu-west-1"
+      }
+    }
+  },
+  "actionGroups": {
+    "read": [
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeImageAttribute",
+      "ec2:DescribeImages",
+      "ec2:DescribeInstances",
+      "ec2:DescribeInstanceStatus",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeRegions",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeSnapshots",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeTags",
+      "ec2:DescribeVolumes",
+      "ec2:DescribeVpcs",
+      "ec2:GetPasswordData",
+      "iam:GetInstanceProfile",
+      "iam:GetRole",
+      "iam:ListInstanceProfileTags",
+      "iam:ListRoleTags",
+      "ssm:DescribeSessions",
+      "ssm:GetConnectionStatus",
+      "ssm:GetParameter",
+      "sts:GetCallerIdentity"
+    ],
+    "createTaggedEc2": [
+      "ec2:CreateImage",
+      "ec2:CreateInternetGateway",
+      "ec2:CreateKeyPair",
+      "ec2:CreateRouteTable",
+      "ec2:CreateSecurityGroup",
+      "ec2:CreateSnapshot",
+      "ec2:CreateSubnet",
+      "ec2:CreateTags",
+      "ec2:CreateVolume",
+      "ec2:CreateVpc",
+      "ec2:RegisterImage",
+      "ec2:RunInstances"
+    ],
+    "mutateOwnedEc2": [
+      "ec2:AssociateRouteTable",
+      "ec2:AttachInternetGateway",
+      "ec2:AttachVolume",
+      "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:CreateRoute",
+      "ec2:DeleteInternetGateway",
+      "ec2:DeleteKeyPair",
+      "ec2:DeleteRoute",
+      "ec2:DeleteRouteTable",
+      "ec2:DeleteSecurityGroup",
+      "ec2:DeleteSnapshot",
+      "ec2:DeleteSubnet",
+      "ec2:DeleteVolume",
+      "ec2:DeleteVpc",
+      "ec2:DeregisterImage",
+      "ec2:DetachInternetGateway",
+      "ec2:DetachVolume",
+      "ec2:DisassociateRouteTable",
+      "ec2:ModifyImageAttribute",
+      "ec2:ModifyInstanceAttribute",
+      "ec2:ModifySnapshotAttribute",
+      "ec2:ModifyVpcAttribute",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:StopInstances",
+      "ec2:TerminateInstances"
+    ],
+    "sessionManager": [
+      "ssm:StartSession",
+      "ssm:TerminateSession"
+    ],
+    "passStableBuilderRole": [
+      "iam:PassRole"
+    ],
+    "observeRequestTags": [
+      "cloudtrail:LookupEvents"
+    ]
+  },
+  "deniedByContract": [
+    "ec2:AuthorizeSecurityGroupIngress",
+    "iam:AddRoleToInstanceProfile",
+    "iam:AttachRolePolicy",
+    "iam:CreateAccessKey",
+    "iam:CreateInstanceProfile",
+    "iam:CreateRole",
+    "iam:DeleteInstanceProfile",
+    "iam:DeleteRole",
+    "iam:DetachRolePolicy",
+    "iam:PutRolePermissionsBoundary",
+    "iam:PutRolePolicy",
+    "iam:RemoveRoleFromInstanceProfile",
+    "iam:TagInstanceProfile",
+    "iam:TagRole",
+    "iam:UpdateAssumeRolePolicy",
+    "ssm:SendCommand"
+  ],
+  "cleanup": {
+    "success": {
+      "retain": [
+        "one tagged AMI",
+        "only snapshots referenced by that AMI"
+      ],
+      "delete": [
+        "builder instances",
+        "temporary key pairs",
+        "temporary volumes",
+        "security group",
+        "route and route table",
+        "subnet",
+        "internet gateway",
+        "VPC"
+      ]
+    },
+    "failure": {
+      "retain": [],
+      "delete": [
+        "all success cleanup resources",
+        "run-tagged partial AMIs",
+        "snapshots referenced by run-tagged partial AMIs"
+      ]
+    },
+    "selection": "Cleanup may select only exact IDs emitted by the current workflow and resources carrying both required tags; broad name-only deletion is forbidden.",
+    "stableIdentity": "retained foundation-managed role/profile; workflow has no IAM mutation permission"
+  },
+  "oidcTrust": {
+    "provider": "token.actions.githubusercontent.com",
+    "audience": "sts.amazonaws.com",
+    "subject": "repo:upgradedev/archon-datahub:environment:staging",
+    "workflow": ".github/workflows/datahub-core-ami.yml",
+    "repository": "upgradedev/archon-datahub",
+    "environment": "staging",
+    "ref": "refs/heads/master",
+    "workflowRef": "upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master",
+    "maxSessionDurationSeconds": 7200
+  },
+  "stableBuilderIdentity": {
+    "roleName": "archon-datahub-core-ami-builder-staging",
+    "instanceProfileName": "archon-datahub-core-ami-builder-staging",
+    "managedPolicy": "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "requiredTags": {
+      "Application": "archon-datahub",
+      "ManagedBy": "aws-foundation",
+      "Environment": "staging",
+      "archon:Purpose": "datahub-core-ami-builder"
+    },
+    "createdByWorkflow": false,
+    "deletedByWorkflow": false,
+    "maxSessionDurationSeconds": 3600,
+    "inlinePolicyCount": 0,
+    "idleAwsCost": "zero"
+  },
+  "packerAmazonPluginVersion": "1.8.0",
+  "requestTagObservation": {
+    "action": "cloudtrail:LookupEvents",
+    "resource": "*",
+    "resourceScopeReason": "aws-action-does-not-support-resource-level-permissions",
+    "region": "eu-west-1",
+    "events": [
+      "CreateKeyPair",
+      "CreateSecurityGroup",
+      "RunInstances"
+    ],
+    "buildIdPattern": "^[1-9][0-9]{0,19}$",
+    "principalBinding": "exact-oidc-role-session-and-build-window",
+    "evidenceSchemaVersion": "archon.packer-request-tag-proof/v1",
+    "requiredTags": {
+      "Application": "archon-datahub",
+      "Environment": "staging",
+      "ManagedBy": "github-actions",
+      "archon:Purpose": "datahub-core-ami",
+      "archon:BuildRun": "exact-buildId"
+    },
+    "sanitizedProjection": [
+      "eventName",
+      "eventTime",
+      "awsRegion",
+      "roleSessionName",
+      "requestTagSpecifications"
+    ],
+    "accountBinding": "validate-active-caller-then-omit-before-digest",
+    "retainedEvidence": "sanitized-counts-and-canonical-digests-only",
+    "eventProducers": {
+      "CreateKeyPair": "workflow-boundary-tag-specifications",
+      "CreateSecurityGroup": "workflow-boundary-tag-specifications",
+      "RunInstances": "packer-amazon-plugin-1.8.0-run_tags"
+    }
+  },
+  "inlinePolicy": {
+    "roleName": "archon-datahub-core-ami-build-staging",
+    "policyName": "archon-datahub-core-ami-build",
+    "managedBy": "CloudFormation",
+    "statementSids": [
+      "VerifyCaller",
+      "ReadEuWestOneEc2BuildState",
+      "ReadExactStableBuilderIdentity",
+      "ReadExactAmazonLinux2023Parameter",
+      "CreateTaggedCoreAmiResources",
+      "TagOnlyDuringOwnedCreation",
+      "RunOnlyAmazonLinux2023Family",
+      "RunOnlyInsideOwnedBoundary",
+      "RunOnlyTaggedBuilderCompute",
+      "MutateOnlyOwnedCoreAmiResources",
+      "ObserveOwnPackerRequestTags",
+      "StartSessionOnlyOnOwnedBuilder",
+      "UseOnlyAwsStartSshSession",
+      "ObserveOnlyEuWestOneSessions",
+      "TerminateOnlyOwnSessions",
+      "PassOnlyStableBuilderRole"
+    ],
+    "iamMutationActionsAllowed": false,
+    "cloudTrailWildcardResourceException": {
+      "sid": "ObserveOwnPackerRequestTags",
+      "action": "cloudtrail:LookupEvents",
+      "resource": "*",
+      "condition": {
+        "aws:RequestedRegion": "eu-west-1"
+      },
+      "reason": "LookupEvents does not support resource-level permissions"
+    },
+    "aggregateRoleInlinePolicyCharacterLimit": 10240,
+    "sizeValidation": "compact-live-policy-document-before-evidence"
+  },
+  "deployment": {
+    "foundationStack": "Archon-DataHub-Core-AMI-Builder-Foundation",
+    "template": "infra/aws/foundation/datahub-core-ami-builder.yml",
+    "reconciler": "scripts/reconcile-datahub-core-ami-foundation.sh",
+    "terminationProtection": true,
+    "controlPolicyMigrationContract": "contracts/aws-foundation-core-ami-policy-migration-v1.json",
+    "controlPolicyMigrationWorkflow": ".github/workflows/aws-foundation-core-ami-policy-migration.yml",
+    "buildWorkflow": ".github/workflows/datahub-core-ami.yml",
+    "buildRoleVariable": "AWS_CORE_AMI_BUILD_ROLE_ARN",
+    "builderProfileVariable": "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE",
+    "activationOrder": [
+      "merge exact signed master tree",
+      "migrate exact foundation control policy v2 to v3",
+      "reconcile and drift-check dedicated foundation stack",
+      "set protected staging variables from sealed foundation outputs",
+      "run DataHub Core AMI workflow"
+    ],
+    "workflowIamMutationAllowed": false
+  }
+}
