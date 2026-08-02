@@ -374,7 +374,7 @@ function authorizationHeaders(accessToken: string): {
   if (
     accessToken.length < 20 ||
     accessToken.length > 16_384 ||
-    /[\s\u0000-\u001F\u007F]/u.test(accessToken)
+    /[\u0000-\u0020\u007F]/u.test(accessToken)
   ) {
     throw new RuntimeApiError(
       "An authenticated judge or steward session is required.",

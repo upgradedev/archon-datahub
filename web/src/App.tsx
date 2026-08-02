@@ -1172,7 +1172,8 @@ export function App() {
     if (!scope || /[*?]/u.test(scope) || scope === "{}") {
       setRunError("Enter a narrow, non-wildcard dataset scope.");
       return;
-    }    if (!runtimeSession) {
+    }
+    if (!runtimeSession) {
       setRunError(
         "Launch a pinned DataHub runtime before running a live audit. The visible showcase remains read-only.",
       );
@@ -1214,7 +1215,8 @@ export function App() {
         getAccessToken(),
         nextController.signal,
         progress,
-      );      setAudit(result);
+      );
+      setAudit(result);
 
       setControlLoop(result.controlLoop);
       setSelectedId(

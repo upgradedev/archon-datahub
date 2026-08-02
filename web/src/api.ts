@@ -139,9 +139,9 @@ function narrowAuditQuery(value: string): string {
   if (
     query.length < 1 ||
     query.length > 256 ||
-    /[*?]/u.test(query) ||
+    /[\u0000-\u001F\u007F]/u.test(query)
     query === "{}" ||
-    /[\u0000-\u001f\u007f]/u.test(query)
+    /[\u0000-\u001F\u007F]/u.test(query)
   ) {
     throw new ApiError(
       "A narrow, non-wildcard dataset query is required.",
@@ -177,7 +177,7 @@ function isBoundedText(value: unknown, maximum: number): value is string {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -193,7 +193,7 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
 
 function isPublicOutputSafe(value: unknown): boolean {
   if (typeof value === "string") {
-    return !PUBLIC_CREDENTIAL_PATTERNS.some((pattern) => pattern.test(value));
+    !/[\u0000-\u001F\u007F]/u.test(value)
   }
   if (Array.isArray(value)) return value.every(isPublicOutputSafe);
   if (!isRecord(value)) return true;
@@ -210,17 +210,17 @@ function isPublicOutputSafe(value: unknown): boolean {
 function isSafeModelId(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    MODEL_ID_PATTERN.test(value) &&
+    !/[\u0000-\u001F\u007F]/u.test(value)
     !value.includes("://") &&
-    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
 function isSafeProviderResponseId(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    RESPONSE_ID_PATTERN.test(value) &&
-    !CREDENTIAL_SHAPED_IDENTIFIER.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -453,7 +453,7 @@ function parseAuditEnvelope(value: unknown): AuditEnvelope {
 function isInstant(value: unknown): value is string {
   return (
     isBoundedText(value, 128) &&
-    RFC3339_INSTANT.test(value) &&
+    !/[\u0000-\u001F\u007F]/u.test(value)
     Number.isFinite(Date.parse(value))
   );
 }
@@ -791,7 +791,7 @@ export async function submitApprovalDecision({
   if (
     accessToken.length < 20 ||
     accessToken.length > 16_384 ||
-    /[\s\u0000-\u001F\u007F]/.test(accessToken)
+    /[\u0000-\u0020\u007F]/u.test(accessToken)
   ) {
     throw new ApiError("A valid steward access token is required.", 401);
   }
