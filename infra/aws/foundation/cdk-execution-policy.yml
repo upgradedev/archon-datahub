@@ -216,7 +216,8 @@ Resources:
             Effect: Allow
             Action: sts:GetCallerIdentity
             Resource: "*"
-          - Effect: Deny
+          - Sid: DenyRuntimeIdentityAdministration
+            Effect: Deny
             Action:
               - account:*
               - iam:*

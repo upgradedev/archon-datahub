@@ -228,8 +228,11 @@ describe("ArchonJudgeStack", () => {
         ? statement.Action
         : [statement.Action];
 
-    const inventories = statements.filter((statement) =>
-      actions(statement).includes("dynamodb:ListStreams")
+    const inventories = statements.filter(
+      (statement) =>
+        actions(statement).includes("dynamodb:ListStreams") &&
+        typeof statement.Sid === "string" &&
+        statement.Sid.endsWith("StreamInventory")
     );
     expect(inventories).toHaveLength(4);
     for (const statement of inventories) {
