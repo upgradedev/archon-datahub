@@ -143,32 +143,42 @@ function validateSnapshot(snapshot: unknown): asserts snapshot is RuntimeProfile
       "runtime snapshot must be an object"
     );
   }
+  const record = snapshot as Record<string, unknown>;
   exactStringKeys(
-    snapshot,
+    record,
     ["capabilities", "checkedAt", "generation", "profileId", "status"],
     "INVALID_RUNTIME_SNAPSHOT",
     "runtime snapshot must use the exact allowlisted schema"
   );
-  if (!RUNTIME_PROFILE_IDS.includes(snapshot.profileId)) {
+  if (
+    typeof record.profileId !== "string" ||
+    !RUNTIME_PROFILE_IDS.includes(record.profileId as RuntimeProfileId)
+  ) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
       "runtime profile is not allowlisted"
     );
   }
-  if (!GENERATION.test(snapshot.generation)) {
+  if (
+    typeof record.generation !== "string" ||
+    !GENERATION.test(record.generation)
+  ) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
       "runtime generation is invalid"
     );
   }
-  if (!["ready", "starting", "unavailable"].includes(snapshot.status)) {
+  if (
+    typeof record.status !== "string" ||
+    !["ready", "starting", "unavailable"].includes(record.status)
+  ) {
     throw new RuntimeSelectionError(
       "INVALID_RUNTIME_SNAPSHOT",
       "runtime health status is invalid"
     );
   }
-  instant(snapshot.checkedAt, "checkedAt");
-  exactCapabilities(snapshot.capabilities);
+  instant(record.checkedAt, "checkedAt");
+  exactCapabilities(record.capabilities);
 }
 
 function canonicalCapabilities(
