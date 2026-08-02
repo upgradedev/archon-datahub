@@ -132,7 +132,7 @@ describe("Archon control plane", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    expect(await screen.findByDisplayValue("urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     expect(await screen.findByText("Live DataHub")).toBeInTheDocument();
@@ -205,7 +205,7 @@ describe("Archon control plane", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    expect(await screen.findByDisplayValue("urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     await screen.findByText("Live model call");
@@ -277,7 +277,7 @@ describe("Archon control plane", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
 
-    expect(await screen.findByDisplayValue("urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Canonical DataHub dataset URN")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run audit" }));
 
     const evidence = await screen.findByTestId("terminal-evidence");
