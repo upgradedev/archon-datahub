@@ -371,9 +371,11 @@ jobs:
             .schemaVersion == "archon.deployed-datahub-semantic-proof/v2" and
             .evidenceClass == "credentialed-live-cloud"
           ' "${semantic}" >/dev/null
-          echo "path=${raw}" >>"${GITHUB_OUTPUT}"
-          echo "digest=sha256:$(sha256sum "${raw}" | awk '{print $1}')" >>"${GITHUB_OUTPUT}"
-          echo "semantic_path=${semantic}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "path=${raw}"
+            echo "digest=sha256:$(sha256sum "${raw}" | awk '{print $1}')"
+            echo "semantic_path=${semantic}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Verify exact governed canary rollback attestation
         if: inputs.profile == 'cloud' && inputs.stage == 'production'
