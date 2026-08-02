@@ -2606,6 +2606,23 @@ async function status(auditId) {
 exports.handler = async (event) => {
   try {
     if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "startV2"
+    ) {
+      return await startV2(event.body, event.identity);
+    }
+    if (
+      exactKeys(event, ["operation", "requestId", "auditId"]) &&
+      event.operation === "statusV2"
+    ) {
+      return await statusV2(event.auditId);
+    }
+    if (
       exactKeys(event, ["operation", "requestId", "body"]) &&
       event.operation === "start"
     ) {
@@ -2619,6 +2636,9 @@ exports.handler = async (event) => {
     }
     return response(404, { error: "not_found" });
   } catch (error) {
+    if (error?.name === "ConditionalCheckFailedException") {
+      return response(409, { error: "runtime_session_conflict" });
+    }
     if (error instanceof RetiredAuditSchemaError) {
       return response(410, {
         error: "audit_schema_retired",
