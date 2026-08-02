@@ -266,7 +266,11 @@ jq --exit-status '
   } and
   .aws.governedCanaryRoles.roles.recovery == {
     environment: "governed-canary-recovery",
-    permissions: ["cloudformation:DescribeStacks"],
+    permissions: [
+      "cloudformation:DescribeStacks",
+      "secretsmanager:GetSecretValue",
+      "kms:Decrypt"
+    ],
     roleName: "archon-datahub-github-governed-canary-recovery",
     variable: "AWS_CANARY_RECOVERY_ROLE_ARN"
   } and
