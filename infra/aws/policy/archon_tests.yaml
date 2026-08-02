@@ -423,18 +423,28 @@
 - name: an all-traffic CloudWatch VPC flow log is accepted
   input:
     Resources:
-      CoreVpc:
+      CoreVpcA1B2C3D4:
         Type: AWS::EC2::VPC
         Properties:
           CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
       CoreFlow:
         Type: AWS::EC2::FlowLog
         Properties:
           DeliverLogsPermissionArn: test-role
-          LogGroupName: test-log-group
+          LogGroupName:
+            Ref: CoreVpcFlowLogGroupA1B2C3D4
           LogDestinationType: cloud-watch-logs
           MaxAggregationInterval: 600
-          ResourceId: core-vpc
+          ResourceId:
+            Ref: CoreVpcA1B2C3D4
           ResourceType: VPC
           TrafficType: ALL
   expectations:
@@ -444,20 +454,37 @@
 - name: a VPC without flow logs is rejected
   input:
     Resources:
-      CoreVpc:
+      CoreVpcA1B2C3D4:
         Type: AWS::EC2::VPC
         Properties:
           CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
   expectations:
     rules:
       every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
 - name: a legacy destination ARN without the exact log-group binding is rejected
   input:
     Resources:
-      CoreVpc:
+      CoreVpcA1B2C3D4:
         Type: AWS::EC2::VPC
         Properties:
           CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
       CoreFlow:
         Type: AWS::EC2::FlowLog
         Properties:
@@ -465,7 +492,8 @@
           LogDestination: test-log-group-arn
           LogDestinationType: cloud-watch-logs
           MaxAggregationInterval: 600
-          ResourceId: core-vpc
+          ResourceId:
+            Ref: CoreVpcA1B2C3D4
           ResourceType: VPC
           TrafficType: ALL
   expectations:
@@ -475,18 +503,149 @@
 - name: a one-minute CloudWatch flow-log aggregation interval is rejected
   input:
     Resources:
-      CoreVpc:
+      CoreVpcA1B2C3D4:
         Type: AWS::EC2::VPC
         Properties:
           CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogGroupName:
+            Ref: CoreVpcFlowLogGroupA1B2C3D4
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 60
+          ResourceId:
+            Ref: CoreVpcA1B2C3D4
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
+- name: a scalar VPC binding is rejected
+  input:
+    Resources:
+      CoreVpcA1B2C3D4:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogGroupName:
+            Ref: CoreVpcFlowLogGroupA1B2C3D4
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 600
+          ResourceId: core-vpc
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
+- name: a scalar external log-group binding is rejected
+  input:
+    Resources:
+      CoreVpcA1B2C3D4:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
       CoreFlow:
         Type: AWS::EC2::FlowLog
         Properties:
           DeliverLogsPermissionArn: test-role
           LogGroupName: test-log-group
           LogDestinationType: cloud-watch-logs
-          MaxAggregationInterval: 60
-          ResourceId: core-vpc
+          MaxAggregationInterval: 600
+          ResourceId:
+            Ref: CoreVpcA1B2C3D4
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
+- name: an unmanaged flow-log group is rejected
+  input:
+    Resources:
+      CoreVpcA1B2C3D4:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          RetentionInDays: 365
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogGroupName:
+            Ref: CoreVpcFlowLogGroupA1B2C3D4
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 600
+          ResourceId:
+            Ref: CoreVpcA1B2C3D4
+          ResourceType: VPC
+          TrafficType: ALL
+  expectations:
+    rules:
+      every_vpc_emits_all_traffic_to_cloudwatch: FAIL
+
+- name: a wrong-prefix intrinsic VPC binding is rejected
+  input:
+    Resources:
+      CoreVpcA1B2C3D4:
+        Type: AWS::EC2::VPC
+        Properties:
+          CidrBlock: 10.77.0.0/24
+      CoreVpcFlowLogGroupA1B2C3D4:
+        Type: AWS::Logs::LogGroup
+        DeletionPolicy: Retain
+        UpdateReplacePolicy: Retain
+        Properties:
+          LogGroupName: /archon/staging/datahub-core/vpc-flow
+          KmsKeyId: test-key
+          RetentionInDays: 365
+      CoreFlow:
+        Type: AWS::EC2::FlowLog
+        Properties:
+          DeliverLogsPermissionArn: test-role
+          LogGroupName:
+            Ref: CoreVpcFlowLogGroupA1B2C3D4
+          LogDestinationType: cloud-watch-logs
+          MaxAggregationInterval: 600
+          ResourceId:
+            Ref: OtherVpcA1B2C3D4
           ResourceType: VPC
           TrafficType: ALL
   expectations:

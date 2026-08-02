@@ -58,6 +58,10 @@ let logs = Resources.*[
   Type == 'AWS::Logs::LogGroup'
 ]
 
+let vpc_flow_log_groups = %logs[
+  Properties.LogGroupName == /^\/archon\/(staging|production)\/datahub-core\/vpc-flow$/
+]
+
 let tables = Resources.*[
   Type == 'AWS::DynamoDB::Table'
 ]
@@ -126,16 +130,26 @@ rule retired_always_on_topology_is_absent {
 rule every_vpc_emits_all_traffic_to_cloudwatch when %vpcs !empty {
   let vpc_count = count(%vpcs)
   let flow_log_count = count(%vpc_flow_logs)
+  let flow_log_group_count = count(%vpc_flow_log_groups)
   %vpc_count == 1
   %flow_log_count == 1
+  %flow_log_group_count == 1
   %vpc_flow_logs.Properties {
     DeliverLogsPermissionArn exists
-    LogGroupName exists
+    LogGroupName.Ref == /^CoreVpcFlowLogGroup[A-F0-9]{8}$/
     LogDestinationType == 'cloud-watch-logs'
     MaxAggregationInterval == 600
-    ResourceId exists
+    ResourceId.Ref == /^CoreVpc[A-F0-9]{8}$/
     ResourceType == 'VPC'
     TrafficType == 'ALL'
+  }
+  %vpc_flow_log_groups {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      KmsKeyId exists
+      RetentionInDays >= 365
+    }
   }
 }
 
