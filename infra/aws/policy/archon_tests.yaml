@@ -166,3 +166,67 @@
   expectations:
     rules:
       core_lifecycle_is_traced_and_logged: FAIL
+
+- name: an automatically rotating symmetric KMS key is accepted
+  input:
+    Resources:
+      Key:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: true
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate_and_are_not_immediately_deletable: PASS
+
+- name: a retained asymmetric mutation-signing key is accepted
+  input:
+    Resources:
+      Key:
+        Type: AWS::KMS::Key
+        Properties:
+          KeySpec: ECC_NIST_P256
+          KeyUsage: SIGN_VERIFY
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate_and_are_not_immediately_deletable: PASS
+
+- name: automatic rotation on an asymmetric signing key is rejected
+  input:
+    Resources:
+      Key:
+        Type: AWS::KMS::Key
+        Properties:
+          EnableKeyRotation: true
+          KeySpec: ECC_NIST_P256
+          KeyUsage: SIGN_VERIFY
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate_and_are_not_immediately_deletable: FAIL
+
+- name: an unreviewed asymmetric signing key spec is rejected
+  input:
+    Resources:
+      Key:
+        Type: AWS::KMS::Key
+        Properties:
+          KeySpec: RSA_2048
+          KeyUsage: SIGN_VERIFY
+          PendingWindowInDays: 30
+          KeyPolicy:
+            Version: "2012-10-17"
+            Statement: []
+  expectations:
+    rules:
+      kms_keys_rotate_and_are_not_immediately_deletable: FAIL

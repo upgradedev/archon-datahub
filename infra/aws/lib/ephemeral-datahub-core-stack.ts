@@ -3,6 +3,7 @@ import {
   Aws,
   CfnOutput,
   CfnParameter,
+  CfnResource,
   Duration,
   Fn,
   RemovalPolicy,
@@ -228,6 +229,41 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         }
       ]
     });
+
+    // CDK's default-SG restriction is a framework custom resource. Keep that
+    // defense in depth, while bringing its generated provider under the same
+    // bounded-concurrency and X-Ray controls as every application Lambda.
+    const restrictDefaultSgProvider = this.node.tryFindChild(
+      "Custom::VpcRestrictDefaultSGCustomResourceProvider"
+    );
+    const restrictDefaultSgHandler =
+      restrictDefaultSgProvider?.node.tryFindChild("Handler");
+    const restrictDefaultSgRole =
+      restrictDefaultSgProvider?.node.tryFindChild("Role");
+    if (
+      !(restrictDefaultSgHandler instanceof CfnResource) ||
+      !(restrictDefaultSgRole instanceof CfnResource)
+    ) {
+      throw new Error("CDK default-security-group provider contract changed");
+    }
+    restrictDefaultSgHandler.addPropertyOverride(
+      "ReservedConcurrentExecutions",
+      1
+    );
+    restrictDefaultSgHandler.addPropertyOverride("TracingConfig.Mode", "Active");
+    new iam.CfnPolicy(this, "RestrictDefaultSgProviderXRayPolicy", {
+      policyName: `archon-${stage}-default-sg-provider-xray`,
+      roles: [restrictDefaultSgRole.ref],
+      policyDocument: new iam.PolicyDocument({
+        statements: [
+          new iam.PolicyStatement({
+            actions: ["xray:PutTelemetryRecords", "xray:PutTraceSegments"],
+            resources: ["*"]
+          })
+        ]
+      })
+    });
+
     const dynamoEndpoint = vpc.addGatewayEndpoint("DynamoDbEndpoint", {
       service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
       subnets: [{ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }]

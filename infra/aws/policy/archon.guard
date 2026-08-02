@@ -128,9 +128,30 @@ rule s3_state_is_private_versioned_and_encrypted when %buckets !empty {
 
 rule kms_keys_rotate_and_are_not_immediately_deletable when %keys !empty {
   %keys.Properties {
-    EnableKeyRotation == true
     PendingWindowInDays >= 7
     KeyPolicy exists
+    KeyUsage not exists or
+    KeyUsage IN ['ENCRYPT_DECRYPT', 'SIGN_VERIFY']
+
+    # AWS KMS automatic rotation supports symmetric encryption keys, not
+    # asymmetric signing keys. Keep the ordinary CMKs on automatic rotation.
+    when KeyUsage not exists {
+      KeySpec not exists or
+      KeySpec == 'SYMMETRIC_DEFAULT'
+      EnableKeyRotation == true
+    }
+    when KeyUsage == 'ENCRYPT_DECRYPT' {
+      KeySpec not exists or
+      KeySpec == 'SYMMETRIC_DEFAULT'
+      EnableKeyRotation == true
+    }
+
+    # Archon's off-host mutation authorization deliberately uses a public-key
+    # verifier. Rotation is alias-based/manual and the key is retained.
+    when KeyUsage == 'SIGN_VERIFY' {
+      KeySpec == 'ECC_NIST_P256'
+      EnableKeyRotation not exists
+    }
   }
 }
 

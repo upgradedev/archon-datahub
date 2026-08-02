@@ -68,6 +68,71 @@ describe("ephemeral DataHub Core stack", () => {
     });
   });
 
+  test("hardens the CDK default-SG restriction provider", () => {
+    const template = synthesized();
+    const providers = Object.entries(
+      resources(template, "AWS::Lambda::Function")
+    ).filter(([, resource]: [string, any]) =>
+      resource.Properties.Description?.includes(
+        "removing all inbound/outbound rules from the VPC default security group"
+      )
+    ) as [string, any][];
+    expect(providers).toHaveLength(1);
+    const [, provider] = providers[0];
+    expect(provider.Properties.ReservedConcurrentExecutions).toBe(1);
+    expect(provider.Properties.TracingConfig).toEqual({ Mode: "Active" });
+    expect(provider.Properties.VpcConfig).toBeUndefined();
+    expect(
+      Object.keys(resources(template, "Custom::VpcRestrictDefaultSG"))
+    ).toHaveLength(1);
+
+    const providerRoleLogicalId = provider.Properties.Role["Fn::GetAtt"][0];
+    const xrayPolicies = Object.values(
+      resources(template, "AWS::IAM::Policy")
+    ).filter((resource: any) =>
+      (resource.Properties.Roles ?? []).some(
+        (role: any) => role.Ref === providerRoleLogicalId
+      )
+    ) as any[];
+    expect(xrayPolicies).toHaveLength(1);
+    const xrayPolicy = JSON.stringify(xrayPolicies[0]);
+    expect(xrayPolicy).toContain("xray:PutTelemetryRecords");
+    expect(xrayPolicy).toContain("xray:PutTraceSegments");
+  });
+
+  test("keeps the asymmetric mutation-signing key manually rotatable", () => {
+    const template = synthesized();
+    const signingKeys = Object.entries(
+      resources(template, "AWS::KMS::Key")
+    ).filter(
+      ([, resource]: [string, any]) =>
+        resource.Properties.KeyUsage === "SIGN_VERIFY"
+    ) as [string, any][];
+    expect(signingKeys).toHaveLength(1);
+    const [logicalId, signingKey] = signingKeys[0];
+    expect(signingKey.Properties).toEqual(
+      expect.objectContaining({
+        KeySpec: "ECC_NIST_P256",
+        KeyUsage: "SIGN_VERIFY",
+        PendingWindowInDays: 30
+      })
+    );
+    expect(signingKey.Properties.EnableKeyRotation).toBeUndefined();
+    const aliases = Object.values(
+      resources(template, "AWS::KMS::Alias")
+    ) as any[];
+    expect(aliases).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Properties: expect.objectContaining({
+            AliasName: "alias/archon/staging/datahub-core-mutation-signing",
+            TargetKeyId: { "Fn::GetAtt": [logicalId, "Arn"] }
+          })
+        })
+      ])
+    );
+  });
+
   test("keeps exactly one private encrypted host at zero desired capacity", () => {
     const template = synthesized();
     const groups = Object.values(
