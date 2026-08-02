@@ -829,6 +829,8 @@ Outputs:
       Configure this value as AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN in the matching
       deployment environment.
     Value: !GetAtt GitHubDataHubCloudTrialRole.Arn
+  GitHubDataHubCloudTrialRoleName:
+    Value: !Ref GitHubDataHubCloudTrialRole
   CloudRuntimeImagePublisherRoleArn:
     Condition: IsProduction
     Description: >-
