@@ -78,8 +78,13 @@ The managed MCP canary uses `mcp-server-datahub` 0.6.0 source commit
    - secret `DATAHUB_CLOUD_ADMIN_PAT`;
    - variable `DATAHUB_CLOUD_GMS_URL`;
    - existing variables `AWS_ACCOUNT_ID` and `AWS_REGION`;
-   - variable `AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN`, set to the dedicated
-     `archon-datahub-github-staging-cloud-trial` role.
+   - variable `AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN`, populated only from the
+     successful Foundation run's verified
+     `steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn`; for
+     production use the corresponding
+     `steps.reconcile.outputs.datahub_cloud_trial_production_role_arn`. The
+     trial workflow independently rejects any ARN other than
+     `archon-datahub-github-<stage>-cloud-trial`.
 4. Confirm that `Archon-staging-Judge` exists and exports
    `ArchonCloudReaderSecretArn`, `ArchonCloudWriterSecretArn`, and
    `ArchonSecretsKeyArn`. The dedicated Cloud-trial role may describe, stage,
