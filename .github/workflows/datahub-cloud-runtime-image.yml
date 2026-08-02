@@ -636,12 +636,48 @@ jobs:
           test "$(jq -r .sourceSha "$evidence/provenance.json")" = "$SOURCE_SHA"
           test "$(jq -r .buildDigest "$evidence/provenance.json")" =             "${{ needs.candidate.outputs.build_digest }}"
 
+      - name: Validate exact publisher binding before AWS trust
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN: ${{ vars.AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCOUNT_ID:?production AWS_ACCOUNT_ID is required}"
+          : "${AWS_REGION_VALUE:?production AWS_REGION is required}"
+          : "${AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN:?production AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN is required}"
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_REPOSITORY}" = "upgradedev/archon-datahub"
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_REF_NAME}" = "master"
+          test "${CONTROL_PLANE_SHA}" = "${SOURCE_SHA}"
+          test "${WORKFLOW_SHA}" = "${SOURCE_SHA}"
+          test "${WORKFLOW_REF}" = \
+            "upgradedev/archon-datahub/.github/workflows/datahub-cloud-runtime-image.yml@refs/heads/master"
+          case "${EVENT_NAME}" in
+            push | workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
+          test "${AWS_REGION_VALUE}" = "eu-west-1"
+          expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-cloud-runtime-publish-production"
+          test "${AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN}" = "${expected_role_arn}"
+          echo "::add-mask::${AWS_ACCOUNT_ID}"
+          echo "::add-mask::${AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN}"
       - name: Acquire short-lived image publisher credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ vars.AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN }}
           role-session-name: archon-cloud-runtime-${{ github.run_id }}
           aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-duration-seconds: 1800
+          mask-aws-account-id: true
+          unset-current-credentials: true
 
       - name: Ensure the exact pipeline-owned immutable ECR repository
         run: |

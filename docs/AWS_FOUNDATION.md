@@ -55,3 +55,50 @@ malformed, stale, indeterminate and drifted states all fail closed.
 `contracts/aws-foundation-v1.json` and the rendered policy validator are the
 machine-readable authority. Policy changes are promoted and verified in CI;
 manual console grants are not evidence.
+
+## Identity-policy migration and Cloud runtime publisher handoff
+
+The current `archon-aws-foundation-identity` default is v1. Before Foundation
+can create the two Cloud-trial roles and the publisher role, dispatch
+`.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml`
+from `master` with the exact current master SHA and confirmation
+`MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY`. The transaction derives
+and verifies the reviewed v1 and v2 policy digests, creates v2 as nondefault,
+reads it back canonically, performs one default switch, retains v1 for rollback,
+and always removes its twenty-minute recovery authorization. Its receipt is
+checksum-sealed and attested. Do not run Foundation until the migration and its
+automatic cleanup both succeed.
+
+Foundation then creates `CloudRuntimeImagePublisherRole` inside the existing
+`Archon-GitHub-Production-Deploy-Role` stack under `IsProduction`. The existing
+production deploy role and all existing outputs remain unchanged; the stack
+adds only `CloudRuntimeImagePublisherRoleArn` and
+`CloudRuntimeImagePublisherRoleName`.
+
+The publisher trust is exact: protected `production` environment, `master`, this
+repository, and workflow name `DataHub Cloud runtime OCI v2`. IAM uses the
+supported `token.actions.githubusercontent.com:workflow` claim. The workflow
+separately proves its full `github.workflow_ref` before requesting OIDC. The
+session request is 1,800 seconds and the role can authenticate to ECR, create the
+single repository only with the required ownership tags, publish/inspect images,
+and delete bounded image tags. It cannot delete or re-policy the repository,
+change lifecycle configuration, or use IAM/KMS.
+
+After a successful Foundation run, copy the verified non-sensitive handoff value
+from `steps.reconcile.outputs.cloud_runtime_publisher_role_arn` into the
+protected production environment variable `AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN`.
+Then publish by pushing the intended release commit to `master`, or dispatch the
+workflow manually. Manual dispatch accepts no revision input and is bound to the
+exact current `master` workflow/source SHA, so it cannot reinterpret a release SHA.
+
+Safe dispatch order for one exact signed master SHA is:
+
+1. complete any pending assets-policy migration;
+2. run the identity v1-to-v2 migration above;
+3. run the Core AMI control-policy v2-to-v3 migration;
+4. run AWS Foundation with `BOOTSTRAP_CDK_FOUNDATION`;
+5. set the verified production publisher-role variable;
+6. publish the Cloud runtime image from the exact release push.
+
+All steps share the AWS control-plane locks and must be allowed to finish their
+mandatory cleanup before the next mutation starts.

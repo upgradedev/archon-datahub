@@ -40,6 +40,20 @@
     "foundationPolicies": {
       "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
       "migrationContract": "contracts/aws-foundation-policy-migration-v1.json",
+      "identityRoleMigration": {
+        "contract": "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+        "workflow": ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml",
+        "policyName": "archon-aws-foundation-identity",
+        "baselineDefaultVersion": "v1",
+        "baselineCanonicalSha256": "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+        "targetVersion": "v2",
+        "targetCanonicalSha256": "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+        "exactRoleDelta": [
+          "archon-datahub-github-staging-cloud-trial",
+          "archon-datahub-github-production-cloud-trial",
+          "archon-datahub-cloud-runtime-publish-production"
+        ]
+      },
       "sourceBundleAttachable": false,
       "renderer": "scripts/render-aws-foundation-policy.mjs",
       "maximumDocumentBytes": 6144,
@@ -159,6 +173,62 @@
           "finalProviderTokenInventoryRequired": true
         }
       }
+    },
+    "cloudRuntimePublisher": {
+      "environment": "production",
+      "condition": "IsProduction",
+      "stackName": "Archon-GitHub-Production-Deploy-Role",
+      "roleName": "archon-datahub-cloud-runtime-publish-production",
+      "roleVariable": "AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN",
+      "foundationWorkflowOutput": "steps.reconcile.outputs.cloud_runtime_publisher_role_arn",
+      "stackOutputs": [
+        "CloudRuntimeImagePublisherRoleArn",
+        "CloudRuntimeImagePublisherRoleName"
+      ],
+      "workflow": {
+        "path": ".github/workflows/datahub-cloud-runtime-image.yml",
+        "name": "DataHub Cloud runtime OCI v2",
+        "branch": "master",
+        "preTrustWorkflowRef": "upgradedev/archon-datahub/.github/workflows/datahub-cloud-runtime-image.yml@refs/heads/master"
+      },
+      "oidcClaims": {
+        "aud": "sts.amazonaws.com",
+        "sub": "repo:upgradedev/archon-datahub:environment:production",
+        "repository": "upgradedev/archon-datahub",
+        "environment": "production",
+        "ref": "refs/heads/master",
+        "workflow": "DataHub Cloud runtime OCI v2",
+        "workflowRefInIam": false
+      },
+      "maximumSessionDurationSeconds": 3600,
+      "workflowRequestedSessionSeconds": 1800,
+      "repository": "archon-datahub-cloud-runtime-v2",
+      "region": "eu-west-1",
+      "inlinePolicyName": "archon-datahub-cloud-runtime-ecr-publish",
+      "allowedActions": [
+        "ecr:GetAuthorizationToken",
+        "ecr:CreateRepository",
+        "ecr:TagResource",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchDeleteImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:DescribeRepositories",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "requiredRepositoryTags": {
+        "archon:component": "datahub-cloud-runtime-v2",
+        "archon:owner": "github-actions"
+      },
+      "forbiddenActions": [
+        "ecr:DeleteRepository",
+        "ecr:PutLifecyclePolicy",
+        "ecr:SetRepositoryPolicy",
+        "iam:*",
+        "kms:*"
+      ]
     },
     "operationalRoles": {
       "judgeAccess": {

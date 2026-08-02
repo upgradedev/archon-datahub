@@ -1,0 +1,150 @@
+{
+  "schemaVersion": "archon.aws-foundation-cloud-runtime-publisher-policy-migration/v1",
+  "status": "ready-for-migration",
+  "source": {
+    "repository": "upgradedev/archon-datahub",
+    "branch": "master",
+    "policyBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+    "renderer": "scripts/render-aws-foundation-policy.mjs"
+  },
+  "workflow": {
+    "entry": ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml",
+    "driver": ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml",
+    "cleanup": ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-cleanup.yml",
+    "branch": "master",
+    "outerConcurrencyGroup": "archon-aws-control-plane",
+    "innerConcurrencyGroup": "archon-governed-canary-mutation-recovery",
+    "queue": "max",
+    "confirmation": "MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY",
+    "cleanupConfirmation": "RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION",
+    "ownerActorOnly": true,
+    "exactHeadRequired": true,
+    "exactParentAttemptJobsRequired": true,
+    "automaticCleanupCurrentHeadIndependent": true
+  },
+  "implementation": {
+    "driver": "scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh",
+    "environmentVerifier": "scripts/verify-github-environment-protection.sh",
+    "libraries": [
+      "scripts/aws-foundation-cloud-runtime-publisher-policy-migration-authorization.sh",
+      "scripts/aws-foundation-cloud-runtime-publisher-policy-migration-common.sh",
+      "scripts/aws-foundation-cloud-runtime-publisher-policy-migration-state.sh"
+    ]
+  },
+  "policy": {
+    "group": "identity",
+    "name": "archon-aws-foundation-identity",
+    "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+    "renderer": "scripts/render-aws-foundation-policy.mjs",
+    "liveBaseline": {
+      "versionId": "v1",
+      "isDefault": true,
+      "canonicalSha256": "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553"
+    },
+    "target": {
+      "expectedVersionId": "v2",
+      "canonicalSha256": "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3"
+    },
+    "initialVersionCount": 1,
+    "successfulVersionCount": 2,
+    "retainPreviousDefaultForRollback": true,
+    "maximumDocumentBytes": 6144,
+    "exactDelta": {
+      "resourceAdditions": [
+        {
+          "statementSid": "ReconcileExactBootstrapAndDeployRoles",
+          "resources": [
+            "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-staging-cloud-trial",
+            "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-production-cloud-trial"
+          ]
+        }
+      ],
+      "newStatements": [
+        {
+          "sid": "ReconcileExactCloudRuntimePublisherRole",
+          "effect": "Allow",
+          "actions": [
+            "iam:CreateRole",
+            "iam:DeleteRole",
+            "iam:DeleteRolePolicy",
+            "iam:GetRole",
+            "iam:GetRolePolicy",
+            "iam:ListAttachedRolePolicies",
+            "iam:ListRolePolicies",
+            "iam:ListRoleTags",
+            "iam:PutRolePolicy",
+            "iam:TagRole",
+            "iam:UntagRole",
+            "iam:UpdateAssumeRolePolicy",
+            "iam:UpdateRole",
+            "iam:UpdateRoleDescription"
+          ],
+          "resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-cloud-runtime-publish-production"
+        }
+      ],
+      "noOtherStatementChange": true
+    }
+  },
+  "authorization": {
+    "installerEnvironment": "aws-foundation",
+    "executorEnvironment": "governed-canary-recovery",
+    "executorRoleName": "archon-datahub-github-governed-canary-recovery",
+    "temporaryPolicyName": "archon-foundation-cloud-runtime-publisher-identity-policy-migration",
+    "ttlSeconds": 1200,
+    "managedPolicyActions": [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "rollbackManagedPolicyActions": [
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "temporaryPolicyReadAction": "iam:GetRolePolicy",
+    "selfPersistenceActionsAllowed": false,
+    "canonicalReadbackRequired": true,
+    "mandatoryRevocation": true,
+    "absenceReadCount": 3
+  },
+  "phases": [
+    "prepare-and-authorize",
+    "create-and-verify-nondefault-version",
+    "single-default-switch",
+    "postverify-and-revoke"
+  ],
+  "recovery": {
+    "automaticFollowerOnNonSuccess": true,
+    "manualDispatch": true,
+    "manualDispatchMode": "cleanup-rollback",
+    "freshRollbackOnlyAuthorization": true,
+    "rollbackToPreviousDefault": true,
+    "deleteOnlyNewNondefaultVersion": true,
+    "mandatoryAuthorizationRevocation": true,
+    "revokeOnlyPreservesExactTerminalState": true,
+    "parentOutcomeClassification": {
+      "migrateSucceeded": "cleanup-migrated",
+      "prepareSucceededWithoutSuccessfulMigrationOrRollback": "cleanup-rollback",
+      "rollbackSucceeded": "cleanup-revoke",
+      "validatedPrepareNotSucceeded": "cleanup-revoke",
+      "validationNotSucceeded": "no-aws"
+    }
+  },
+  "evidence": {
+    "schemaVersion": "archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1",
+    "artifactFiles": [
+      "SHA256SUMS",
+      "migration.json"
+    ],
+    "artifactRetentionDays": 90,
+    "canonicalJson": true,
+    "checksumSealed": true,
+    "attestationRequired": true,
+    "sensitiveIdentifiersAllowed": false
+  }
+}

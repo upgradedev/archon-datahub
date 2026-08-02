@@ -192,6 +192,11 @@ jobs:
             contracts/aws-foundation-v1.json \
             contracts/aws-foundation-policy-migration-v1.json \
             contracts/aws-foundation-core-ami-policy-migration-v1.json \
+            contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-cleanup.yml \
+            .github/workflows/datahub-cloud-runtime-image.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration-driver.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml \
@@ -214,6 +219,10 @@ jobs:
             scripts/seal-cdk-bootstrap-templates.sh \
             scripts/reconcile-aws-foundation.sh \
             scripts/reconcile-datahub-core-ami-foundation.sh \
+            scripts/aws-foundation-cloud-runtime-publisher-policy-migration-common.sh \
+            scripts/aws-foundation-cloud-runtime-publisher-policy-migration-authorization.sh \
+            scripts/aws-foundation-cloud-runtime-publisher-policy-migration-state.sh \
+            scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh \
             scripts/aws-foundation-core-ami-policy-migration-common.sh \
             scripts/aws-foundation-core-ami-policy-migration-authorization.sh \
             scripts/aws-foundation-core-ami-policy-migration-state.sh \
@@ -260,6 +269,24 @@ jobs:
             } and
             .aws.foundationPolicies.migrationContract ==
               "contracts/aws-foundation-policy-migration-v1.json" and
+            .aws.foundationPolicies.identityRoleMigration == {
+              baselineCanonicalSha256:
+                "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+              baselineDefaultVersion: "v1",
+              contract:
+                "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+              exactRoleDelta: [
+                "archon-datahub-github-staging-cloud-trial",
+                "archon-datahub-github-production-cloud-trial",
+                "archon-datahub-cloud-runtime-publish-production"
+              ],
+              policyName: "archon-aws-foundation-identity",
+              targetCanonicalSha256:
+                "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+              targetVersion: "v2",
+              workflow:
+                ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
+            } and
             .aws.foundationPolicies.sourceBundleAttachable == false and
             .aws.foundationPolicies.roleInlinePolicyCount == 0 and
             .aws.foundationPolicies.roleAttachedPolicyCount == 4 and
@@ -308,6 +335,51 @@ jobs:
                 version: "v4.47.2"
               }
             } and
+            .aws.cloudRuntimePublisher.environment == "production" and
+            .aws.cloudRuntimePublisher.condition == "IsProduction" and
+            .aws.cloudRuntimePublisher.stackName ==
+              "Archon-GitHub-Production-Deploy-Role" and
+            .aws.cloudRuntimePublisher.roleName ==
+              "archon-datahub-cloud-runtime-publish-production" and
+            .aws.cloudRuntimePublisher.roleVariable ==
+              "AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN" and
+            .aws.cloudRuntimePublisher.foundationWorkflowOutput ==
+              "steps.reconcile.outputs.cloud_runtime_publisher_role_arn" and
+            .aws.cloudRuntimePublisher.stackOutputs == [
+              "CloudRuntimeImagePublisherRoleArn",
+              "CloudRuntimeImagePublisherRoleName"
+            ] and
+            .aws.cloudRuntimePublisher.workflow == {
+              branch: "master",
+              name: "DataHub Cloud runtime OCI v2",
+              path: ".github/workflows/datahub-cloud-runtime-image.yml",
+              preTrustWorkflowRef:
+                "upgradedev/archon-datahub/.github/workflows/datahub-cloud-runtime-image.yml@refs/heads/master"
+            } and
+            .aws.cloudRuntimePublisher.oidcClaims == {
+              aud: "sts.amazonaws.com",
+              environment: "production",
+              ref: "refs/heads/master",
+              repository: "upgradedev/archon-datahub",
+              sub:
+                "repo:upgradedev/archon-datahub:environment:production",
+              workflow: "DataHub Cloud runtime OCI v2",
+              workflowRefInIam: false
+            } and
+            .aws.cloudRuntimePublisher.maximumSessionDurationSeconds == 3600 and
+            .aws.cloudRuntimePublisher.workflowRequestedSessionSeconds == 1800 and
+            .aws.cloudRuntimePublisher.repository ==
+              "archon-datahub-cloud-runtime-v2" and
+            .aws.cloudRuntimePublisher.region == "eu-west-1" and
+            .aws.cloudRuntimePublisher.inlinePolicyName ==
+              "archon-datahub-cloud-runtime-ecr-publish" and
+            .aws.cloudRuntimePublisher.requiredRepositoryTags == {
+              "archon:component": "datahub-cloud-runtime-v2",
+              "archon:owner": "github-actions"
+            } and
+            (.aws.cloudRuntimePublisher.forbiddenActions | sort) ==
+              (["ecr:DeleteRepository", "ecr:PutLifecyclePolicy",
+                "ecr:SetRepositoryPolicy", "iam:*", "kms:*"] | sort) and
             .aws.coreAmiFoundation.stackName ==
               "Archon-DataHub-Core-AMI-Builder-Foundation" and
             .aws.coreAmiFoundation.template ==
@@ -704,6 +776,11 @@ jobs:
             --slurpfile migration \
               contracts/aws-foundation-policy-migration-v1.json \
             contracts/aws-foundation-core-ami-policy-migration-v1.json \
+            contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml \
+            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-cleanup.yml \
+            .github/workflows/datahub-cloud-runtime-image.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration-driver.yml \
             .github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml \
@@ -1459,6 +1536,8 @@ jobs:
           DEPLOY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.deploy_role_binding_sha }}
           CANARY_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.canary_role_binding_sha }}
           OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}
+          CLOUD_RUNTIME_PUBLISHER_ROLE_ARN: ${{ steps.reconcile.outputs.cloud_runtime_publisher_role_arn }}
+          CLOUD_RUNTIME_PUBLISHER_BINDING_SHA: ${{ steps.reconcile.outputs.cloud_runtime_publisher_binding_sha }}
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
           SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}
           DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}
@@ -1475,7 +1554,7 @@ jobs:
             echo "- Stage execution policies and runtime boundaries: exact; CloudFormation-supported resources IN_SYNC"
             echo "- GitHub deploy roles: separate staging and production OIDC subjects"
             echo "- Governed canary roles: prepare, approval, and recovery read paths"
-            echo "- Operational roles: stage judge access plus production posture, runtime, and paging"
+            echo "- Operational roles: stage judge access plus production Cloud runtime publisher, posture, runtime, and paging"
             case "${SHARED_API_GATEWAY_MODE}" in
               foundation-managed)
                 test "${DRIFT_STACK_COUNT}" = "10"
@@ -1497,6 +1576,9 @@ jobs:
             echo "- Deploy-role binding digest: \`${DEPLOY_ROLE_BINDING_SHA}\`"
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
             echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"
+            echo "- Set production AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN to ${CLOUD_RUNTIME_PUBLISHER_ROLE_ARN}"
+            echo "- Cloud runtime publisher binding digest: \`${CLOUD_RUNTIME_PUBLISHER_BINDING_SHA}\`"
+            echo "- Cloud runtime publisher: exact master/workflow OIDC trust; 1800-second requested session; exact tagged ECR repository only"
             echo "- Core AMI builder: stable zero-idle-cost role/profile, independent of runtime KMS/Bedrock permissions"
             echo "- Core AMI build OIDC role max/session request: 7200 seconds"
             echo "- Set staging AWS_CORE_AMI_BUILD_ROLE_ARN to ${CORE_AMI_BUILD_ROLE_ARN}"

@@ -255,6 +255,27 @@
       ]
     },
     {
+      "Sid": "ReconcileExactCloudRuntimePublisherRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "Resource": "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-cloud-runtime-publish-production"
+    },
+    {
       "Sid": "ConfigureSharedApiGatewayLogging",
       "Effect": "Allow",
       "Action": [
