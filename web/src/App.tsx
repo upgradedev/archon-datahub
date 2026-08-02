@@ -6,7 +6,7 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from "react";
-import { loadAudit, submitApprovalDecision } from "./api";
+import { submitApprovalDecision } from "./api";
 import { EvidencePack } from "./EvidencePack";
 import { GuidedTour } from "./GuidedTour";
 import { RuntimeControl } from "./RuntimeControl";
@@ -1172,6 +1172,19 @@ export function App() {
     if (!scope || /[*?]/u.test(scope) || scope === "{}") {
       setRunError("Enter a narrow, non-wildcard dataset scope.");
       return;
+    }    if (!runtimeSession) {
+      setRunError(
+        "Launch a pinned DataHub runtime before running a live audit. The visible showcase remains read-only.",
+      );
+      return;
+    }
+    if (!runtimeSession.canRun) {
+      setRunError(
+        runtimeSession.state === "STARTING"
+          ? "The pinned runtime is still starting. Wait for READY."
+          : "This pinned runtime is not runnable. Start a new session.",
+      );
+      return;
     }
     controller.current?.abort();
     const nextController = new AbortController();
@@ -1195,20 +1208,13 @@ export function App() {
             );
           }
         };
-      const result =
-        runtimeSession?.canRun === true
-          ? await loadRuntimeAudit(
-              scope,
-              runtimeSession.sessionId,
-              getAccessToken(),
-              nextController.signal,
-              progress,
-            )
-          : await loadAudit(
-              scope,
-              nextController.signal,
-              progress,
-            );      setAudit(result);
+      const result = await loadRuntimeAudit(
+        scope,
+        runtimeSession.sessionId,
+        getAccessToken(),
+        nextController.signal,
+        progress,
+      );      setAudit(result);
 
       setControlLoop(result.controlLoop);
       setSelectedId(
@@ -1315,7 +1321,8 @@ export function App() {
                 loading ||
                 !query.trim() ||
                 /[*?]/u.test(query.trim()) ||
-                query.trim() === "{}"
+                query.trim() === "{}" ||
+                runtimeSession?.canRun !== true
               }
               id="judge-tour-run-audit"
               onClick={() => void runAudit()}

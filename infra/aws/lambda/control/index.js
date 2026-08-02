@@ -162,7 +162,7 @@ function boundedString(value, maximum = 2048) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[^@-^_\u007f]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -172,7 +172,7 @@ function configuredDemoQuery() {
     demoQuery !== demoQuery.trim() ||
     demoQuery.length < 1 ||
     demoQuery.length > 256 ||
-    /[^@-^_\u007f]/u.test(demoQuery) ||
+    /[\u0000-\u001F\u007F]/u.test(demoQuery) ||
     /[*?]/u.test(demoQuery) ||
     demoQuery === "{}"
   ) {
@@ -233,7 +233,7 @@ function parseStartBody(input) {
   if (
     typeof body.query !== "string" ||
     body.query.length > 256 ||
-    /[^@-^_\u007f]/u.test(body.query)
+    /[\u0000-\u001F\u007F]/u.test(body.query)
   ) {
     return { error: response(400, { error: "invalid_query" }) };
   }
@@ -1026,7 +1026,7 @@ function boundedReportText(value, maximum) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[^@-^H\u000B^L^N-^_\u007F]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 

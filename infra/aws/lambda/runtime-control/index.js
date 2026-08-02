@@ -13,7 +13,6 @@ const {
 } = require("@aws-sdk/client-sfn");
 const {
   activity,
-  capabilityDigest,
   completeStop,
   createSession,
   failSession,

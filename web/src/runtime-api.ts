@@ -374,7 +374,7 @@ function authorizationHeaders(accessToken: string): {
   if (
     accessToken.length < 20 ||
     accessToken.length > 16_384 ||
-    /[\s^@-^_\u007F]/u.test(accessToken)
+    /[\s\u0000-\u001F\u007F]/u.test(accessToken)
   ) {
     throw new RuntimeApiError(
       "An authenticated judge or steward session is required.",
@@ -740,12 +740,26 @@ export async function loadRuntimeAudit(
     signal,
   );
   let latest: LoadedAudit | undefined;
+  let transientFailures = 0;
   while (!signal?.aborted) {
-    const { status } = await getRuntimeControlLoopStatus(
-      start,
-      accessToken,
-      signal,
-    );
+    let status: ControlLoopStatus;
+    try {
+      ({ status } = await getRuntimeControlLoopStatus(
+        start,
+        accessToken,
+        signal,
+      ));
+      transientFailures = 0;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const retryable =
+        error instanceof TypeError ||
+        (error instanceof RuntimeApiError &&
+          [502, 503, 504].includes(error.status));
+      if (!retryable || ++transientFailures > 3) throw error;
+      await waitRuntimePoll(1000 * transientFailures, signal);
+      continue;
+    }
     const projected = loadedRuntimeAudit(status);
     latest = projected ?? latest;
     onProgress?.(status, projected);

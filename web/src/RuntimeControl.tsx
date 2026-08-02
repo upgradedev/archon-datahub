@@ -408,43 +408,45 @@ export function RuntimeControl({
         {registry ? <Registry registry={registry} /> : null}
 
         {!session || terminal ? (
-          <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-            <label className="block">
-              <span className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
-                Runtime preference
-              </span>
-              <select
-                aria-label="DataHub runtime preference"
-                className="w-full rounded-xl border border-white/[0.08] bg-[#091512] px-3 py-3 text-xs text-slate-100 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
-                disabled={pending !== undefined}
-                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                  setRequestedProfile(event.target.value as RuntimeRequest)
-                }
-                value={requestedProfile}
+          <>
+            <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <label className="block">
+                <span className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                  Runtime preference
+                </span>
+                <select
+                  aria-label="DataHub runtime preference"
+                  className="w-full rounded-xl border border-white/[0.08] bg-[#091512] px-3 py-3 text-xs text-slate-100 outline-none focus:border-emerald-300/30 focus:ring-2 focus:ring-emerald-300/[0.07]"
+                  disabled={pending !== undefined}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    setRequestedProfile(event.target.value as RuntimeRequest)
+                  }
+                  value={requestedProfile}
+                >
+                  <option value="auto">{requestLabels.auto}</option>
+                  <option value="cloud">{requestLabels.cloud}</option>
+                  <option value="core">{requestLabels.core}</option>
+                </select>
+              </label>
+              <button
+                className="run-button min-h-11 justify-center"
+                disabled={pending !== undefined || getAccessToken === undefined}
+                onClick={() => void launch()}
+                type="button"
               >
-                <option value="auto">{requestLabels.auto}</option>
-                <option value="cloud">{requestLabels.cloud}</option>
-                <option value="core">{requestLabels.core}</option>
-              </select>
-            </label>
-            <button
-              className="run-button min-h-11 justify-center"
-              disabled={pending !== undefined || getAccessToken === undefined}
-              onClick={() => void launch()}
-              type="button"
-            >
-              {pending === "start"
-                ? "Starting runtime…"
-                : terminal
-                  ? "Start new pinned session"
-                  : "Launch pinned session"}
-            </button>
-          </div>
-          {getAccessToken === undefined ? (
-            <p className="mt-2 text-[10px] text-amber-100/80">
-              Sign in as the judge or steward to launch a paid runtime.
-            </p>
-          ) : null}
+                {pending === "start"
+                  ? "Starting runtime…"
+                  : terminal
+                    ? "Start new pinned session"
+                    : "Launch pinned session"}
+              </button>
+            </div>
+            {getAccessToken === undefined ? (
+              <p className="mt-2 text-[10px] text-amber-100/80">
+                Sign in as the judge or steward to launch a paid runtime.
+              </p>
+            ) : null}
+          </>
         ) : (
           <div
             aria-live="polite"
