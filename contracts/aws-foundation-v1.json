@@ -491,8 +491,8 @@
       "autoscaling:UpdateAutoScalingGroup",
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock-mantle:CallWithBearerToken",
-      "bedrock-mantle:CreateInference",
+
+
       "cloudwatch:PutMetricData",
       "dynamodb:DescribeStream",
       "dynamodb:DescribeTable",
@@ -513,10 +513,10 @@
       "ec2:DescribeVpcEndpoints",
       "ec2:RevokeSecurityGroupEgress",
       "ec2:RevokeSecurityGroupIngress",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:BatchGetImage",
-      "ecr:GetAuthorizationToken",
-      "ecr:GetDownloadUrlForLayer",
+
+
+
+
       "kms:Decrypt",
       "kms:DescribeKey",
       "kms:Encrypt",
@@ -530,7 +530,7 @@
       "logs:CreateLogStream",
       "logs:DeleteLogDelivery",
       "logs:DescribeLogGroups",
-      "logs:DescribeLogStreams",
+
       "logs:DescribeResourcePolicies",
       "logs:GetLogDelivery",
       "logs:ListLogDeliveries",
@@ -539,22 +539,22 @@
       "logs:UpdateLogDelivery",
       "s3:DeleteObjectVersion",
       "s3:GetBucketVersioning",
-      "s3:GetObject",
-      "s3:GetObjectAttributes",
+
+
       "s3:GetObjectVersion",
       "s3:PutObject",
-      "secretsmanager:DescribeSecret",
+
       "secretsmanager:GetSecretValue",
-      "sqs:ChangeMessageVisibility",
-      "sqs:DeleteMessage",
+
+
       "sqs:GetQueueAttributes",
       "sqs:GetQueueUrl",
-      "sqs:ReceiveMessage",
+
       "sqs:SendMessage",
-      "states:DescribeExecution",
-      "states:SendTaskFailure",
-      "states:SendTaskHeartbeat",
-      "states:SendTaskSuccess",
+
+
+
+
       "states:StartExecution",
       "sts:AssumeRole",
       "sts:GetCallerIdentity",

@@ -40,23 +40,23 @@ Resources:
         Statement:
           - Effect: Allow
             Action:
-              - bedrock-mantle:CallWithBearerToken
-              - bedrock-mantle:CreateInference
+
+
               - dynamodb:ListStreams
               - ec2:AuthorizeSecurityGroupEgress
               - ec2:AuthorizeSecurityGroupIngress
               - ec2:RevokeSecurityGroupEgress
               - ec2:RevokeSecurityGroupIngress
-              - ecr:BatchCheckLayerAvailability
-              - ecr:BatchGetImage
-              - ecr:GetAuthorizationToken
-              - ecr:GetDownloadUrlForLayer
+
+
+
+
               - logs:CreateLogDelivery
               - logs:CreateLogGroup
               - logs:CreateLogStream
               - logs:DeleteLogDelivery
               - logs:DescribeLogGroups
-              - logs:DescribeLogStreams
+
               - logs:DescribeResourcePolicies
               - logs:GetLogDelivery
               - logs:ListLogDeliveries
@@ -64,20 +64,20 @@ Resources:
               - logs:PutResourcePolicy
               - logs:UpdateLogDelivery
               - s3:DeleteObjectVersion
-              - s3:GetObject
-              - s3:GetObjectAttributes
+
+
               - s3:GetObjectVersion
               - s3:PutObject
-              - sqs:ChangeMessageVisibility
-              - sqs:DeleteMessage
+
+
               - sqs:GetQueueAttributes
               - sqs:GetQueueUrl
-              - sqs:ReceiveMessage
+
               - sqs:SendMessage
-              - states:DescribeExecution
-              - states:SendTaskFailure
-              - states:SendTaskHeartbeat
-              - states:SendTaskSuccess
+
+
+
+
               - states:StartExecution
               - xray:GetSamplingRules
               - xray:GetSamplingTargets
@@ -202,7 +202,7 @@ Resources:
             Resource: !Sub arn:aws:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-*
           - Effect: Allow
             Action:
-              - secretsmanager:DescribeSecret
+
               - secretsmanager:GetSecretValue
             Resource:
               - !Sub arn:aws:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/*

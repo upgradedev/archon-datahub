@@ -1727,6 +1727,8 @@ jobs:
 #|     canary_binding["source"]["runAttempt"],
 #|     "canary source attempt",
 #| )
+#| if len(source["runAttempt"]) > 10:
+#|     fail("canary source runAttempt exceeds ten digits")
 #| exact(source["controlPlaneSha"], release, "canary control-plane SHA")
 #| digest(source["controlPlaneGatesSha256"], "canary control-plane gates")
 #| exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")
@@ -1849,6 +1851,8 @@ jobs:
 #| prepared_at = instant(manifest["preparedAt"], "canary preparedAt")
 #| if prepared_at > recovered_at:
 #|     fail("canary recovery predates its sealed recovery capability")
+#| if recovered_at - prepared_at > dt.timedelta(hours=2):
+#|     fail("canary sealed recovery capability is stale")
 #| manifest_digest = canonical_digest(manifest, "canary recovery manifest")
 #| exact(
 #|     recovery["recoveryDigest"],

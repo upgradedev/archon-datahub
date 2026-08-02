@@ -187,7 +187,6 @@ jobs:
       CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
       CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
       CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
-      CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary-recovery/source/recovery.json
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,6 +209,7 @@ jobs:
           CONTROL_PLANE_SHA: ${{ needs.resolve.outputs.source_sha }}
           EXPECTED_GATE: ${{ needs.resolve.outputs.gates_digest }}
           VERIFICATION_MODE: sealed
+          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary-recovery/source/recovery.json
           SEALED_GATE_PATH: ${{ runner.temp }}/governed-canary-recovery/source/control-plane-security-gates.json
           OUTPUT_PATH: ${{ runner.temp }}/governed-canary-recovery/current/control-plane-security-gates.json
         run: |
@@ -220,6 +220,7 @@ jobs:
           test "$(jq -er .digest "${CANARY_RECOVERY_PATH}")" = "${{ needs.resolve.outputs.recovery_digest }}"
       - name: Restore only canonical PII baseline and prove read-back
         env:
+          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary-recovery/source/recovery.json
           CANARY_RECOVERY_EVIDENCE_PATH: ${{ runner.temp }}/governed-canary-recovery/evidence/recovery-evidence.json
           CANARY_DATAHUB_READ_TOKEN: ${{ secrets.CANARY_DATAHUB_READ_TOKEN }}
           CANARY_DATAHUB_WRITE_TOKEN: ${{ secrets.CANARY_DATAHUB_WRITE_TOKEN }}

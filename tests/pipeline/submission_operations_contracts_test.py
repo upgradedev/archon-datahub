@@ -319,6 +319,8 @@ def validate_workflow(source: str) -> None:
         'recovery["deploymentEvidenceSha256"]',
         'manifest["endpointBindingSha256"]',
         'positive_decimal(source["runId"]',
+        '"canary source runAttempt exceeds ten digits"',
+        "dt.timedelta(hours=2)",
         '"17 */6 * * *"',
         '"2026-08-31T21:00:00Z"',
         '.state == "active"',
@@ -451,6 +453,12 @@ mutations = {
         workflow,
         '#|     positive_decimal(source["runId"], "canary source runId"),\n',
         '#|     int(source["runId"]),\n',
+    ),
+    "stale sealed canary recovery accepted": replace_once(
+        workflow,
+        '#| if recovered_at - prepared_at > dt.timedelta(hours=2):\n'
+        '#|     fail("canary sealed recovery capability is stale")\n',
+        "",
     ),
     "alarm inventory weakened": replace_once(
         workflow,

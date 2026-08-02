@@ -56,6 +56,30 @@ malformed, stale, indeterminate and drifted states all fail closed.
 machine-readable authority. Policy changes are promoted and verified in CI;
 manual console grants are not evidence.
 
+## Protected foundation-policy version migrations
+
+Foundation managed-policy changes are explicit protected transactions, never an
+implicit side effect of reconciliation. The reviewed assets-policy target keeps
+the CloudFormation drift reads `cloudformation:DetectStackResourceDrift` and
+`cloudformation:BatchDescribeTypeConfigurations` and adds only the
+contract-listed S3 resource-handler and IAM attachment reads required for a
+complete drift result.
+
+From the exact signed `master` revision, the repository owner dispatches
+`.github/workflows/aws-foundation-policy-migration.yml` with the confirmation
+`MIGRATE EXACT FOUNDATION ASSETS POLICY`. The entry, driver and automatic or
+manual cleanup are serialized with the AWS control-plane lock and `queue: max`.
+The driver verifies the canonical live default, creates and reads back one
+nondefault version, performs one default-version switch, retains the former
+default as the rollback target, and revokes its short-lived authorization on
+every terminal path.
+
+A failed or cancelled transaction is classified from the exact parent run and
+attempt. Recovery installs a fresh rollback-only grant, restores the verified
+former default when required, deletes only the reviewed new version, and then
+proves the temporary grant absent. The checksum-sealed receipt excludes account
+identifiers and role ARNs, and it never stores raw IAM documents.
+
 ## Identity-policy migration and Cloud runtime publisher handoff
 
 The current `archon-aws-foundation-identity` default is v1. Before Foundation

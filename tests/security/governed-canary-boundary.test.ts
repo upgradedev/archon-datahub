@@ -94,7 +94,10 @@ test("recovery is an exact PII-only inverse with endpoint and read-back proofs",
   assert.match(driver, /removeTags\(\{/);
   assert.match(driver, /tagUrns: \[PII_TAG_URN\]/);
   assert.match(driver, /exactProjection\(before, manifest\.target\)/);
-  assert.match(driver, /exactProjection\(after, manifest\.target\)/);
+  assert.match(
+    driver,
+    /const after = await reader\.readTagProjection\(target\);\s+exactProjection\(after, manifest\.target\);/
+  );
   assert.match(driver, /live DataHub Cloud endpoints changed after recovery was sealed/);
 });
 
