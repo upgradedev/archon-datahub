@@ -2335,7 +2335,8 @@ test("proves one governed v2 context delta and seals the sanitized legacy reject
   if (process.env.ARCHON_LIVE_V2_ONLY === "1") {
     verifiedAccessToken = "";
     ensure(
-      observation.runtimeSessionStarts === 1 &&
+      verifiedAccessToken.length === 0 &&
+        observation.runtimeSessionStarts === 1 &&
         observation.runtimeSessionReads > 0 &&
         observation.runtimeSessionStops === 1 &&
         observation.runtimeAgentStarts === 1 &&

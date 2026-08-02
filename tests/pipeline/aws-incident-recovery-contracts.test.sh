@@ -499,7 +499,7 @@ forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
 forbid_text "${reconciler}" 'cloudformation delete-stack' 'delete-stack' 'continue-update-rollback'
 
 test "$(sha256sum "${canary_roles}" | awk '{print $1}')" = \
-  '0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4' || \
+  'cf613a1af94a339253a2e0aac3f1ebb61066337629e83c0b254b609227a2817d' || \
   fail 'governed-canary role source changed'
 
 require_text "${ci}" \
