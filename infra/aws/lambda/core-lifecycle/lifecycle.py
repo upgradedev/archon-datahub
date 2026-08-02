@@ -7,8 +7,10 @@ not permitted to mutate Auto Scaling. Step Functions is the only scaling owner.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import re
+import time
 import uuid
 from typing import Any
 
@@ -309,10 +311,12 @@ def _runtime_endpoints() -> list[dict[str, Any]]:
             {"Name": "tag:Environment", "Values": [STAGE]},
         ]
     )
+    # Keep deleting endpoints in the result. Private DNS can remain reserved
+    # until EC2 stops returning the endpoint, so create must wait for absence.
     return [
         endpoint
         for endpoint in response.get("VpcEndpoints", [])
-        if endpoint.get("State") not in {"deleted", "deleting", "failed", "rejected"}
+        if endpoint.get("State") not in {"deleted", "failed", "rejected"}
     ]
 
 
@@ -323,6 +327,11 @@ def _endpoint_session(endpoint: dict[str, Any]) -> str:
         if isinstance(tag, dict)
     }
     return str(tags.get("ArchonSessionId", ""))
+
+
+def _endpoint_token(session_id: str) -> str:
+    material = f"{STAGE}\0{GENERATION}\0{session_id}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
 
 
 def _delete_endpoint(endpoint_id: Any) -> None:
@@ -336,59 +345,106 @@ def _delete_endpoint(endpoint_id: Any) -> None:
 def _cleanup_orphan_endpoints(active_endpoint_id: str = "") -> None:
     for endpoint in _runtime_endpoints():
         endpoint_id = endpoint.get("VpcEndpointId", "")
-        if endpoint_id != active_endpoint_id:
+        if endpoint_id != active_endpoint_id and endpoint.get("State") != "deleting":
             _delete_endpoint(endpoint_id)
 
 
-def _ensure_inference_endpoint(session_id: str) -> tuple[str, bool]:
-    for endpoint in _runtime_endpoints():
-        if _endpoint_session(endpoint) == session_id:
-            endpoint_id = endpoint.get("VpcEndpointId")
-            if isinstance(endpoint_id, str):
-                return endpoint_id, False
-    response = _EC2.create_vpc_endpoint(
-        VpcEndpointType="Interface",
-        VpcId=VPC_ID,
-        ServiceName=BEDROCK_SERVICE_NAME,
-        SubnetIds=[SUBNET_ID],
-        SecurityGroupIds=[INFERENCE_SECURITY_GROUP_ID],
-        PrivateDnsEnabled=True,
-        ClientToken=uuid.uuid4().hex,
-        TagSpecifications=[
-            {
-                "ResourceType": "vpc-endpoint",
-                "Tags": [
-                    {"Key": "Application", "Value": "archon-datahub"},
-                    {"Key": "Environment", "Value": STAGE},
-                    {"Key": "ManagedBy", "Value": "archon-core-lifecycle"},
-                    {"Key": "ArchonSessionId", "Value": session_id},
+def _ensure_inference_endpoint(
+    session_id: str, operation_expires_at: int
+) -> tuple[str, bool]:
+    # The operation lease bounds this wait. Retrying the Lambda uses the same
+    # deterministic EC2 client token and therefore cannot allocate a duplicate.
+    remaining = max(1, operation_expires_at - int(time.time()) - 5)
+    deadline = time.monotonic() + min(210, remaining)
+    retryable_codes = {
+        "ConflictingDomainExists",
+        "InvalidParameter",
+        "InvalidState",
+        "InvalidVpcEndpoint.DuplicateSubnets",
+    }
+    while True:
+        endpoints = _runtime_endpoints()
+        for endpoint in endpoints:
+            if (
+                _endpoint_session(endpoint) == session_id
+                and endpoint.get("State") != "deleting"
+            ):
+                endpoint_id = endpoint.get("VpcEndpointId")
+                if isinstance(endpoint_id, str) and re.fullmatch(
+                    r"^vpce-[0-9a-f]{8,17}$", endpoint_id
+                ):
+                    return endpoint_id, False
+
+        # A previous session may still own the private-DNS name. Delete it and
+        # wait until DescribeVpcEndpoints no longer returns it before creating.
+        for endpoint in endpoints:
+            if endpoint.get("State") != "deleting":
+                _delete_endpoint(endpoint.get("VpcEndpointId"))
+        if endpoints:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Bedrock Runtime endpoint private-DNS release timed out"
+                )
+            time.sleep(3)
+            continue
+
+        try:
+            response = _EC2.create_vpc_endpoint(
+                VpcEndpointType="Interface",
+                VpcId=VPC_ID,
+                ServiceName=BEDROCK_SERVICE_NAME,
+                SubnetIds=[SUBNET_ID],
+                SecurityGroupIds=[INFERENCE_SECURITY_GROUP_ID],
+                PrivateDnsEnabled=True,
+                ClientToken=_endpoint_token(session_id),
+                TagSpecifications=[
+                    {
+                        "ResourceType": "vpc-endpoint",
+                        "Tags": [
+                            {"Key": "Application", "Value": "archon-datahub"},
+                            {"Key": "Environment", "Value": STAGE},
+                            {
+                                "Key": "ManagedBy",
+                                "Value": "archon-core-lifecycle",
+                            },
+                            {"Key": "ArchonSessionId", "Value": session_id},
+                        ],
+                    }
                 ],
-            }
-        ],
-    )
-    endpoint_id = response.get("VpcEndpoint", {}).get("VpcEndpointId")
-    if not isinstance(endpoint_id, str) or re.fullmatch(
-        r"^vpce-[0-9a-f]{8,17}$", endpoint_id
-    ) is None:
-        raise ValueError("Bedrock Runtime endpoint creation returned no exact ID")
-    return endpoint_id, True
+            )
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code", "")
+            if (
+                code not in retryable_codes
+                and not str(code).startswith("InvalidVpcEndpoint")
+            ):
+                raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Bedrock Runtime endpoint creation did not converge"
+                ) from error
+            time.sleep(3)
+            continue
+        endpoint_id = response.get("VpcEndpoint", {}).get("VpcEndpointId")
+        if not isinstance(endpoint_id, str) or re.fullmatch(
+            r"^vpce-[0-9a-f]{8,17}$", endpoint_id
+        ) is None:
+            raise ValueError(
+                "Bedrock Runtime endpoint creation returned no exact ID"
+            )
+        return endpoint_id, True
 
 
 def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     _verify_ami()
     binding = command["binding"]
     session_id = command["sessionId"]
-    existing = _lease()
-    active_endpoint_id = (
-        str(existing.get("inferenceEndpointId", "")) if existing else ""
-    )
-    _cleanup_orphan_endpoints(active_endpoint_id)
-    endpoint_id, endpoint_created = _ensure_inference_endpoint(session_id)
     expected = command["expectedRevision"]
-    operation_id = uuid.uuid4().hex
     hard = _parse_iso(binding["leaseExpiresAt"], "binding.leaseExpiresAt")
     idle = min(now + dt.timedelta(seconds=IDLE_SECONDS), hard)
     revision = expected + 1
+    operation_id = uuid.uuid4().hex
+    operation_expires_at = _epoch(now) + OPERATION_SECONDS
     values = {
         ":session": session_id,
         ":starting": "STARTING",
@@ -405,10 +461,11 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         ":hard": _epoch(hard),
         ":updated": _iso(now),
         ":operation": operation_id,
-        ":operationExpiry": _epoch(now) + OPERATION_SECONDS,
-        ":endpoint": endpoint_id,
+        ":operationExpiry": operation_expires_at,
         ":ttl": _epoch(hard) + 86400,
     }
+
+    # Win authoritative ownership before creating any billable/network resource.
     try:
         _TABLE.update_item(
             Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
@@ -418,7 +475,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "resolution=:resolution, boundAt=:bound, "
                 "idleExpiresAt=:idle, hardExpiresAt=:hard, updatedAt=:updated, "
                 "operationId=:operation, operationExpiresAt=:operationExpiry, "
-                "inferenceEndpointId=:endpoint, expiresAt=:ttl REMOVE stoppedAt"
+                "expiresAt=:ttl REMOVE stoppedAt, inferenceEndpointId"
             ),
             ConditionExpression=(
                 "(attribute_not_exists(pk) OR "
@@ -428,32 +485,87 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
             ExpressionAttributeNames={"#state": "state"},
             ExpressionAttributeValues=values,
         )
-        return _decision(
-            "UPSCALE",
-            operation_id=operation_id,
-            session_id=session_id,
-            revision=revision,
+    except ClientError as error:
+        if not _conditional_failure(error):
+            raise
+        current = _lease()
+        same_reservation = (
+            current
+            and current.get("sessionId") == session_id
+            and current.get("generation") == GENERATION
+            and current.get("capabilityDigest") == CAPABILITY_DIGEST
+            and current.get("state") == "STARTING"
+            and current.get("revision") == revision
+            and current.get("resolution") == binding["resolution"]
+            and current.get("boundAt") == binding["boundAt"]
+            and int(current.get("hardExpiresAt", 0)) == _epoch(hard)
+            and isinstance(current.get("operationId"), str)
+            and int(current.get("operationExpiresAt", 0)) > _epoch(now)
+        )
+        if same_reservation:
+            operation_id = str(current["operationId"])
+            operation_expires_at = int(current["operationExpiresAt"])
+        elif (
+            current
+            and current.get("sessionId") == session_id
+            and current.get("generation") == GENERATION
+            and current.get("capabilityDigest") == CAPABILITY_DIGEST
+            and current.get("state") == "READY"
+            and int(current.get("revision", -1)) >= revision
+        ):
+            return _decision("NONE", code="IDEMPOTENT")
+        else:
+            return _decision("REJECT", code="LEASE_CONFLICT")
+
+    endpoint_id, endpoint_created = _ensure_inference_endpoint(
+        session_id, operation_expires_at
+    )
+    try:
+        _TABLE.update_item(
+            Key={"pk": "CORE#LEASE", "sk": "CURRENT"},
+            UpdateExpression=(
+                "SET inferenceEndpointId=:endpoint, updatedAt=:updated"
+            ),
+            ConditionExpression=(
+                "sessionId=:session AND #state=:starting "
+                "AND revision=:revision AND operationId=:operation "
+                "AND generation=:generation AND capabilityDigest=:digest"
+            ),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":endpoint": endpoint_id,
+                ":updated": _iso(now),
+                ":session": session_id,
+                ":starting": "STARTING",
+                ":revision": revision,
+                ":operation": operation_id,
+                ":generation": GENERATION,
+                ":digest": CAPABILITY_DIGEST,
+            },
         )
     except ClientError as error:
         if not _conditional_failure(error):
             raise
-    current = _lease()
-    if endpoint_created and (
-        current is None or current.get("inferenceEndpointId") != endpoint_id
-    ):
-        _delete_endpoint(endpoint_id)
-    if (
-        current
-        and current.get("sessionId") == session_id
-        and current.get("generation") == GENERATION
-        and current.get("capabilityDigest") == CAPABILITY_DIGEST
-        and current.get("state") in {"STARTING", "READY"}
-        and int(current.get("revision", -1)) >= revision
-    ):
-        return _decision("NONE", code="IDEMPOTENT")
-    return _decision("REJECT", code="LEASE_CONFLICT")
-
-
+        current = _lease()
+        if not (
+            current
+            and current.get("sessionId") == session_id
+            and current.get("revision") == revision
+            and current.get("operationId") == operation_id
+            and current.get("inferenceEndpointId") == endpoint_id
+        ):
+            if endpoint_created and (
+                current is None
+                or current.get("inferenceEndpointId") != endpoint_id
+            ):
+                _delete_endpoint(endpoint_id)
+            return _decision("REJECT", code="LEASE_CONFLICT")
+    return _decision(
+        "UPSCALE",
+        operation_id=operation_id,
+        session_id=session_id,
+        revision=revision,
+    )
 def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     binding = command["binding"]
     session_id = command["sessionId"]
