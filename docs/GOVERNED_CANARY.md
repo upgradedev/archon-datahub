@@ -56,18 +56,16 @@ verifies the GitHub deployment attestation.
 
 ## GitHub environments
 
-The workflow uses four intentionally distinct environments:
+The workflow uses exactly three environments:
 
 | Environment | Purpose | Secret access |
 | --- | --- | --- |
-| `governed-canary-prepare` | Read-only deployment, control-plane, endpoint, and Judge-stack binding; seals recovery before mutation | none |
+| `governed-canary-prepare` | Read-only OIDC, deployment, control-plane, endpoint, and Judge-stack binding; seals recovery before mutation | none |
 | `governed-canary` | Human-approved browser journey and Cognito role proof | judge username/password only |
-| `governed-canary-rollback` | Independently approved normal inverse | DataHub read/write tokens |
-| `governed-canary-recovery` | Independently approved interrupted-run inverse | DataHub read/write tokens |
+| `governed-canary-recovery` | Independently approved exact inverse for both normal rollback and interrupted recovery; the exact AWS role retrieves stage-scoped reader/writer credentials | no GitHub DataHub-token secrets |
 
-`governed-canary`, `governed-canary-rollback`, and
-`governed-canary-recovery` must retain their human approval rules. The
-preparation environment is deliberately non-mutating and may remain
+Only `governed-canary` and `governed-canary-recovery` retain human approval
+rules. The preparation environment is deliberately non-mutating and may remain
 reviewerless. All jobs share the non-cancelling
 `archon-governed-canary-mutation-recovery` concurrency lock.
 
@@ -75,9 +73,11 @@ reviewerless. All jobs share the non-cancelling
 
 Repository or matching environment variables:
 
-- `AWS_REGION`
+- `AWS_CANARY_ACCOUNT_ID` and `AWS_CANARY_REGION` for preparation
+- `AWS_ACCOUNT_ID` and `AWS_REGION` for approval and recovery
 - `AWS_CANARY_PREPARE_ROLE_ARN`
 - `AWS_CANARY_APPROVAL_ROLE_ARN`
+- `AWS_CANARY_RECOVERY_ROLE_ARN`
 - `CANARY_APPLICATION_URL`
 - `CANARY_ISOLATION_MARKER`
 - `CANARY_DATAHUB_READ_GMS_URL`
@@ -85,17 +85,17 @@ Repository or matching environment variables:
 - `CANARY_DATAHUB_WRITE_GMS_URL`
 - `CANARY_DATAHUB_WRITE_MCP_URL`
 
-Protected-environment secrets:
+The only protected application secrets are `CANARY_COGNITO_USERNAME` and
+`CANARY_COGNITO_PASSWORD` in `governed-canary`.
 
-- `CANARY_COGNITO_USERNAME` and `CANARY_COGNITO_PASSWORD` in
-  `governed-canary`
-- `CANARY_DATAHUB_READ_TOKEN` and `CANARY_DATAHUB_WRITE_TOKEN` in both
-  rollback environments
-
-The read and write tokens must remain different capabilities. The pipeline
-masks both values, passes them only to the exact protected inverse step, and
-never uploads environment dumps, browser storage, headers, or raw network
-bodies.
+Both inverse paths first assume the exact recovery role through GitHub OIDC.
+In the same credentialed shell, the source-only AWS loader resolves the exact
+`ArchonCloudReaderSecretArn` and `ArchonCloudWriterSecretArn` outputs, reads
+only `AWSCURRENT`, rejects `SecretBinary` and non-exact reader/writer schemas,
+requires distinct tokens, masks both values, and keeps them only in the current
+shell under an `EXIT` cleanup trap. The safe credential-binding digest includes
+the exact secret ARNs and version IDs; plaintext is never written to an output,
+file, or artifact.
 
 ## Proof sequence
 
@@ -138,9 +138,11 @@ and security checks. It asserts that no secret material was retained.
 ### 3. Independently approved inverse
 
 The rollback job runs even when the browser job fails or is cancelled, provided
-preparation sealed recovery. It re-authenticates the original control-plane
-digest, reads the current tag projection using the read token, removes only the
-canonical PII tag when present using the write token, and reads back the exact
+preparation sealed recovery. It enters `governed-canary-recovery`, assumes the
+exact recovery role through OIDC, sources the same AWS credential loader, and
+re-authenticates the original control-plane digest. It reads the current tag
+projection with the retrieved reader capability, removes only the canonical PII
+tag when present with the retrieved writer capability, and reads back the exact
 baseline. Any unrelated tags must remain unchanged.
 
 The canonical recovery evidence schema is
@@ -165,8 +167,9 @@ artifact from that failed attempt. It checks canonical JSON, schema, manifest
 digest, source SHA, endpoint binding, target, and sealed gate digest using the
 driver's non-mutating `verify` operation. It has no secrets.
 
-Only then can the protected recovery job run. It repeats the checks after human
-approval and executes the same PII-only, read-back-proven inverse. A source run
+Only then can the protected recovery job run. After human approval it assumes
+the exact recovery role through OIDC, sources the same AWS loader, repeats the
+checks, and executes the same PII-only, read-back-proven inverse. A source run
 that did not reach sealing fails closed without requesting mutation authority.
 
 ## Evidence artifacts
