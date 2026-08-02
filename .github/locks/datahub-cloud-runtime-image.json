@@ -17,7 +17,7 @@
   },
   "dependencyLock": {
     "path": "services/datahub-companion/uv.lock",
-    "blobSha": "905242f65f746e16b007480df92db83284474bec",
+    "blobSha": "501107833ced68253d4a2b7b16bbc5c649273035",
     "pyprojectPath": "services/datahub-companion/pyproject.toml",
     "pyprojectBlobSha": "df8c27f55e6a835c322e5cf369df18e84b7a6418",
     "exactPackages": {
