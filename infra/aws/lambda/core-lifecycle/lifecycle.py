@@ -77,6 +77,15 @@ GENERATION = _required_env("CORE_GENERATION", GENERATION_RE)
 CAPABILITY_DIGEST = _required_env("CORE_CAPABILITY_DIGEST", DIGEST_RE)
 IMAGE_MANIFEST_DIGEST = _required_env("CORE_IMAGE_MANIFEST_DIGEST", DIGEST_RE)
 STAGE = _required_env("CORE_STAGE", re.compile(r"^(staging|production)$"))
+VPC_ID = _required_env("CORE_VPC_ID", re.compile(r"^vpc-[0-9a-f]{8,17}$"))
+SUBNET_ID = _required_env("CORE_SUBNET_ID", re.compile(r"^subnet-[0-9a-f]{8,17}$"))
+INFERENCE_SECURITY_GROUP_ID = _required_env(
+    "CORE_INFERENCE_SECURITY_GROUP_ID", re.compile(r"^sg-[0-9a-f]{8,17}$")
+)
+BEDROCK_SERVICE_NAME = _required_env(
+    "CORE_BEDROCK_SERVICE_NAME",
+    re.compile(r"^com\.amazonaws\.eu-west-1\.bedrock-runtime$"),
+)
 IDLE_SECONDS = int(_required_env("CORE_IDLE_SECONDS", re.compile(r"^[1-9]\d{2,4}$")))
 HARD_SECONDS = int(_required_env("CORE_HARD_SECONDS", re.compile(r"^[1-9]\d{3,5}$")))
 OPERATION_SECONDS = int(
@@ -290,10 +299,91 @@ def _verify_ami() -> None:
         raise ValueError("configured Core AMI failed the immutable provenance gate")
 
 
+def _runtime_endpoints() -> list[dict[str, Any]]:
+    response = _EC2.describe_vpc_endpoints(
+        Filters=[
+            {"Name": "vpc-id", "Values": [VPC_ID]},
+            {"Name": "service-name", "Values": [BEDROCK_SERVICE_NAME]},
+            {"Name": "tag:Application", "Values": ["archon-datahub"]},
+            {"Name": "tag:ManagedBy", "Values": ["archon-core-lifecycle"]},
+            {"Name": "tag:Environment", "Values": [STAGE]},
+        ]
+    )
+    return [
+        endpoint
+        for endpoint in response.get("VpcEndpoints", [])
+        if endpoint.get("State") not in {"deleted", "deleting", "failed", "rejected"}
+    ]
+
+
+def _endpoint_session(endpoint: dict[str, Any]) -> str:
+    tags = {
+        tag.get("Key"): tag.get("Value")
+        for tag in endpoint.get("Tags", [])
+        if isinstance(tag, dict)
+    }
+    return str(tags.get("ArchonSessionId", ""))
+
+
+def _delete_endpoint(endpoint_id: Any) -> None:
+    if not isinstance(endpoint_id, str) or re.fullmatch(
+        r"^vpce-[0-9a-f]{8,17}$", endpoint_id
+    ) is None:
+        return
+    _EC2.delete_vpc_endpoints(VpcEndpointIds=[endpoint_id])
+
+
+def _cleanup_orphan_endpoints(active_endpoint_id: str = "") -> None:
+    for endpoint in _runtime_endpoints():
+        endpoint_id = endpoint.get("VpcEndpointId", "")
+        if endpoint_id != active_endpoint_id:
+            _delete_endpoint(endpoint_id)
+
+
+def _ensure_inference_endpoint(session_id: str) -> tuple[str, bool]:
+    for endpoint in _runtime_endpoints():
+        if _endpoint_session(endpoint) == session_id:
+            endpoint_id = endpoint.get("VpcEndpointId")
+            if isinstance(endpoint_id, str):
+                return endpoint_id, False
+    response = _EC2.create_vpc_endpoint(
+        VpcEndpointType="Interface",
+        VpcId=VPC_ID,
+        ServiceName=BEDROCK_SERVICE_NAME,
+        SubnetIds=[SUBNET_ID],
+        SecurityGroupIds=[INFERENCE_SECURITY_GROUP_ID],
+        PrivateDnsEnabled=True,
+        ClientToken=uuid.uuid4().hex,
+        TagSpecifications=[
+            {
+                "ResourceType": "vpc-endpoint",
+                "Tags": [
+                    {"Key": "Application", "Value": "archon-datahub"},
+                    {"Key": "Environment", "Value": STAGE},
+                    {"Key": "ManagedBy", "Value": "archon-core-lifecycle"},
+                    {"Key": "ArchonSessionId", "Value": session_id},
+                ],
+            }
+        ],
+    )
+    endpoint_id = response.get("VpcEndpoint", {}).get("VpcEndpointId")
+    if not isinstance(endpoint_id, str) or re.fullmatch(
+        r"^vpce-[0-9a-f]{8,17}$", endpoint_id
+    ) is None:
+        raise ValueError("Bedrock Runtime endpoint creation returned no exact ID")
+    return endpoint_id, True
+
+
 def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     _verify_ami()
     binding = command["binding"]
     session_id = command["sessionId"]
+    existing = _lease()
+    active_endpoint_id = (
+        str(existing.get("inferenceEndpointId", "")) if existing else ""
+    )
+    _cleanup_orphan_endpoints(active_endpoint_id)
+    endpoint_id, endpoint_created = _ensure_inference_endpoint(session_id)
     expected = command["expectedRevision"]
     operation_id = uuid.uuid4().hex
     hard = _parse_iso(binding["leaseExpiresAt"], "binding.leaseExpiresAt")
@@ -316,6 +406,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         ":updated": _iso(now),
         ":operation": operation_id,
         ":operationExpiry": _epoch(now) + OPERATION_SECONDS,
+        ":endpoint": endpoint_id,
         ":ttl": _epoch(hard) + 86400,
     }
     try:
@@ -327,7 +418,7 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
                 "resolution=:resolution, boundAt=:bound, "
                 "idleExpiresAt=:idle, hardExpiresAt=:hard, updatedAt=:updated, "
                 "operationId=:operation, operationExpiresAt=:operationExpiry, "
-                "expiresAt=:ttl REMOVE stoppedAt"
+                "inferenceEndpointId=:endpoint, expiresAt=:ttl REMOVE stoppedAt"
             ),
             ConditionExpression=(
                 "(attribute_not_exists(pk) OR "
@@ -347,6 +438,10 @@ def _start(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         if not _conditional_failure(error):
             raise
     current = _lease()
+    if endpoint_created and (
+        current is None or current.get("inferenceEndpointId") != endpoint_id
+    ):
+        _delete_endpoint(endpoint_id)
     if (
         current
         and current.get("sessionId") == session_id
@@ -403,6 +498,10 @@ def _activity(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         if not _conditional_failure(error):
             raise
     current = _lease()
+    if endpoint_created and (
+        current is None or current.get("inferenceEndpointId") != endpoint_id
+    ):
+        _delete_endpoint(endpoint_id)
     if (
         current
         and current.get("sessionId") == session_id
@@ -499,6 +598,7 @@ def _stop(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
 def _reap(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     current = _lease()
     if current is None or current.get("state") in TERMINAL_STATES:
+        _cleanup_orphan_endpoints()
         return _decision("NONE", code="NO_ACTIVE_LEASE")
     if "expectedSessionId" in command:
         if (
@@ -526,6 +626,10 @@ def _reap(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
 def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
     decision = command["decision"]
     final_state = "STARTING" if decision == "UPSCALE" else "STOPPED"
+    before = _lease()
+    endpoint_id = (
+        str(before.get("inferenceEndpointId", "")) if before else ""
+    )
     update = (
         "SET #state=:state, updatedAt=:updated"
         + (", stoppedAt=:updated" if final_state == "STOPPED" else "")
@@ -572,6 +676,8 @@ def _finalize(command: dict[str, Any], now: dt.datetime) -> dict[str, Any]:
         return _decision("REJECT", code="FINALIZE_CONFLICT")
 
     if final_state == "STOPPED":
+        _delete_endpoint(endpoint_id)
+        _cleanup_orphan_endpoints()
         _TABLE.put_item(
             Item={
                 "pk": "RUNTIME#core",
