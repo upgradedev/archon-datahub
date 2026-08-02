@@ -58,7 +58,8 @@ jobs:
       github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    environment: datahub-demo
+    environment:
+      name: ${{ inputs.stage }}
     permissions:
       actions: read
       attestations: write
@@ -102,6 +103,21 @@ jobs:
           else
             test -z "${RUNTIME_SESSION_ID}"
           fi
+
+      - name: Validate Cloud proof identity inputs before OIDC
+        if: inputs.profile == 'cloud'
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          DATAHUB_CLOUD_GMS_URL: ${{ vars.DATAHUB_CLOUD_GMS_URL }}
+        run: |
+          set -euo pipefail
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${AWS_REGION_VALUE}" = "eu-west-1"
+          expected_role="arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-cloud-trial"
+          test "${AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN}" = "${expected_role}"
+          [[ "${DATAHUB_CLOUD_GMS_URL}" =~ ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.acryl\.io/gms$ ]]
 
       - name: Bind current green GitHub control plane
         env:
@@ -320,12 +336,33 @@ jobs:
             echo "python_version=${python_version}"
           } >>"${GITHUB_OUTPUT}"
 
+      - name: Configure read-only step-scoped Cloud proof AWS credentials
+        if: inputs.profile == 'cloud'
+        id: cloud-proof-aws
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          role-session-name: archon-live-proof-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          output-env-credentials: false
+          output-credentials: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Sid":"ReadExactJudgeBinding","Effect":"Allow","Action":"cloudformation:DescribeStacks","Resource":"arn:aws:cloudformation:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:stack/Archon-${{ inputs.stage }}-Judge/*"},{"Sid":"ReadExactCloudReader","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:secret:archon/${{ inputs.stage }}/datahub-cloud/reader-*"},{"Sid":"DecryptExactCloudReader","Effect":"Allow","Action":"kms:Decrypt","Resource":"arn:aws:kms:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:key/*","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AWS_ACCOUNT_ID }}","kms:ViaService":"secretsmanager.eu-west-1.amazonaws.com"},"StringLike":{"kms:EncryptionContext:SecretARN":"arn:aws:secretsmanager:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:secret:archon/${{ inputs.stage }}/datahub-cloud/reader-*"}}}]}
+
       - name: Prove live Cloud MCP, retention, provenance, and contradiction
         if: inputs.profile == 'cloud'
         id: semantic
         env:
-          DATAHUB_GMS_URL: ${{ secrets.DATAHUB_CLOUD_GMS_URL }}
-          DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_CLOUD_GMS_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ steps.cloud-proof-aws.outputs.aws-access-key-id }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.cloud-proof-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.cloud-proof-aws.outputs.aws-session-token }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_CLOUD_GMS_URL }}
           DATAHUB_MCP_COMMAND: uv
           DATAHUB_MCP_ARGS: >-
             run --project ${{ steps.mcp.outputs.project }}
