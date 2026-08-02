@@ -2868,6 +2868,7 @@ with tempfile.TemporaryDirectory(prefix="native-live-v3-derive-") as raw:
     legacy_deployment["pipelineSecurity"] = {
         "preProductionGovernedCanary": {}
     }
+    deployment_path.unlink()
     validator.write_json(deployment_path, legacy_deployment)
     expect_rejected(
         lambda: validator.derive_live(
