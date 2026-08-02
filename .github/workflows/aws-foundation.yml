@@ -411,6 +411,10 @@ jobs:
               "archon-datahub-core-ami-build-staging" and
             .aws.coreAmiFoundation.githubBuildRole.variable ==
               "AWS_CORE_AMI_BUILD_ROLE_ARN" and
+            .aws.coreAmiFoundation.githubBuildRole.stackOutput ==
+              "GitHubCoreAmiBuildRoleArn" and
+            .aws.coreAmiFoundation.githubBuildRole.foundationWorkflowOutput ==
+              "steps.core_ami_foundation.outputs.build_role_arn" and
             .aws.coreAmiFoundation.githubBuildRole.environment == "staging" and
             .aws.coreAmiFoundation.githubBuildRole.maxSessionDurationSeconds ==
               7200 and
@@ -483,6 +487,13 @@ jobs:
               "archon-datahub-core-ami-builder-staging" and
             .aws.coreAmiFoundation.ec2Builder.instanceProfileVariable ==
               "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE" and
+            .aws.coreAmiFoundation.ec2Builder.stackOutputs == [
+              "CoreAmiBuilderRoleArn",
+              "CoreAmiBuilderInstanceProfileName",
+              "CoreAmiBuilderInstanceProfileArn"
+            ] and
+            .aws.coreAmiFoundation.ec2Builder.instanceProfileFoundationWorkflowOutput ==
+              "steps.core_ami_foundation.outputs.instance_profile" and
             .aws.coreAmiFoundation.ec2Builder.maxSessionDurationSeconds ==
               3600 and
             .aws.coreAmiFoundation.ec2Builder.attachedManagedPolicies == [
@@ -539,6 +550,19 @@ jobs:
               "archon-datahub-github-staging-deploy" and
             .aws.deployRoles.production.roleName ==
               "archon-datahub-github-production-deploy" and
+            .aws.deployRoles.dataHubCloudTrial.foundationRole == {
+              stackNameTemplate: "Archon-GitHub-<stage>-Deploy-Role",
+              stackOutputs: [
+                "GitHubDataHubCloudTrialRoleArn",
+                "GitHubDataHubCloudTrialRoleName"
+              ],
+              workflowOutputs: {
+                production:
+                  "steps.reconcile.outputs.datahub_cloud_trial_production_role_arn",
+                staging:
+                  "steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn"
+              }
+            } and
             .aws.operationalRoles == {
               judgeAccess: {
                 production: {
@@ -1538,6 +1562,8 @@ jobs:
           OPERATIONAL_ROLE_BINDING_SHA: ${{ steps.reconcile.outputs.operational_role_binding_sha }}
           CLOUD_RUNTIME_PUBLISHER_ROLE_ARN: ${{ steps.reconcile.outputs.cloud_runtime_publisher_role_arn }}
           CLOUD_RUNTIME_PUBLISHER_BINDING_SHA: ${{ steps.reconcile.outputs.cloud_runtime_publisher_binding_sha }}
+          DATAHUB_CLOUD_TRIAL_STAGING_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn }}
+          DATAHUB_CLOUD_TRIAL_PRODUCTION_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_production_role_arn }}
           APPLICATION_STACK_ROLE_TRANSITION: ${{ steps.reconcile.outputs.application_stack_role_transition }}
           SHARED_API_GATEWAY_MODE: ${{ steps.reconcile.outputs.shared_api_gateway_mode }}
           DRIFT_STACK_COUNT: ${{ steps.reconcile.outputs.drift_stack_count }}
@@ -1546,6 +1572,8 @@ jobs:
           CORE_AMI_BUILDER_INSTANCE_PROFILE: ${{ steps.core_ami_foundation.outputs.instance_profile }}
         run: |
           set -euo pipefail
+          : "${DATAHUB_CLOUD_TRIAL_STAGING_ROLE_ARN:?staging Cloud trial role handoff missing}"
+          : "${DATAHUB_CLOUD_TRIAL_PRODUCTION_ROLE_ARN:?production Cloud trial role handoff missing}"
           {
             echo "### AWS foundation reconciled"
             echo
@@ -1577,6 +1605,8 @@ jobs:
             echo "- Canary-role binding digest: \`${CANARY_ROLE_BINDING_SHA}\`"
             echo "- Operational-role binding digest: \`${OPERATIONAL_ROLE_BINDING_SHA}\`"
             echo "- Set production AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN to ${CLOUD_RUNTIME_PUBLISHER_ROLE_ARN}"
+            echo "- Set staging AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN to ${DATAHUB_CLOUD_TRIAL_STAGING_ROLE_ARN}"
+            echo "- Set production AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN to ${DATAHUB_CLOUD_TRIAL_PRODUCTION_ROLE_ARN}"
             echo "- Cloud runtime publisher binding digest: \`${CLOUD_RUNTIME_PUBLISHER_BINDING_SHA}\`"
             echo "- Cloud runtime publisher: exact master/workflow OIDC trust; 1800-second requested session; exact tagged ECR repository only"
             echo "- Core AMI builder: stable zero-idle-cost role/profile, independent of runtime KMS/Bedrock permissions"
