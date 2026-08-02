@@ -454,9 +454,12 @@ describe("ephemeral DataHub Core stack", () => {
       JSON.stringify(
         bySid.InvokeConfiguredBedrockModelsOnlyThroughProfile.Resource
       )
-    ).toContain(
-      "foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
-    );
+    ).toContain("DataHubCoreBedrockBaseModelId");
+    expect(
+      template.Parameters.DataHubCoreBedrockBaseModelId.AllowedValues
+    ).toEqual([
+      "anthropic.claude-sonnet-4-5-20250929-v1:0"
+    ]);
     expect(
       JSON.stringify(
         bySid.InvokeConfiguredBedrockModelsOnlyThroughProfile.Condition

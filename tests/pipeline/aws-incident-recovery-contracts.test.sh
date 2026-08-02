@@ -214,7 +214,7 @@ jq --exit-status '
     ],
     rejectionPoint: "before-PutRolePolicy"
   } and
-  .recoveryRole.stackTemplateSourceSha256 == "0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4" and
+  .recoveryRole.stackTemplateSourceSha256 == "cf613a1af94a339253a2e0aac3f1ebb61066337629e83c0b254b609227a2817d" and
   .recoveryRole.baselinePolicyUnchanged == true and
   .recoveryRole.foundationRolePolicyBroadening == "forbidden" and
   .recoveryRole.attachedManagedPolicies == "forbidden" and
@@ -380,6 +380,8 @@ for blob in "${driver_lock}" "${foundation_inner_lock}"; do
 done
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
+  'deployment-evidence-${{ inputs.stage }}-${{ inputs.release_sha }}-${{ github.run_id }}'
+forbid_text "${deploy_workflow}" \
   '/actions/workflows/governed-canary.yml/dispatches'
 for workflow in "${fixture_workflow}" "${canary_workflow}" "${canary_recovery_workflow}"; do
   lock="$(sed -n '/^concurrency:/,/^env:/p' "${workflow}" | sed '$d')"

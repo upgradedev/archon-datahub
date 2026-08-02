@@ -337,90 +337,58 @@ class DataHubCanaryFixtureWorkflowContractsTest(unittest.TestCase):
         ):
             self.assertIn(coordinate, self.attest)
 
-    def test_fixture_receipt_is_a_required_content_addressed_canary_input(
-        self,
-    ) -> None:
-        for input_name in (
+    def test_fixture_lifecycle_is_independent_from_cloud_canary(self) -> None:
+        for legacy_input in (
             "fixture_run_id",
             "fixture_run_attempt",
             "fixture_artifact_id",
             "fixture_artifact_digest",
             "fixture_receipt_sha256",
         ):
-            self.assertRegex(
+            self.assertNotRegex(
                 GOVERNED_CANARY,
-                rf"(?ms)^      {input_name}:\n"
-                rf".*?^        required: true\n"
-                rf".*?^        type: string\n",
+                rf"(?ms)^      {legacy_input}:\n",
             )
-        self.assertRegex(
-            DEPLOY,
-            r"(?ms)^      fixture_coordinates:\n"
-            r".*?^        required: false\n"
-            r".*?^        type: string\n",
-        )
 
-        fixture_verifier = GOVERNED_CANARY.index(
-            "Verify exact attested governed-canary fixture binding"
-        )
-        aws_trust = GOVERNED_CANARY.index(
-            "Assume the read-only canary evidence role"
-        )
-        self.assertLess(fixture_verifier, aws_trust)
-        verifier = GOVERNED_CANARY[fixture_verifier:aws_trust]
-        self.assertIn(
+        self.assertNotIn(
             ".github/workflows/datahub-canary-fixture.yml",
-            verifier,
+            GOVERNED_CANARY,
         )
-        self.assertIn(".head_sha == $releaseSha", verifier)
-        self.assertIn(".digest == $digest", verifier)
-        self.assertIn(
+        self.assertNotIn(
             "contracts/datahub-canary-fixture-v1.json",
-            verifier,
+            GOVERNED_CANARY,
         )
-        self.assertIn(
-            "file_type not in (0, stat.S_IFREG)",
-            verifier,
-        )
-        self.assertIn(
-            "The fixture checksum inventory is not exact",
-            verifier,
-        )
-        self.assertIn("gh attestation verify", verifier)
-        self.assertIn("--deny-self-hosted-runners", verifier)
-        self.assertIn("== $expectedSubjects", verifier)
-        self.assertIn(
+        self.assertNotIn(
             "archon.governed-canary-fixture-binding/v1",
-            verifier,
+            GOVERNED_CANARY,
         )
-        self.assertIn(
+        self.assertNotIn(
             "archon.governed-canary-recovery/v3",
             GOVERNED_CANARY,
         )
         self.assertIn(
-            "archon.governed-canary-recovery/v3",
-            RECOVERY,
-        )
-        self.assertIn(
-            "fixtureBinding: $fixtureBinding",
+            "archon.governed-canary-recovery/v4",
             GOVERNED_CANARY,
         )
         self.assertIn(
-            "fixtureBinding: $fixtureBinding",
+            "archon.governed-canary-recovery/v4",
             RECOVERY,
         )
         self.assertIn(
-            "fixture_run_id: $fixtureRunId",
-            DEPLOY,
+            "archon.aws-deployment-evidence/v2",
+            GOVERNED_CANARY,
         )
         self.assertIn(
-            'canonical_fixture_coordinates="$(jq -ceS',
-            DEPLOY,
+            "archon.lean-runtime-observation/v1",
+            GOVERNED_CANARY,
         )
         self.assertIn(
-            "fixtureBindingDigest:\n"
-            "                    $governedCanaryFixtureBindingDigest",
-            DEPLOY,
+            "CANARY_RUNTIME_PROFILE: cloud",
+            GOVERNED_CANARY,
+        )
+        self.assertIn(
+            "Archon-staging-Judge",
+            GOVERNED_CANARY,
         )
 
     def test_all_reusable_actions_are_immutable_pins(self) -> None:

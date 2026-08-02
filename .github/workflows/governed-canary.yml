@@ -1,81 +1,50 @@
-name: Governed DataHub canary
-
-run-name: Governed canary for ${{ inputs.release_sha }} from deployment ${{ inputs.deployment_run_id }}
+name: Governed DataHub Cloud canary v2
+run-name: Cloud canary ${{ inputs.release_sha }} from deployment ${{ inputs.deployment_run_id }}
 
 on:
   workflow_dispatch:
     inputs:
       deployment_run_id:
-        description: Successful immutable deployment run that produced the staging URL
+        description: Exact successful staging deploy run ID
+        required: true
+        type: string
+      deployment_artifact_id:
+        description: Exact staging deployment-evidence artifact ID
+        required: true
+        type: string
+      deployment_artifact_digest:
+        description: Exact GitHub sha256 artifact digest
         required: true
         type: string
       release_sha:
-        description: Exact deployed 40-character release SHA
-        required: true
-        type: string
-      fixture_run_id:
-        description: Exact successful governed-canary fixture workflow run ID
-        required: true
-        type: string
-      fixture_run_attempt:
-        description: Exact successful governed-canary fixture workflow run attempt
-        required: true
-        type: string
-      fixture_artifact_id:
-        description: Exact governed-canary fixture receipt artifact ID
-        required: true
-        type: string
-      fixture_artifact_digest:
-        description: Exact GitHub sha256 digest of the fixture receipt artifact
-        required: true
-        type: string
-      fixture_receipt_sha256:
-        description: Exact inner fixture receipt.json SHA-256
+        description: Exact deployed 40-character master SHA
         required: true
         type: string
       confirmation:
-        description: Type RUN ISOLATED GOVERNED CANARY
+        description: Type RUN GOVERNED DATAHUB CLOUD CANARY
         required: true
         type: string
 
-# This workflow is workflow-dispatch-only: the immutable deployment pipeline invokes it
-# as a pre-production gate, while an operator may also invoke it for an already
-# successful deployment. It never targets the production stack.
-# A read-only preparation job seals the exact plan before either protected gate.
-# The first protected environment approves that content-addressed GOVERNED write
-# on the exact contract-owned snowflake TEST fixture. The second protected environment separately
-# approves the content-addressed inverse action and owns the rollback credential.
-permissions:
-  actions: read
-  contents: read
-
+permissions: {}
 concurrency:
   group: archon-governed-canary-mutation-recovery
   cancel-in-progress: false
-  queue: max
 
 env:
   NODE_VERSION: "22.23.1"
   AWS_PAGER: ""
-  CANARY_STACK_NAME: Archon-staging
+  CANARY_STACK_NAME: Archon-staging-Judge
+  CANARY_RUNTIME_PROFILE: cloud
   CANARY_SOURCE_WORKFLOW_RUN_ID: ${{ github.run_id }}
   CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
-  CANARY_QUERY: archon_governed_canary_fixture
-  CANARY_COLUMN_PATH: email
-  CANARY_TAG_URN: urn:li:tag:PII
-
-defaults:
-  run:
-    shell: bash
+  CANARY_CONTROL_PLANE_SHA: ${{ github.sha }}
 
 jobs:
   prepare:
-    name: Read-only preparation of immutable governed plan
-    if: >-
-      github.repository == 'upgradedev/archon-datahub' &&
-      github.ref == 'refs/heads/master'
+    name: Seal Cloud recovery ${{ inputs.deployment_artifact_digest }}
+    if: github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       actions: read
       attestations: read
@@ -86,1069 +55,172 @@ jobs:
       name: governed-canary-prepare
       url: ${{ vars.CANARY_APPLICATION_URL }}
     outputs:
-      recovery_digest: ${{ steps.prepare.outputs.recovery_digest }}
-      plan_digest: ${{ steps.prepare.outputs.plan_digest }}
-      audit_id: ${{ steps.prepare.outputs.audit_id }}
-      deployment_evidence_sha256: ${{ steps.source.outputs.deployment_evidence_sha256 }}
-      control_plane_gate_sha256: ${{ steps.source.outputs.control_plane_gate_sha256 }}
       application_url: ${{ steps.stack.outputs.application_url }}
-      evidence_bucket: ${{ steps.stack.outputs.evidence_bucket }}
       cognito_client_id: ${{ steps.stack.outputs.cognito_client_id }}
       cognito_hosted_ui_origin: ${{ steps.stack.outputs.cognito_hosted_ui_origin }}
-      fixture_binding_digest: ${{ steps.fixture.outputs.binding_digest }}
+      cognito_issuer: ${{ steps.stack.outputs.cognito_issuer }}
+      user_pool_id: ${{ steps.stack.outputs.user_pool_id }}
+      recovery_digest: ${{ steps.seal.outputs.recovery_digest }}
+      gates_digest: ${{ steps.gates.outputs.gates_digest }}
     env:
-      CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      GH_TOKEN: ${{ github.token }}
       CANARY_RELEASE_SHA: ${{ inputs.release_sha }}
+      CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      CANARY_DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
+      CANARY_DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
       CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
-      CANARY_DATASET_URN: ${{ vars.CANARY_DATASET_URN }}
       CANARY_ISOLATION_MARKER: ${{ vars.CANARY_ISOLATION_MARKER }}
       CANARY_DATAHUB_READ_GMS_URL: ${{ vars.CANARY_DATAHUB_READ_GMS_URL }}
       CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
       CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
       CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
-      CANARY_FIXTURE_RUN_ID: ${{ inputs.fixture_run_id }}
-      CANARY_FIXTURE_RUN_ATTEMPT: ${{ inputs.fixture_run_attempt }}
-      CANARY_FIXTURE_ARTIFACT_ID: ${{ inputs.fixture_artifact_id }}
-      CANARY_FIXTURE_ARTIFACT_DIGEST: ${{ inputs.fixture_artifact_digest }}
-      CANARY_FIXTURE_RECEIPT_SHA256: ${{ inputs.fixture_receipt_sha256 }}
     steps:
-      - name: Validate protected environments and immutable deployment source
-        id: source
+      - name: Bind current master and exact deployment artifact
         env:
-          GH_TOKEN: ${{ github.token }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
-          test "${CONFIRMATION}" = "RUN ISOLATED GOVERNED CANARY" || {
-            echo "::error::The exact canary confirmation phrase is required"
-            exit 1
-          }
-          [[ "${CANARY_DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          test "${CONFIRMATION}" = "RUN GOVERNED DATAHUB CLOUD CANARY"
           [[ "${CANARY_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
-
-          repository_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}")"
-          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
-          test "${default_branch}" = "master"
-          test "${GITHUB_REF}" = "refs/heads/${default_branch}"
-          current_ref_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}")"
-          current_default_sha="$(jq -er \
-            --arg ref "refs/heads/${default_branch}" '
-              select(
-                .ref == $ref and
-                .object.type == "commit" and
-                (.object.sha | test("^[0-9a-f]{40}$"))
-              ) |
-              .object.sha
-            ' <<<"${current_ref_json}")"
-          test "${current_default_sha}" = "${GITHUB_SHA}" || {
-            echo "::error::The canary driver is no longer the current default-branch head"
-            exit 1
-          }
-
-          workflow_success() {
-            local workflow_file="$1"
-            local expected_name="$2"
-            local expected_path=".github/workflows/${workflow_file}"
-            local response
-            response="$(gh api \
-              --method GET \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
-              -f "head_sha=${GITHUB_SHA}" \
-              -f "branch=${default_branch}" \
-              -f event=push \
-              -f per_page=100)"
-            jq -e \
-              --arg name "${expected_name}" \
-              --arg path "${expected_path}" \
-              --arg sha "${GITHUB_SHA}" \
-              --arg branch "${default_branch}" \
-              --arg repository "${GITHUB_REPOSITORY}" '
-                [
-                  .workflow_runs[] |
-                  select(
-                    .name == $name and
-                    .path == $path and
-                    .head_sha == $sha and
-                    .head_branch == $branch and
-                    .head_repository.full_name == $repository and
-                    .event == "push"
-                  )
-                ] |
-                sort_by(.id, .run_attempt) |
-                last |
-                select(
-                  . != null and
-                  .status == "completed" and
-                  .conclusion == "success"
-                )
-              ' <<<"${response}" >/dev/null
-          }
-
-          if ! workflow_success ci.yml CI ||
-            ! workflow_success codeql.yml CodeQL ||
-            ! workflow_success workflow-security.yml "Workflow security"; then
-            echo "::error::The canary control plane requires successful exact-SHA CI, CodeQL, and Workflow security push runs"
-            exit 1
-          fi
-
-          prepare_environment_name="governed-canary-prepare"
-          prepare_environment_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/environments/${prepare_environment_name}")"
-          jq -e --arg name "${prepare_environment_name}" '
-            .name == $name and
-            .deployment_branch_policy.protected_branches == false and
-            .deployment_branch_policy.custom_branch_policies == true and
-            ([.protection_rules[]?.type] | sort) == ["branch_policy"]
-          ' <<<"${prepare_environment_json}" >/dev/null || {
-            echo "::error::${prepare_environment_name} must be a reviewerless read-only environment with a custom branch policy"
-            exit 1
-          }
-          prepare_branch_policies="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/environments/${prepare_environment_name}/deployment-branch-policies?per_page=100")"
-          jq -e --arg branch "${default_branch}" '
-            .total_count == 1 and .branch_policies[0].name == $branch
-          ' <<<"${prepare_branch_policies}" >/dev/null || {
-            echo "::error::${prepare_environment_name} must allow only the default branch"
-            exit 1
-          }
-
-          for environment_name in governed-canary governed-canary-rollback; do
-            environment_json="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}")"
-            jq -e \
-              --arg name "${environment_name}" \
-              --arg owner "${GITHUB_REPOSITORY_OWNER}" '
-              .name == $name and
-              .deployment_branch_policy.protected_branches == false and
-              .deployment_branch_policy.custom_branch_policies == true and
-              (
-                [
-                  .protection_rules[]? |
-                  select(.type == "required_reviewers")
-                ] as $rules |
-                ($rules | length) == 1 and
-                $rules[0].prevent_self_review == false and
-                ($rules[0].reviewers | length) == 1 and
-                $rules[0].reviewers[0].type == "User" and
-                ($rules[0].reviewers[0].reviewer.id | type) == "number" and
-                $rules[0].reviewers[0].reviewer.id > 0 and
-                ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
-                  ($owner | ascii_downcase)
-              )
-            ' <<<"${environment_json}" >/dev/null || {
-              echo "::error::${environment_name} needs the explicit solo-owner User reviewer, self-review enabled, and a custom branch policy"
-              exit 1
-            }
-            branch_policies="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}/deployment-branch-policies?per_page=100")"
-            jq -e --arg branch "${default_branch}" '
-              .total_count == 1 and .branch_policies[0].name == $branch
-            ' <<<"${branch_policies}" >/dev/null || {
-              echo "::error::${environment_name} must allow only the default branch"
-              exit 1
-            }
-          done
-
-          run_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
-          jq -e \
-            --argjson runId "${CANARY_DEPLOYMENT_RUN_ID}" \
-            --arg branch "${default_branch}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg controlPlane "${GITHUB_SHA}" '
-            .id == $runId and
-            .name == "Deploy immutable AWS release" and
-            .path == ".github/workflows/deploy.yml" and
-            .head_repository.full_name == $repository and
-            .event == "workflow_dispatch" and
-            .head_branch == $branch and
-            .head_sha == $controlPlane and
-            (
-              (
-                .status == "completed" and
-                .conclusion == "success"
-              ) or
-              (
-                .status == "in_progress" and
-                .conclusion == null
-              )
-            )
-          ' <<<"${run_json}" >/dev/null || {
-            echo "::error::The source must be the exact-control-plane default-branch immutable deployment"
-            exit 1
-          }
-          run_attempt="$(jq -er \
-            '.run_attempt | select(type == "number" and . >= 1)' \
-            <<<"${run_json}")"
-          if test "$(jq -er '.status' <<<"${run_json}")" = "in_progress"; then
-            jobs_json="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}/attempts/${run_attempt}/jobs?per_page=100")"
-            jq -e \
-              --argjson runAttempt "${run_attempt}" '
-                (
-                  [
-                    .jobs[] |
-                    select(.name == "Verify once and deploy staging")
-                  ]
-                ) as $staging |
-                (
-                  ($staging | length) == 1 and
-                  $staging[0].run_attempt == $runAttempt and
-                  $staging[0].status == "completed" and
-                  $staging[0].conclusion == "success"
-                ) and
-                (
-                  [
-                    .jobs[] |
-                    select(.name == "Explicit solo-owner approval and promote identical artifacts") |
-                    select(
-                      .started_at != null or
-                      (.status != "queued" and .status != "pending")
-                    )
-                  ] |
-                  length == 0
-                )
-              ' <<<"${jobs_json}" >/dev/null || {
-              echo "::error::An active deployment may run the canary only after successful same-attempt staging and before production starts"
-              exit 1
-            }
-          fi
-
-          artifacts_json="$(gh api --paginate \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}/artifacts?per_page=100")"
-          expected_artifact="staging-deployment-evidence-${CANARY_RELEASE_SHA}-${run_attempt}"
-          artifact="$(jq -ce \
-            --arg name "${expected_artifact}" \
-            --argjson runId "${CANARY_DEPLOYMENT_RUN_ID}" '
-              [
-                .artifacts[] |
-                select(
-                  .expired == false and
-                  .name == $name and
-                  .workflow_run.id == $runId and
-                  (.digest | test("^sha256:[0-9a-f]{64}$"))
-                )
-              ] |
-              if length == 1 then .[0] else error(
-                "exactly one retained staging deployment evidence artifact is required"
-              ) end
-            ' <<<"${artifacts_json}")"
-          evidence_dir="${RUNNER_TEMP}/source-deployment-evidence"
-          mkdir -p "${evidence_dir}"
-          gh run download "${CANARY_DEPLOYMENT_RUN_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "$(jq -er '.name' <<<"${artifact}")" \
-            --dir "${evidence_dir}"
-          mapfile -t evidence_files < <(
-            find "${evidence_dir}" -type f \
-              -name 'staging-deployment-evidence.json' -print
-          )
-          test "${#evidence_files[@]}" = "1"
-          evidence="${evidence_files[0]}"
-          test -f "${evidence}"
-          test ! -L "${evidence}"
-          jq -e \
-            --arg release "${CANARY_RELEASE_SHA}" \
-            --arg controlPlane "${GITHUB_SHA}" \
-            --arg application "${CANARY_APPLICATION_URL}" \
-            --arg runUrl \
-              "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}" '
-              .schemaVersion == 1 and
-              .environment == "staging" and
-              (.source.ciRunId | test("^[1-9][0-9]{0,19}$")) and
-              .source.releaseSha == $release and
-              .source.deploymentControlPlaneSha == $controlPlane and
-              .deployment.stackName == "Archon-staging" and
-              .deployment.deploymentRunUrl == $runUrl and
-              .deployment.applicationUrl == $application and
-              (.verification.pipelineSecurity.deploymentControlPlaneGatesSha256 |
-                test("^[0-9a-f]{64}$")) and
-              .verification.result == "passed" and
-              .verification.dast.result == "passed"
-            ' "${evidence}" >/dev/null || {
-            echo "::error::Staging evidence does not bind the control plane, release, deployment, and URL"
-            exit 1
-          }
-
-          release_ci_run_id="$(jq -er '.source.ciRunId' "${evidence}")"
-          release_ci_run="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${release_ci_run_id}")"
-          jq -e \
-            --argjson runId "${release_ci_run_id}" \
-            --arg release "${CANARY_RELEASE_SHA}" \
-            --arg branch "${default_branch}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sourceUrl "$(jq -er '.source.sourceRunUrl' "${evidence}")" '
-              .id == $runId and
-              .name == "CI" and
-              .path == ".github/workflows/ci.yml" and
-              .head_repository.full_name == $repository and
-              .head_branch == $branch and
-              .head_sha == $release and
-              .event == "push" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .html_url == $sourceUrl
-            ' <<<"${release_ci_run}" >/dev/null || {
-            echo "::error::Staging evidence is not bound to successful exact-release CI"
-            exit 1
-          }
-
-          mapfile -t control_plane_files < <(
-            find "${evidence_dir}" -type f \
-              -name 'control-plane-security-gates.json' -print
-          )
-          test "${#control_plane_files[@]}" = "1"
-          control_plane_evidence="${control_plane_files[0]}"
-          test -f "${control_plane_evidence}"
-          test ! -L "${control_plane_evidence}"
-          expected_gate_sha="$(
-            jq -er \
-              '.verification.pipelineSecurity.deploymentControlPlaneGatesSha256' \
-              "${evidence}"
-          )"
-          test "$(sha256sum "${control_plane_evidence}" | awk '{print $1}')" = \
-            "${expected_gate_sha}"
-          jq -e \
-            --arg sha "${GITHUB_SHA}" \
-            --arg branch "${default_branch}" '
-              .schemaVersion == "archon.deployment-control-plane-gates/v1" and
-              .sourceSha == $sha and
-              .branch == $branch and
-              (.workflows | length) == 3 and
-              ([.workflows[].path] | sort) == [
-                ".github/workflows/ci.yml",
-                ".github/workflows/codeql.yml",
-                ".github/workflows/workflow-security.yml"
-              ] and
-              all(
-                .workflows[];
-                (.runId | type) == "number" and
-                (.runAttempt | type) == "number" and
-                .conclusion == "success"
-              )
-            ' "${control_plane_evidence}" >/dev/null || {
-            echo "::error::Deployment control-plane evidence is incomplete or mismatched"
-            exit 1
-          }
-          deployment_evidence_sha256="$(
-            sha256sum "${evidence}" | awk '{print $1}'
-          )"
-          {
-            echo "deployment_evidence=${evidence}"
-            echo "deployment_evidence_sha256=${deployment_evidence_sha256}"
-            echo "control_plane_evidence=${control_plane_evidence}"
-            echo "control_plane_gate_sha256=${expected_gate_sha}"
-          } >>"${GITHUB_OUTPUT}"
-
+          [[ "${CANARY_DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${CANARY_DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "${GITHUB_SHA}" = "${CANARY_RELEASE_SHA}"
+          test "$(gh api "/repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha)" = "${GITHUB_SHA}"
+          run="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_DEPLOYMENT_RUN_ID}")"
+          jq -e --arg sha "${CANARY_RELEASE_SHA}" --argjson id "${CANARY_DEPLOYMENT_RUN_ID}" '
+            .id==$id and .name=="Deploy immutable AWS release" and
+            .path==".github/workflows/deploy.yml" and .event=="workflow_dispatch" and
+            .head_branch=="master" and .head_sha==$sha and
+            .status=="completed" and .conclusion=="success"
+          ' <<<"${run}" >/dev/null
+          artifact="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANARY_DEPLOYMENT_ARTIFACT_ID}")"
+          expected="deployment-evidence-staging-${CANARY_RELEASE_SHA}-${CANARY_DEPLOYMENT_RUN_ID}"
+          jq -e --arg name "${expected}" --arg digest "${CANARY_DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --argjson id "${CANARY_DEPLOYMENT_ARTIFACT_ID}" --argjson run "${CANARY_DEPLOYMENT_RUN_ID}" '
+            .id==$id and .name==$name and .digest==$digest and .expired==false and
+            .workflow_run.id==$run and .size_in_bytes>0
+          ' <<<"${artifact}" >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Assert exact reviewed canary control plane
-        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-
-      - name: Verify exact attested governed-canary fixture binding
-        id: fixture
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          umask 077
-          [[ "${CANARY_FIXTURE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
-          [[ "${CANARY_FIXTURE_RUN_ATTEMPT}" =~ ^[1-9][0-9]{0,9}$ ]]
-          [[ "${CANARY_FIXTURE_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
-          [[ "${CANARY_FIXTURE_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${CANARY_FIXTURE_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-
-          fixture_run="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANARY_FIXTURE_RUN_ID}/attempts/${CANARY_FIXTURE_RUN_ATTEMPT}")"
-          jq -e \
-            --argjson runId "${CANARY_FIXTURE_RUN_ID}" \
-            --argjson runAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" '
-              .id == $runId and
-              .run_attempt == $runAttempt and
-              .name == "DataHub governed-canary fixture" and
-              .path == ".github/workflows/datahub-canary-fixture.yml" and
-              .head_repository.full_name == $repository and
-              .head_branch == "master" and
-              .head_sha == $releaseSha and
-              .event == "workflow_dispatch" and
-              .status == "completed" and
-              .conclusion == "success"
-            ' <<<"${fixture_run}" >/dev/null || {
-            echo "::error::The fixture run is not the exact successful current-release producer"
-            exit 1
-          }
-
-          expected_artifact_name="datahub-canary-fixture-receipt-${CANARY_FIXTURE_RUN_ID}-${CANARY_FIXTURE_RUN_ATTEMPT}"
-          artifact="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANARY_FIXTURE_ARTIFACT_ID}")"
-          jq -e \
-            --arg digest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
-            --arg name "${expected_artifact_name}" \
-            --argjson artifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
-            --argjson runId "${CANARY_FIXTURE_RUN_ID}" '
-              .id == $artifactId and
-              .name == $name and
-              .digest == $digest and
-              .expired == false and
-              .workflow_run.id == $runId and
-              (.size_in_bytes | type) == "number" and
-              .size_in_bytes > 0 and
-              .size_in_bytes <= 1048576
-            ' <<<"${artifact}" >/dev/null || {
-            echo "::error::The fixture artifact metadata differs from the supplied coordinates"
-            exit 1
-          }
-
-          fixture_root="${RUNNER_TEMP}/governed-canary/fixture"
-          archive="${fixture_root}/receipt.zip"
-          receipt_dir="${fixture_root}/receipt"
-          binding="${fixture_root}/fixture-binding.json"
-          mkdir -p "${receipt_dir}"
-          gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANARY_FIXTURE_ARTIFACT_ID}/zip" \
-            >"${archive}"
-          test "$(stat --format=%s "${archive}")" -le 1048576
-          test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = \
-            "${CANARY_FIXTURE_ARTIFACT_DIGEST}"
-
-          mapfile -t archive_entries < <(unzip -Z1 "${archive}")
-          expected_checksum_inventory="$(
-            printf '%s\n' \
-              approval-receipt.json \
-              control-plane.json \
-              plan.json \
-              receipt.json |
-              LC_ALL=C sort
-          )"
-          expected_inventory="$(
-            printf '%s\n' \
-              SHA256SUMS \
-              approval-receipt.json \
-              control-plane.json \
-              plan.json \
-              receipt.json |
-              LC_ALL=C sort
-          )"
-          actual_archive_inventory="$(
-            printf '%s\n' "${archive_entries[@]}" |
-              LC_ALL=C sort
-          )"
-          test "${actual_archive_inventory}" = "${expected_inventory}" || {
-            echo "::error::The fixture archive inventory is not exact"
-            exit 1
-          }
-          FIXTURE_ARCHIVE="${archive}" python3 - <<'PY'
-          import os
-          import stat
-          import zipfile
-
-          archive = os.environ["FIXTURE_ARCHIVE"]
-          with zipfile.ZipFile(archive) as handle:
-              entries = handle.infolist()
-              if len(entries) != 5:
-                  raise SystemExit("fixture archive entry count is not exact")
-              total = 0
-              for entry in entries:
-                  mode = entry.external_attr >> 16
-                  file_type = stat.S_IFMT(mode)
-                  if (
-                      entry.is_dir()
-                      or stat.S_ISLNK(mode)
-                      or file_type not in (0, stat.S_IFREG)
-                      or entry.file_size <= 0
-                      or entry.file_size > 524_288
-                      or entry.compress_size > 1_048_576
-                  ):
-                      raise SystemExit("fixture archive has an unsafe entry")
-                  total += entry.file_size
-              if total > 1_048_576:
-                  raise SystemExit("fixture archive expands beyond its bound")
-          PY
-          if zipinfo -l "${archive}" |
-            awk '$1 ~ /^l[rwxStTs-]{9}$/ { found = 1 } END { exit found ? 0 : 1 }'; then
-            echo "::error::Symlinks are forbidden in fixture evidence"
-            exit 1
-          fi
-          unzip -q "${archive}" -d "${receipt_dir}"
-          actual_inventory="$(
-            find "${receipt_dir}" -mindepth 1 -maxdepth 1 -printf '%f\n' |
-              LC_ALL=C sort
-          )"
-          test "${actual_inventory}" = "${expected_inventory}"
-          for path in \
-            SHA256SUMS \
-            approval-receipt.json \
-            control-plane.json \
-            plan.json \
-            receipt.json; do
-            test -f "${receipt_dir}/${path}"
-            test ! -L "${receipt_dir}/${path}"
-            test "$(stat --format=%s "${receipt_dir}/${path}")" -le 524288
-          done
-          (
-            cd "${receipt_dir}"
-            test "$(wc -l <SHA256SUMS)" = "4"
-            actual_checksum_inventory="$(
-              sed -nE \
-                's/^[0-9a-f]{64}  ([A-Za-z0-9.-]+)$/\1/p' \
-                SHA256SUMS |
-                LC_ALL=C sort
-            )"
-            test "${actual_checksum_inventory}" = \
-              "${expected_checksum_inventory}" || {
-              echo "::error::The fixture checksum inventory is not exact"
-              exit 1
-            }
-            sha256sum --check --strict SHA256SUMS
-          )
-          for path in \
-            approval-receipt.json \
-            control-plane.json \
-            plan.json \
-            receipt.json; do
-            canonical="${fixture_root}/canonical-${path}"
-            jq -cS . "${receipt_dir}/${path}" >"${canonical}"
-            cmp --silent "${receipt_dir}/${path}" "${canonical}"
-          done
-          test "$(sha256sum "${receipt_dir}/receipt.json" | awk '{print $1}')" = \
-            "${CANARY_FIXTURE_RECEIPT_SHA256}"
-
-          contract_sha256="$(
-            jq -cS . contracts/datahub-canary-fixture-v1.json |
-              sha256sum |
-              awk '{print $1}'
-          )"
-          target_urn="urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)"
-          domain_urn="urn:li:domain:archonGovernedCanaryFixture"
-          jq -e \
-            --arg contractSha256 "${contract_sha256}" \
-            --arg query "${CANARY_QUERY}" \
-            --arg targetUrn "${target_urn}" \
-            --arg domainUrn "${domain_urn}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" '
-              .schemaVersion ==
-                "archon.datahub-canary-fixture-plan/v1" and
-              .repository == $repository and
-              .releaseSha == $releaseSha and
-              .stateContractSha256 == $contractSha256 and
-              .queryBinding == {
-                query: $query,
-                targetUrn: $targetUrn
-              } and
-              .ownedUrns == [$targetUrn, $domainUrn] and
-              (.action == "seed" or .action == "reset") and
-              (.operation == "noop" or .operation == "seed" or
-                .operation == "reset") and
-              (.gmsEndpointFingerprint | test("^[0-9a-f]{64}$")) and
-              (.isolationMarkerSha256 | test("^[0-9a-f]{64}$")) and
-              (.before.rawAspectSnapshotSha256 |
-                test("^[0-9a-f]{64}$"))
-            ' "${receipt_dir}/plan.json" >/dev/null
-          plan_sha256="$(sha256sum "${receipt_dir}/plan.json" | awk '{print $1}')"
-          jq -e \
-            --arg contractSha256 "${contract_sha256}" \
-            --arg planSha256 "${plan_sha256}" \
-            --arg query "${CANARY_QUERY}" \
-            --arg targetUrn "${target_urn}" \
-            --arg domainUrn "${domain_urn}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg runId "${CANARY_FIXTURE_RUN_ID}" \
-            --arg runAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
-            --slurpfile plan "${receipt_dir}/plan.json" '
-              .schemaVersion ==
-                "archon.datahub-canary-fixture-receipt/v1" and
-              .repository == $repository and
-              .releaseSha == $releaseSha and
-              .workflowRunId == $runId and
-              .workflowRunAttempt == $runAttempt and
-              .stateContractSha256 == $contractSha256 and
-              .planSha256 == $planSha256 and
-              .gmsEndpointFingerprint ==
-                $plan[0].gmsEndpointFingerprint and
-              .queryBinding == {
-                query: $query,
-                targetUrn: $targetUrn
-              } and
-              .ownedUrns == [$targetUrn, $domainUrn] and
-              .action == $plan[0].action and
-              .exactQueryMatchCount == 1 and
-              (.g1ToG5 | keys | sort) ==
-                ["G1", "G2", "G3", "G4", "G5"] and
-              all(.g1ToG5[]; . == true) and
-              .g6Gap == {
-                classificationState: "absent",
-                fieldPath: "email",
-                piiClassificationAbsent: true
-              } and
-              (.postStateSha256 | test("^[0-9a-f]{64}$")) and
-              (
-                if $plan[0].operation == "noop" then
-                  .outcome == "unchanged"
-                elif $plan[0].operation == "seed" then
-                  .outcome == "seeded"
-                else
-                  .outcome == "reset"
-                end
-              )
-            ' "${receipt_dir}/receipt.json" >/dev/null || {
-            echo "::error::The fixture receipt does not prove the exact TEST G1-G5/G6 state"
-            exit 1
-          }
-
-          normalize_gms() {
-            GMS_VALUE="$1" python3 - <<'PY'
-          import os
-          import re
-          import sys
-          import urllib.parse
-
-          raw = os.environ["GMS_VALUE"]
-          parsed = urllib.parse.urlsplit(raw)
-          decoded = urllib.parse.unquote(parsed.path)
-          if (
-              parsed.scheme != "https"
-              or not parsed.hostname
-              or parsed.username is not None
-              or parsed.password is not None
-              or parsed.query
-              or parsed.fragment
-              or "\\" in raw
-              or re.search(r"[\x00-\x20\x7f\\]", decoded)
-              or any(part in {".", ".."} for part in decoded.split("/"))
-          ):
-              raise SystemExit(1)
-          host = parsed.hostname.lower().rstrip(".")
-          port = parsed.port
-          authority = f"[{host}]" if ":" in host else host
-          if port is not None and port != 443:
-              authority = f"{authority}:{port}"
-          sys.stdout.write(
-              urllib.parse.urlunsplit(
-                  ("https", authority, parsed.path.rstrip("/"), "", "")
-              )
-          )
-          PY
-          }
-          read_gms="$(normalize_gms "${CANARY_DATAHUB_READ_GMS_URL}")"
-          write_gms="$(normalize_gms "${CANARY_DATAHUB_WRITE_GMS_URL}")"
-          test "${read_gms}" = "${write_gms}" || {
-            echo "::error::The governed canary GMS endpoints do not equal one fixture endpoint"
-            exit 1
-          }
-          endpoint_fingerprint="$(
-            printf '%s' "${read_gms}" | sha256sum | awk '{print $1}'
-          )"
-          isolation_marker_sha256="$(
-            printf '%s' "${CANARY_ISOLATION_MARKER,,}" |
-              sha256sum |
-              awk '{print $1}'
-          )"
-          test "${endpoint_fingerprint}" = "$(
-            jq -er '.gmsEndpointFingerprint' "${receipt_dir}/receipt.json"
-          )"
-          test "${endpoint_fingerprint}" = "$(
-            jq -er '.gmsEndpointFingerprint' "${receipt_dir}/plan.json"
-          )"
-          test "${isolation_marker_sha256}" = "$(
-            jq -er '.isolationMarkerSha256' "${receipt_dir}/plan.json"
-          )"
-
-          approval_sha256="$(
-            sha256sum "${receipt_dir}/approval-receipt.json" | awk '{print $1}'
-          )"
-          control_plane_sha256="$(
-            sha256sum "${receipt_dir}/control-plane.json" | awk '{print $1}'
-          )"
-          sums_sha256="$(
-            sha256sum "${receipt_dir}/SHA256SUMS" | awk '{print $1}'
-          )"
-          post_state_sha256="$(
-            jq -er '.postStateSha256' "${receipt_dir}/receipt.json"
-          )"
-          fixture_action="$(jq -er '.action' "${receipt_dir}/receipt.json")"
-          expected_predicate="${fixture_root}/expected-attestation-predicate.json"
-          jq -cnS \
-            --arg action "${fixture_action}" \
-            --arg approvalReceiptSha256 "${approval_sha256}" \
-            --arg artifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
-            --arg controlPlaneSha256 "${control_plane_sha256}" \
-            --arg planSha256 "${plan_sha256}" \
-            --arg postStateSha256 "${post_state_sha256}" \
-            --arg receiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg sha256sumsSha256 "${sums_sha256}" \
-            --arg stateContractSha256 "${contract_sha256}" \
-            --arg workflowRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
-            --arg workflowRunId "${CANARY_FIXTURE_RUN_ID}" '
-              {
-                schemaVersion:
-                  "archon.datahub-canary-fixture-attestation/v1",
-                repository: $repository,
-                releaseSha: $releaseSha,
-                workflowRunId: $workflowRunId,
-                workflowRunAttempt: $workflowRunAttempt,
-                action: $action,
-                result: "exact-fixture-ready",
-                artifactDigest: $artifactDigest,
-                stateContractSha256: $stateContractSha256,
-                controlPlaneSha256: $controlPlaneSha256,
-                approvalReceiptSha256: $approvalReceiptSha256,
-                planSha256: $planSha256,
-                receiptSha256: $receiptSha256,
-                sha256sumsSha256: $sha256sumsSha256,
-                postStateSha256: $postStateSha256
-              }
-            ' >"${expected_predicate}"
-          predicate_type="https://github.com/upgradedev/archon-datahub/attestations/datahub-canary-fixture/v1"
-          attestation_verification="${fixture_root}/attestation-verification.json"
-          gh attestation verify \
-            "${receipt_dir}/receipt.json" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow \
-              "github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-canary-fixture.yml" \
-            --signer-digest "${CANARY_RELEASE_SHA}" \
-            --source-digest "${CANARY_RELEASE_SHA}" \
-            --source-ref refs/heads/master \
-            --predicate-type "${predicate_type}" \
-            --deny-self-hosted-runners \
-            --format json >"${attestation_verification}"
-          test -s "${attestation_verification}"
-          expected_subjects="$(
-            jq -cn \
-              --arg sums "$(sha256sum "${receipt_dir}/SHA256SUMS" | awk '{print $1}')" \
-              --arg approval "${approval_sha256}" \
-              --arg controlPlane "${control_plane_sha256}" \
-              --arg plan "${plan_sha256}" \
-              --arg receipt "${CANARY_FIXTURE_RECEIPT_SHA256}" '
-                [
-                  {name: "SHA256SUMS", sha256: $sums},
-                  {name: "approval-receipt.json", sha256: $approval},
-                  {name: "control-plane.json", sha256: $controlPlane},
-                  {name: "plan.json", sha256: $plan},
-                  {name: "receipt.json", sha256: $receipt}
-                ] | sort_by(.name)
-              '
-          )"
-          expected_predicate_json="$(jq -cS . "${expected_predicate}")"
-          jq -e \
-            --arg predicateType "${predicate_type}" \
-            --argjson expectedPredicate "${expected_predicate_json}" \
-            --argjson expectedSubjects "${expected_subjects}" '
-              length >= 1 and
-              any(
-                .[];
-                .verificationResult.statement.predicateType ==
-                  $predicateType and
-                .verificationResult.statement.predicate ==
-                  $expectedPredicate and
-                (
-                  .verificationResult.statement.subject |
-                  map({
-                    name: (.name | split("/") | last),
-                    sha256: .digest.sha256
-                  }) |
-                  sort_by(.name)
-                ) == $expectedSubjects
-              )
-            ' "${attestation_verification}" >/dev/null || {
-            echo "::error::The fixture attestation does not bind the exact predicate and full subject set"
-            exit 1
-          }
-
-          attestation_predicate_sha256="$(
-            sha256sum "${expected_predicate}" | awk '{print $1}'
-          )"
-          jq -cnS \
-            --arg artifactDigest "${CANARY_FIXTURE_ARTIFACT_DIGEST}" \
-            --arg artifactId "${CANARY_FIXTURE_ARTIFACT_ID}" \
-            --arg artifactName "${expected_artifact_name}" \
-            --arg attestationPredicateSha256 \
-              "${attestation_predicate_sha256}" \
-            --arg gmsEndpointFingerprint "${endpoint_fingerprint}" \
-            --arg isolationMarkerSha256 "${isolation_marker_sha256}" \
-            --arg postStateSha256 "${post_state_sha256}" \
-            --arg query "${CANARY_QUERY}" \
-            --arg receiptSha256 "${CANARY_FIXTURE_RECEIPT_SHA256}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg stateContractSha256 "${contract_sha256}" \
-            --arg targetUrn "${target_urn}" \
-            --arg workflowRunAttempt "${CANARY_FIXTURE_RUN_ATTEMPT}" \
-            --arg workflowRunId "${CANARY_FIXTURE_RUN_ID}" '
-              {
-                schemaVersion:
-                  "archon.governed-canary-fixture-binding/v1",
-                repository: $repository,
-                releaseSha: $releaseSha,
-                workflowRunId: $workflowRunId,
-                workflowRunAttempt: $workflowRunAttempt,
-                artifactId: $artifactId,
-                artifactName: $artifactName,
-                artifactDigest: $artifactDigest,
-                receiptSha256: $receiptSha256,
-                stateContractSha256: $stateContractSha256,
-                postStateSha256: $postStateSha256,
-                gmsEndpointFingerprint: $gmsEndpointFingerprint,
-                isolationMarkerSha256: $isolationMarkerSha256,
-                attestationPredicateSha256:
-                  $attestationPredicateSha256,
-                target: {
-                  query: $query,
-                  targetUrn: $targetUrn
-                }
-              }
-            ' >"${binding}"
-          chmod 0600 "${binding}"
-          canonical_binding="$(jq -cS . "${binding}")"
-          binding_digest="sha256:$(
-            printf '%s' "${canonical_binding}" | sha256sum | awk '{print $1}'
-          )"
-          {
-            echo "binding=${binding}"
-            echo "binding_digest=${binding_digest}"
-          } >>"${GITHUB_OUTPUT}"
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-
-      - name: Install the reviewed, locked canary driver
-        run: npm ci --ignore-scripts
-
-      - name: Revalidate exact control plane before prepare AWS trust
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ steps.source.outputs.control_plane_gate_sha256 }}
-          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/prepare-gates/control-plane-security-gates.json
-        run: bash scripts/verify-github-control-plane.sh
-
-      - name: Assume the read-only canary evidence role
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          role-to-assume: ${{ vars.AWS_CANARY_PREPARE_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_CANARY_REGION }}
-          allowed-account-ids: ${{ vars.AWS_CANARY_ACCOUNT_ID }}
-          role-session-name: archon-canary-${{ github.run_id }}
-
-      - name: Fail closed on stack and isolated endpoint bindings
-        id: stack
-        env:
-          AWS_ACCOUNT_ID: ${{ vars.AWS_CANARY_ACCOUNT_ID }}
-          AWS_REGION: ${{ vars.AWS_CANARY_REGION }}
-          DEPLOYMENT_EVIDENCE: ${{ steps.source.outputs.deployment_evidence }}
+          artifact-ids: ${{ inputs.deployment_artifact_id }}
+          run-id: ${{ inputs.deployment_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/governed-canary/deployment
+      - name: Verify lean evidence v2 and attestation
+        id: evidence
         run: |
           set -euo pipefail
-          : "${AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID is required}"
-          : "${AWS_REGION:?AWS_REGION is required}"
-          : "${CANARY_APPLICATION_URL:?CANARY_APPLICATION_URL is required}"
-          : "${CANARY_DATASET_URN:?CANARY_DATASET_URN is required}"
-          : "${CANARY_ISOLATION_MARKER:?CANARY_ISOLATION_MARKER is required}"
-          : "${CANARY_DATAHUB_READ_GMS_URL:?CANARY_DATAHUB_READ_GMS_URL is required}"
-          : "${CANARY_DATAHUB_READ_MCP_URL:?CANARY_DATAHUB_READ_MCP_URL is required}"
-          : "${CANARY_DATAHUB_WRITE_GMS_URL:?CANARY_DATAHUB_WRITE_GMS_URL is required}"
-          : "${CANARY_DATAHUB_WRITE_MCP_URL:?CANARY_DATAHUB_WRITE_MCP_URL is required}"
-
-          caller_account="$(aws sts get-caller-identity --query Account --output text)"
-          test "${caller_account}" = "${AWS_ACCOUNT_ID}"
-          stack_json="${RUNNER_TEMP}/canary-stack.json"
-          aws cloudformation describe-stacks \
-            --stack-name "${CANARY_STACK_NAME}" >"${stack_json}"
-          jq -e '
-            .Stacks | length == 1 and
-            .[0].StackName == "Archon-staging" and
-            (.[0].StackStatus | endswith("_COMPLETE"))
-          ' "${stack_json}" >/dev/null
-
-          parameter() {
-            jq -er --arg key "$1" '
-              .Stacks[0].Parameters[] |
-              select(.ParameterKey == $key) |
-              .ParameterValue
-            ' "${stack_json}"
-          }
-          output() {
-            jq -er --arg key "$1" '
-              .Stacks[0].Outputs[] |
-              select(.OutputKey == $key) |
-              .OutputValue
-            ' "${stack_json}"
-          }
-          test "$(parameter ReleaseSha)" = "${CANARY_RELEASE_SHA}"
-          test "$(parameter WorkerDesiredCount)" = "1"
-          test "$(parameter DataHubReadGmsUrl)" = "${CANARY_DATAHUB_READ_GMS_URL}"
-          test "$(parameter DataHubReadMcpUrl)" = "${CANARY_DATAHUB_READ_MCP_URL}"
-          test "$(parameter DataHubWriteGmsUrl)" = "${CANARY_DATAHUB_WRITE_GMS_URL}"
-          test "$(parameter DataHubWriteMcpUrl)" = "${CANARY_DATAHUB_WRITE_MCP_URL}"
-          application_url="$(output ArchonApplicationUrl)"
-          evidence_bucket="$(output ArchonEvidenceBucketName)"
-          cognito_client_id="$(output ArchonUserPoolClientId)"
-          cognito_origin="$(output ArchonCognitoHostedUiOrigin)"
-          authorization_endpoint="$(output ArchonCognitoAuthorizationEndpoint)"
-          token_endpoint="$(output ArchonCognitoTokenEndpoint)"
-          test "${application_url}" = "${CANARY_APPLICATION_URL}"
-          [[ "${cognito_client_id}" =~ ^[A-Za-z0-9]{8,128}$ ]]
-          [[ "${cognito_origin}" =~ ^https://[a-z0-9.-]+$ ]]
-          test "${authorization_endpoint}" = "${cognito_origin}/oauth2/authorize"
-          test "${token_endpoint}" = "${cognito_origin}/oauth2/token"
-          test "$(jq -er '.deployment.applicationUrl' \
-            "${DEPLOYMENT_EVIDENCE}")" = \
-            "${application_url}"
+          root="${RUNNER_TEMP}/governed-canary/deployment"
+          test -d "${root}" && test ! -L "${root}"
+          test -z "$(find "${root}" -type l -print -quit)"
+          mapfile -t paths < <(find "${root}" -type f -printf '%f\n' | sort)
+          test "$(printf '%s\n' "${paths[@]}")" = $'deployment-evidence.json\nobservation.json'
+          evidence="${root}/deployment-evidence.json"
+          observation="${root}/observation.json"
+          jq -e --arg sha "${CANARY_RELEASE_SHA}" --argjson run "${CANARY_DEPLOYMENT_RUN_ID}" --arg url "${CANARY_APPLICATION_URL}" '
+            .schemaVersion=="archon.aws-deployment-evidence/v2" and .stage=="staging" and
+            .releaseSha==$sha and .deploymentRunId==$run and .applicationUrl==$url and
+            .promotion.policy=="build-once-promote-exact-artifacts" and
+            .verification.result=="passed" and .verification.zeroIdleCore==true and
+            .verification.httpBoundary==true and .verification.securityHeaders==true and
+            .verification.directApiRejected==true and .verification.canonicalHostEnforced==true and
+            (.verification.observationSha256|test("^[0-9a-f]{64}$")) and .secretsProjected==false
+          ' "${evidence}" >/dev/null
+          jq -e --arg sha "${CANARY_RELEASE_SHA}" '
+            .schemaVersion=="archon.lean-runtime-observation/v1" and .stage=="staging" and
+            .releaseSha==$sha and .topology.coreIdle==true and
+            .topology.legacyAlwaysOnRuntimeAbsent==true and
+            (.runtime.cloudImageDigest|test("^sha256:[0-9a-f]{64}$")) and
+            .runtime.functions==6 and .runtime.imageFunctions==3 and
+            (.security | all(.[]; . == true))
+          ' "${observation}" >/dev/null
+          observation_raw="$(sha256sum "${observation}"|awk '{print $1}')"
+          test "$(jq -er .verification.observationSha256 "${evidence}")" = "${observation_raw}"
+          gh attestation verify "${evidence}" --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml" \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/aws-deployment/v2" >/dev/null
           {
-            echo "application_url=${application_url}"
-            echo "evidence_bucket=${evidence_bucket}"
-            echo "cognito_client_id=${cognito_client_id}"
-            echo "cognito_hosted_ui_origin=${cognito_origin}"
+            echo "evidence_digest=sha256:$(sha256sum "${evidence}"|awk '{print $1}')"
+            echo "observation_digest=sha256:${observation_raw}"
+            echo "cloud_image_digest=$(jq -er .runtime.cloudImageDigest "${observation}")"
           } >>"${GITHUB_OUTPUT}"
-
-      - name: Prepare and validate the exact governed plan
-        id: prepare
+      - name: Verify current GitHub control plane
+        id: gates
         env:
-          CANARY_APPLICATION_URL: ${{ steps.stack.outputs.application_url }}
-          CANARY_EVIDENCE_BUCKET: ${{ steps.stack.outputs.evidence_bucket }}
-          CANARY_COGNITO_CLIENT_ID: ${{ steps.stack.outputs.cognito_client_id }}
-          CANARY_COGNITO_HOSTED_UI_ORIGIN: ${{ steps.stack.outputs.cognito_hosted_ui_origin }}
-          CANARY_CONTROL_PLANE_GATES_PATH: ${{ steps.source.outputs.control_plane_evidence }}
-          CANARY_CONTROL_PLANE_GATES_SHA256: ${{ steps.source.outputs.control_plane_gate_sha256 }}
-          CANARY_FIXTURE_BINDING_PATH: ${{ steps.fixture.outputs.binding }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
+          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/recovery/control-plane-security-gates.json
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${OUTPUT_PATH}")"
+          bash scripts/verify-github-control-plane.sh
+          echo "gates_digest=sha256:$(sha256sum "${OUTPUT_PATH}"|awk '{print $1}')" >>"${GITHUB_OUTPUT}"
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_CANARY_PREPARE_ROLE_ARN }}
+          role-session-name: archon-canary-prepare-${{ github.run_id }}
+      - name: Verify exact Judge stack bindings
+        id: stack
+        env:
+          CLOUD_IMAGE_DIGEST: ${{ steps.evidence.outputs.cloud_image_digest }}
+        run: |
+          set -euo pipefail
+          stack="${RUNNER_TEMP}/governed-canary/judge.json"
+          aws cloudformation describe-stacks --stack-name "${CANARY_STACK_NAME}" >"${stack}"
+          output() { jq -er --arg k "$1" '.Stacks[0].Outputs|map(select(.OutputKey==$k))|if length==1 then .[0].OutputValue else error("ambiguous output") end' "${stack}"; }
+          test "$(jq -er .Stacks[0].StackName "${stack}")" = "${CANARY_STACK_NAME}"
+          test "$(output ArchonReleaseSha)" = "${CANARY_RELEASE_SHA}"
+          test "$(output ArchonDeploymentWorkflowRunId)" = "${CANARY_DEPLOYMENT_RUN_ID}"
+          test "$(output ArchonApplicationUrl)" = "${CANARY_APPLICATION_URL}"
+          test "${CANARY_APPLICATION_URL}" = "https://staging.archon-datahub.click"
+          [[ "$(output ArchonCloudRuntimeImageUri)" == *@"${CLOUD_IMAGE_DIGEST}" ]]
+          test "$(output ArchonCanonicalDatasetUrn)" = "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+          test "$(output ArchonGovernedColumnPath)" = "customer_email"
+          pool="$(output ArchonUserPoolId)"
+          {
+            echo "application_url=$(output ArchonApplicationUrl)"
+            echo "user_pool_id=${pool}"
+            echo "cognito_client_id=$(output ArchonUserPoolClientId)"
+            echo "cognito_hosted_ui_origin=$(output ArchonCognitoHostedUiOrigin)"
+            echo "cognito_issuer=https://cognito-idp.${AWS_REGION}.amazonaws.com/${pool}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Seal pre-mutation recovery capability
+        id: seal
+        env:
+          CANARY_DEPLOYMENT_EVIDENCE_SHA256: ${{ steps.evidence.outputs.evidence_digest }}
+          CANARY_OBSERVATION_SHA256: ${{ steps.evidence.outputs.observation_digest }}
+          CANARY_CLOUD_IMAGE_DIGEST: ${{ steps.evidence.outputs.cloud_image_digest }}
+          CANARY_CONTROL_PLANE_GATES_SHA256: ${{ steps.gates.outputs.gates_digest }}
           CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
         run: |
           set -euo pipefail
-          recovery_dir="$(dirname "${CANARY_RECOVERY_PATH}")"
-          mkdir -p "${recovery_dir}"
-          test -f "${CANARY_CONTROL_PLANE_GATES_PATH}"
-          test ! -L "${CANARY_CONTROL_PLANE_GATES_PATH}"
-          test "$(sha256sum "${CANARY_CONTROL_PLANE_GATES_PATH}" | awk '{print $1}')" = \
-            "${CANARY_CONTROL_PLANE_GATES_SHA256}"
-          test -f "${CANARY_FIXTURE_BINDING_PATH}"
-          test ! -L "${CANARY_FIXTURE_BINDING_PATH}"
-          fixture_binding_canonical="${RUNNER_TEMP}/fixture-binding-canonical.json"
-          jq -cS . "${CANARY_FIXTURE_BINDING_PATH}" \
-            >"${fixture_binding_canonical}"
-          cmp --silent \
-            "${CANARY_FIXTURE_BINDING_PATH}" \
-            "${fixture_binding_canonical}"
-          fixture_binding="$(jq -cS . "${CANARY_FIXTURE_BINDING_PATH}")"
-          test "sha256:$(printf '%s' "${fixture_binding}" |
-            sha256sum | awk '{print $1}')" = \
-            "${{ steps.fixture.outputs.binding_digest }}"
-          node --import tsx scripts/governed-canary.ts prepare
-          chmod 0600 "${CANARY_RECOVERY_PATH}"
-          jq -e \
-            --arg fixtureBindingDigest \
-              "${{ steps.fixture.outputs.binding_digest }}" \
-            --slurpfile fixtureBinding "${CANARY_FIXTURE_BINDING_PATH}" '
-              .schemaVersion ==
-                "archon.governed-canary-recovery/v3" and
-              .fixtureBinding == $fixtureBinding[0] and
-              .fixtureBindingDigest == $fixtureBindingDigest
-            ' "${CANARY_RECOVERY_PATH}" >/dev/null || {
-            echo "::error::The recovery manifest does not seal the verified fixture binding"
-            exit 1
-          }
-          test "$(jq -er '.controlPlaneGatesSha256' "${CANARY_RECOVERY_PATH}")" = \
-            "${CANARY_CONTROL_PLANE_GATES_SHA256}"
-          control_plane_output="${recovery_dir}/control-plane-security-gates.json"
-          cp -- "${CANARY_CONTROL_PLANE_GATES_PATH}" "${control_plane_output}"
-          chmod 0600 "${control_plane_output}"
-          test "$(sha256sum "${control_plane_output}" | awk '{print $1}')" = \
-            "${CANARY_CONTROL_PLANE_GATES_SHA256}"
-          fixture_binding_output="${recovery_dir}/fixture-binding.json"
-          cp -- "${CANARY_FIXTURE_BINDING_PATH}" "${fixture_binding_output}"
-          chmod 0600 "${fixture_binding_output}"
-          cmp --silent "${fixture_binding_output}" \
-            "${CANARY_FIXTURE_BINDING_PATH}"
-          recovery_digest="$(jq -er \
-            '.recoveryDigest | select(test("^sha256:[a-f0-9]{64}$"))' \
-            "${CANARY_RECOVERY_PATH}")"
-          audit_id="$(jq -er \
-            '.auditId | select(test("^[a-f0-9]{64}$"))' \
-            "${CANARY_RECOVERY_PATH}")"
-          approval_id="$(jq -er '.approvalId' "${CANARY_RECOVERY_PATH}")"
-          approval_expires_at="$(jq -er '.approvalExpiresAt' "${CANARY_RECOVERY_PATH}")"
-          plan_digest="$(jq -er '.planDigest' "${CANARY_RECOVERY_PATH}")"
-          auth_binding_digest="$(jq -er '.authBindingsDigest' "${CANARY_RECOVERY_PATH}")"
-          target_urn="$(jq -er '.target.entityUrn' "${CANARY_RECOVERY_PATH}")"
-          before_digest="$(jq -er '.expectedBefore.digest' "${CANARY_RECOVERY_PATH}")"
-          after_digest="$(jq -er '.expectedAfter.digest' "${CANARY_RECOVERY_PATH}")"
-          {
-            echo "path=${CANARY_RECOVERY_PATH}"
-            echo "artifact_path=${recovery_dir}"
-            echo "recovery_digest=${recovery_digest}"
-            echo "audit_id=${audit_id}"
-            echo "approval_id=${approval_id}"
-            echo "plan_digest=${plan_digest}"
-          } >>"${GITHUB_OUTPUT}"
-          {
-            echo "### Governed plan sealed before mutation"
-            echo
-            echo "- Release: \`${CANARY_RELEASE_SHA}\`"
-            echo "- Audit: \`${audit_id}\`"
-            echo "- Approval: \`${approval_id}\`"
-            echo "- Approval expires: \`${approval_expires_at}\`"
-            echo "- Plan: \`${plan_digest}\`"
-            echo "- Staging Cognito binding: \`${auth_binding_digest}\`"
-            echo "- Recovery binding: \`${recovery_digest}\`"
-            echo "- Attested fixture binding: \`${{ steps.fixture.outputs.binding_digest }}\`"
-            echo "- Target: \`${target_urn}#${CANARY_COLUMN_PATH}\`"
-            echo "- Transition: \`${before_digest}\` → \`${after_digest}\`"
-            echo "- Exact write/inverse: \`add_tags(urn:li:tag:PII)\` / \`remove_tags(urn:li:tag:PII)\`"
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Seal recovery state before approval
-        id: recovery
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          node --import tsx scripts/governed-canary.ts seal
+          jq -e '.schemaVersion=="archon.governed-canary-recovery/v4" and .runtime==(.runtime|select(.profileId=="cloud" and .resolution=="explicit" and .stackName=="Archon-staging-Judge"))' "${CANARY_RECOVERY_PATH}" >/dev/null
+          echo "recovery_digest=$(jq -er .digest "${CANARY_RECOVERY_PATH}")" >>"${GITHUB_OUTPUT}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: governed-canary-recovery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.prepare.outputs.artifact_path }}
+          path: ${{ runner.temp }}/governed-canary/recovery
           if-no-files-found: error
           retention-days: 90
+          compression-level: 9
 
-  approval:
-    name: Human approval — plan ${{ needs.prepare.outputs.plan_digest }} / recovery ${{ needs.prepare.outputs.recovery_digest }}
+  execute:
+    name: Human-approved Cloud proof ${{ needs.prepare.outputs.recovery_digest }}
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
@@ -1156,301 +228,102 @@ jobs:
       id-token: write
     environment:
       name: governed-canary
-      url: ${{ vars.CANARY_APPLICATION_URL }}
-    outputs:
-      rollback_proposal_digest: ${{ steps.approve.outputs.rollback_proposal_digest }}
-      receipt_digest: ${{ steps.approve.outputs.receipt_digest }}
+      url: ${{ needs.prepare.outputs.application_url }}
     env:
-      CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      GH_TOKEN: ${{ github.token }}
       CANARY_RELEASE_SHA: ${{ inputs.release_sha }}
-      CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
-      CANARY_EVIDENCE_BUCKET: ${{ needs.prepare.outputs.evidence_bucket }}
+      CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      CANARY_APPLICATION_URL: ${{ needs.prepare.outputs.application_url }}
       CANARY_COGNITO_CLIENT_ID: ${{ needs.prepare.outputs.cognito_client_id }}
       CANARY_COGNITO_HOSTED_UI_ORIGIN: ${{ needs.prepare.outputs.cognito_hosted_ui_origin }}
-      CANARY_CONTROL_PLANE_GATES_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
-      CANARY_DATASET_URN: ${{ vars.CANARY_DATASET_URN }}
-      CANARY_ISOLATION_MARKER: ${{ vars.CANARY_ISOLATION_MARKER }}
-      CANARY_DATAHUB_READ_GMS_URL: ${{ vars.CANARY_DATAHUB_READ_GMS_URL }}
-      CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
-      CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
-      CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
-      CANARY_CHROME_VERSION: ${{ vars.CANARY_CHROME_VERSION }}
-      CANARY_CHROME_BINARY_SHA256: ${{ vars.CANARY_CHROME_BINARY_SHA256 }}
+      CANARY_COGNITO_ISSUER: ${{ needs.prepare.outputs.cognito_issuer }}
+      CANARY_USER_POOL_ID: ${{ needs.prepare.outputs.user_pool_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Assert exact reviewed canary control plane
-        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-
-      - name: Install the reviewed, locked approval driver
-        run: npm ci --ignore-scripts
-
-      - name: Download the exact pre-mutation plan approved by this job
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: governed-canary-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/governed-canary/recovery
-
-      - name: Revalidate both protected gates immediately before approval
+      - name: Revalidate sealed control plane
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          default_branch="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
-          for environment_name in governed-canary governed-canary-rollback; do
-            environment_json="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}")"
-            jq -e \
-              --arg name "${environment_name}" \
-              --arg owner "${GITHUB_REPOSITORY_OWNER}" '
-              .name == $name and
-              .deployment_branch_policy.protected_branches == false and
-              .deployment_branch_policy.custom_branch_policies == true and
-              (
-                [
-                  .protection_rules[]? |
-                  select(.type == "required_reviewers")
-                ] as $rules |
-                ($rules | length) == 1 and
-                $rules[0].prevent_self_review == false and
-                ($rules[0].reviewers | length) == 1 and
-                $rules[0].reviewers[0].type == "User" and
-                ($rules[0].reviewers[0].reviewer.id | type) == "number" and
-                $rules[0].reviewers[0].reviewer.id > 0 and
-                ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
-                  ($owner | ascii_downcase)
-              )
-            ' <<<"${environment_json}" >/dev/null
-            branch_policies="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/environments/${environment_name}/deployment-branch-policies?per_page=100")"
-            jq -e --arg branch "${default_branch}" '
-              .total_count == 1 and .branch_policies[0].name == $branch
-            ' <<<"${branch_policies}" >/dev/null
-          done
-
-      - name: Revalidate exact control plane before approval AWS trust
-        env:
-          GH_TOKEN: ${{ github.token }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
-          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/approval-aws-gates/control-plane-security-gates.json
-        run: bash scripts/verify-github-control-plane.sh
-
-      - name: Assume the read-only canary evidence role
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+          EXPECTED_GATE: ${{ needs.prepare.outputs.gates_digest }}
+          VERIFICATION_MODE: sealed
+          SEALED_GATE_PATH: ${{ runner.temp }}/governed-canary/recovery/control-plane-security-gates.json
+          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/execute-gates/control-plane-security-gates.json
+        run: |
+          export EXPECTED_GATE_SHA256="${EXPECTED_GATE#sha256:}"
+          bash scripts/verify-github-control-plane.sh
+      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
-          role-to-assume: ${{ vars.AWS_CANARY_APPROVAL_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
-          role-session-name: archon-canary-approval-${{ github.run_id }}
-
-      - name: Revalidate exact control plane before approver identity secret
+          role-to-assume: ${{ vars.AWS_CANARY_APPROVAL_ROLE_ARN }}
+          role-session-name: archon-canary-execute-${{ github.run_id }}
+      - name: Revalidate dual-authority Judge and install Chromium
         env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
-          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/approval-identity-gates/control-plane-security-gates.json
-        run: bash scripts/verify-github-control-plane.sh
-
-      - name: Revalidate the protected release, endpoints, and approver identity
-        env:
-          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          CANARY_COGNITO_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
-          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
-          EXPECTED_AUDIT_ID: ${{ needs.prepare.outputs.audit_id }}
-          EXPECTED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
-          EXPECTED_RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
+          USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
         run: |
           set -euo pipefail
-          : "${AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID is required}"
-          : "${AWS_REGION:?AWS_REGION is required}"
-          : "${CANARY_COGNITO_USERNAME:?CANARY_COGNITO_USERNAME is required}"
-          echo "::add-mask::${CANARY_COGNITO_USERNAME}"
-          test -f "${CANARY_RECOVERY_PATH}"
-          test ! -L "${CANARY_RECOVERY_PATH}"
-          test "$(jq -er '.auditId' "${CANARY_RECOVERY_PATH}")" = \
-            "${EXPECTED_AUDIT_ID}"
-          test "$(jq -er '.planDigest' "${CANARY_RECOVERY_PATH}")" = \
-            "${EXPECTED_PLAN_DIGEST}"
-          test "$(jq -er '.recoveryDigest' "${CANARY_RECOVERY_PATH}")" = \
-            "${EXPECTED_RECOVERY_DIGEST}"
-          umask 077
-          identity_dir="${RUNNER_TEMP}/canary-cognito-identity"
-          mkdir -p "${identity_dir}"
-          trap 'find "${identity_dir}" -type f -exec shred -u {} + 2>/dev/null || true' EXIT
-
-          caller_account="$(aws sts get-caller-identity --query Account --output text)"
-          test "${caller_account}" = "${AWS_ACCOUNT_ID}"
-          stack_json="${identity_dir}/stack.json"
-          aws cloudformation describe-stacks \
-            --stack-name "${CANARY_STACK_NAME}" >"${stack_json}"
-          jq -e '
-            .Stacks | length == 1 and
-            .[0].StackName == "Archon-staging" and
-            (.[0].StackStatus | endswith("_COMPLETE"))
-          ' "${stack_json}" >/dev/null
-          parameter() {
-            jq -er --arg key "$1" '
-              .Stacks[0].Parameters[] |
-              select(.ParameterKey == $key) |
-              .ParameterValue
-            ' "${stack_json}"
-          }
-          output() {
-            jq -er --arg key "$1" '
-              .Stacks[0].Outputs[] |
-              select(.OutputKey == $key) |
-              .OutputValue
-            ' "${stack_json}"
-          }
-          test "$(parameter ReleaseSha)" = "${CANARY_RELEASE_SHA}"
-          test "$(parameter WorkerDesiredCount)" = "1"
-          test "$(parameter DataHubReadGmsUrl)" = "${CANARY_DATAHUB_READ_GMS_URL}"
-          test "$(parameter DataHubReadMcpUrl)" = "${CANARY_DATAHUB_READ_MCP_URL}"
-          test "$(parameter DataHubWriteGmsUrl)" = "${CANARY_DATAHUB_WRITE_GMS_URL}"
-          test "$(parameter DataHubWriteMcpUrl)" = "${CANARY_DATAHUB_WRITE_MCP_URL}"
-          test "$(output ArchonApplicationUrl)" = "${CANARY_APPLICATION_URL}"
-          test "$(output ArchonEvidenceBucketName)" = "${CANARY_EVIDENCE_BUCKET}"
-          test "$(output ArchonUserPoolClientId)" = "${CANARY_COGNITO_CLIENT_ID}"
-          test "$(output ArchonCognitoHostedUiOrigin)" = \
-            "${CANARY_COGNITO_HOSTED_UI_ORIGIN}"
-          test "$(output ArchonCognitoAuthorizationEndpoint)" = \
-            "${CANARY_COGNITO_HOSTED_UI_ORIGIN}/oauth2/authorize"
-          test "$(output ArchonCognitoTokenEndpoint)" = \
-            "${CANARY_COGNITO_HOSTED_UI_ORIGIN}/oauth2/token"
-          user_pool_id="$(output ArchonUserPoolId)"
-          approver_group="$(output ArchonApproverGroupName)"
-          test "${approver_group}" = "archon-approvers"
-
-          aws cognito-idp admin-get-user \
-            --user-pool-id "${user_pool_id}" \
-            --username "${CANARY_COGNITO_USERNAME}" \
-            >"${identity_dir}/user.json"
-          jq -e '
-            .Enabled == true and
-            .UserStatus == "CONFIRMED"
-          ' "${identity_dir}/user.json" >/dev/null
-          aws cognito-idp admin-list-groups-for-user \
-            --user-pool-id "${user_pool_id}" \
-            --username "${CANARY_COGNITO_USERNAME}" \
-            >"${identity_dir}/groups.json"
-          jq -e --arg group "${approver_group}" '
-            [.Groups[].GroupName] == [$group]
-          ' "${identity_dir}/groups.json" >/dev/null
-
-      - name: Bind deployed runtime auth before any browser or password use
+          : "${USERNAME:?CANARY_COGNITO_USERNAME is required}"
+          echo "::add-mask::${USERNAME}"
+          aws cognito-idp admin-get-user --user-pool-id "${CANARY_USER_POOL_ID}" --username "${USERNAME}" >"${RUNNER_TEMP}/user.json"
+          aws cognito-idp admin-list-groups-for-user --user-pool-id "${CANARY_USER_POOL_ID}" --username "${USERNAME}" >"${RUNNER_TEMP}/groups.json"
+          jq -e '.Enabled==true and .UserStatus=="CONFIRMED"' "${RUNNER_TEMP}/user.json" >/dev/null
+          jq -e '([.Groups[].GroupName] | sort) == ["archon-approvers","archon-runtime-operators"]' "${RUNNER_TEMP}/groups.json" >/dev/null
+          npm exec -- playwright install --with-deps chromium
+      - name: Execute explicit Cloud Agent Stack and seal proof
+        env:
+          JUDGE_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
+          JUDGE_PASSWORD: ${{ secrets.CANARY_COGNITO_PASSWORD }}
+          ARCHON_EXPECTED_LIFECYCLE_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
         run: |
           set -euo pipefail
-          runtime_config="${RUNNER_TEMP}/governed-canary-runtime-config.json"
-          trap 'rm -f "${runtime_config}"' EXIT
-          curl --fail --silent --show-error \
-            --proto '=https' \
-            --max-time 35 \
-            -H 'Accept: application/json' \
-            "${CANARY_APPLICATION_URL}/runtime-config.json" \
-            -o "${runtime_config}"
-          test -f "${runtime_config}"
-          test ! -L "${runtime_config}"
-          jq -e \
-            --arg client "${CANARY_COGNITO_CLIENT_ID}" \
-            --arg origin "${CANARY_COGNITO_HOSTED_UI_ORIGIN}" \
-            --arg redirect "${CANARY_APPLICATION_URL}/" '
-              .schemaVersion == 1 and
-              .auth.clientId == $client and
-              .auth.authorizationEndpoint == ($origin + "/oauth2/authorize") and
-              .auth.tokenEndpoint == ($origin + "/oauth2/token") and
-              .auth.redirectUri == $redirect and
-              .auth.scopes == ["openid", "email", "archon/approve"]
-            ' "${runtime_config}" >/dev/null
-
-      - name: Revalidate exact control plane before password-backed mutation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
-          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/approval-mutation-gates/control-plane-security-gates.json
-        run: bash scripts/verify-github-control-plane.sh
-
-      - name: Authenticate with Cognito PKCE, approve, and verify receipt
-        id: approve
-        env:
-          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
-          CANARY_ROLLBACK_PATH: ${{ runner.temp }}/governed-canary/rollback.json
-          CANARY_EXPECTED_AUDIT_ID: ${{ needs.prepare.outputs.audit_id }}
-          CANARY_EXPECTED_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
-          CANARY_EXPECTED_RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
-          CANARY_COGNITO_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}
-          CANARY_COGNITO_PASSWORD: ${{ secrets.CANARY_COGNITO_PASSWORD }}
-          CANARY_CHROME_PROFILE: ${{ runner.temp }}/governed-canary/chrome-profile
-        run: |
-          set -euo pipefail
-          chrome_bin="$(command -v google-chrome-stable || command -v google-chrome)"
-          test -x "${chrome_bin}"
-          [[ "${CANARY_CHROME_BINARY_SHA256}" =~ ^[0-9a-f]{64}$ ]]
-          : "${CANARY_CHROME_VERSION:?CANARY_CHROME_VERSION is required}"
-          test "$("${chrome_bin}" --product-version)" = "${CANARY_CHROME_VERSION}"
-          chrome_resolved="$(readlink -f "${chrome_bin}")"
-          chrome_payload="$(dirname "${chrome_resolved}")/chrome"
-          test -x "${chrome_payload}"
-          test "$(sha256sum "${chrome_payload}" | awk '{print $1}')" = \
-            "${CANARY_CHROME_BINARY_SHA256}"
-          export CANARY_CHROME_BIN="${chrome_bin}"
-          node --import tsx scripts/governed-canary.ts approve
-          chmod 0600 "${CANARY_ROLLBACK_PATH}"
-          proposal_digest="$(jq -er \
-            '.proposal.digest | select(test("^sha256:[a-f0-9]{64}$"))' \
-            "${CANARY_ROLLBACK_PATH}")"
-          receipt_digest="$(jq -er '.receiptDigest' "${CANARY_ROLLBACK_PATH}")"
-          {
-            echo "path=${CANARY_ROLLBACK_PATH}"
-            echo "rollback_proposal_digest=${proposal_digest}"
-            echo "receipt_digest=${receipt_digest}"
-          } >>"${GITHUB_OUTPUT}"
-          {
-            echo
-            echo "### Governed write verified"
-            echo
-            echo "- Outcome: \`VERIFIED\`"
-            echo "- Receipt: \`${receipt_digest}\`"
-            echo "- Fresh rollback proposal: \`${proposal_digest}\`"
-            echo "- Chrome payload: \`${CANARY_CHROME_VERSION}\` / \`sha256:${CANARY_CHROME_BINARY_SHA256}\`"
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Retain verified write and rollback proposal
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          : "${JUDGE_USERNAME:?username is required}"; : "${JUDGE_PASSWORD:?password is required}"
+          echo "::add-mask::${JUDGE_USERNAME}"; echo "::add-mask::${JUDGE_PASSWORD}"
+          runtime="${RUNNER_TEMP}/runtime-config.json"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 30 "${CANARY_APPLICATION_URL}/runtime-config.json" -o "${runtime}"
+          sub="$(aws cognito-idp admin-get-user --user-pool-id "${CANARY_USER_POOL_ID}" --username "${JUDGE_USERNAME}" --query 'UserAttributes[?Name==`sub`].Value|[0]' --output text)"
+          account="$(printf 'archon-canary-account-v1\0%s' "${JUDGE_USERNAME}"|sha256sum|awk '{print $1}')"
+          output="${RUNNER_TEMP}/governed-canary-live"; mkdir --mode=0700 "${output}"
+          export ARCHON_LIVE_JUDGE_JOURNEY=1 ARCHON_LIVE_V2_ONLY=1 ARCHON_LIVE_RUNTIME_PROFILE=cloud
+          export ARCHON_LIVE_BASE_URL="${CANARY_APPLICATION_URL}" ARCHON_LIVE_OUTPUT_DIR="${output}"
+          export ARCHON_EXPECTED_APPLICATION_ORIGIN_SHA256="$(printf '%s' "${CANARY_APPLICATION_URL}"|sha256sum|awk '{print $1}')"
+          export ARCHON_EXPECTED_RUNTIME_CONFIG_SHA256="$(sha256sum "${runtime}"|awk '{print $1}')"
+          export ARCHON_EXPECTED_RELEASE_SHA="${CANARY_RELEASE_SHA}"
+          export ARCHON_EXPECTED_IDENTITY_DIGEST="sha256:$(printf 'archon-judge-identity-v1\0%s' "${account}"|sha256sum|awk '{print $1}')"
+          export ARCHON_EXPECTED_COGNITO_SUBJECT_DIGEST="sha256:$(printf 'archon-cognito-subject-v1\0%s' "${sub}"|sha256sum|awk '{print $1}')"
+          export ARCHON_EXPECTED_COGNITO_HOSTED_UI_ORIGIN="${CANARY_COGNITO_HOSTED_UI_ORIGIN}"
+          export ARCHON_EXPECTED_COGNITO_CLIENT_ID="${CANARY_COGNITO_CLIENT_ID}"
+          export ARCHON_EXPECTED_COGNITO_ISSUER="${CANARY_COGNITO_ISSUER}" JUDGE_ACCOUNT_ID="${account}"
+          npm exec -- playwright test --config=playwright.live.config.ts web/e2e/live-judge-journey.live.spec.ts
+          receipt="${output}/browser-journey-receipt.json"
+          jq -e '.schemaVersion=="archon.browser-governed-canary-v2/v1" and .journey.requestedProfile=="cloud" and .journey.resolvedProfile=="cloud" and .journey.result=="SUCCEEDED" and .journey.components==["DataHub MCP Server","Agent Context Kit","DataHub Skills","Analytics Agent"] and .checks.governedMutationAndContextDeltaVerified==true and .checks.secretMaterialRetained==false' "${receipt}" >/dev/null
+          evidence="${RUNNER_TEMP}/governed-canary/evidence"; mkdir --mode=0700 "${evidence}"
+          cp "${receipt}" "${evidence}/browser-journey-receipt.json"
+          cp "${RUNNER_TEMP}/governed-canary/recovery/recovery.json" "${evidence}/recovery.json"
+          (cd "${evidence}" && sha256sum browser-journey-receipt.json recovery.json >SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: governed-canary-write-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/governed-canary/rollback.json
-          if-no-files-found: ignore
+          path: ${{ runner.temp }}/governed-canary/evidence
+          if-no-files-found: error
           retention-days: 90
 
   rollback:
-    name: Fresh rollback approval — ${{ needs.approval.outputs.rollback_proposal_digest || needs.prepare.outputs.recovery_digest }}
-    needs:
-      - prepare
-      - approval
-    if: >-
-      always() &&
-      needs.prepare.outputs.recovery_digest != ''
+    name: Fresh human-approved exact PII inverse
+    if: always() && needs.prepare.result == 'success'
+    needs: [prepare, execute]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       actions: read
       attestations: write
@@ -1459,219 +332,65 @@ jobs:
       id-token: write
     environment:
       name: governed-canary-rollback
-      url: ${{ vars.CANARY_APPLICATION_URL }}
+      url: ${{ needs.prepare.outputs.application_url }}
     env:
-      CANARY_DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
-      CANARY_RELEASE_SHA: ${{ inputs.release_sha }}
-      CANARY_APPLICATION_URL: ${{ vars.CANARY_APPLICATION_URL }}
-      CANARY_EVIDENCE_BUCKET: ${{ vars.CANARY_EVIDENCE_BUCKET }}
-      CANARY_COGNITO_CLIENT_ID: ${{ needs.prepare.outputs.cognito_client_id }}
-      CANARY_COGNITO_HOSTED_UI_ORIGIN: ${{ needs.prepare.outputs.cognito_hosted_ui_origin }}
-      CANARY_CONTROL_PLANE_GATES_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
-      CANARY_DATASET_URN: ${{ vars.CANARY_DATASET_URN }}
+      CANARY_SOURCE_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CANARY_ISOLATION_MARKER: ${{ vars.CANARY_ISOLATION_MARKER }}
       CANARY_DATAHUB_READ_GMS_URL: ${{ vars.CANARY_DATAHUB_READ_GMS_URL }}
       CANARY_DATAHUB_READ_MCP_URL: ${{ vars.CANARY_DATAHUB_READ_MCP_URL }}
       CANARY_DATAHUB_WRITE_GMS_URL: ${{ vars.CANARY_DATAHUB_WRITE_GMS_URL }}
       CANARY_DATAHUB_WRITE_MCP_URL: ${{ vars.CANARY_DATAHUB_WRITE_MCP_URL }}
-      CANARY_WRITE_JOB_RESULT: ${{ needs.approval.result }}
     steps:
-      - name: Revalidate rollback protection immediately before recovery
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          default_branch="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
-          environment_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-rollback")"
-          jq -e --arg owner "${GITHUB_REPOSITORY_OWNER}" '
-            .name == "governed-canary-rollback" and
-            .deployment_branch_policy.protected_branches == false and
-            .deployment_branch_policy.custom_branch_policies == true and
-            (
-              [
-                .protection_rules[]? |
-                select(.type == "required_reviewers")
-              ] as $rules |
-              ($rules | length) == 1 and
-              $rules[0].prevent_self_review == false and
-              ($rules[0].reviewers | length) == 1 and
-              $rules[0].reviewers[0].type == "User" and
-              ($rules[0].reviewers[0].reviewer.id | type) == "number" and
-              $rules[0].reviewers[0].reviewer.id > 0 and
-              ($rules[0].reviewers[0].reviewer.login | ascii_downcase) ==
-                ($owner | ascii_downcase)
-            )
-          ' <<<"${environment_json}" >/dev/null
-          branch_policies="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/environments/governed-canary-rollback/deployment-branch-policies?per_page=100")"
-          jq -e --arg branch "${default_branch}" '
-            .total_count == 1 and .branch_policies[0].name == $branch
-          ' <<<"${branch_policies}" >/dev/null
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Assert exact reviewed canary control plane
-        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-
-      - name: Install the reviewed, locked rollback driver
-        run: npm ci --ignore-scripts
-
-      - name: Download the pre-mutation recovery binding
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: governed-canary-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/governed-canary/recovery
-
-      - name: Download the verified rollback proposal when available
-        id: final
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: governed-canary-write-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/governed-canary/write
-
-      - name: Authenticate sealed original control plane before rollback mutation
+      - name: Authenticate sealed original control plane
         env:
           GH_TOKEN: ${{ github.token }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ needs.prepare.outputs.control_plane_gate_sha256 }}
+          EXPECTED_GATE: ${{ needs.prepare.outputs.gates_digest }}
           VERIFICATION_MODE: sealed
           SEALED_GATE_PATH: ${{ runner.temp }}/governed-canary/recovery/control-plane-security-gates.json
-          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/rollback-mutation-gates/control-plane-security-gates.json
-        run: bash scripts/verify-github-control-plane.sh
-
-      - name: Execute only the separately approved inverse and prove restoration
-        id: restore
+          OUTPUT_PATH: ${{ runner.temp }}/governed-canary/rollback-gates/control-plane-security-gates.json
+        run: |
+          export EXPECTED_GATE_SHA256="${EXPECTED_GATE#sha256:}"
+          bash scripts/verify-github-control-plane.sh
+      - name: Restore only canonical PII baseline and prove read-back
         env:
           CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
-          CANARY_ROLLBACK_PATH: ${{ steps.final.outcome == 'success' && format('{0}/governed-canary/write/rollback.json', runner.temp) || '' }}
-          CANARY_ROLLBACK_EVIDENCE_PATH: ${{ runner.temp }}/governed-canary/evidence/rollback-evidence.json
+          CANARY_RECOVERY_EVIDENCE_PATH: ${{ runner.temp }}/governed-canary/rollback/recovery-evidence.json
           CANARY_DATAHUB_READ_TOKEN: ${{ secrets.CANARY_DATAHUB_READ_TOKEN }}
           CANARY_DATAHUB_WRITE_TOKEN: ${{ secrets.CANARY_DATAHUB_WRITE_TOKEN }}
-          ROLLBACK_BINDING: ${{ needs.approval.outputs.rollback_proposal_digest || needs.prepare.outputs.recovery_digest }}
         run: |
           set -euo pipefail
-          : "${CANARY_DATAHUB_READ_TOKEN:?CANARY_DATAHUB_READ_TOKEN is required}"
-          : "${CANARY_DATAHUB_WRITE_TOKEN:?CANARY_DATAHUB_WRITE_TOKEN is required}"
-          echo "::add-mask::${CANARY_DATAHUB_READ_TOKEN}"
-          echo "::add-mask::${CANARY_DATAHUB_WRITE_TOKEN}"
-          mkdir -p "$(dirname "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
-          test -f "${CANARY_RECOVERY_PATH}"
-          test ! -L "${CANARY_RECOVERY_PATH}"
-          if [[ -n "${CANARY_ROLLBACK_PATH}" ]]; then
-            test -f "${CANARY_ROLLBACK_PATH}"
-            test ! -L "${CANARY_ROLLBACK_PATH}"
-          fi
-          node --import tsx scripts/governed-canary.ts rollback
-          chmod 0600 "${CANARY_ROLLBACK_EVIDENCE_PATH}"
-          evidence_digest="$(jq -er \
-            '.digest | select(test("^sha256:[a-f0-9]{64}$"))' \
-            "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
-          disposition="$(jq -er '.disposition' \
-            "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
-          {
-            echo "path=${CANARY_ROLLBACK_EVIDENCE_PATH}"
-            echo "evidence_digest=${evidence_digest}"
-          } >>"${GITHUB_OUTPUT}"
-          {
-            echo "### Freshly approved rollback"
-            echo
-            echo "- Binding approved by this environment: \`${ROLLBACK_BINDING}\`"
-            echo "- Result: \`${disposition}\`"
-            echo "- Read-after-rollback evidence: \`${evidence_digest}\`"
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Prepare exact canary evidence attestation
-        id: predicate
-        if: >-
-          needs.approval.result == 'success' &&
-          needs.approval.outputs.rollback_proposal_digest != ''
-        env:
-          CANARY_ROLLBACK_EVIDENCE_PATH: ${{ steps.restore.outputs.path }}
-          CANARY_RECOVERY_PATH: ${{ runner.temp }}/governed-canary/recovery/recovery.json
-          RECOVERY_DIGEST: ${{ needs.prepare.outputs.recovery_digest }}
-          ROLLBACK_PROPOSAL_DIGEST: ${{ needs.approval.outputs.rollback_proposal_digest }}
-          ROLLBACK_EVIDENCE_DIGEST: ${{ steps.restore.outputs.evidence_digest }}
-          DEPLOYMENT_EVIDENCE_SHA256: ${{ needs.prepare.outputs.deployment_evidence_sha256 }}
-        run: |
-          set -euo pipefail
-          evidence_dir="$(dirname "${CANARY_ROLLBACK_EVIDENCE_PATH}")"
-          fixture_binding="$(jq -cS '.fixtureBinding' "${CANARY_RECOVERY_PATH}")"
-          fixture_binding_digest="$(jq -er \
-            '.fixtureBindingDigest |
-              select(test("^sha256:[a-f0-9]{64}$"))' \
-            "${CANARY_RECOVERY_PATH}")"
-          test "sha256:$(printf '%s' "${fixture_binding}" |
-            sha256sum | awk '{print $1}')" = \
-            "${fixture_binding_digest}"
-          (
-            cd "${evidence_dir}"
-            sha256sum rollback-evidence.json >rollback-subject.sha256
-          )
-          jq -n \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg workflowRunId "${GITHUB_RUN_ID}" \
-            --arg controlPlaneSha "${GITHUB_SHA}" \
-            --arg deploymentRunId "${CANARY_DEPLOYMENT_RUN_ID}" \
-            --arg deploymentEvidenceSha256 "${DEPLOYMENT_EVIDENCE_SHA256}" \
-            --arg releaseSha "${CANARY_RELEASE_SHA}" \
-            --arg recoveryDigest "${RECOVERY_DIGEST}" \
-            --arg rollbackProposalDigest "${ROLLBACK_PROPOSAL_DIGEST}" \
-            --arg rollbackEvidenceDigest "${ROLLBACK_EVIDENCE_DIGEST}" \
-            --arg fixtureBindingDigest "${fixture_binding_digest}" \
-            --argjson fixtureBinding "${fixture_binding}" \
-            '{
-              schemaVersion: "archon.governed-canary-attestation/v1",
-              repository: $repository,
-              workflowRunId: $workflowRunId,
-              controlPlaneSha: $controlPlaneSha,
-              deploymentRunId: $deploymentRunId,
-              deploymentEvidenceSha256: $deploymentEvidenceSha256,
-              releaseSha: $releaseSha,
-              recoveryDigest: $recoveryDigest,
-              rollbackProposalDigest: $rollbackProposalDigest,
-              rollbackEvidenceDigest: $rollbackEvidenceDigest,
-              fixtureBinding: $fixtureBinding,
-              fixtureBindingDigest: $fixtureBindingDigest,
-              result: "write-verified-and-rollback-proven"
-            }' >"${evidence_dir}/attestation-predicate.json"
-          {
-            echo "checksums=${evidence_dir}/rollback-subject.sha256"
-            echo "predicate=${evidence_dir}/attestation-predicate.json"
-            echo "directory=${evidence_dir}"
-          } >>"${GITHUB_OUTPUT}"
-
-      - name: Attest the exact governed canary evidence
-        if: >-
-          needs.approval.result == 'success' &&
-          needs.approval.outputs.rollback_proposal_digest != ''
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+          : "${CANARY_DATAHUB_READ_TOKEN:?read token required}"; : "${CANARY_DATAHUB_WRITE_TOKEN:?write token required}"
+          echo "::add-mask::${CANARY_DATAHUB_READ_TOKEN}"; echo "::add-mask::${CANARY_DATAHUB_WRITE_TOKEN}"
+          mkdir --mode=0700 "$(dirname "${CANARY_RECOVERY_EVIDENCE_PATH}")"
+          node --import tsx scripts/governed-canary.ts recover
+          jq -e '.schemaVersion=="archon.governed-canary-recovery-evidence/v2" and .runtimeProfile=="cloud" and (.disposition=="restored" or .disposition=="already-baseline")' "${CANARY_RECOVERY_EVIDENCE_PATH}" >/dev/null
+          cp "${RUNNER_TEMP}/governed-canary/recovery/recovery.json" "${RUNNER_TEMP}/governed-canary/rollback/recovery.json"
+          cp "${CANARY_RECOVERY_EVIDENCE_PATH}" "${RUNNER_TEMP}/governed-canary/rollback/attestation-predicate.json"
+          (cd "$(dirname "${CANARY_RECOVERY_EVIDENCE_PATH}")" && sha256sum recovery-evidence.json >recovery-evidence.sha256)
+      - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-checksums: ${{ steps.predicate.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/governed-canary/v1
-          predicate-path: ${{ steps.predicate.outputs.predicate }}
-
-      - name: Retain sanitized rollback and read-after-rollback evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          subject-checksums: ${{ runner.temp }}/governed-canary/rollback/recovery-evidence.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2
+          predicate-path: ${{ runner.temp }}/governed-canary/rollback/attestation-predicate.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: governed-canary-rollback-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/governed-canary/evidence/
-          if-no-files-found: warn
+          path: ${{ runner.temp }}/governed-canary/rollback
+          if-no-files-found: error
           retention-days: 90

@@ -294,7 +294,16 @@ def validate_workflow(source: str) -> None:
         "availability-subject.sha256",
         "posture-subject.sha256",
         "paging-subject.sha256",
-        "rollback-subject.sha256",
+        "recovery-evidence.sha256",
+        "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2",
+        '"archon.governed-canary-recovery-evidence/v2"',
+        '"archon.governed-canary-recovery/v4"',
+        'exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")',
+        '"Archon-staging-Judge"',
+        '"archon_demo.customers,PROD)"',
+        'exact(canary_predicate, recovery, "canary attestation predicate/evidence")',
+        'canonical_digest(recovery, "canary recovery evidence")',
+        'canonical_digest(manifest, "canary recovery manifest")',
         "production-paging-delivery-${RELEASE_SHA}-",
         "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-",
         "availabilityObservedAt",
@@ -306,13 +315,10 @@ def validate_workflow(source: str) -> None:
         '"alarmActionsBoundToTopic": True',
         '"okActionsBoundToTopic": True',
         '"insufficientDataActionsEmpty": True',
-        'embedded_canary["attestationVerificationSha256"]',
-        'embedded_canary["fixtureBindingDigest"]',
-        'canary_predicate["fixtureBinding"]',
-        '"archon.governed-canary-fixture-binding/v1"',
-        '"canary fixture binding content digest"',
-        '"archon_governed_canary_fixture,TEST)"',
-        "positive_decimal(rollback[\"workflowRunId\"]",
+        'canary_dir.parent / "verification" / "recovery-evidence.json.json"',
+        'recovery["deploymentEvidenceSha256"]',
+        'manifest["endpointBindingSha256"]',
+        'positive_decimal(source["runId"]',
         '"17 */6 * * *"',
         '"2026-08-31T21:00:00Z"',
         '.state == "active"',
@@ -369,10 +375,10 @@ mutations = {
     "optional canary selector": replace_once(
         workflow,
         "      governed_canary_run_id:\n"
-        "        description: Exact governed-canary run bound by live deployment evidence\n"
+        "        description: Exact successful governed DataHub Cloud canary v2 run\n"
         "        required: true\n",
         "      governed_canary_run_id:\n"
-        "        description: Exact governed-canary run bound by live deployment evidence\n"
+        "        description: Exact successful governed DataHub Cloud canary v2 run\n"
         "        required: false\n",
     ),
     "producer signing authority": replace_once(
@@ -421,18 +427,30 @@ mutations = {
     ),
     "canary verification rederived": replace_once(
         workflow,
-        '#|     embedded_canary["attestationVerificationSha256"],\n',
-        '#|     file_sha(canary_dir / "attestation-predicate.json"),\n',
+        '#|     canary_dir.parent / "verification" / "recovery-evidence.json.json"\n',
+        '#|     canary_dir / "attestation-predicate.json"\n',
     ),
-    "canary fixture binding detached from deployment": replace_once(
+    "canary Cloud runtime weakened to Core": replace_once(
         workflow,
-        '#|         embedded_canary["fixtureBindingDigest"],\n',
-        '#|         fixture_binding_digest,\n',
+        '#| exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")\n',
+        '#| exact(recovery["runtimeProfile"], "core", "canary runtime profile")\n',
+    ),
+    "canary endpoint binding detached": replace_once(
+        workflow,
+        '#|     recovery["endpointBindingSha256"],\n'
+        '#|     "canary endpoint binding",\n',
+        '#|     manifest["endpointBindingSha256"],\n'
+        '#|     "canary endpoint binding",\n',
+    ),
+    "canary manifest digest accepted without canonical verification": replace_once(
+        workflow,
+        '#| manifest_digest = canonical_digest(manifest, "canary recovery manifest")\n',
+        '#| manifest_digest = digest(manifest["digest"], "canary recovery manifest")\n',
     ),
     "canary run identifier coercion accepted": replace_once(
         workflow,
-        '#|     positive_decimal(rollback["workflowRunId"], "canary workflowRunId"),\n',
-        '#|     int(rollback["workflowRunId"]),\n',
+        '#|     positive_decimal(source["runId"], "canary source runId"),\n',
+        '#|     int(source["runId"]),\n',
     ),
     "alarm inventory weakened": replace_once(
         workflow,

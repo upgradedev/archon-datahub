@@ -100,11 +100,25 @@ def test_dockerfile_is_exact_lambda_amd64_input_without_secret_values():
 def test_security_evidence_is_retained_before_fail_closed_enforcement():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     evaluate = workflow.index("Enforce scan and SBOM gates")
+    stage = workflow.index("Stage complete pre-gate security evidence")
     retain = workflow.index("Retain pre-gate scan and SBOM evidence")
+    upload_sarif = workflow.index("Upload trusted image SARIF")
     fail_closed = workflow.index("Fail closed after security evidence retention")
     seal = workflow.index("Seal candidate, SBOM and provenance")
-    assert evaluate < retain < fail_closed < seal
-    assert "continue-on-error: true" in workflow[evaluate:retain]
+    assert evaluate < stage < retain < upload_sarif < fail_closed < seal
+    assert "continue-on-error: true" in workflow[evaluate:stage]
+    stage_block = workflow[stage:retain]
+    assert "id: security_evidence" in stage_block
+    assert "steps.security_gate.outcome == 'success'" in stage_block
+    assert "steps.security_gate.outcome == 'failure'" in stage_block
+    assert 'sources=(' in stage_block
+    assert stage_block.index('test -f "$VEX_PATH"') < stage_block.index('mkdir -m 0755 "$evidence"')
+    assert "id: security_evidence_upload" in workflow[retain:upload_sarif]
+    assert "steps.security_evidence.outcome == 'success'" in workflow[retain:upload_sarif]
+    assert "steps.security_evidence.outcome == 'success'" in workflow[upload_sarif:fail_closed]
+    assert "steps.security_gate.outcome == 'failure'" in workflow[fail_closed:seal]
+    assert "steps.security_evidence_upload.outcome == 'success'" in workflow[fail_closed:seal]
+    assert "if: steps.security_gate.outcome != 'success'" not in workflow
     assert "archon.datahub-cloud-runtime-gate-diagnostics/v1" in workflow
     assert "datahub-cloud-runtime-security-evidence-${{ env.SOURCE_SHA }}" in workflow
     assert "cloud-runtime-sca.raw.sarif" in workflow

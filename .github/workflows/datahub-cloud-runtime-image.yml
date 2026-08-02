@@ -488,23 +488,32 @@ jobs:
           fi
           exit "$gate_status"
 
-      - name: Stage available pre-gate security evidence
-        if: always()
+      - name: Stage complete pre-gate security evidence
+        id: security_evidence
+        if: >-
+          always() &&
+          (steps.security_gate.outcome == 'success' ||
+          steps.security_gate.outcome == 'failure')
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/cloud-runtime-security-evidence"
-          mkdir -p "$evidence"
-          for source in \
-            "$RUNNER_TEMP/cloud-runtime-sca.raw.sarif" \
-            "$RUNNER_TEMP/cloud-runtime-sca.sarif" \
-            "$RUNNER_TEMP/cloud-runtime-image.raw.sarif" \
-            "$RUNNER_TEMP/cloud-runtime-image.sarif" \
-            "$RUNNER_TEMP/cloud-runtime.cdx.json" \
-            "$RUNNER_TEMP/cloud-runtime.spdx.json" \
+          sources=(
+            "$RUNNER_TEMP/cloud-runtime-sca.raw.sarif"
+            "$RUNNER_TEMP/cloud-runtime-sca.sarif"
+            "$RUNNER_TEMP/cloud-runtime-image.raw.sarif"
+            "$RUNNER_TEMP/cloud-runtime-image.sarif"
+            "$RUNNER_TEMP/cloud-runtime.cdx.json"
+            "$RUNNER_TEMP/cloud-runtime.spdx.json"
             "$RUNNER_TEMP/cloud-runtime-gate-diagnostics.json"
-          do
+          )
+          for source in "${sources[@]}"; do
             test -f "$source"
             test ! -L "$source"
+          done
+          test -f "$VEX_PATH"
+          test ! -L "$VEX_PATH"
+          mkdir -m 0755 "$evidence"
+          for source in "${sources[@]}"; do
             install -m 0644 "$source" "$evidence/$(basename "$source")"
           done
           install -m 0644 "$VEX_PATH" "$evidence/image.openvex.json"
@@ -523,7 +532,10 @@ jobs:
           )
 
       - name: Retain pre-gate scan and SBOM evidence
-        if: always()
+        id: security_evidence_upload
+        if: >-
+          always() &&
+          steps.security_evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: datahub-cloud-runtime-security-evidence-${{ env.SOURCE_SHA }}
@@ -535,6 +547,7 @@ jobs:
       - name: Upload trusted image SARIF
         if: >-
           always() &&
+          steps.security_evidence.outcome == 'success' &&
           (github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
@@ -543,7 +556,9 @@ jobs:
           category: trivy-datahub-cloud-runtime-v2
 
       - name: Fail closed after security evidence retention
-        if: steps.security_gate.outcome != 'success'
+        if: >-
+          steps.security_gate.outcome == 'failure' &&
+          steps.security_evidence_upload.outcome == 'success'
         run: |
           echo "::error title=Cloud runtime candidate rejected::Security or exact SBOM gate failed; retained evidence is attached to this run"
           exit 1

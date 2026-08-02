@@ -22,7 +22,7 @@ on:
         required: true
         type: string
       governed_canary_run_id:
-        description: Exact governed-canary run bound by live deployment evidence
+        description: Exact successful governed DataHub Cloud canary v2 run
         required: true
         type: string
       project_access_run_id:
@@ -957,7 +957,7 @@ jobs:
 #|       expected_subject_files="manifest.json,paging-delivery.json"
 #|       ;;
 #|     canary)
-#|       expected_subject_files="rollback-evidence.json"
+#|       expected_subject_files="recovery-evidence.json"
 #|       ;;
 #|     *)
 #|       echo "::error::Unknown native subject inventory"
@@ -1111,10 +1111,10 @@ jobs:
 #|   dispatch \
 #|   "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-" \
 #|   exact-current \
-#|   "https://github.com/upgradedev/archon-datahub/attestations/governed-canary/v1" \
-#|   rollback-subject.sha256 \
+#|   "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2" \
+#|   recovery-evidence.sha256 \
 #|   attestation-predicate.json \
-#|   "attestation-predicate.json,rollback-evidence.json,rollback-subject.sha256"
+#|   "attestation-predicate.json,recovery-evidence.json,recovery-evidence.sha256,recovery.json"
 #|
 #| monitor="$(
 #|   api "/repos/${GITHUB_REPOSITORY}/actions/workflows/availability.yml"
@@ -1211,6 +1211,20 @@ jobs:
 #| def file_sha(path: pathlib.Path, *, prefixed: bool = True) -> str:
 #|     value = hashlib.sha256(path.read_bytes()).hexdigest()
 #|     return f"sha256:{value}" if prefixed else value
+#|
+#|
+#| def canonical_digest(value: dict[str, Any], label: str) -> str:
+#|     claimed = digest(value.get("digest"), f"{label} digest")
+#|     unsigned = {key: item for key, item in value.items() if key != "digest"}
+#|     encoded = json.dumps(
+#|         unsigned,
+#|         ensure_ascii=False,
+#|         separators=(",", ":"),
+#|         sort_keys=True,
+#|     ).encode("utf-8")
+#|     expected = "sha256:" + hashlib.sha256(encoded).hexdigest()
+#|     exact(claimed, expected, f"{label} canonical digest")
+#|     return claimed
 #|
 #|
 #| def instant(value: Any, label: str) -> dt.datetime:
@@ -1663,269 +1677,189 @@ jobs:
 #| )
 #|
 #| canary_binding, canary_dir, canary_predicate = native_source("canary")
-#| rollback = load(canary_dir / "rollback-evidence.json")
-#| exact(
-#|     rollback["schemaVersion"],
-#|     "archon.governed-canary-rollback-evidence/v1",
-#|     "canary rollback schema",
+#| recovery = load(canary_dir / "recovery-evidence.json")
+#| manifest = load(canary_dir / "recovery.json")
+#| exact(canary_predicate, recovery, "canary attestation predicate/evidence")
+#| exact_keys(
+#|     recovery,
+#|     {
+#|         "schemaVersion",
+#|         "recoveryDigest",
+#|         "sourceWorkflow",
+#|         "deploymentEvidenceSha256",
+#|         "runtimeProfile",
+#|         "target",
+#|         "endpointBindingSha256",
+#|         "beforeDigest",
+#|         "afterDigest",
+#|         "mutation",
+#|         "disposition",
+#|         "recoveredAt",
+#|         "digest",
+#|     },
+#|     "canary recovery evidence",
 #| )
-#| exact(rollback["repository"], repository, "canary repository")
 #| exact(
-#|     positive_decimal(rollback["workflowRunId"], "canary workflowRunId"),
+#|     recovery["schemaVersion"],
+#|     "archon.governed-canary-recovery-evidence/v2",
+#|     "canary recovery evidence schema",
+#| )
+#| source = recovery["sourceWorkflow"]
+#| if not isinstance(source, dict):
+#|     fail("canary sourceWorkflow must be an object")
+#| exact_keys(
+#|     source,
+#|     {
+#|         "runId",
+#|         "runAttempt",
+#|         "controlPlaneSha",
+#|         "controlPlaneGatesSha256",
+#|     },
+#|     "canary source workflow",
+#| )
+#| exact(
+#|     positive_decimal(source["runId"], "canary source runId"),
 #|     canary_binding["source"]["runId"],
-#|     "canary workflow run",
+#|     "canary source run",
 #| )
 #| exact(
-#|     positive_decimal(
-#|         rollback["workflowRunAttempt"],
-#|         "canary workflowRunAttempt",
-#|     ),
+#|     positive_decimal(source["runAttempt"], "canary source runAttempt"),
 #|     canary_binding["source"]["runAttempt"],
-#|     "canary workflow attempt",
+#|     "canary source attempt",
 #| )
+#| exact(source["controlPlaneSha"], release, "canary control-plane SHA")
+#| digest(source["controlPlaneGatesSha256"], "canary control-plane gates")
+#| exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")
+#| target = recovery["target"]
+#| if not isinstance(target, dict):
+#|     fail("canary target must be an object")
 #| exact(
-#|     positive_decimal(
-#|         rollback["recoveryWorkflowRunId"],
-#|         "canary recoveryWorkflowRunId",
-#|     ),
-#|     canary_binding["source"]["runId"],
-#|     "canary recovery run",
+#|     target,
+#|     {
+#|         "entityUrn": (
+#|             "urn:li:dataset:(urn:li:dataPlatform:sqlite,"
+#|             "archon_demo.customers,PROD)"
+#|         ),
+#|         "columnPath": "customer_email",
+#|         "tagUrn": "urn:li:tag:PII",
+#|     },
+#|     "canary Cloud target",
 #| )
-#| exact(
-#|     positive_decimal(
-#|         rollback["recoveryWorkflowRunAttempt"],
-#|         "canary recoveryWorkflowRunAttempt",
-#|     ),
-#|     canary_binding["source"]["runAttempt"],
-#|     "canary recovery attempt",
+#| digest(recovery["endpointBindingSha256"], "canary endpoint binding")
+#| before_digest = digest(recovery["beforeDigest"], "canary before digest")
+#| after_digest = digest(recovery["afterDigest"], "canary after digest")
+#| if before_digest == after_digest:
+#|     fail("successful governed canary must prove a tag projection transition")
+#| mutation = recovery["mutation"]
+#| if not isinstance(mutation, dict):
+#|     fail("canary mutation must be an object")
+#| exact_keys(
+#|     mutation,
+#|     {"performed", "requestDigest", "responseDigest"},
+#|     "canary mutation",
 #| )
-#| exact(rollback["releaseSha"], release, "canary release")
-#| exact(
-#|     positive_decimal(rollback["deploymentRunId"], "canary deploymentRunId"),
-#|     sq3["deployment"]["runId"],
-#|     "project/canary deployment run",
-#| )
-#| if rollback["disposition"] not in {"ROLLED_BACK", "ALREADY_RESTORED"}:
-#|     fail("governed canary did not prove rollback")
-#| canary_verified_at = rollback["verifiedAt"]
-#| fresh(
+#| exact(mutation["performed"], True, "canary mutation performed")
+#| digest(mutation["requestDigest"], "canary mutation request")
+#| digest(mutation["responseDigest"], "canary mutation response")
+#| exact(recovery["disposition"], "restored", "canary recovery disposition")
+#| canary_verified_at = recovery["recoveredAt"]
+#| recovered_at = fresh(
 #|     canary_verified_at,
 #|     dt.timedelta(days=7),
-#|     "canary verifiedAt",
+#|     "canary recoveredAt",
 #| )
-#| rollback_subject = file_sha(canary_dir / "rollback-evidence.json")
-#| rollback_digest = digest(rollback["digest"], "rollback evidence digest")
-#| fixture_binding = canary_predicate["fixtureBinding"]
-#| if not isinstance(fixture_binding, dict):
-#|     fail("canary fixture binding must be an object")
+#| rollback_subject = file_sha(canary_dir / "recovery-evidence.json")
+#| rollback_digest = canonical_digest(recovery, "canary recovery evidence")
+#| exact(
+#|     canary_binding["attestation"]["predicateDigest"],
+#|     rollback_subject,
+#|     "canary predicate/evidence digest",
+#| )
+#|
 #| exact_keys(
-#|     fixture_binding,
+#|     manifest,
 #|     {
 #|         "schemaVersion",
 #|         "repository",
-#|         "releaseSha",
-#|         "workflowRunId",
-#|         "workflowRunAttempt",
-#|         "artifactId",
-#|         "artifactName",
-#|         "artifactDigest",
-#|         "receiptSha256",
-#|         "stateContractSha256",
-#|         "postStateSha256",
-#|         "gmsEndpointFingerprint",
-#|         "isolationMarkerSha256",
-#|         "attestationPredicateSha256",
+#|         "sourceWorkflow",
+#|         "deployment",
+#|         "runtime",
 #|         "target",
+#|         "endpointBindingSha256",
+#|         "preparedAt",
+#|         "digest",
 #|     },
-#|     "canary fixture binding",
+#|     "canary recovery manifest",
 #| )
 #| exact(
-#|     fixture_binding["schemaVersion"],
-#|     "archon.governed-canary-fixture-binding/v1",
-#|     "canary fixture binding schema",
+#|     manifest["schemaVersion"],
+#|     "archon.governed-canary-recovery/v4",
+#|     "canary recovery manifest schema",
 #| )
-#| exact(
-#|     fixture_binding["repository"],
-#|     repository,
-#|     "canary fixture repository",
-#| )
-#| exact(
-#|     fixture_binding["releaseSha"],
-#|     release,
-#|     "canary fixture release",
-#| )
-#| fixture_run_id = positive_decimal(
-#|     fixture_binding["workflowRunId"],
-#|     "canary fixture workflowRunId",
-#| )
-#| fixture_run_attempt = positive_decimal(
-#|     fixture_binding["workflowRunAttempt"],
-#|     "canary fixture workflowRunAttempt",
-#| )
-#| if len(fixture_binding["workflowRunAttempt"]) > 10:
-#|     fail("canary fixture workflowRunAttempt exceeds ten digits")
-#| positive_decimal(fixture_binding["artifactId"], "canary fixture artifactId")
-#| exact(
-#|     fixture_binding["artifactName"],
-#|     (
-#|         "datahub-canary-fixture-receipt-"
-#|         f"{fixture_run_id}-{fixture_run_attempt}"
-#|     ),
-#|     "canary fixture artifactName",
-#| )
-#| digest(fixture_binding["artifactDigest"], "canary fixture artifactDigest")
-#| for fixture_digest_field in (
-#|     "receiptSha256",
-#|     "stateContractSha256",
-#|     "postStateSha256",
-#|     "gmsEndpointFingerprint",
-#|     "isolationMarkerSha256",
-#|     "attestationPredicateSha256",
-#| ):
-#|     raw_digest(
-#|         fixture_binding[fixture_digest_field],
-#|         f"canary fixture {fixture_digest_field}",
-#|     )
-#| fixture_target = fixture_binding["target"]
-#| if not isinstance(fixture_target, dict):
-#|     fail("canary fixture target must be an object")
+#| exact(manifest["repository"], repository, "canary manifest repository")
+#| exact(manifest["sourceWorkflow"], source, "canary manifest source workflow")
+#| deployment = manifest["deployment"]
+#| if not isinstance(deployment, dict):
+#|     fail("canary deployment binding must be an object")
 #| exact_keys(
-#|     fixture_target,
-#|     {"query", "targetUrn"},
-#|     "canary fixture target",
-#| )
-#| exact(
-#|     fixture_target,
+#|     deployment,
 #|     {
-#|         "query": "archon_governed_canary_fixture",
-#|         "targetUrn": (
-#|             "urn:li:dataset:(urn:li:dataPlatform:snowflake,"
-#|             "archon_governed_canary_fixture,TEST)"
-#|         ),
+#|         "runId",
+#|         "artifactId",
+#|         "artifactDigest",
+#|         "evidenceSha256",
+#|         "observationSha256",
+#|         "applicationUrl",
 #|     },
-#|     "canary fixture target",
+#|     "canary deployment binding",
 #| )
-#| fixture_binding_digest = digest(
-#|     canary_predicate["fixtureBindingDigest"],
-#|     "canary fixture binding digest",
-#| )
-#| fixture_binding_bytes = json.dumps(
-#|     fixture_binding,
-#|     ensure_ascii=False,
-#|     separators=(",", ":"),
-#|     sort_keys=True,
-#| ).encode("utf-8")
+#| positive_decimal(deployment["runId"], "canary deployment runId")
+#| positive_decimal(deployment["artifactId"], "canary deployment artifactId")
+#| digest(deployment["artifactDigest"], "canary deployment artifact")
+#| digest(deployment["evidenceSha256"], "canary deployment evidence")
+#| digest(deployment["observationSha256"], "canary runtime observation")
 #| exact(
-#|     fixture_binding_digest,
-#|     "sha256:" + hashlib.sha256(fixture_binding_bytes).hexdigest(),
-#|     "canary fixture binding content digest",
+#|     recovery["deploymentEvidenceSha256"],
+#|     deployment["evidenceSha256"],
+#|     "canary evidence/manifest deployment digest",
 #| )
 #| exact(
-#|     canary_predicate,
-#|     {
-#|         "schemaVersion": "archon.governed-canary-attestation/v1",
-#|         "repository": repository,
-#|         "workflowRunId": str(canary_binding["source"]["runId"]),
-#|         "controlPlaneSha": release,
-#|         "deploymentRunId": str(rollback["deploymentRunId"]),
-#|         "deploymentEvidenceSha256":
-#|             canary_predicate["deploymentEvidenceSha256"],
-#|         "releaseSha": release,
-#|         "recoveryDigest": rollback["recoveryDigest"],
-#|         "rollbackProposalDigest": rollback["rollbackProposalDigest"],
-#|         "rollbackEvidenceDigest": rollback_digest,
-#|         "fixtureBinding": fixture_binding,
-#|         "fixtureBindingDigest": fixture_binding_digest,
-#|         "result": "write-verified-and-rollback-proven",
-#|     },
-#|     "canary predicate",
+#|     deployment["applicationUrl"],
+#|     "https://staging.archon-datahub.click",
+#|     "canary staging application",
 #| )
-#| raw_digest(
-#|     canary_predicate["deploymentEvidenceSha256"],
-#|     "canary deployment evidence digest",
+#| runtime = manifest["runtime"]
+#| if not isinstance(runtime, dict):
+#|     fail("canary runtime binding must be an object")
+#| exact_keys(
+#|     runtime,
+#|     {"profileId", "resolution", "stackName", "cloudImageDigest"},
+#|     "canary runtime binding",
+#| )
+#| exact(runtime["profileId"], "cloud", "canary manifest profile")
+#| exact(runtime["resolution"], "explicit", "canary runtime resolution")
+#| exact(runtime["stackName"], "Archon-staging-Judge", "canary Judge stack")
+#| digest(runtime["cloudImageDigest"], "canary Cloud image")
+#| exact(manifest["target"], target, "canary manifest target")
+#| exact(
+#|     manifest["endpointBindingSha256"],
+#|     recovery["endpointBindingSha256"],
+#|     "canary endpoint binding",
+#| )
+#| prepared_at = instant(manifest["preparedAt"], "canary preparedAt")
+#| if prepared_at > recovered_at:
+#|     fail("canary recovery predates its sealed recovery capability")
+#| manifest_digest = canonical_digest(manifest, "canary recovery manifest")
+#| exact(
+#|     recovery["recoveryDigest"],
+#|     manifest_digest,
+#|     "canary evidence/manifest recovery digest",
+#| )
+#| canary_verification = file_sha(
+#|     canary_dir.parent / "verification" / "recovery-evidence.json.json"
 #| )
 #|
-#| deployment = load(
-#|     root
-#|     / "registered"
-#|     / "upstream-subjects"
-#|     / "live-datahub"
-#|     / "deployment-evidence.json"
-#| )
-#| embedded_canary = deployment["pipelineSecurity"][
-#|     "preProductionGovernedCanary"
-#| ]
-#| exact(
-#|     positive(
-#|         embedded_canary["deploymentWorkflowRunId"],
-#|         "embedded deployment run",
-#|     ),
-#|     sq3["deployment"]["runId"],
-#|     "project/live deployment run",
-#| )
-#| exact(
-#|     positive(embedded_canary["workflowRunId"], "embedded canary run"),
-#|     canary_binding["source"]["runId"],
-#|     "embedded/canary run",
-#| )
-#| exact(
-#|     embedded_canary["releaseSha"],
-#|     release,
-#|     "embedded canary release",
-#| )
-#| exact(
-#|     embedded_canary["controlPlaneSha"],
-#|     release,
-#|     "embedded canary control plane",
-#| )
-#| exact(
-#|     raw_digest(
-#|         embedded_canary["artifactSha256"],
-#|         "embedded canary artifact",
-#|     ),
-#|     canary_binding["artifact"]["digest"].removeprefix("sha256:"),
-#|     "embedded canary artifact",
-#| )
-#| exact(
-#|     raw_digest(
-#|         embedded_canary["rollbackSubjectSha256"],
-#|         "embedded rollback subject",
-#|     ),
-#|     rollback_subject.removeprefix("sha256:"),
-#|     "embedded rollback subject",
-#| )
-#| exact(
-#|     embedded_canary["rollbackEvidenceDigest"],
-#|     rollback_digest,
-#|     "embedded rollback evidence",
-#| )
-#| exact(
-#|     digest(
-#|         embedded_canary["fixtureBindingDigest"],
-#|         "embedded canary fixture binding digest",
-#|     ),
-#|     fixture_binding_digest,
-#|     "embedded/canary fixture binding digest",
-#| )
-#| exact(
-#|     raw_digest(
-#|         embedded_canary["attestationPredicateSha256"],
-#|         "embedded canary predicate",
-#|     ),
-#|     canary_binding["attestation"]["predicateDigest"].removeprefix(
-#|         "sha256:"
-#|     ),
-#|     "embedded canary predicate",
-#| )
-#| embedded_verification = "sha256:" + raw_digest(
-#|     embedded_canary["attestationVerificationSha256"],
-#|     "embedded canary verification",
-#| )
-#| exact(
-#|     embedded_canary["result"],
-#|     "write-verified-and-rollback-proven",
-#|     "embedded canary result",
-#| )
+#|
 #| governed_write = d4["governedWrite"]
 #| exact(
 #|     governed_write,
@@ -1936,7 +1870,7 @@ jobs:
 #|         "rollbackEvidenceDigest": rollback_digest,
 #|         "attestationPredicateDigest":
 #|             canary_binding["attestation"]["predicateDigest"],
-#|         "attestationVerificationDigest": embedded_verification,
+#|         "attestationVerificationDigest": canary_verification,
 #|     },
 #|     "D4/canary binding",
 #| )
@@ -2081,7 +2015,7 @@ jobs:
 #|                 "subjectDigest": rollback_subject,
 #|                 "rollbackEvidenceDigest": rollback_digest,
 #|                 "attestationVerificationDigest":
-#|                     embedded_verification,
+#|                     canary_verification,
 #|             },
 #|         ),
 #|     },

@@ -241,8 +241,11 @@ describe("ArchonJudgeStack", () => {
         "aws:RequestedRegion"
       );
     }
-    const streamReads = statements.filter((statement) =>
-      actions(statement).includes("dynamodb:GetRecords")
+    const streamReads = statements.filter(
+      (statement) =>
+        actions(statement).includes("dynamodb:GetRecords") &&
+        typeof statement.Sid === "string" &&
+        statement.Sid.endsWith("Stream")
     );
     expect(streamReads).toHaveLength(4);
     for (const statement of streamReads) {
