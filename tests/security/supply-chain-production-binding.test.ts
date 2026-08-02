@@ -27,7 +27,21 @@ test("deploy promotes only exact attested build-once artifacts", () => {
   assert.match(deployWorkflow, /gh attestation verify/);
   assert.match(deployWorkflow, /datahub-cloud-runtime-release-/);
   assert.match(deployWorkflow, /archon\.datahub-core-ami-build\/v2/);
-  assert.match(deployWorkflow, /@sha256:/);
+  for (const required of [
+    'test "sha256:$(sha256sum "${archive}"|awk \'{print $1}\')" = "${digest}"',
+    "archon-web.tar.gz.sha256",
+    "archon-lambdas.tar.gz.sha256",
+    'spa_tar_sha256="$(sha256sum "${web_tar}" | awk \'{print $1}\')"',
+    'lambda_tar_sha256="$(sha256sum "${lambda_tar}" | awk \'{print $1}\')"',
+    ".imageUri+\"@\"+.imageDigest",
+    "SpaArtifactSha256=${SPA_TAR_SHA256}",
+    "LambdaArtifactSha256=${LAMBDA_TAR_SHA256}"
+  ]) {
+    assert.ok(
+      deployWorkflow.includes(required),
+      `missing outer/inner promotion binding: ${required}`
+    );
+  }
   assert.match(deployWorkflow, /CloudRuntimeReleaseDigest/);
   assert.match(deployWorkflow, /DataHubCoreImageManifestDigest/);
   assert.match(deployWorkflow, /archon\.aws-deployment-evidence\/v2/);

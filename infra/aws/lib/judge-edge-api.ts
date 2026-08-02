@@ -4,7 +4,6 @@ import {
   Duration,
   Fn,
   RemovalPolicy,
-  SecretValue,
   Stack
 } from "aws-cdk-lib";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
@@ -582,6 +581,31 @@ export function addJudgeEdgeApi(
     function: router,
     eventType: cloudfront.FunctionEventType.VIEWER_REQUEST
   };
+  // CloudFront rejects Authorization in an OriginRequestPolicy. A zero-TTL
+  // CachePolicy is the supported forwarding path: the header reaches API
+  // Gateway, participates in the (unused) cache key, and no authenticated
+  // response can be retained.
+  const apiCachePolicy = new cloudfront.CachePolicy(
+    scope,
+    "ApiNoCachePolicy",
+    {
+      cachePolicyName:
+        `archon-${stage}-api-no-cache`,
+      comment:
+        "Forward Authorization to the judge API while retaining zero objects",
+      defaultTtl: Duration.seconds(0),
+      minTtl: Duration.seconds(0),
+      maxTtl: Duration.seconds(0),
+      cookieBehavior:
+        cloudfront.CacheCookieBehavior.none(),
+      headerBehavior:
+        cloudfront.CacheHeaderBehavior.allowList(
+          "authorization"
+        ),
+      queryStringBehavior:
+        cloudfront.CacheQueryStringBehavior.none()
+    }
+  );
   const apiOriginPolicy = new cloudfront.OriginRequestPolicy(
     scope,
     "ApiOriginPolicy",
@@ -593,7 +617,6 @@ export function addJudgeEdgeApi(
       headerBehavior:
         cloudfront.OriginRequestHeaderBehavior.allowList(
           "accept",
-          "authorization",
           "content-type"
         ),
       queryStringBehavior:
@@ -667,7 +690,7 @@ export function addJudgeEdgeApi(
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachedMethods:
             cloudfront.CachedMethods.CACHE_GET_HEAD_OPTIONS,
-          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          cachePolicy: apiCachePolicy,
           compress: true,
           functionAssociations: [routerAssociation],
           originRequestPolicy: apiOriginPolicy,

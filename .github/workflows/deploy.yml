@@ -197,9 +197,11 @@ jobs:
             [[ "${staging_name}" =~ ^deployment-evidence-staging-${RELEASE_SHA}-[1-9][0-9]*$ ]]
             download "${STAGING_ID}" "${STAGING_DIGEST}" "${staging_name}" "${root}/staging"
           fi
-          echo "root=${root}" >>"${GITHUB_OUTPUT}"
-          echo "web_digest=${web_digest}" >>"${GITHUB_OUTPUT}"
-          echo "lambda_digest=${lambda_digest}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "root=${root}"
+            echo "web_digest=${web_digest}"
+            echo "lambda_digest=${lambda_digest}"
+          } >>"${GITHUB_OUTPUT}"
 
 
       - name: Validate release receipts and producer workflows
@@ -581,9 +583,11 @@ jobs:
               --parameters "${judge_stack}:ReleaseSha=${RELEASE_SHA}" \
               --outputs-file "${judge_outputs}"
           )
-          echo "edge_outputs=${edge_outputs}" >>"${GITHUB_OUTPUT}"
-          echo "core_outputs=${core_outputs}" >>"${GITHUB_OUTPUT}"
-          echo "judge_outputs=${judge_outputs}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "edge_outputs=${edge_outputs}"
+            echo "core_outputs=${core_outputs}"
+            echo "judge_outputs=${judge_outputs}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Publish exact SPA bytes and runtime authentication config
         id: release

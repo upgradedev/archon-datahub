@@ -42,7 +42,7 @@ grep -Fq 'for name in control runtime-control' .github/workflows/ci.yml
 grep -Fq 'control|control/*|runtime-control|runtime-control/*' \
   .github/workflows/supply-chain.yml
 grep -Fq 'cognito.OAuthScope.PROFILE' infra/aws/lib/judge-edge-api.ts
-if rg -n 'RetentionDays\.ONE_MONTH|sampledRequestsEnabled: true' \
+if grep -nE -- 'RetentionDays\.ONE_MONTH|sampledRequestsEnabled: true' \
   infra/aws/lib/archon-edge-stack.ts \
   infra/aws/lib/ephemeral-datahub-core-stack.ts \
   infra/aws/lib/archon-judge-stack.ts \
@@ -57,7 +57,7 @@ grep -Fq 'detect-stack-drift' .github/workflows/production-posture.yml
 grep -Fq 'CloudWatch->SNS(KMS)->SQS(KMS)' \
   .github/workflows/production-paging-test.yml
 
-if rg -n --glob '!aws-security-contracts.test.sh' \
+if grep -rInE --exclude='aws-security-contracts.test.sh' -- \
   'codex.security|Codex Security' \
   .github/workflows infra/aws/bin infra/aws/lib infra/aws/policy scripts tests/pipeline; then
   echo "::error::Codex Security must not be part of the security control plane" >&2

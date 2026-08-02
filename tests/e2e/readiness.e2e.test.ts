@@ -316,6 +316,26 @@ test("readiness: the differentiator (I1) fires on version-history data", async (
   assert.equal(i1.status, "pass", `I1 evidence: ${i1.evidence}`);
 });
 
+test("readiness: lean runtime binding, recovery semantics, and CI SLO stay evidence-bound", async () => {
+  const r = await report();
+  const byId = (id: string) => r.checks.find((candidate) => candidate.id === id)!;
+  for (const id of ["I5", "SQ1", "L1"]) {
+    assert.equal(byId(id).status, "pass", `${id} evidence: ${byId(id).evidence}`);
+  }
+  assert.match(
+    byId("I5").evidence,
+    /serverless Judge\/runtime-control binding=true/
+  );
+  assert.match(
+    byId("SQ1").evidence,
+    /DESIGN bounded GenericAspectV3 recovery=true/
+  );
+  assert.match(
+    byId("L1").evidence,
+    /harness defaults\/gates=true; README exact CI Offline SLO=true/
+  );
+});
+
 test("readiness: no offline capability check is failing", async () => {
   const r = await report();
   const failing = r.capabilityEvidence.checks.filter((c) => c.status === "fail");

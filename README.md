@@ -123,6 +123,19 @@ npm run audit:demo
 npm start
 ```
 
+### CI Offline SLO
+
+The GitHub Actions **Offline SLO** job runs the shipped `AuditPipeline.run` and
+`audit_catalog` MCP dispatch against the deterministic, network-free Fake DataHub backend.
+Its default release gate is explicit and reproducible:
+
+- 10 virtual users execute 200 planned iterations across both entry points;
+- the error rate must remain 0%, and completed iterations must equal planned iterations;
+- p95 audit latency must stay below 1,500 ms.
+
+`LOAD_VUS`, `LOAD_ITERATIONS`, and `LOAD_P95_MS` are diagnostic overrides; the
+release pipeline uses the defaults above and exits non-zero on any breach.
+
 With no DataHub or model credentials, Archon uses deterministic fixtures. This mode is for
 development and reproducible CI evidence; the UI labels fallback showcase data rather than
 presenting it as a live tenant result.

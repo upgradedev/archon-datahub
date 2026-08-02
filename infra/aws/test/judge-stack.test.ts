@@ -269,6 +269,49 @@ describe("ArchonJudgeStack", () => {
     );
   });
 
+  test("forwards Authorization only through a zero-TTL API cache policy", () => {
+    const template = judgeTemplate();
+    const cachePolicies = Object.values(
+      template.findResources("AWS::CloudFront::CachePolicy")
+    ) as any[];
+    const apiCache = cachePolicies.find(
+      (policy) =>
+        policy.Properties.CachePolicyConfig.Name ===
+        "archon-staging-api-no-cache"
+    );
+    expect(apiCache).toBeDefined();
+    expect(apiCache.Properties.CachePolicyConfig).toMatchObject({
+      DefaultTTL: 0,
+      MinTTL: 0,
+      MaxTTL: 0
+    });
+    const cacheHeaders =
+      apiCache.Properties.CachePolicyConfig
+        .ParametersInCacheKeyAndForwardedToOrigin.HeadersConfig
+        .Headers;
+    expect(cacheHeaders.map((header: string) => header.toLowerCase()))
+      .toEqual(["authorization"]);
+
+    const originPolicies = Object.values(
+      template.findResources(
+        "AWS::CloudFront::OriginRequestPolicy"
+      )
+    ) as any[];
+    const apiOrigin = originPolicies.find(
+      (policy) =>
+        policy.Properties.OriginRequestPolicyConfig.Name ===
+        "archon-staging-api-origin"
+    );
+    expect(apiOrigin).toBeDefined();
+    const originHeaders =
+      apiOrigin.Properties.OriginRequestPolicyConfig.HeadersConfig
+        .Headers.map((header: string) => header.toLowerCase());
+    expect(originHeaders).toEqual(
+      expect.arrayContaining(["accept", "content-type"])
+    );
+    expect(originHeaders).not.toContain("authorization");
+  });
+
   test("binds Cognito, WAF and the canonical judge fixture", () => {
     const template = judgeTemplate();
     template.hasResourceProperties("AWS::Cognito::UserPool", {

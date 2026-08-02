@@ -97,3 +97,34 @@ def test_dockerfile_is_exact_lambda_amd64_input_without_secret_values():
         "AWS_SESSION_TOKEN=",
     ):
         assert name not in dockerfile
+def test_security_evidence_is_retained_before_fail_closed_enforcement():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    evaluate = workflow.index("Enforce scan and SBOM gates")
+    retain = workflow.index("Retain pre-gate scan and SBOM evidence")
+    fail_closed = workflow.index("Fail closed after security evidence retention")
+    seal = workflow.index("Seal candidate, SBOM and provenance")
+    assert evaluate < retain < fail_closed < seal
+    assert "continue-on-error: true" in workflow[evaluate:retain]
+    assert "archon.datahub-cloud-runtime-gate-diagnostics/v1" in workflow
+    assert "datahub-cloud-runtime-security-evidence-${{ env.SOURCE_SHA }}" in workflow
+    assert "cloud-runtime-sca.raw.sarif" in workflow
+    assert "cloud-runtime-image.raw.sarif" in workflow
+    assert "cloud-runtime-sca.sarif" in workflow
+    assert "cloud-runtime-image.sarif" in workflow
+    assert "cloud-runtime.cdx.json" in workflow
+    assert "cloud-runtime.spdx.json" in workflow
+    assert "cloud-runtime-gate-diagnostics.json" in workflow
+    assert ".github/security/datahub-companion-image.openvex.json" in workflow
+    assert "TRIVY_VEX:" in workflow
+    assert "limit-severities-for-sarif: true" in workflow
+    assert '([.runs[].results[]] | length) == 0' in workflow
+    assert 'any(.components[]; .name == "datahub-agent-context" and .version == "1.6.0.17")' in workflow
+    assert 'any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0")' in workflow
+    assert 'any(.components[]; .name == "cryptography" and .version == "50.0.0")' in workflow
+
+
+def test_cloud_runtime_denies_source_builds_for_every_dependency_layer():
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert dockerfile.count("--no-build") == 2
+    assert "uv sync --frozen --no-dev --no-build --no-install-project" in dockerfile
+    assert "uv sync --frozen --group test --no-build --no-install-project" in dockerfile

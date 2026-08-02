@@ -1051,7 +1051,7 @@ describe("async audit control Lambda", () => {
             sessionId: { S: sessionId },
             generation: { S: runtime.session.binding.generation },
             capabilityDigest: { S: runtime.session.binding.capabilityDigest },
-            checkedAt: { S: new Date().toISOString() },
+            checkedAt: { S: runtime.session.updatedAt },
             capabilities: {
               M: Object.fromEntries(
                 Object.entries(runtimeCapabilities).map(([name, value]) => [
@@ -1145,7 +1145,7 @@ describe("async audit control Lambda", () => {
             status: { S: "READY" },
             generation: { S: runtime.session.binding.generation },
             capabilityDigest: { S: runtime.session.binding.capabilityDigest },
-            checkedAt: { S: new Date().toISOString() },
+            checkedAt: { S: runtime.session.updatedAt },
             capabilities: {
               M: Object.fromEntries(
                 Object.entries(runtimeCapabilities).map(([name, value]) => [
@@ -1202,7 +1202,7 @@ describe("async audit control Lambda", () => {
           status: { S: "READY" },
           generation: { S: runtime.session.binding.generation },
           capabilityDigest: { S: runtime.session.binding.capabilityDigest },
-          checkedAt: { S: new Date().toISOString() },
+          checkedAt: { S: runtime.session.updatedAt },
           capabilities: {
             M: {
               ...Object.fromEntries(

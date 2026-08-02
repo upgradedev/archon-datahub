@@ -532,6 +532,19 @@ export class ArchonEphemeralDataHubCoreStack extends Stack {
         ]
       }
     );
+    const cfnLaunchTemplate =
+      this.autoScalingGroup.node.findAll().find(
+        (child) => child instanceof ec2.CfnLaunchTemplate
+      );
+    if (!cfnLaunchTemplate) {
+      throw new Error(
+        "DataHub Core requires an explicit EC2 launch template"
+      );
+    }
+    cfnLaunchTemplate.addPropertyOverride(
+      "LaunchTemplateData.MetadataOptions.HttpEndpoint",
+      "enabled"
+    );
     Tags.of(this.autoScalingGroup).add("Runtime", "datahub-core", {
       applyToLaunchedInstances: true
     });

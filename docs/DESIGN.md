@@ -21,6 +21,17 @@ Core modes. Every conclusion carries source evidence and uncertainty; every
 mutation requires a fresh digest-bound human approval and a before/after
 receipt.
 
+## Version-history recovery
+
+A contradiction cannot be inferred from the current MCP read surface alone.
+For the differentiator path, Archon directly reads bounded DataHub GMS
+`GenericAspectV3` version 0/history records, retains their system-metadata
+provenance, and separates stable `pipelineName` source identity from per-run
+`runId` execution identity. Same-pipeline changes remain drift; only
+independent retained sources can form a contradiction. Missing, malformed,
+unauthorized, or truncated history fails closed to an unknown/manual result
+instead of becoming an actionable finding.
+
 ## Judge runtime
 
 The permanent path is CloudFront + private S3, API Gateway + WAF, Cognito,

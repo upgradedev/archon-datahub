@@ -13,12 +13,12 @@ WORKDIR /build
 COPY --from=uv /uv /uvx /bin/
 COPY services/datahub-companion/pyproject.toml services/datahub-companion/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project \
+    uv sync --frozen --no-dev --no-build --no-install-project \
       --python /var/lang/bin/python3.12
 
 FROM runtime-dependencies AS test-dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --group test --no-install-project \
+    uv sync --frozen --group test --no-build --no-install-project \
       --python /var/lang/bin/python3.12
 
 FROM ${LAMBDA_IMAGE} AS runtime

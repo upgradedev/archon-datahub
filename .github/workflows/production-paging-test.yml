@@ -142,7 +142,7 @@ jobs:
 
           matched=false
           matched_digest=
-          for attempt in $(seq 1 18); do
+          for ((attempt = 1; attempt <= 18; attempt++)); do
             batch="$(
               aws sqs receive-message --queue-url "${queue_url}" \
                 --max-number-of-messages 10 --wait-time-seconds 10 \

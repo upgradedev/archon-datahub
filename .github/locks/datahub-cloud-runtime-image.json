@@ -26,7 +26,8 @@
       "cryptography": "50.0.0",
       "httpx": "0.28.1",
       "pytest": "9.1.1"
-    }
+    },
+    "sourceBuilds": "deny"
   },
   "immutableInputs": {
     "companion": {
@@ -52,6 +53,10 @@
     "customSkill": {
       "path": "contrib/datahub-audit/SKILL.md",
       "blobSha": "f417432a93a9f869185b7fe4f9c62a1abb865dc3"
+    },
+    "imageOpenVex": {
+      "path": ".github/security/datahub-companion-image.openvex.json",
+      "blobSha": "5d2f3ab9b61243212d4ed235b3119ac7091785a0"
     }
   },
   "officialSkills": {
@@ -69,11 +74,11 @@
   "sourceBlobs": [
     {
       "path": ".github/workflows/datahub-cloud-runtime-image.yml",
-      "blobSha": "7619042323ebd08131f59bfcde830e8ceddfc481"
+      "blobSha": "b0bc75daf3d1fafa02c051921d1b4dabb4a73f81"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile",
-      "blobSha": "1c921a009a8fb8945770380d1e033b8907d034ab"
+      "blobSha": "9b8a9c15dfee5d97a897d22d155204aba03f89bd"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile.dockerignore",
@@ -145,7 +150,7 @@
     },
     {
       "path": "tests/pipeline/datahub_cloud_runtime_image_contracts_test.py",
-      "blobSha": "6e2cfe0b79df2ae84b43fc754693e9200319bb50"
+      "blobSha": "c5cdb574dd3a80ba4649d65040a4d2c30bef35f9"
     }
   ],
   "handlers": {

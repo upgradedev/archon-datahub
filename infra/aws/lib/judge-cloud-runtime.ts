@@ -217,7 +217,7 @@ function eventMapping(
       }
     }
   );
-  mapping.addDependency(config.functionResource);
+  mapping.addResourceDependency(config.functionResource);
   return mapping;
 }
 

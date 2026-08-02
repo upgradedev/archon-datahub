@@ -85,7 +85,7 @@ jobs:
                 --query StackDriftDetectionId --output text
             )"
             [[ "${detection}" =~ ^[0-9a-fA-F-]{36}$ ]]
-            for attempt in $(seq 1 30); do
+            for ((attempt = 1; attempt <= 30; attempt++)); do
               status="$(
                 aws cloudformation describe-stack-drift-detection-status \
                   --stack-drift-detection-id "${detection}" \

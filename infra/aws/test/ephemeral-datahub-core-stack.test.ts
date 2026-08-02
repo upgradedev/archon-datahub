@@ -149,11 +149,34 @@ describe("ephemeral DataHub Core stack", () => {
     const serialized = JSON.stringify(template);
     expect(serialized).toContain("ec2:CreateVpcEndpoint");
     expect(serialized).toContain("ec2:DeleteVpcEndpoints");
-    expect(serialized).toContain("CORE_BEDROCK_SERVICE_NAME");
-    expect(serialized).toContain("CORE_KMS_SERVICE_NAME");
-    expect(serialized).toContain("CORE_STS_SERVICE_NAME");
-    expect(serialized).toContain("com.amazonaws.eu-west-1.sts");
-    expect(serialized).toContain("CORE_INTERFACE_SECURITY_GROUP_ID");
+    const lifecycle = (
+      Object.values(resources(template, "AWS::Lambda::Function")) as any[]
+    ).find(
+      (resource) =>
+        resource.Properties.Handler === "lifecycle.handler"
+    );
+    expect(lifecycle).toBeDefined();
+    const endpointServices =
+      lifecycle.Properties.Environment.Variables;
+    for (const [name, suffix] of [
+      ["CORE_BEDROCK_SERVICE_NAME", ".bedrock-runtime"],
+      ["CORE_KMS_SERVICE_NAME", ".kms"],
+      ["CORE_STS_SERVICE_NAME", ".sts"]
+    ]) {
+      expect(endpointServices[name]).toEqual({
+        "Fn::Join": [
+          "",
+          [
+            "com.amazonaws.",
+            { Ref: "AWS::Region" },
+            suffix
+          ]
+        ]
+      });
+    }
+    expect(endpointServices).toHaveProperty(
+      "CORE_INTERFACE_SECURITY_GROUP_ID"
+    );
   });
 
   test("pins one portable SQLite question and exact EU Bedrock resources", () => {

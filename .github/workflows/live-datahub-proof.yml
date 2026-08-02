@@ -223,7 +223,7 @@ jobs:
           if [[ "${PROFILE}" == core ]]; then
             session_url="${APPLICATION_URL}/api/runtime-sessions/${RUNTIME_SESSION_ID}"
             ready=false
-            for attempt in $(seq 1 60); do
+            for ((attempt = 1; attempt <= 60; attempt++)); do
               curl --fail --silent --show-error \
                 --proto '=https' --tlsv1.2 --retry 2 --retry-all-errors \
                 --max-time 20 --output "${work}/session.json" "${session_url}"

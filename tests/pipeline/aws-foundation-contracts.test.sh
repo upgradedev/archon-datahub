@@ -664,7 +664,45 @@ jq --exit-status '
     .Resource |
     map(select(contains("governed-canary"))) |
     length
-  ) == 3
+  ) == 3 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiFoundationStack")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiFoundationRoles")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiBuilderProfile")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "AttachExactCoreAmiBuilderSsmPolicy")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "PassExactCoreAmiBuilderRoleForProfile")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactBootstrapAndDeployRoles")][0] |
+    .Resource |
+    map(select(endswith("-cloud-trial"))) |
+    sort
+  ) == (
+    [
+      "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-production-cloud-trial",
+      "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-staging-cloud-trial"
+    ] |
+    sort
+  )
 ' "${foundation_policy}" >/dev/null
 
 require_text "${foundation_renderer}" \
@@ -700,6 +738,23 @@ for group in control assets identity attachments; do
       (tostring | contains("${aws:PrincipalAccount}") | not)
     ' <<<"${renderer_stdout[${group}]}" >/dev/null
 done
+
+jq --exit-status '
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiFoundationStack")) != null and
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiFoundationRoles")) != null and
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiBuilderProfile")) != null and
+  ([.Statement[].Sid] |
+    index("AttachExactCoreAmiBuilderSsmPolicy")) != null and
+  ([.Statement[].Sid] |
+    index("PassExactCoreAmiBuilderRoleForProfile")) != null
+' <<<"${renderer_stdout[control]}" >/dev/null
+jq --exit-status '
+  ([.Statement[].Sid] |
+    index("ReconcileExactBootstrapAndDeployRoles")) != null
+' <<<"${renderer_stdout[identity]}" >/dev/null
 
 node "${foundation_renderer}" \
   --input "${foundation_policy}" \

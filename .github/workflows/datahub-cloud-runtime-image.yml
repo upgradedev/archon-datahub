@@ -8,6 +8,7 @@ on:
       - ".github/locks/datahub-cloud-runtime-image.json"
       - ".github/locks/datahub-mcp-v0.6.0.json"
       - ".github/workflows/datahub-cloud-runtime-image.yml"
+      - ".github/security/datahub-companion-image.openvex.json"
       - "contracts/datahub-core-mutation-authorization-golden.json"
       - "contrib/datahub-audit/SKILL.md"
       - "services/datahub-cloud-runtime/**"
@@ -21,6 +22,7 @@ on:
       - ".github/locks/datahub-cloud-runtime-image.json"
       - ".github/locks/datahub-mcp-v0.6.0.json"
       - ".github/workflows/datahub-cloud-runtime-image.yml"
+      - ".github/security/datahub-companion-image.openvex.json"
       - "contracts/datahub-core-mutation-authorization-golden.json"
       - "contrib/datahub-audit/SKILL.md"
       - "services/datahub-cloud-runtime/**"
@@ -41,6 +43,7 @@ env:
   SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   IMAGE_REF: archon-datahub-cloud-runtime:${{ github.event.pull_request.head.sha || github.sha }}
   LOCK_PATH: .github/locks/datahub-cloud-runtime-image.json
+  VEX_PATH: .github/security/datahub-companion-image.openvex.json
   ECR_REPOSITORY: archon-datahub-cloud-runtime-v2
 
 jobs:
@@ -179,7 +182,62 @@ jobs:
           test -n "${{ steps.image.outputs.digest }}"
           test -z "$(git status --porcelain --untracked-files=all)"
 
+      - name: Validate the exact expiring runtime OpenVEX statement
+        run: |
+          set -euo pipefail
+          jq --exit-status '
+            ."@context" == "https://openvex.dev/ns/v0.2.0" and
+            ."@id" == "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image-setuptools/v1" and
+            .author == "https://github.com/upgradedev/archon-datahub" and
+            .timestamp == .last_updated and
+            .version == 1 and
+            (.statements | length) == 1 and
+            .statements[0].vulnerability.name == "CVE-2026-59890" and
+            .statements[0].products == [
+              {"@id": "pkg:pypi/setuptools@81.0.0"}
+            ] and
+            .statements[0].status == "not_affected" and
+            .statements[0].justification == "vulnerable_code_not_in_execute_path"
+          ' "$VEX_PATH" >/dev/null
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+
+          vex = json.loads(Path(os.environ["VEX_PATH"]).read_text())
+          issued = datetime.fromisoformat(
+              vex["timestamp"].removesuffix("Z") + "+00:00"
+          )
+          expires = datetime.fromisoformat(
+              vex["x-archon-expires-at"].removesuffix("Z") + "+00:00"
+          )
+          now = datetime.now(UTC)
+          assert issued <= now < expires
+          assert timedelta(0) < expires - issued <= timedelta(days=32)
+          PY
+          test "$(
+            grep -c -- '--no-build' services/datahub-cloud-runtime/Dockerfile
+          )" = "2"
+
       - name: Dependency SCA against the exact lock
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: services/datahub-companion
+          scanners: vuln
+          format: sarif
+          output: ${{ runner.temp }}/cloud-runtime-sca.raw.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: false
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Dependency SCA with the reviewed OpenVEX
+        env:
+          TRIVY_VEX: .github/security/datahub-companion-image.openvex.json
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -188,12 +246,30 @@ jobs:
           format: sarif
           output: ${{ runner.temp }}/cloud-runtime-sca.sarif
           severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
           ignore-unfixed: true
           exit-code: "0"
           hide-progress: true
           version: v0.72.0
 
-      - name: Trivy scan of the exact production image
+      - name: Trivy raw scan of the exact production image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_REF }}
+          scanners: vuln
+          format: sarif
+          output: ${{ runner.temp }}/cloud-runtime-image.raw.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: false
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Trivy scan of the exact production image with reviewed OpenVEX
+        env:
+          TRIVY_VEX: .github/security/datahub-companion-image.openvex.json
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
@@ -202,6 +278,7 @@ jobs:
           format: sarif
           output: ${{ runner.temp }}/cloud-runtime-image.sarif
           severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
           ignore-unfixed: true
           exit-code: "0"
           hide-progress: true
@@ -228,41 +305,262 @@ jobs:
           version: v0.72.0
 
       - name: Enforce scan and SBOM gates
+        id: security_gate
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          for report in             "$RUNNER_TEMP/cloud-runtime-sca.sarif"             "$RUNNER_TEMP/cloud-runtime-image.sarif"
+          set -u -o pipefail
+          diagnostics="$RUNNER_TEMP/cloud-runtime-gate-diagnostics.json"
+          jq -nS \
+            --slurpfile scaRaw "$RUNNER_TEMP/cloud-runtime-sca.raw.sarif" \
+            --slurpfile sca "$RUNNER_TEMP/cloud-runtime-sca.sarif" \
+            --slurpfile imageRaw "$RUNNER_TEMP/cloud-runtime-image.raw.sarif" \
+            --slurpfile image "$RUNNER_TEMP/cloud-runtime-image.sarif" \
+            --slurpfile cdx "$RUNNER_TEMP/cloud-runtime.cdx.json" \
+            --slurpfile spdx "$RUNNER_TEMP/cloud-runtime.spdx.json" '
+            def valid_sarif($document):
+              $document.version == "2.1.0" and
+              ($document.runs | type == "array" and length > 0) and
+              all(
+                $document.runs[];
+                (.results | type == "array")
+              );
+            def findings($document):
+              [
+                $document.runs[]? as $run
+                | ($run.results // [])[]?
+                | . as $result
+                | {
+                    ruleId: ($result.ruleId // "unknown"),
+                    level: ($result.level // "unknown"),
+                    severity: (
+                      [
+                        $run.tool.driver.rules[]?
+                        | select(.id == $result.ruleId)
+                        | .properties.tags[]?
+                        | select(. == "HIGH" or . == "CRITICAL")
+                      ][0] // "unknown"
+                    )
+                  }
+              ]
+              | unique_by([.ruleId, .level, .severity])
+              | sort_by(.ruleId)
+              | .[:20];
+            def count_results($document):
+              [$document.runs[]?.results[]?] | length;
+            def versions($name):
+              [
+                $cdx[0].components[]?
+                | select(.name == $name)
+                | .version
+                | select(type == "string")
+              ] | unique | sort;
+            {
+              schemaVersion:
+                "archon.datahub-cloud-runtime-gate-diagnostics/v1",
+              redaction: {
+                freeTextMessages: "omitted",
+                locations: "omitted",
+                sourcePaths: "omitted"
+              },
+              scans: [
+                {
+                  report: "dependency",
+                  raw: {
+                    valid: valid_sarif($scaRaw[0]),
+                    count: count_results($scaRaw[0]),
+                    findings: findings($scaRaw[0])
+                  },
+                  actionable: {
+                    valid: valid_sarif($sca[0]),
+                    count: count_results($sca[0]),
+                    findings: findings($sca[0])
+                  }
+                },
+                {
+                  report: "image",
+                  raw: {
+                    valid: valid_sarif($imageRaw[0]),
+                    count: count_results($imageRaw[0]),
+                    findings: findings($imageRaw[0])
+                  },
+                  actionable: {
+                    valid: valid_sarif($image[0]),
+                    count: count_results($image[0]),
+                    findings: findings($image[0])
+                  }
+                }
+              ],
+              sbom: {
+                cycloneDx: {
+                  bomFormat: ($cdx[0].bomFormat // "missing"),
+                  componentCount: ([$cdx[0].components[]?] | length),
+                  required: [
+                    {
+                      name: "datahub-agent-context",
+                      requiredVersion: "1.6.0.17",
+                      observedVersions:
+                        versions("datahub-agent-context")
+                    },
+                    {
+                      name: "datahub-analytics-agent",
+                      requiredVersion: "0.4.0",
+                      observedVersions:
+                        versions("datahub-analytics-agent")
+                    },
+                    {
+                      name: "cryptography",
+                      requiredVersion: "50.0.0",
+                      observedVersions: versions("cryptography")
+                    }
+                  ]
+                },
+                spdx: {
+                  version: ($spdx[0].spdxVersion // "missing")
+                }
+              }
+            }
+            | .gate = {
+                sarifClean: all(
+                  .scans[];
+                  .raw.valid and
+                  .actionable.valid and
+                  .actionable.count == 0
+                ),
+                cycloneDxExactComponents: (
+                  .sbom.cycloneDx.bomFormat == "CycloneDX" and
+                  all(
+                    .sbom.cycloneDx.required[];
+                    . as $required
+                    | (
+                        $required.observedVersions
+                        | index($required.requiredVersion)
+                      ) != null
+                  )
+                ),
+                spdxValid:
+                  (.sbom.spdx.version | startswith("SPDX-"))
+              }
+            | .gate.passed = (
+                .gate.sarifClean and
+                .gate.cycloneDxExactComponents and
+                .gate.spdxValid
+              )
+          ' >"$diagnostics"
+
+          jq -c '{
+            schemaVersion,
+            gate,
+            scans,
+            sbom
+          }' "$diagnostics"
+
+          gate_status=0
+          for report in \
+            "$RUNNER_TEMP/cloud-runtime-sca.sarif" \
+            "$RUNNER_TEMP/cloud-runtime-image.sarif"
           do
-            jq -e '
+            if ! jq -e '
               .version == "2.1.0" and
               ([.runs[].results[]] | length) == 0
-            ' "$report" >/dev/null
+            ' "$report" >/dev/null; then
+              count="$(
+                jq -r '[.runs[]?.results[]?] | length' "$report" \
+                  2>/dev/null || printf unknown
+              )"
+              echo "::error title=Cloud runtime security gate::$(basename "$report") has $count actionable HIGH/CRITICAL finding(s); inspect retained redacted diagnostics"
+              gate_status=1
+            fi
           done
-          jq -e '
+          if ! jq -e '
             .bomFormat == "CycloneDX" and
             any(.components[]; .name == "datahub-agent-context" and .version == "1.6.0.17") and
             any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0") and
             any(.components[]; .name == "cryptography" and .version == "50.0.0")
-          ' "$RUNNER_TEMP/cloud-runtime.cdx.json" >/dev/null
-          jq -e '.spdxVersion | startswith("SPDX-")'             "$RUNNER_TEMP/cloud-runtime.spdx.json" >/dev/null
+          ' "$RUNNER_TEMP/cloud-runtime.cdx.json" >/dev/null; then
+            echo "::error title=Cloud runtime SBOM gate::required exact CycloneDX component is absent; inspect retained redacted diagnostics"
+            gate_status=1
+          fi
+          if ! jq -e '
+            .spdxVersion | startswith("SPDX-")
+          ' "$RUNNER_TEMP/cloud-runtime.spdx.json" >/dev/null; then
+            echo "::error title=Cloud runtime SBOM gate::SPDX document is malformed"
+            gate_status=1
+          fi
+          exit "$gate_status"
+
+      - name: Stage available pre-gate security evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/cloud-runtime-security-evidence"
+          mkdir -p "$evidence"
+          for source in \
+            "$RUNNER_TEMP/cloud-runtime-sca.raw.sarif" \
+            "$RUNNER_TEMP/cloud-runtime-sca.sarif" \
+            "$RUNNER_TEMP/cloud-runtime-image.raw.sarif" \
+            "$RUNNER_TEMP/cloud-runtime-image.sarif" \
+            "$RUNNER_TEMP/cloud-runtime.cdx.json" \
+            "$RUNNER_TEMP/cloud-runtime.spdx.json" \
+            "$RUNNER_TEMP/cloud-runtime-gate-diagnostics.json"
+          do
+            test -f "$source"
+            test ! -L "$source"
+            install -m 0644 "$source" "$evidence/$(basename "$source")"
+          done
+          install -m 0644 "$VEX_PATH" "$evidence/image.openvex.json"
+          (
+            cd "$evidence"
+            sha256sum \
+              cloud-runtime-sca.raw.sarif \
+              cloud-runtime-sca.sarif \
+              cloud-runtime-image.raw.sarif \
+              cloud-runtime-image.sarif \
+              cloud-runtime.cdx.json \
+              cloud-runtime.spdx.json \
+              cloud-runtime-gate-diagnostics.json \
+              image.openvex.json >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Retain pre-gate scan and SBOM evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-cloud-runtime-security-evidence-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/cloud-runtime-security-evidence/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'push' && 90 || 7 }}
+          overwrite: true
 
       - name: Upload trusted image SARIF
         if: >-
-          github.event_name == 'push' ||
-          github.event.pull_request.head.repo.full_name == github.repository
+          always() &&
+          (github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: ${{ runner.temp }}/cloud-runtime-image.sarif
           category: trivy-datahub-cloud-runtime-v2
 
+      - name: Fail closed after security evidence retention
+        if: steps.security_gate.outcome != 'success'
+        run: |
+          echo "::error title=Cloud runtime candidate rejected::Security or exact SBOM gate failed; retained evidence is attached to this run"
+          exit 1
       - name: Seal candidate, SBOM and provenance
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/cloud-runtime-candidate"
           mkdir -p "$evidence"
+          cp "$RUNNER_TEMP/cloud-runtime-sca.raw.sarif" "$evidence/sca.raw.sarif"
           cp "$RUNNER_TEMP/cloud-runtime-sca.sarif" "$evidence/sca.sarif"
+          cp "$RUNNER_TEMP/cloud-runtime-image.raw.sarif" "$evidence/image.raw.sarif"
           cp "$RUNNER_TEMP/cloud-runtime-image.sarif" "$evidence/image.sarif"
           cp "$RUNNER_TEMP/cloud-runtime.cdx.json" "$evidence/runtime.cdx.json"
           cp "$RUNNER_TEMP/cloud-runtime.spdx.json" "$evidence/runtime.spdx.json"
+          cp "$RUNNER_TEMP/cloud-runtime-gate-diagnostics.json" \
+            "$evidence/gate-diagnostics.json"
+          cp "$VEX_PATH" "$evidence/image.openvex.json"
           docker save --output "$evidence/candidate.tar" "$IMAGE_REF"
           image_id="$(docker image inspect "$IMAGE_REF" --format '{{.Id}}')"
           jq -n             --arg schemaVersion "archon.datahub-cloud-runtime-provenance/v1"             --arg sourceSha "$SOURCE_SHA"             --arg imageRef "$IMAGE_REF"             --arg imageId "$image_id"             --arg buildDigest "${{ steps.image.outputs.digest }}"             --arg lockDigest "sha256:$(sha256sum "$LOCK_PATH" | cut -d' ' -f1)"             '{
@@ -275,11 +573,22 @@ jobs:
               platform:"linux/amd64",
               architecture:"x86_64",
               networkDuringTests:"none",
+              sourceBuilds:"deny",
               localArtifactsPersisted:false
             }' >"$evidence/provenance.json"
           (
             cd "$evidence"
-            sha256sum candidate.tar image.sarif sca.sarif               runtime.cdx.json runtime.spdx.json provenance.json               >SHA256SUMS
+            sha256sum \
+              candidate.tar \
+              gate-diagnostics.json \
+              image.openvex.json \
+              image.raw.sarif \
+              image.sarif \
+              provenance.json \
+              runtime.cdx.json \
+              runtime.spdx.json \
+              sca.raw.sarif \
+              sca.sarif >SHA256SUMS
             sha256sum --check --strict SHA256SUMS
           )
 

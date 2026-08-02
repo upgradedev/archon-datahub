@@ -26,15 +26,45 @@ class PortableDemoSeedTests(TestCase):
                     "FROM customer_segment_revenue "
                     "ORDER BY net_revenue_cents DESC, segment"
                 ).fetchall()
+                segments = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT segment FROM customers ORDER BY segment"
+                    ).fetchall()
+                ]
+                q2_gross = connection.execute(
+                    "SELECT SUM(gross_revenue_cents) FROM orders "
+                    "WHERE recognized_at >= '2026-04-01T00:00:00Z' "
+                    "AND recognized_at < '2026-07-01T00:00:00Z'"
+                ).fetchone()[0]
+                q2_refunds = connection.execute(
+                    "SELECT SUM(r.refund_cents) "
+                    "FROM refunds AS r "
+                    "JOIN orders AS o ON o.order_id = r.order_id "
+                    "WHERE o.recognized_at >= '2026-04-01T00:00:00Z' "
+                    "AND o.recognized_at < '2026-07-01T00:00:00Z' "
+                    "AND r.recognized_at >= '2026-04-01T00:00:00Z' "
+                    "AND r.recognized_at < '2026-07-01T00:00:00Z'"
+                ).fetchone()[0]
             finally:
                 connection.close()
         self.assertEqual(
             rows,
             [
                 ("enterprise", 2, 1850000),
-                ("smb", 1, 1200000),
-                ("mid_market", 1, 900000),
+                ("mid_market", 1, 1150000),
+                ("small_business", 1, 600000),
             ],
+        )
+        self.assertEqual(
+            segments,
+            ["enterprise", "mid_market", "small_business"],
+        )
+        self.assertEqual(q2_gross, 4000000)
+        self.assertEqual(q2_refunds, 400000)
+        self.assertEqual(
+            sum(net_revenue_cents for _, _, net_revenue_cents in rows),
+            q2_gross - q2_refunds,
         )
 
     def test_metadata_plan_matches_canonical_core_story(self) -> None:
