@@ -205,7 +205,7 @@ def test_ack_context_preserves_unknown_when_search_resolves_nothing(
     monkeypatch,
 ):
     monkeypatch.setattr(companion, "DataHubContext", FakeContext)
-    monkeypatch.setattr(companion, "datahub_client", lambda: object())
+    monkeypatch.setattr(companion, "datahub_client", object)
     monkeypatch.setattr(
         companion,
         "search",
@@ -237,7 +237,7 @@ def test_ack_context_executes_exact_read_only_dataset_workflow(
         return operation
 
     monkeypatch.setattr(companion, "DataHubContext", FakeContext)
-    monkeypatch.setattr(companion, "datahub_client", lambda: object())
+    monkeypatch.setattr(companion, "datahub_client", object)
     monkeypatch.setattr(
         companion,
         "search",
