@@ -323,6 +323,11 @@ def validate_contract(workflow: str, helper: str) -> None:
             "archon.production-availability/v2",
             "attestations/production-availability/v2",
             'availability_dir / "observation.json"',
+            "availability_observation_observed",
+            "availability_observation_observed > availability_observed",
+            "availability_observed - availability_observation_observed",
+            "dt.timedelta(minutes=5)",
+            "now - availability_observation_observed",
             '["openid", "email", "profile", "archon/approve"]',
             "dt.timedelta(hours=7)",
             "availability_binding",
@@ -374,7 +379,7 @@ def validate_contract(workflow: str, helper: str) -> None:
         "path: ${{ runner.temp }}/submission-project-access-evidence\n" in retained,
         "retained artifact path widened",
     )
-    require("retention-days: 14\n" in retained, "retention policy changed")
+    require("retention-days: 90\n" in retained, "retention policy changed")
 
     reverify = named_step(attest, "Reverify all exact upstream attestations from retained facts")
     require_tokens(
@@ -425,6 +430,11 @@ def validate_contract(workflow: str, helper: str) -> None:
             "deployment_dir / \"observation.json\"",
             "availability_dir / \"evidence.json\"",
             "availability_dir / \"observation.json\"",
+            "availability_observation_observed",
+            "availability_observation_observed > availability_observed",
+            "availability_observed - availability_observation_observed",
+            "dt.timedelta(minutes=5)",
+            "now - availability_observation_observed",
             "journey_dir / \"production-runtime-config.json\"",
             "archon.aws-deployment-evidence/v2",
             "archon.lean-runtime-observation/v1",
@@ -559,6 +569,26 @@ tamper_cases: dict[str, tuple[str, str]] = {
         ),
         helper_text,
     ),
+    "availability observation order reversed": (
+        replace_exact(
+            workflow_text,
+            "or availability_observation_observed > availability_observed\n",
+            "or availability_observation_observed < availability_observed\n",
+            count=2,
+        ),
+        helper_text,
+    ),
+    "availability observation join widened": (
+        replace_exact(
+            workflow_text,
+            "or availability_observed - availability_observation_observed\n"
+            "              > dt.timedelta(minutes=5)\n",
+            "or availability_observed - availability_observation_observed\n"
+            "              > dt.timedelta(hours=1)\n",
+            count=2,
+        ),
+        helper_text,
+    ),
     "legacy deployment schema": (
         replace_exact(
             workflow_text,
@@ -572,6 +602,14 @@ tamper_cases: dict[str, tuple[str, str]] = {
             workflow_text,
             "          path: ${{ runner.temp }}/submission-project-access-evidence\n",
             "          path: ${{ runner.temp }}/submission-project-access-upstream\n",
+        ),
+        helper_text,
+    ),
+    "retention shortened": (
+        replace_exact(
+            workflow_text,
+            "          retention-days: 90\n",
+            "          retention-days: 14\n",
         ),
         helper_text,
     ),

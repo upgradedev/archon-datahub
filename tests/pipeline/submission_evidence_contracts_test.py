@@ -2870,6 +2870,18 @@ with tempfile.TemporaryDirectory(prefix="native-live-v3-derive-") as raw:
     }
     deployment_path.unlink()
     validator.write_json(deployment_path, legacy_deployment)
+    predicate["evidence"]["deploymentEvidenceSha256"] = (
+        validator.sha256_file(deployment_path).removeprefix("sha256:")
+    )
+    predicate_path.unlink()
+    validator.write_json(predicate_path, predicate)
+    inventory["deployment-evidence.json"] = validator.sha256_file(
+        deployment_path
+    )
+    inventory_path.write_text(
+        validator.checksum_inventory_text(inventory),
+        encoding="utf-8",
+    )
     expect_rejected(
         lambda: validator.derive_live(
             native_root,

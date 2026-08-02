@@ -1182,6 +1182,10 @@ jobs:
           availability_observed = instant(
               availability["observedAt"], "availability observedAt"
           )
+          availability_observation_observed = instant(
+              availability_observation["observedAt"],
+              "availability observation observedAt",
+          )
           now = dt.datetime.now(dt.timezone.utc)
           expected_origin_sha = hashlib.sha256(
               application_url.encode("utf-8")
@@ -1221,6 +1225,13 @@ jobs:
                   "rawIdentifiersProjected"
               )
               is not False
+              or availability_observation_observed > availability_observed
+              or availability_observed - availability_observation_observed
+              > dt.timedelta(minutes=5)
+              or availability_observation_observed
+              > now + dt.timedelta(minutes=5)
+              or now - availability_observation_observed
+              > dt.timedelta(hours=7)
               or availability_observed > now + dt.timedelta(minutes=5)
               or now - availability_observed > dt.timedelta(hours=7)
           ):
@@ -3736,6 +3747,9 @@ jobs:
           )
           now = dt.datetime.now(dt.timezone.utc)
           availability_observed = instant(availability.get("observedAt"))
+          availability_observation_observed = instant(
+              availability_observation.get("observedAt")
+          )
           parsed = urllib.parse.urlsplit(sq3["applicationUrl"])
           if (
               parsed.scheme != "https"
@@ -3933,6 +3947,13 @@ jobs:
                   "rawIdentifiersProjected"
               )
               is not False
+              or availability_observation_observed > availability_observed
+              or availability_observed - availability_observation_observed
+              > dt.timedelta(minutes=5)
+              or availability_observation_observed
+              > now + dt.timedelta(minutes=5)
+              or now - availability_observation_observed
+              > dt.timedelta(hours=7)
               or availability_observed > now + dt.timedelta(minutes=5)
               or now - availability_observed > dt.timedelta(hours=7)
               or journey_manifest.get("releaseSha") != release
