@@ -318,6 +318,7 @@ def validate_workflow(source: str) -> None:
         "production-alarm-delivery-${RELEASE_SHA}-",
         "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-",
         "availabilityObservedAt",
+        '"profileResponseDigest": availability["profileResponseDigest"]',
         '"observationDigest": file_sha(\n'
         '                availability_dir / "observation.json"\n'
         '            )',
@@ -500,6 +501,11 @@ mutations = {
         workflow,
         '#|         "maximumExpectedGapMinutes": 90,\n',
         '#|         "maximumExpectedGapMinutes": 420,\n',
+    ),
+    "runtime profile response detached": replace_once(
+        workflow,
+        '#|             "profileResponseDigest": availability["profileResponseDigest"],\n',
+        '#|             "profileResponseDigest": availability_binding["artifact"]["digest"],\n',
     ),
     "availability observation detached": replace_once(
         workflow,
