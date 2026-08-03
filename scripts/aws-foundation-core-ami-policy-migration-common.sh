@@ -201,7 +201,8 @@ validate_common() {
         defaultVersionId: "v2",
         canonicalReadback: true
       }
-    } and    .policy.target == {
+    } and
+    .policy.target == {
       canonicalSha256:
         "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33",
       expectedVersionId: "v3"
@@ -238,7 +239,8 @@ validate_common() {
         }
       ],
       noOtherStatementChange: true
-    } and    .policy.maximumDocumentBytes == 6144 and
+    } and
+    .policy.maximumDocumentBytes == 6144 and
     .authorization.foundationRoleName ==
       "archon-datahub-github-foundation" and
     .authorization.executorRoleName ==
@@ -455,7 +457,9 @@ render_policy_documents() {
     fail "The Core AMI control-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered control policy exceeds the managed-policy limit"
-}verify_recovery_role_baseline() {
+}
+
+verify_recovery_role_baseline() {
   local role="${WORK_ROOT}/recovery-role.json"
   local inline="${WORK_ROOT}/recovery-inline.json"
   local attached="${WORK_ROOT}/recovery-attached.json"
