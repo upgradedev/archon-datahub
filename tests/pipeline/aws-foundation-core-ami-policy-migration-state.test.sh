@@ -340,9 +340,14 @@ run_dynamic_receipt_case() (
   local expected_id="$3"
   local expected_result="$4"
   local case_name="${state}-${observed_id:-absent}-${expected_id:-none}-${expected_result}"
-  WORK_ROOT="${test_root}/receipt-${case_name}"
-  GITHUB_OUTPUT="${WORK_ROOT}/github-output"
-  mkdir -p "${WORK_ROOT}"
+  local case_runtime="${test_root}/receipt-${case_name}"
+  case "${WORK_ROOT}" in
+    "${RUNNER_TEMP}"/*) ;;
+    *) fail "Receipt work root escaped the runner temp directory" ;;
+  esac
+  rm -rf -- "${WORK_ROOT}/evidence"
+  mkdir -p "${case_runtime}"
+  GITHUB_OUTPUT="${case_runtime}/github-output"
   : >"${GITHUB_OUTPUT}"
   AWS_ACCOUNT_ID=123456789012
   CONTROL_PLANE_SHA=0123456789abcdef0123456789abcdef01234567
@@ -365,14 +370,14 @@ run_dynamic_receipt_case() (
 
   local status=0
   set +e
-  write_receipt "${state}" >"${WORK_ROOT}/stdout" 2>"${WORK_ROOT}/stderr"
+  write_receipt "${state}" >"${case_runtime}/stdout" 2>"${case_runtime}/stderr"
   status=$?
   set -e
   if [[ "${expected_result}" == mismatch ]]; then
     test "${status}" -ne 0 ||
       fail "Receipt accepted a target ID that changed after authorization"
     grep -Fq 'Receipt target version changed after authorization' \
-      "${WORK_ROOT}/stderr" ||
+      "${case_runtime}/stderr" ||
       fail "Receipt mismatch diagnostic differs"
     test ! -e "${WORK_ROOT}/evidence/migration.json" ||
       fail "Mismatched receipt must not be materialized"
@@ -380,7 +385,7 @@ run_dynamic_receipt_case() (
   fi
 
   test "${status}" -eq 0 ||
-    fail "Dynamic receipt failed for ${case_name}: $(cat "${WORK_ROOT}/stderr")"
+    fail "Dynamic receipt failed for ${case_name}: $(cat "${case_runtime}/stderr")"
   local receipt="${WORK_ROOT}/evidence/migration.json"
   test -f "${receipt}"
   test ! -L "${receipt}"
