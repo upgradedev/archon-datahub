@@ -122,6 +122,12 @@
     "automaticFollowerOnNonSuccess": true,
     "manualDispatch": true,
     "manualDispatchMode": "cleanup-rollback",
+    "manualMigratedSeal": {
+      "confirmation": "SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY",
+      "mode": "cleanup-migrated",
+      "installsAuthorization": false,
+      "managedPolicyMutationAllowed": false
+    },
     "freshRollbackOnlyAuthorization": true,
     "rollbackToPreviousDefault": true,
     "deleteOnlyNewNondefaultVersion": true,
