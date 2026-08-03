@@ -84,7 +84,8 @@
         "defaultVersionId": "v2",
         "canonicalReadback": true
       }
-    },    "target": {
+    },
+    "target": {
       "expectedVersionId": "v3",
       "canonicalSha256": "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33"
     },
