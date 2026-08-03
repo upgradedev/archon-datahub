@@ -1981,6 +1981,8 @@ done
 
 forbid_text "${publisher_migration_common}" \
   'all($addedResources[] as $resource;'
+forbid_text "${core_migration_common}" \
+  'all(.;'
 
 jq -e '
   .aws.foundationPolicies.identityRoleMigration == {
