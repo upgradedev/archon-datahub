@@ -365,6 +365,12 @@ def validate_workflow(source: str) -> None:
         "production-alarm-delivery-candidate-" not in collector,
         "collector accepted a paging candidate artifact prefix",
     )
+    require(
+        collector.count("exact-run-id") == 6
+        and collector.count("latest-retained") == 1
+        and collector.count("exact-current") == 3,
+        "collector native selection policies are not exact and complete",
+    )
     forbidden_collector_contracts = (
         "rm -rf",
         "eval ",
@@ -377,7 +383,9 @@ def validate_workflow(source: str) -> None:
         "paging-subject.sha256",
         "attestations/production-availability/v1",
         "attestations/production-posture/v1",
+        "attestations/production-alarm-delivery/v1",
         "attestations/production-paging-delivery/v1",
+        "attestations/governed-canary/v1",
         '"17 */6 * * *"',
         '"alarmCount": 10',
     )
