@@ -301,7 +301,7 @@ def validate(sources: dict[str, str]) -> None:
         "Cloud trial runbook",
     )
     require_all(
-        docs_live,
+        " ".join(docs_live.split()),
         (
             "selected protected `staging` or",
             "reads only `AWSCURRENT`",
@@ -328,7 +328,7 @@ def validate(sources: dict[str, str]) -> None:
         "Core runbook",
     )
     require_all(
-        docs_canary,
+        " ".join(docs_canary.split()),
         (
             "exactly three environments",
             "AWS_CANARY_RECOVERY_ROLE_ARN",
