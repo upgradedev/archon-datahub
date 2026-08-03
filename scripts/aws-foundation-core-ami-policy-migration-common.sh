@@ -292,10 +292,10 @@ render_policy_documents() {
         select(($deltaSids | index($statement.Sid)) != null)][];
         .Effect == "Allow" and
         ((.Action | if type == "array" then . else [.] end) |
-          all(.;
+          all(.[];
             startswith("iam:") or startswith("cloudformation:"))) and
         ((.Resource | if type == "array" then . else [.] end) |
-          all(.; . != "*")))
+          all(.[]; . != "*")))
     ' "${NEW_POLICY}" >/dev/null ||
       fail "The Core AMI control-policy delta is not exact"
   NEW_POLICY_SHA="$(iam_policy_sha "${NEW_POLICY}")"
