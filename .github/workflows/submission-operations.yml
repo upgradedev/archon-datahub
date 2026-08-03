@@ -1274,20 +1274,89 @@ jobs:
 #| exact(d4["applicationUrl"], application_url, "D4/SQ3 applicationUrl")
 #| exact(sq4["deployment"], sq3["deployment"], "SQ3/SQ4 deployment")
 #|
+#| def validate_observation(
+#|     path: pathlib.Path,
+#|     maximum_age: dt.timedelta,
+#|     label: str,
+#| ) -> dict[str, Any]:
+#|     value = load(path)
+#|     exact_keys(
+#|         value,
+#|         {
+#|             "schemaVersion",
+#|             "stage",
+#|             "releaseSha",
+#|             "observedAt",
+#|             "topology",
+#|             "runtime",
+#|             "security",
+#|         },
+#|         label,
+#|     )
+#|     exact(value["schemaVersion"], "archon.lean-runtime-observation/v1", f"{label} schema")
+#|     exact(value["stage"], "production", f"{label} stage")
+#|     exact(value["releaseSha"], release, f"{label} release")
+#|     fresh(value["observedAt"], maximum_age, f"{label} observedAt")
+#|     topology = value["topology"]
+#|     if not isinstance(topology, dict):
+#|         fail(f"{label} topology must be an object")
+#|     exact_keys(
+#|         topology,
+#|         {"coreIdle", "legacyAlwaysOnRuntimeAbsent", "stackFingerprintSha256"},
+#|         f"{label} topology",
+#|     )
+#|     exact(topology["coreIdle"], True, f"{label} Core idle")
+#|     exact(
+#|         topology["legacyAlwaysOnRuntimeAbsent"],
+#|         True,
+#|         f"{label} legacy runtime absence",
+#|     )
+#|     raw_digest(topology["stackFingerprintSha256"], f"{label} stack fingerprint")
+#|     runtime = value["runtime"]
+#|     if not isinstance(runtime, dict):
+#|         fail(f"{label} runtime must be an object")
+#|     exact(
+#|         runtime,
+#|         {
+#|             "cloudImageDigest": runtime["cloudImageDigest"],
+#|             "functions": 6,
+#|             "imageFunctions": 3,
+#|             "sessionTables": 2,
+#|             "privateVersionedBuckets": 2,
+#|         },
+#|         f"{label} runtime",
+#|     )
+#|     digest(runtime["cloudImageDigest"], f"{label} Cloud image")
+#|     exact(
+#|         value["security"],
+#|         {
+#|             "noLambdaVpcAttachments": True,
+#|             "wafOnApiAndCognito": True,
+#|             "cloudFrontOac": True,
+#|             "encryptedState": True,
+#|             "pointInTimeRecovery": True,
+#|             "alarmRouteBound": True,
+#|             "rawIdentifiersProjected": False,
+#|         },
+#|         f"{label} security",
+#|     )
+#|     return value
+#|
+#|
 #| availability_binding, availability_dir, availability_predicate = (
 #|     native_source("availability")
 #| )
-#| availability = load(availability_dir / "availability.json")
-#| availability_manifest = load(availability_dir / "manifest.json")
+#| availability = load(availability_dir / "evidence.json")
+#| exact(availability_predicate, availability, "availability attestation predicate/evidence")
 #| exact_keys(
 #|     availability,
 #|     {
 #|         "schemaVersion",
+#|         "releaseSha",
 #|         "observedAt",
-#|         "source",
-#|         "publicRuntime",
-#|         "readOnlyAudit",
-#|         "releaseEvidence",
+#|         "checks",
+#|         "profileResponseDigest",
+#|         "rawIdentifiersRetained",
 #|         "result",
 #|     },
 #|     "availability",
@@ -1295,167 +1364,41 @@ jobs:
 #| exact(
 #|     availability["schemaVersion"],
 #|     "archon.production-availability/v2",
-#|     "availability.schemaVersion",
+#|     "availability schema",
 #| )
-#| exact(availability["result"], "passed", "availability.result")
+#| exact(availability["releaseSha"], release, "availability release")
 #| availability_observed = fresh(
 #|     availability["observedAt"],
-#|     dt.timedelta(hours=7),
-#|     "availability.observedAt",
-#| )
-#| availability_source = availability["source"]
-#| exact(availability_source["repository"], repository, "availability.repository")
-#| exact(availability_source["branch"], "master", "availability.branch")
-#| exact(
-#|     availability_source["controlPlaneSha"],
-#|     release,
-#|     "availability.controlPlaneSha",
+#|     dt.timedelta(minutes=90),
+#|     "availability observedAt",
 #| )
 #| exact(
-#|     availability_source["workflowRunId"],
-#|     availability_binding["source"]["runId"],
-#|     "availability workflow run",
-#| )
-#| exact(
-#|     availability_source["workflowRunAttempt"],
-#|     availability_binding["source"]["runAttempt"],
-#|     "availability workflow attempt",
-#| )
-#| availability_sha = file_sha(
-#|     availability_dir / "availability.json", prefixed=False
-#| )
-#| availability_size = (
-#|     availability_dir / "availability.json"
-#| ).stat().st_size
-#| exact(
-#|     availability_manifest,
+#|     availability["checks"],
 #|     {
-#|         "schemaVersion": "archon.production-availability-manifest/v1",
-#|         "files": [
-#|             {
-#|                 "path": "availability.json",
-#|                 "sha256": availability_sha,
-#|                 "sizeBytes": availability_size,
-#|             }
-#|         ],
+#|         "publicSpa": True,
+#|         "runtimeProfiles": True,
+#|         "securityHeaders": True,
+#|         "leanAwsControls": True,
+#|         "coreIdle": True,
 #|     },
-#|     "availability manifest",
+#|     "availability checks",
 #| )
-#| availability_manifest_sha = file_sha(
-#|     availability_dir / "manifest.json", prefixed=False
+#| digest(availability["profileResponseDigest"], "availability profile response")
+#| exact(availability["rawIdentifiersRetained"], False, "availability identifiers")
+#| exact(availability["result"], "passed", "availability result")
+#| availability_observation = validate_observation(
+#|     availability_dir / "observation.json",
+#|     dt.timedelta(minutes=90),
+#|     "availability observation",
 #| )
-#| exact_keys(
-#|     availability_predicate,
-#|     {
-#|         "schemaVersion",
-#|         "repository",
-#|         "releaseSha",
-#|         "source",
-#|         "monitor",
-#|         "deployment",
-#|         "evidence",
-#|         "result",
-#|     },
-#|     "availability predicate",
+#| availability_topology_observed = instant(
+#|     availability_observation["observedAt"],
+#|     "availability topology observedAt",
 #| )
-#| exact(
-#|     availability_predicate["schemaVersion"],
-#|     "archon.production-availability-attestation/v1",
-#|     "availability predicate schema",
-#| )
-#| exact(
-#|     availability_predicate["repository"],
-#|     repository,
-#|     "availability predicate repository",
-#| )
-#| exact(
-#|     availability_predicate["releaseSha"],
-#|     release,
-#|     "availability predicate release",
-#| )
-#| exact(
-#|     availability_predicate["source"]["workflowPath"],
-#|     ".github/workflows/availability.yml",
-#|     "availability predicate workflow",
-#| )
-#| exact(
-#|     availability_predicate["source"]["runId"],
-#|     availability_binding["source"]["runId"],
-#|     "availability predicate run",
-#| )
-#| exact(
-#|     availability_predicate["source"]["runAttempt"],
-#|     availability_binding["source"]["runAttempt"],
-#|     "availability predicate attempt",
-#| )
-#| if availability_predicate["source"]["event"] not in {
-#|     "schedule",
-#|     "workflow_dispatch",
-#| }:
-#|     fail("availability predicate event is not reviewed")
-#| exact(
-#|     availability_predicate["monitor"],
-#|     {
-#|         "cron": "17 */6 * * *",
-#|         "maximumExpectedGapMinutes": 420,
-#|         "observedAt": availability["observedAt"],
-#|         "result": "passed",
-#|     },
-#|     "availability monitor binding",
-#| )
-#| exact(
-#|     availability_predicate["deployment"],
-#|     {
-#|         "runId":
-#|             availability["releaseEvidence"]["deploymentRunId"],
-#|         "runAttempt":
-#|             availability["releaseEvidence"]["deploymentRunAttempt"],
-#|         "artifactId":
-#|             availability["releaseEvidence"]["deploymentArtifactId"],
-#|         "artifactDigest":
-#|             availability["releaseEvidence"]["deploymentArtifactDigest"],
-#|         "deploymentEvidenceSha256":
-#|             availability["releaseEvidence"][
-#|                 "deploymentEvidenceSha256"
-#|             ],
-#|     },
-#|     "availability predicate deployment binding",
-#| )
-#| exact(
-#|     availability_predicate["evidence"]["availabilitySha256"],
-#|     availability_sha,
-#|     "availability predicate evidence digest",
-#| )
-#| exact(
-#|     availability_predicate["evidence"]["manifestSha256"],
-#|     availability_manifest_sha,
-#|     "availability predicate manifest digest",
-#| )
-#| exact(
-#|     availability_predicate["evidence"]["applicationOriginSha256"],
-#|     availability["publicRuntime"]["applicationOriginSha256"],
-#|     "availability application digest",
-#| )
-#| exact(
-#|     availability_predicate["result"],
-#|     "public-read-path-verified",
-#|     "availability predicate result",
-#| )
-#| exact(
-#|     availability["publicRuntime"]["applicationOriginSha256"],
-#|     sq3["applicationOriginDigest"].removeprefix("sha256:"),
-#|     "SQ3/availability application origin",
-#| )
-#| exact(
-#|     availability["releaseEvidence"]["deploymentRunId"],
-#|     sq3["deployment"]["runId"],
-#|     "SQ3/availability deployment run",
-#| )
-#| exact(
-#|     availability["releaseEvidence"]["deploymentArtifactId"],
-#|     sq3["deployment"]["artifactId"],
-#|     "SQ3/availability deployment artifact",
-#| )
+#| if availability_topology_observed > availability_observed:
+#|     fail("availability evidence predates its topology observation")
+#| if availability_observed - availability_topology_observed > dt.timedelta(minutes=5):
+#|     fail("availability evidence is detached from its topology observation")
 #| observation = sq3["observation"]
 #| exact(
 #|     observation["availabilityObservedAt"],
@@ -1483,197 +1426,121 @@ jobs:
 #|     fail("availability observation follows the SQ3 public probe")
 #|
 #| posture_binding, posture_dir, posture_predicate = native_source("posture")
-#| posture = load(posture_dir / "production-posture.json")
-#| posture_manifest = load(posture_dir / "manifest.json")
-#| exact(
-#|     posture["schemaVersion"],
-#|     "archon.production-posture-evidence/v1",
-#|     "posture schema",
-#| )
-#| exact(posture["repository"], repository, "posture repository")
-#| exact(
-#|     posture["controlPlane"]["sha"],
-#|     release,
-#|     "posture control plane",
-#| )
-#| exact(
-#|     posture["verification"]["result"],
-#|     "passed",
-#|     "posture result",
-#| )
-#| posture_observed = posture["verification"]["completedAt"]
-#| fresh(posture_observed, dt.timedelta(hours=30), "posture observedAt")
-#| alarms = posture["alarms"]
-#| exact(alarms["pendingConfirmation"], False, "posture pending confirmation")
-#| exact(alarms["unchangedAfterVerification"], True, "posture alarm TOCTOU")
-#| alarm_inventory = alarms["alarmInventory"]
-#| exact(
-#|     alarm_inventory,
+#| posture = load(posture_dir / "evidence.json")
+#| exact(posture_predicate, posture, "posture attestation predicate/evidence")
+#| exact_keys(
+#|     posture,
 #|     {
-#|         "observedAt": posture_observed,
-#|         "alarmCount": 10,
-#|         "allActionsEnabled": True,
-#|         "alarmActionsBoundToTopic": True,
-#|         "okActionsBoundToTopic": True,
-#|         "insufficientDataActionsEmpty": True,
-#|         "inventoryDigest": alarm_inventory["inventoryDigest"],
+#|         "schemaVersion",
+#|         "releaseSha",
+#|         "observedAt",
+#|         "checks",
+#|         "driftEvidenceDigest",
+#|         "rawIdentifiersRetained",
+#|         "result",
 #|     },
-#|     "posture alarm inventory",
+#|     "posture",
 #| )
-#| digest(
-#|     alarm_inventory["inventoryDigest"],
-#|     "posture alarm inventory digest",
-#| )
-#| digest(alarms["topicArnSha256"], "posture topic digest")
-#| digest(
-#|     alarms["subscriptionArnSha256"],
-#|     "posture subscription digest",
-#| )
-#| posture_sha = file_sha(posture_dir / "production-posture.json")
-#| posture_manifest_sha = file_sha(posture_dir / "manifest.json")
-#| exact(
-#|     posture_manifest["schemaVersion"],
-#|     "archon.production-posture-manifest/v1",
-#|     "posture manifest schema",
-#| )
-#| exact(posture_manifest["repository"], repository, "posture manifest repository")
-#| exact(
-#|     posture_manifest["controlPlaneSha"],
-#|     release,
-#|     "posture manifest release",
+#| exact(posture["schemaVersion"], "archon.production-posture/v2", "posture schema")
+#| exact(posture["releaseSha"], release, "posture release")
+#| posture_observed = fresh(
+#|     posture["observedAt"],
+#|     dt.timedelta(hours=30),
+#|     "posture observedAt",
 #| )
 #| exact(
-#|     posture_manifest["workflow"],
+#|     posture["checks"],
 #|     {
-#|         "path": ".github/workflows/production-posture.yml",
-#|         "runId": posture_binding["source"]["runId"],
-#|         "runAttempt": posture_binding["source"]["runAttempt"],
+#|         "leanRuntimeControls": True,
+#|         "zeroIdleCore": True,
+#|         "cloudFormationDrift": "IN_SYNC",
+#|         "alarmsNotFiring": True,
+#|         "legacyAlwaysOnRuntimeAbsent": True,
 #|     },
-#|     "posture manifest workflow",
+#|     "posture checks",
+#| )
+#| exact(posture["rawIdentifiersRetained"], False, "posture identifiers")
+#| exact(posture["result"], "passed", "posture result")
+#| posture_observation = validate_observation(
+#|     posture_dir / "observation.json",
+#|     dt.timedelta(hours=30),
+#|     "posture observation",
+#| )
+#| posture_topology_observed = instant(
+#|     posture_observation["observedAt"],
+#|     "posture topology observedAt",
+#| )
+#| if posture_topology_observed > posture_observed:
+#|     fail("posture evidence predates its topology observation")
+#| if posture_observed - posture_topology_observed > dt.timedelta(minutes=5):
+#|     fail("posture evidence is detached from its topology observation")
+#| drift_path = posture_dir / "drift.json"
+#| if not drift_path.is_file() or drift_path.is_symlink():
+#|     fail("posture drift evidence must be a regular file")
+#| try:
+#|     drift = json.loads(drift_path.read_bytes())
+#| except (OSError, json.JSONDecodeError) as error:
+#|     fail(f"posture drift evidence is invalid: {error}")
+#| exact(
+#|     drift,
+#|     [
+#|         {"stack": "Archon-production-Core", "region": "eu-west-1", "status": "IN_SYNC"},
+#|         {"stack": "Archon-production-Edge", "region": "us-east-1", "status": "IN_SYNC"},
+#|         {"stack": "Archon-production-Judge", "region": "eu-west-1", "status": "IN_SYNC"},
+#|     ],
+#|     "posture drift evidence",
 #| )
 #| exact(
-#|     posture_manifest["files"]["production-posture.json"],
-#|     posture_sha,
-#|     "posture manifest evidence digest",
+#|     posture["driftEvidenceDigest"],
+#|     file_sha(drift_path),
+#|     "posture drift evidence digest",
 #| )
-#| posture_binding_values = {
-#|     "observedAt": posture_observed,
-#|     "topicArnSha256": alarms["topicArnSha256"],
-#|     "subscriptionArnSha256": alarms["subscriptionArnSha256"],
-#|     "alarmInventoryDigest": alarm_inventory["inventoryDigest"],
-#| }
-#| exact(
-#|     posture_manifest["postureBinding"],
-#|     posture_binding_values,
-#|     "posture manifest binding",
-#| )
-#| exact(
-#|     posture_predicate,
-#|     {
-#|         "schemaVersion": "archon.production-posture-attestation/v1",
-#|         "repository": repository,
-#|         "controlPlaneSha": release,
-#|         "evidenceSha256": posture_sha,
-#|         "manifestSha256": posture_manifest_sha,
-#|         "postureBinding": posture_binding_values,
-#|         "verificationResult": "passed",
-#|     },
-#|     "posture predicate",
-#| )
+#| alarm_names = [
+#|     "archon-production-control-plane-errors",
+#|     "archon-production-runtime-failure-queue-visible",
+#| ]
 #|
 #| paging_binding, paging_dir, paging_predicate = native_source("paging")
-#| paging = load(paging_dir / "paging-delivery.json")
-#| paging_manifest = load(paging_dir / "manifest.json")
+#| paging = load(paging_dir / "evidence.json")
+#| exact(paging_predicate, paging, "paging attestation predicate/evidence")
+#| exact_keys(
+#|     paging,
+#|     {
+#|         "schemaVersion",
+#|         "releaseSha",
+#|         "provedAt",
+#|         "route",
+#|         "checks",
+#|         "deliveryDigest",
+#|         "rawIdentifiersRetained",
+#|         "result",
+#|     },
+#|     "paging",
+#| )
 #| exact(
 #|     paging["schemaVersion"],
-#|     "archon.production-paging-delivery/v1",
+#|     "archon.production-alarm-delivery/v2",
 #|     "paging schema",
 #| )
-#| exact(paging["repository"], repository, "paging repository")
 #| exact(paging["releaseSha"], release, "paging release")
+#| paging_observed = paging["provedAt"]
+#| fresh(paging_observed, dt.timedelta(days=7), "paging provedAt")
+#| exact(paging["route"], "CloudWatch->SNS(KMS)->SQS(KMS)", "paging route")
 #| exact(
-#|     paging["workflow"],
+#|     paging["checks"],
 #|     {
-#|         "path": ".github/workflows/production-paging-test.yml",
-#|         "runId": paging_binding["source"]["runId"],
-#|         "producerAttempt": paging_binding["source"]["runAttempt"],
+#|         "exactAlarm": True,
+#|         "alarmTransition": True,
+#|         "topicBinding": True,
+#|         "encryptedProofQueue": True,
+#|         "endToEndDelivery": True,
+#|         "cleanupRegistered": True,
 #|     },
-#|     "paging workflow binding",
+#|     "paging checks",
 #| )
-#| delivery = paging["delivery"]
-#| for key in (
-#|     "syntheticTest",
-#|     "externalHttpsAccepted",
-#|     "destinationMatched",
-#|     "exactMessageIdMatched",
-#|     "uniqueDestinationMatch",
-#| ):
-#|     exact(delivery[key], True, f"paging delivery {key}")
-#| exact(delivery["status"], "SUCCESS", "paging delivery status")
-#| paging_observed = delivery["observedAt"]
-#| fresh(paging_observed, dt.timedelta(days=7), "paging observedAt")
-#| for key in (
-#|     "completePagination",
-#|     "boundedPoll",
-#|     "stackUnchanged",
-#|     "topicUnchanged",
-#|     "subscriptionUnchanged",
-#| ):
-#|     exact(paging["verification"][key], True, f"paging verification {key}")
-#| exact(
-#|     paging["target"]["topicArnSha256"],
-#|     alarms["topicArnSha256"],
-#|     "paging/posture topic",
-#| )
-#| exact(
-#|     paging["target"]["subscriptionArnSha256"],
-#|     alarms["subscriptionArnSha256"],
-#|     "paging/posture subscription",
-#| )
-#| paging_sha = file_sha(paging_dir / "paging-delivery.json")
-#| paging_manifest_sha = file_sha(paging_dir / "manifest.json")
-#| exact(
-#|     paging_manifest["schemaVersion"],
-#|     "archon.production-paging-delivery-manifest/v1",
-#|     "paging manifest schema",
-#| )
-#| exact(paging_manifest["repository"], repository, "paging manifest repository")
-#| exact(paging_manifest["releaseSha"], release, "paging manifest release")
-#| exact(
-#|     paging_manifest["workflow"],
-#|     paging["workflow"],
-#|     "paging manifest workflow",
-#| )
-#| exact(
-#|     paging_manifest["files"],
-#|     {"paging-delivery.json": paging_sha},
-#|     "paging manifest files",
-#| )
-#| exact(
-#|     paging_manifest["subjects"],
-#|     ["manifest.json", "paging-delivery.json"],
-#|     "paging manifest subjects",
-#| )
-#| exact(paging_manifest["subjectCount"], 2, "paging subject count")
-#| exact(
-#|     paging_predicate,
-#|     {
-#|         "schemaVersion":
-#|             "archon.production-paging-delivery-attestation/v1",
-#|         "repository": repository,
-#|         "releaseSha": release,
-#|         "workflow": paging["workflow"],
-#|         "controlPlaneGateReceiptSha256":
-#|             paging_manifest["controlPlaneGateReceiptSha256"],
-#|         "subjects": {
-#|             "manifest.json": paging_manifest_sha,
-#|             "paging-delivery.json": paging_sha,
-#|         },
-#|         "verificationResult": "passed",
-#|     },
-#|     "paging predicate",
-#| )
-#|
+#| digest(paging["deliveryDigest"], "paging delivery")
+#| exact(paging["rawIdentifiersRetained"], False, "paging identifiers")
+#| exact(paging["result"], "passed", "paging result")
 #| canary_binding, canary_dir, canary_predicate = native_source("canary")
 #| recovery = load(canary_dir / "recovery-evidence.json")
 #| manifest = load(canary_dir / "recovery.json")
@@ -1981,27 +1848,25 @@ jobs:
 #|     "posture": provenance(
 #|         posture_binding,
 #|         extra={
-#|             "observedAt": posture_observed,
+#|             "observedAt": posture["observedAt"],
 #|             "result": "passed",
-#|             "topicArnSha256": alarms["topicArnSha256"],
-#|             "subscriptionArnSha256":
-#|                 alarms["subscriptionArnSha256"],
-#|             "alarmInventory": alarm_inventory,
+#|             "checks": posture["checks"],
+#|             "driftEvidenceDigest": posture["driftEvidenceDigest"],
+#|             "alarmNames": alarm_names,
 #|         },
 #|     ),
 #|     "alerting": {
 #|         "alarmsActive": True,
 #|         "snsSubscriptionConfirmed": True,
-#|         "externalPagingDeliveryTested": True,
+#|         "endToEndAlarmDeliveryTested": True,
 #|         "lastPagingTestAt": paging_observed,
 #|         "pagingDelivery": provenance(
 #|             paging_binding,
 #|             extra={
-#|                 "observedAt": paging_observed,
-#|                 "topicArnSha256":
-#|                     paging["target"]["topicArnSha256"],
-#|                 "subscriptionArnSha256":
-#|                     paging["target"]["subscriptionArnSha256"],
+#|                 "provedAt": paging_observed,
+#|                 "route": paging["route"],
+#|                 "checks": paging["checks"],
+#|                 "deliveryDigest": paging["deliveryDigest"],
 #|             },
 #|         ),
 #|     },
@@ -2028,12 +1893,12 @@ jobs:
 #|         "projectAccess": project_access,
 #|     },
 #|     "monitoringWindow": {
-#|         "schedule": "17 */6 * * *",
+#|         "schedule": "*/30 * * * *",
+#|         "maximumExpectedGapMinutes": 90,
 #|         "active": True,
 #|         "through": judging_end,
 #|     },
 #| }
-#|
 #| facts_dir = root / "facts"
 #| facts_dir.mkdir(mode=0o700)
 #| encoded = (
