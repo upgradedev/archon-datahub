@@ -101,7 +101,7 @@
         "datahub-demo-seed",
         "governed-canary",
         "governed-canary-recovery",
-          "judge-access-production",
+        "judge-access-production",
         "judge-access-staging",
         "production",
         "submission-bonus-feedback",
