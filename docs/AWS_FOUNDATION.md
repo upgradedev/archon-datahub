@@ -92,16 +92,23 @@ identifiers and role ARNs, and it never stores raw IAM documents.
 
 ## Identity-policy migration and Cloud runtime publisher handoff
 
-The current `archon-aws-foundation-identity` default is v1. Before Foundation
-can create the two Cloud-trial roles and the publisher role, dispatch
+The required `archon-aws-foundation-identity` state is v2 default with v1
+retained as the exact rollback point. When the live baseline is still v1,
+dispatch
 `.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml`
 from `master` with the exact current master SHA and confirmation
 `MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY`. The transaction derives
 and verifies the reviewed v1 and v2 policy digests, creates v2 as nondefault,
 reads it back canonically, performs one default switch, retains v1 for rollback,
-and always removes its twenty-minute recovery authorization. Its receipt is
-checksum-sealed and attested. Do not run Foundation until the migration and its
-automatic cleanup both succeed.
+and always removes its twenty-minute recovery authorization.
+
+If migration and revocation succeeded but receipt creation was interrupted,
+dispatch the cleanup workflow at the exact current signed master with
+`SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY`. That path accepts
+only the exact migrated state, installs no temporary authorization, performs no
+managed-policy mutation, and emits the checksum-sealed attested receipt. The
+ordinary `RECOVER` confirmation remains rollback-only for a known incomplete
+migration. Do not run Foundation until the migrated receipt is sealed.
 
 Foundation creates `GitHubDataHubCloudTrialRole` in both matching
 `Archon-GitHub-<Stage>-Deploy-Role` stacks and creates
@@ -155,8 +162,9 @@ Safe dispatch order for one exact signed master SHA is:
 4. run AWS Foundation with `BOOTSTRAP_CDK_FOUNDATION`;
 5. wire the verified staging/production trial-role, production publisher-role,
    and staging Core AMI role/profile outputs;
-6. publish the companion and Cloud runtime images for the exact release push;
-7. build the Core AMI from the exact signed companion push.
+6. publish the companion through an exact-master `push` or `workflow_dispatch`
+   and publish the Cloud runtime image for that same release SHA;
+7. build the Core AMI from that exact signed companion run.
 
 All steps share the AWS control-plane locks and must be allowed to finish their
 mandatory cleanup before the next mutation starts.
