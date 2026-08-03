@@ -318,9 +318,7 @@ render_policy_documents() {
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
   if [[ "${OLD_POLICY_SHA}" != "${expected_old}" ||
     "${NEW_POLICY_SHA}" != "${expected_new}" ]]; then
-    fail "Core AMI control-policy digest contract differs:" \
-      "v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old}" \
-      "v3_actual=${NEW_POLICY_SHA} v3_expected=${expected_new}"
+    fail "Core AMI control-policy digest contract differs: v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old} v3_actual=${NEW_POLICY_SHA} v3_expected=${expected_new}"
   fi
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" ||
     fail "The Core AMI control-policy migration delta is empty"
