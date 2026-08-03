@@ -83,6 +83,8 @@ validate_common() {
   : "${CONTROL_PLANE_SHA:?CONTROL_PLANE_SHA is required}"
   [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || fail "AWS account binding is invalid"
   [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]] || fail "Control-plane SHA is invalid"
+  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
+  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
   for path in "${CONTRACT}" "${SOURCE_POLICY}" "${RENDERER}"; do
     test -f "${path}"
     test ! -L "${path}"
@@ -314,11 +316,9 @@ render_policy_documents() {
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" || fail "The migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered assets policy exceeds the managed-policy document limit"
-  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
-  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
+
 }
 verify_recovery_role_baseline() {
-  local expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
   local role="${WORK_ROOT}/recovery-role.json"
   local inline="${WORK_ROOT}/recovery-inline.json"
   local attached="${WORK_ROOT}/recovery-attached.json"
@@ -327,7 +327,7 @@ verify_recovery_role_baseline() {
     iam get-role --role-name "${RECOVERY_ROLE_NAME}" --output json
   jq -e \
     --arg account "${AWS_ACCOUNT_ID}" \
-    --arg roleArn "${expected_role_arn}" '
+    --arg roleArn "${RECOVERY_ROLE_ARN}" '
       .Role.Arn == $roleArn and
       .Role.RoleName == "archon-datahub-github-governed-canary-recovery" and
       .Role.MaxSessionDuration == 3600 and
