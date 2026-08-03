@@ -317,7 +317,7 @@
     "builderProfileVariable": "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE",
     "activationOrder": [
       "merge exact signed master tree",
-      "migrate exact foundation control policy v2 to v3",
+      "migrate exact foundation control policy from v2 to the digest-bound AWS-assigned successor",
       "reconcile and drift-check dedicated foundation stack",
       "set protected staging variables from sealed foundation outputs",
       "run DataHub Core AMI workflow"
