@@ -152,7 +152,7 @@ validate_common() {
       },
       {
         canonicalSha256:
-          "c04fa232282c099ddf1c311f239ac9f2080f1a0c41e3c5e4420d0c061a707137",
+          "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b",
         isDefault: true,
         versionId: "v2"
       }
