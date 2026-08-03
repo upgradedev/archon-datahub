@@ -1,189 +1,120 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const workflow = readFileSync(
-  resolve(__dirname, "../../../.github/workflows/deploy.yml"),
-  "utf8"
-);
-const liveProofWorkflow = readFileSync(
-  resolve(__dirname, "../../../.github/workflows/live-datahub-proof.yml"),
-  "utf8"
-);
-const controlPlaneVerifier = readFileSync(
-  resolve(__dirname, "../../../scripts/verify-github-control-plane.sh"),
-  "utf8"
-);
+describe("lean deploy workflow contract", () => {
+  const source = readFileSync(
+    resolve(__dirname, "../../../.github/workflows/deploy.yml"),
+    "utf8"
+  );
 
-describe("deployment workflow release-subject binding", () => {
-  test("requires the latest exact control-plane run to be completed successfully", () => {
-    const gateStart = workflow.indexOf("workflow_success() {");
-    const gateEnd = workflow.indexOf(
-      'control_plane_gate_file="${RUNNER_TEMP}/control-plane-security-gates.json"'
-    );
-    expect(gateStart).toBeGreaterThanOrEqual(0);
-    expect(gateEnd).toBeGreaterThan(gateStart);
-
-    const gate = workflow.slice(gateStart, gateEnd);
-    expect(gate).not.toContain("-f status=success");
-    expect(gate).toContain("sort_by(.id, .run_attempt)");
-    expect(gate).toContain('.status == "completed"');
-    expect(gate).toContain('.conclusion == "success"');
-  });
-
-  test("applies the same latest-run rule to the privileged live proof", () => {
-    expect(liveProofWorkflow).not.toContain("-f status=completed");
-    expect(liveProofWorkflow).not.toContain("-f status=success");
-    expect(liveProofWorkflow).toContain("sort_by(.id, .run_attempt)");
-    expect(liveProofWorkflow).toContain('.status == "completed"');
-    expect(liveProofWorkflow).toContain('.conclusion == "success"');
-    expect(liveProofWorkflow).toContain(
-      "/git/ref/heads/${default_branch}"
-    );
-    expect(
-      liveProofWorkflow.match(
-        /bash scripts\/verify-github-control-plane\.sh/gu
-      )
-    ).toHaveLength(4);
-    const preSecretGate = liveProofWorkflow.indexOf(
-      "Revalidate exact control plane immediately before DataHub secrets"
-    );
-    const liveProof = liveProofWorkflow.indexOf(
-      "Prove one-dataset MCP, retention, provenance, and contradiction path"
-    );
-    const postProofGate = liveProofWorkflow.indexOf(
-      "Revalidate and bind the exact control plane after live proof"
-    );
-    const proofEvidence = liveProofWorkflow.indexOf(
-      "Prepare digest-bound proof evidence"
-    );
-    const preAttestationGate = liveProofWorkflow.indexOf(
-      "Revalidate exact control plane immediately before proof attestation"
-    );
-    const proofAttestation = liveProofWorkflow.indexOf(
-      "Attest exact live proof evidence"
-    );
-    for (const boundary of [
-      preSecretGate,
-      liveProof,
-      postProofGate,
-      proofEvidence,
-      preAttestationGate,
-      proofAttestation
+  test("promotes immutable CI, image, AMI and staging receipts", () => {
+    for (const required of [
+      "release_sha:",
+      "ci_run_id:",
+      "cloud_runtime_artifact_id:",
+      "cloud_runtime_artifact_digest:",
+      "core_ami_artifact_id:",
+      "core_ami_artifact_digest:",
+      "staging_evidence_artifact_id:",
+      "gh attestation verify",
+      "archon.datahub-cloud-runtime-release/v1",
+      "archon.datahub-core-ami-build/v2",
+      "archon.aws-deployment-evidence/v2",
+      "Archon-${STAGE}-Edge",
+      "Archon-${STAGE}-Core",
+      "Archon-${STAGE}-Judge",
+      "DataHubCoreAmiId",
+      "CloudRuntimeImageUri",
+      "CloudRuntimeReleaseDigest",
+      "LambdaArtifactSha256",
+      "spa_tar_sha256=",
+      "lambda_tar_sha256=",
+      "control|control/*|runtime-control|runtime-control/*",
+      "runtime-control/session.js",
+      "actions/attest@",
+      "retention-days: 90"
     ]) {
-      expect(boundary).toBeGreaterThanOrEqual(0);
+      expect(source).toContain(required);
     }
-    expect(preSecretGate).toBeLessThan(liveProof);
-    expect(liveProof).toBeLessThan(postProofGate);
-    expect(postProofGate).toBeLessThan(proofEvidence);
-    expect(proofEvidence).toBeLessThan(preAttestationGate);
-    expect(preAttestationGate).toBeLessThan(proofAttestation);
-    expect(liveProofWorkflow).toContain(
-      "The enriched live-proof receipt differs from the enforced exact gate"
+  });
+
+  test("binds CloudFormation to verified inner tar bytes", () => {
+    expect(source).toContain(
+      '--parameters "${judge_stack}:SpaArtifactSha256=${SPA_TAR_SHA256}"'
     );
-    expect(liveProofWorkflow).toContain(
-      "The signed live-proof gate subject is no longer current"
+    expect(source).toContain(
+      '--parameters "${judge_stack}:LambdaArtifactSha256=${LAMBDA_TAR_SHA256}"'
     );
-    expect(liveProofWorkflow).toContain(
-      "The signed exact and enriched live-proof receipts differ"
+    expect(source).toContain(
+      "SPA_TAR_SHA256: ${{ steps.receipts.outputs.spa_tar_sha256 }}"
     );
-    expect(liveProofWorkflow).toContain(
-      "control-plane-security-gates.json"
+    expect(source).toContain(
+      "LAMBDA_TAR_SHA256: ${{ steps.receipts.outputs.lambda_tar_sha256 }}"
     );
-    expect(liveProofWorkflow).toContain(
-      "controlPlaneSecurityGatesSha256"
+    expect(source).not.toContain(
+      "SpaArtifactSha256=${WEB_DIGEST#sha256:}"
+    );
+    expect(source).not.toContain(
+      "LambdaArtifactSha256=${LAMBDA_DIGEST#sha256:}"
     );
   });
 
-  test("revalidates the current branch and latest gates at every AWS trust boundary", () => {
-    expect(controlPlaneVerifier).toContain(
-      "/git/ref/heads/${default_branch}"
-    );
-    expect(controlPlaneVerifier).not.toContain("-f status=completed");
-    expect(controlPlaneVerifier).not.toContain("-f status=success");
-    expect(controlPlaneVerifier).toContain(
-      "sort_by(.id, .run_attempt)"
-    );
-    expect(controlPlaneVerifier).toContain(
-      '.status == "completed"'
-    );
-    expect(controlPlaneVerifier).toContain(
-      '.conclusion == "success"'
+  test("gates exact stage authority and post-deploy role bindings", () => {
+    for (const required of [
+      "Fail closed on exact stage deployment role before AWS trust",
+      "AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}",
+      "archon-datahub-github-${STAGE}-deploy",
+      "role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}",
+      "allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}",
+      "Preflight exact lean stack execution-role bindings",
+      "ALLOW_ABSENT=true",
+      "Verify exact post-deploy CloudFormation role bindings",
+      "ALLOW_ABSENT=false",
+      "ALLOW_ROLE_MIGRATION=false",
+      "bash scripts/validate-cloudformation-role-bindings.sh"
+    ]) {
+      expect(source).toContain(required);
+    }
+    expect(source.match(
+      /bash scripts\/validate-cloudformation-role-bindings[.]sh/g
+    )).toHaveLength(2);
+    expect(source).not.toContain(
+      "role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}"
     );
 
-    const verifierCalls =
-      workflow.match(
-        /bash scripts\/verify-github-control-plane\.sh/gu
-      ) ?? [];
-    expect(verifierCalls).toHaveLength(6);
-    expect(workflow.indexOf("before staging AWS trust")).toBeLessThan(
-      workflow.indexOf("Configure staging AWS credentials through OIDC")
+    const beforeTrust = source.indexOf(
+      "Fail closed on exact stage deployment role before AWS trust"
     );
-    expect(workflow.indexOf("before staging mutation")).toBeLessThan(
-      workflow.indexOf(
-        "Deploy edge, registry, verified image, and staging platform"
-      )
+    const acquire = source.indexOf(
+      "Acquire short-lived deployment authority"
     );
-    expect(
-      workflow.indexOf("after production approval")
-    ).toBeLessThan(
-      workflow.indexOf("Configure production AWS credentials through OIDC")
+    const preflight = source.indexOf(
+      "Preflight exact lean stack execution-role bindings"
     );
-    expect(workflow.indexOf("before production AWS trust")).toBeLessThan(
-      workflow.indexOf("Configure production AWS credentials through OIDC")
+    const deploy = source.indexOf(
+      "Deploy Edge, zero-idle Core, then serverless Judge"
     );
-    expect(workflow.indexOf("before production mutation")).toBeLessThan(
-      workflow.indexOf(
-        "Deploy edge, registry, identical image, and production platform"
-      )
+    const postDeploy = source.indexOf(
+      "Verify exact post-deploy CloudFormation role bindings"
     );
-    expect(
-      workflow.indexOf("Bind exact live production runtime bytes")
-    ).toBeLessThan(
-      workflow.indexOf(
-        "Revalidate exact control plane before sealing promotion evidence"
-      )
-    );
-    expect(
-      workflow.indexOf(
-        "Revalidate exact control plane before sealing promotion evidence"
-      )
-    ).toBeLessThan(workflow.indexOf("Emit promotion evidence"));
-    expect(workflow).toContain(
-      "EXPECTED_GATE_SHA256: ${{ steps.production_control_plane.outputs.control_plane_gate_sha }}"
-    );
-    expect(workflow).toContain(
-      '"${evidence_dir}/control-plane-security-gates.json"'
+    expect(beforeTrust).toBeLessThan(acquire);
+    expect(acquire).toBeLessThan(preflight);
+    expect(preflight).toBeLessThan(deploy);
+    expect(deploy).toBeLessThan(postDeploy);
+  });
+
+  test("scopes AWS mutation permissions to only the deploy job", () => {
+    expect(source).toMatch(/^permissions: \{\}$/m);
+    expect(source).toMatch(
+      /jobs:\n  deploy:[\s\S]*?    permissions:\n      actions: read\n      attestations: write\n      contents: read\n      id-token: write\n/
     );
   });
 
-  test("passes the same exact CI and deployment subjects on every platform reconciliation", () => {
-    const platformDeployments =
-      workflow.match(
-        /--parameters "\$\{(?:stack_name|STACK_NAME)\}:ImageDigest=[\s\S]+?--outputs-file "\$\{(?:stack_outputs|STACK_OUTPUTS)\}"/gu
-      ) ?? [];
-
-    expect(platformDeployments).toHaveLength(4);
-    for (const deployment of platformDeployments) {
-      expect(deployment).toContain(
-        ":ContainerArchiveSha256=${CONTAINER_ARCHIVE_SHA}"
-      );
-      expect(deployment).toContain(
-        ":LambdaArchiveSha256=${LAMBDA_ARCHIVE_SHA}"
-      );
-      expect(deployment).toContain(
-        ":DeploymentWorkflowRunId=${GITHUB_RUN_ID}"
-      );
-      expect(deployment).toContain(
-        ":DeploymentWorkflowRunAttempt=${GITHUB_RUN_ATTEMPT}"
-      );
-      expect(deployment).toContain(":CiRunId=${CI_RUN_ID}");
-      expect(deployment).toContain(
-        ":SpaArtifactSha256=${SPA_ARTIFACT_SHA}"
-      );
-      expect(deployment).toContain(":ReleaseSha=${RELEASE_SHA}");
-      expect(deployment).toContain(
-        ":DemoQuery=${DATAHUB_DEMO_QUERY}"
-      );
-    }
+  test("does not rebuild candidates or restore retired topology", () => {
+    expect(source).not.toMatch(/docker build/);
+    expect(source).not.toMatch(/Archon-.*Registry/);
+    expect(source).not.toMatch(/ECS|Fargate|NLB|VpcLink|Codex Security/i);
+    expect(source).toContain('${RUNNER_TEMP}/promotion');
+    expect(source).toContain("rm -rf --");
   });
 });

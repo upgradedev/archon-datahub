@@ -19,7 +19,7 @@ Resources:
     Properties:
       RoleName: archon-datahub-github-governed-canary-prepare
       Description: >-
-        Read-only staging-stack binding role for governed-canary preparation.
+        Read-only staging Judge-stack binding role for governed-canary preparation.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -44,7 +44,7 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging-Judge/*
       Tags:
         - Key: Application
           Value: archon-datahub
@@ -84,7 +84,7 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging-Judge/*
               - Sid: ReadExactStagingApproverMembership
                 Effect: Allow
                 Action:
@@ -110,8 +110,8 @@ Resources:
     Properties:
       RoleName: archon-datahub-github-governed-canary-recovery
       Description: >-
-        Read-only staging-stack binding role for the separately approved
-        governed-canary recovery path.
+        Read-only staging Judge-stack and exact DataHub credential recovery
+        role for the separately approved governed-canary recovery path.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -136,7 +136,25 @@ Resources:
                 Effect: Allow
                 Action: cloudformation:DescribeStacks
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging/*
+                  arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/Archon-staging-Judge/*
+              - Sid: ReadExactStagingCloudRuntimeSecrets
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:archon/staging/datahub-cloud/reader-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:archon/staging/datahub-cloud/writer-*
+              - Sid: DecryptExactStagingCloudRuntimeSecrets
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService: !Sub secretsmanager.${AWS::Region}.amazonaws.com
+                  StringLike:
+                    "kms:EncryptionContext:SecretARN":
+                      - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:archon/staging/datahub-cloud/reader-*
+                      - !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:archon/staging/datahub-cloud/writer-*
       Tags:
         - Key: Application
           Value: archon-datahub

@@ -184,6 +184,8 @@ declare -A DEPLOY_TEMPLATE_SHA
 declare -A CANARY_POLICY_SHA
 declare -A CANARY_ROLE_BINDING_SHA
 declare -A OPERATIONAL_ROLE_BINDING_SHA
+declare -A OPERATIONAL_ROLE_ARN
+cloud_runtime_publisher_role_arn=""
 application_stack_roles_json='[]'
 application_stack_role_transition_json=''
 
@@ -867,21 +869,24 @@ staging_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging
 staging_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[staging]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
 production_cfn_eu="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${PRIMARY_REGION}"
 production_cfn_us="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/cdk-${QUALIFIER[production]}-cfn-exec-role-${EXPECTED_ACCOUNT_ID}-${EDGE_REGION}"
-foundation_phase='preflight:application-stack-role-binding:staging:registry'
-assert_application_stack_role_exact_if_present \
-  staging "${PRIMARY_REGION}" Archon-Registry "${staging_cfn_eu}"
-foundation_phase='preflight:application-stack-role-binding:staging:primary'
-assert_application_stack_role_exact_if_present \
-  staging "${PRIMARY_REGION}" Archon-staging "${staging_cfn_eu}"
 foundation_phase='preflight:application-stack-role-binding:staging:edge'
 assert_application_stack_role_exact_if_present \
   staging "${EDGE_REGION}" Archon-staging-Edge "${staging_cfn_us}"
-foundation_phase='preflight:application-stack-role-binding:production:primary'
+foundation_phase='preflight:application-stack-role-binding:staging:core'
 assert_application_stack_role_exact_if_present \
-  production "${PRIMARY_REGION}" Archon-production "${production_cfn_eu}"
+  staging "${PRIMARY_REGION}" Archon-staging-Core "${staging_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:staging:judge'
+assert_application_stack_role_exact_if_present \
+  staging "${PRIMARY_REGION}" Archon-staging-Judge "${staging_cfn_eu}"
 foundation_phase='preflight:application-stack-role-binding:production:edge'
 assert_application_stack_role_exact_if_present \
   production "${EDGE_REGION}" Archon-production-Edge "${production_cfn_us}"
+foundation_phase='preflight:application-stack-role-binding:production:core'
+assert_application_stack_role_exact_if_present \
+  production "${PRIMARY_REGION}" Archon-production-Core "${production_cfn_eu}"
+foundation_phase='preflight:application-stack-role-binding:production:judge'
+assert_application_stack_role_exact_if_present \
+  production "${PRIMARY_REGION}" Archon-production-Judge "${production_cfn_eu}"
 foundation_phase='preflight:application-stack-role-transition'
 application_stack_role_transition_json="$(
   jq -cnS \
@@ -891,8 +896,8 @@ application_stack_role_transition_json="$(
           .validation == "requires-explicit-deploy-migration"
         )) |
         length) as $migrationRequiredCount |
-      if ($entries | length) != 5 then
-        error("application stack role preflight inventory must contain five entries")
+      if ($entries | length) != 6 then
+        error("application stack role preflight inventory must contain six entries")
       elif (
         all($entries[];
           .validation == "passed" or
@@ -1719,6 +1724,8 @@ verify_operational_role() {
             Value: (
               if ($environment | startswith("judge-access-")) then
                 ($environment | sub("^judge-access-"; ""))
+              elif ($environment == "staging" or $environment == "production") then
+                $environment
               else
                 "production"
               end
@@ -1774,6 +1781,7 @@ verify_operational_role() {
     printf '%s' "${role_arn}" | sha256sum | awk '{print $1}'
   )"
   OPERATIONAL_ROLE_BINDING_SHA["${kind}"]="${binding_sha}"
+  OPERATIONAL_ROLE_ARN["${kind}"]="${role_arn}"
   role_evidence="$(
     jq -cnS \
       --arg kind "${kind}" \
@@ -1781,6 +1789,173 @@ verify_operational_role() {
       --arg policySha256 "${policy_sha}" \
       --arg roleName "${role_name}" \
       --arg roleBindingSha256 "${binding_sha}" '
+        {
+          environment: $environment,
+          kind: $kind,
+          policySha256: $policySha256,
+          roleArnTemplate:
+            ("arn:aws:iam::<AWS_ACCOUNT_ID>:role/" + $roleName),
+          roleBindingSha256: $roleBindingSha256,
+          validation: "passed"
+        }
+      '
+  )"
+  operational_roles_json="$(
+    jq -cnS \
+      --argjson current "${operational_roles_json}" \
+      --argjson addition "${role_evidence}" \
+      '$current + [$addition]'
+  )"
+}
+
+verify_cloud_runtime_publisher() {
+  local stack_json="$1"
+  local role_name="archon-datahub-cloud-runtime-publish-production"
+  local policy_name="archon-datahub-cloud-runtime-ecr-publish"
+  local role_arn
+  local role_json="${RUNNER_TEMP}/cloud-runtime-publisher-role.json"
+  local attached_json="${RUNNER_TEMP}/cloud-runtime-publisher-attached.json"
+  local inline_json="${RUNNER_TEMP}/cloud-runtime-publisher-inline.json"
+  local policy_json="${RUNNER_TEMP}/cloud-runtime-publisher-policy.json"
+  local policy_sha
+  local binding_sha
+  local role_evidence
+
+  role_arn="$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "CloudRuntimeImagePublisherRoleArn") |
+      .OutputValue
+    ' "${stack_json}"
+  )"
+  test "${role_arn}" = \
+    "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${role_name}"
+  test "$(
+    jq -er '
+      .Stacks[0].Outputs[] |
+      select(.OutputKey == "CloudRuntimeImagePublisherRoleName") |
+      .OutputValue
+    ' "${stack_json}"
+  )" = "${role_name}"
+
+  aws iam get-role --role-name "${role_name}" --output json >"${role_json}"
+  jq -e \
+    --arg account "${EXPECTED_ACCOUNT_ID}" \
+    --arg role "${role_name}" '
+      .Role.Arn ==
+        ("arn:aws:iam::" + $account + ":role/" + $role) and
+      .Role.RoleName == $role and
+      .Role.MaxSessionDuration == 3600 and
+      .Role.PermissionsBoundary == null and
+      (.Role.AssumeRolePolicyDocument.Statement | length) == 1 and
+      .Role.AssumeRolePolicyDocument.Statement[0].Sid ==
+        "GitHubCloudRuntimePublisherOnly" and
+      .Role.AssumeRolePolicyDocument.Statement[0].Effect == "Allow" and
+      .Role.AssumeRolePolicyDocument.Statement[0].Action ==
+        "sts:AssumeRoleWithWebIdentity" and
+      .Role.AssumeRolePolicyDocument.Statement[0].Principal.Federated ==
+        ("arn:aws:iam::" + $account +
+         ":oidc-provider/token.actions.githubusercontent.com") and
+      .Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals == {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:environment": "production",
+        "token.actions.githubusercontent.com:ref": "refs/heads/master",
+        "token.actions.githubusercontent.com:repository":
+          "upgradedev/archon-datahub",
+        "token.actions.githubusercontent.com:sub":
+          "repo:upgradedev/archon-datahub:environment:production",
+        "token.actions.githubusercontent.com:workflow":
+          "DataHub Cloud runtime OCI v2"
+      } and
+      (.Role.AssumeRolePolicyDocument | tostring |
+        contains("workflow_ref") | not) and
+      (
+        .Role.Tags |
+        map(select(.Key | startswith("aws:") | not)) |
+        sort_by(.Key)
+      ) == (
+        [
+          {Key: "Application", Value: "archon-datahub"},
+          {Key: "Environment", Value: "production"},
+          {Key: "ManagedBy", Value: "cloudformation"},
+          {Key: "Purpose", Value: "cloud-runtime-image-publisher"}
+        ] | sort_by(.Key)
+      )
+    ' "${role_json}" >/dev/null
+  aws iam list-attached-role-policies \
+    --role-name "${role_name}" --output json >"${attached_json}"
+  jq -e '.AttachedPolicies == []' "${attached_json}" >/dev/null
+  aws iam list-role-policies \
+    --role-name "${role_name}" --output json >"${inline_json}"
+  jq -e --arg policy "${policy_name}" \
+    '.PolicyNames == [$policy]' "${inline_json}" >/dev/null
+  aws iam get-role-policy \
+    --role-name "${role_name}" \
+    --policy-name "${policy_name}" \
+    --output json >"${policy_json}"
+  jq -e \
+    --arg account "${EXPECTED_ACCOUNT_ID}" \
+    --arg policy "${policy_name}" '
+      def values: if type == "array" then sort else [.] end;
+      ("arn:aws:ecr:eu-west-1:" + $account +
+       ":repository/archon-datahub-cloud-runtime-v2") as $repository |
+      (.PolicyDocument.Statement | sort_by(.Sid)) as $statements |
+      .RoleName == "archon-datahub-cloud-runtime-publish-production" and
+      .PolicyName == $policy and
+      .PolicyDocument.Version == "2012-10-17" and
+      ($statements | length) == 3 and
+      $statements[0].Sid == "AuthenticateOnlyToEcrInPrimaryRegion" and
+      ($statements[0].Action | values) == ["ecr:GetAuthorizationToken"] and
+      $statements[0].Resource == "*" and
+      $statements[0].Condition == {
+        StringEquals: {"aws:RequestedRegion": "eu-west-1"}
+      } and
+      $statements[1].Sid == "CreateOnlyExactTaggedRepository" and
+      ($statements[1].Action | values) ==
+        ["ecr:CreateRepository", "ecr:TagResource"] and
+      $statements[1].Resource == $repository and
+      $statements[1].Condition == {
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": ["archon:component", "archon:owner"]
+        },
+        StringEquals: {
+          "aws:RequestTag/archon:component": "datahub-cloud-runtime-v2",
+          "aws:RequestTag/archon:owner": "github-actions",
+          "aws:RequestedRegion": "eu-west-1"
+        }
+      } and
+      $statements[2].Sid ==
+        "PublishInspectAndBoundedCleanupExactRepository" and
+      ($statements[2].Action | values) == [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchDeleteImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:DescribeRepositories",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ] and
+      $statements[2].Resource == $repository and
+      $statements[2].Condition == {
+        StringEquals: {"aws:RequestedRegion": "eu-west-1"}
+      } and
+      (.PolicyDocument | tostring | contains("ecr:DeleteRepository") | not) and
+      (.PolicyDocument | tostring | contains("ecr:PutLifecyclePolicy") | not) and
+      (.PolicyDocument | tostring | contains("ecr:SetRepositoryPolicy") | not)
+    ' "${policy_json}" >/dev/null
+
+  policy_sha="$(canonical_policy_sha "${policy_json}")"
+  binding_sha="$(printf '%s' "${role_arn}" | sha256sum | awk '{print $1}')"
+  cloud_runtime_publisher_role_arn="${role_arn}"
+  OPERATIONAL_ROLE_BINDING_SHA["cloud-runtime-publisher"]="${binding_sha}"
+  role_evidence="$(
+    jq -cnS \
+      --arg environment production \
+      --arg kind cloud-runtime-publisher \
+      --arg policySha256 "${policy_sha}" \
+      --arg roleBindingSha256 "${binding_sha}" \
+      --arg roleName "${role_name}" '
         {
           environment: $environment,
           kind: $kind,
@@ -1922,9 +2097,9 @@ for stage in staging production; do
     if [[ "${region}" == "${EDGE_REGION}" ]]; then
       stack_names="[\"Archon-${stage}-Edge\"]"
     elif [[ "${stage}" == "staging" ]]; then
-      stack_names='["Archon-staging","Archon-Registry"]'
+      stack_names='["Archon-staging-Core","Archon-staging-Judge"]'
     else
-      stack_names='["Archon-production"]'
+      stack_names='["Archon-production-Core","Archon-production-Judge"]'
     fi
     expected_bootstrap_deploy_policy="${RUNNER_TEMP}/${stage}-expected-bootstrap-deploy-policy-${region}.json"
     jq -cnS \
@@ -2152,6 +2327,10 @@ for stage in staging production; do
       ) == (
         if $stage == "production" then
           [
+            "CloudRuntimeImagePublisherRoleArn",
+            "CloudRuntimeImagePublisherRoleName",
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName",
             "GitHubDeployRoleArn",
             "GitHubDeployRoleName",
             "JudgeUserRoleArn",
@@ -2166,6 +2345,8 @@ for stage in staging production; do
           sort
         else
           [
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName",
             "GitHubDeployRoleArn",
             "GitHubDeployRoleName",
             "JudgeUserRoleArn",
@@ -2283,7 +2464,17 @@ for stage in staging production; do
     "judge-access-${stage}" \
     archon-judge-user-operations \
     judge-user-lifecycle
+  verify_operational_role \
+    "${deploy_stack_json}" \
+    "datahub-cloud-trial-${stage}" \
+    GitHubDataHubCloudTrialRoleArn \
+    GitHubDataHubCloudTrialRoleName \
+    "archon-datahub-github-${stage}-cloud-trial" \
+    "${stage}" \
+    archon-datahub-cloud-trial-transaction \
+    datahub-cloud-trial-control-plane
   if [[ "${stage}" == "production" ]]; then
+    verify_cloud_runtime_publisher "${deploy_stack_json}"
     verify_operational_role \
       "${deploy_stack_json}" \
       posture-observer \
@@ -2501,7 +2692,7 @@ jq -e '
       .iamDeployedTemplateSha256 == $expected
     )
   ) and
-  (.aws.applicationStackRolePreflight | length) == 5 and
+  (.aws.applicationStackRolePreflight | length) == 6 and
   all(.aws.applicationStackRolePreflight[];
     .validation == "passed" or
     .validation == "requires-explicit-deploy-migration"
@@ -2579,7 +2770,10 @@ jq -e '
   all(.aws.governedCanary.roles[]; .validation == "passed") and
   (.aws.operationalRoles | map(.kind)) == [
     "judge-staging",
+    "datahub-cloud-trial-staging",
     "judge-production",
+    "datahub-cloud-trial-production",
+    "cloud-runtime-publisher",
     "posture-observer",
     "runtime-read",
     "paging-test"
@@ -2725,7 +2919,10 @@ combined_canary_binding_sha="$(
 combined_operational_binding_sha="$(
   printf '%s\n' \
     "${OPERATIONAL_ROLE_BINDING_SHA[judge-staging]}" \
+    "${OPERATIONAL_ROLE_BINDING_SHA[datahub-cloud-trial-staging]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[judge-production]}" \
+    "${OPERATIONAL_ROLE_BINDING_SHA[datahub-cloud-trial-production]}" \
+    "${OPERATIONAL_ROLE_BINDING_SHA[cloud-runtime-publisher]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[posture-observer]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[runtime-read]}" \
     "${OPERATIONAL_ROLE_BINDING_SHA[paging-test]}" |
@@ -2742,6 +2939,10 @@ combined_operational_binding_sha="$(
   echo "deploy_role_binding_sha=${combined_deploy_binding_sha}"
   echo "canary_role_binding_sha=${combined_canary_binding_sha}"
   echo "operational_role_binding_sha=${combined_operational_binding_sha}"
+  echo "cloud_runtime_publisher_role_arn=${cloud_runtime_publisher_role_arn}"
+  echo "cloud_runtime_publisher_binding_sha=${OPERATIONAL_ROLE_BINDING_SHA[cloud-runtime-publisher]}"
+  echo "datahub_cloud_trial_staging_role_arn=${OPERATIONAL_ROLE_ARN[datahub-cloud-trial-staging]}"
+  echo "datahub_cloud_trial_production_role_arn=${OPERATIONAL_ROLE_ARN[datahub-cloud-trial-production]}"
   echo "application_stack_role_transition=${application_stack_role_transition_state}"
   echo "shared_api_gateway_mode=${shared_api_gateway_mode}"
   echo "drift_stack_count=${drift_stack_count}"

@@ -26,6 +26,94 @@ approval_verifier="$(
   printf '%s/scripts/verify-judge-environment-approval.sh' \
     "${repository_root}"
 )"
+judge_access_doc="${repository_root}/docs/JUDGE_ACCESS.md"
+judge_testing_doc="${repository_root}/docs/JUDGE_TESTING.md"
+
+contract_stage="documentation"
+contract_case="dual-group and governed-write judge guidance"
+python3 - "${judge_access_doc}" "${judge_testing_doc}" <<'PY'
+from pathlib import Path
+import sys
+
+access = Path(sys.argv[1]).read_text(encoding="utf-8")
+testing = Path(sys.argv[2]).read_text(encoding="utf-8")
+access_required = (
+    "`ArchonApproverGroupName`, and `ArchonRuntimeOperatorGroupName`",
+    "complete authorization membership is exactly the two-group set `archon-approvers` and `archon-runtime-operators`",
+    "complete two-group set: `archon-approvers` plus `archon-runtime-operators`",
+    "removes both exact runtime-authorization groups",
+    "no group memberships",
+    "exact two-group or empty-membership proof",
+)
+testing_required = (
+    "## Recommended quick path",
+    "Select **Reject proposal**",
+    "## Optional governed-write journey",
+    "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+    "field: `customer_email`",
+    "proposed tag: `urn:li:tag:PII`",
+    "Select **Approve exact plan**",
+    "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
+    "ACK context · changed",
+    "Analytics result · changed",
+    "`governed-canary-recovery`",
+    "requires a fresh human approval",
+    "workflow automatically enters the rollback job",
+    "Archon does not mutate autonomously",
+    "distinct, separately approved",
+)
+stale_access = (
+    "One enabled, email-bound",
+    "exactly the `archon-approvers` group",
+    "exactly the approver group",
+    "same sole approver group",
+    "exactly the sole approver group",
+    "has zero groups",
+    "zero-group",
+    "sole-group",
+    "approver-group removal",
+    "removes its approver group",
+    "group-free",
+)
+unsafe_testing = (
+    "automatically approves",
+    "mutates without approval",
+    "clean up the PII tag manually",
+)
+
+def validate(access_text: str, testing_text: str) -> None:
+    missing_access = [item for item in access_required if item not in access_text]
+    missing_testing = [item for item in testing_required if item not in testing_text]
+    stale = [item for item in stale_access if item in access_text]
+    unsafe = [item for item in unsafe_testing if item in testing_text]
+    assert not missing_access, f"missing judge-access contracts: {missing_access}"
+    assert not missing_testing, f"missing judge-testing contracts: {missing_testing}"
+    assert not stale, f"stale single/count-based group language: {stale}"
+    assert not unsafe, f"unsafe governed-write language: {unsafe}"
+
+try:
+    validate(access, testing)
+except AssertionError as error:
+    raise SystemExit(str(error)) from error
+
+negative_cases = (
+    ("single-group regression", access.replace(access_required[1], "authorization membership is exactly the approver group", 1), testing),
+    ("numeric membership regression", access + "\nA zero-group proof is sufficient.\n", testing),
+    ("synthetic tag target removed", access, testing.replace("proposed tag: `urn:li:tag:PII`", "proposed tag: any", 1)),
+    ("autonomous mutation overclaim", access, testing.replace("Archon does not mutate autonomously", "Archon mutates without approval", 1)),
+    ("rollback approval removed", access, testing.replace("requires a fresh human approval", "automatically approves", 1)),
+    ("automatic rollback scheduling removed", access, testing.replace("workflow automatically enters the rollback job", "workflow may eventually consider cleanup", 1)),
+)
+for name, drifted_access, drifted_testing in negative_cases:
+    if drifted_access == access and drifted_testing == testing:
+        raise SystemExit(f"negative fixture did not mutate content: {name}")
+    try:
+        validate(drifted_access, drifted_testing)
+    except AssertionError:
+        continue
+    raise SystemExit(f"negative documentation drift was accepted: {name}")
+PY
+
 test_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/archon-judge-contracts.XXXXXX")"
 state_dir="${test_root}/state"
 bin_dir="${test_root}/bin"
@@ -115,6 +203,10 @@ case "${service}:${operation}" in
       {
         "OutputKey": "ArchonApproverGroupName",
         "OutputValue": "archon-approvers"
+      },
+      {
+        "OutputKey": "ArchonRuntimeOperatorGroupName",
+        "OutputValue": "archon-runtime-operators"
       },
       {
         "OutputKey": "ArchonRegionalWebAclArn",
@@ -679,20 +771,24 @@ JSON
     fi
     test "$(argument_value --username "$@")" = \
       "$(<"${FAKE_STATE_DIR}/canonical")"
-    test "$(argument_value --group-name "$@")" = "archon-approvers"
-    if ! grep -Fxq "archon-approvers" "${FAKE_STATE_DIR}/groups"; then
-      printf 'archon-approvers\n' >>"${FAKE_STATE_DIR}/groups"
+    group_name="$(argument_value --group-name "$@")"
+    [[ "${group_name}" == "archon-approvers" ||
+      "${group_name}" == "archon-runtime-operators" ]]
+    if ! grep -Fxq "${group_name}" "${FAKE_STATE_DIR}/groups"; then
+      printf '%s\n' "${group_name}" >>"${FAKE_STATE_DIR}/groups"
     fi
     ;;
 
   cognito-idp:admin-remove-user-from-group)
     test "$(argument_value --username "$@")" = \
       "$(<"${FAKE_STATE_DIR}/canonical")"
-    test "$(argument_value --group-name "$@")" = "archon-approvers"
+    group_name="$(argument_value --group-name "$@")"
+    [[ "${group_name}" == "archon-approvers" ||
+      "${group_name}" == "archon-runtime-operators" ]]
     if [[ "${FAKE_REMOVE_FAILURE:-0}" == "1" ]]; then
       exit 3
     fi
-    grep -Fxv "archon-approvers" "${FAKE_STATE_DIR}/groups" \
+    grep -Fxv "${group_name}" "${FAKE_STATE_DIR}/groups" \
       >"${FAKE_STATE_DIR}/groups.next" || true
     mv -- "${FAKE_STATE_DIR}/groups.next" "${FAKE_STATE_DIR}/groups"
     if [[ "${FAKE_REMOVE_APPLIED_ERROR:-0}" == "1" ]]; then
@@ -1215,7 +1311,7 @@ assert_operation_state_receipt() {
         (if $operation == "deactivate" then
           "none"
         else
-          "sole-approver-group"
+          "dual-runtime-operator-and-approver-groups"
         end) and
       .sessionRevocation == $sessionRevocation and
       .startedAt == $startedAt and
@@ -1806,7 +1902,7 @@ done
 reset_state absent
 run_apply provision "${judge_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 assert_operation_state_receipt \
   provision \
   absent \
@@ -1877,32 +1973,32 @@ FAKE_PASSWORD_FAILURE=1 \
 test "$(<"${state_dir}/status")" = "disabled-force"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 expect_failure run_apply provision "${judge_password}"
 test "$(
   grep -Fc "cognito-idp:admin-create-user" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 expect_failure run_apply rotate "${judge_password}"
 test ! -e "${operation_state_receipt}"
 test "$(<"${state_dir}/status")" = "confirmed"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 grep -Fq "24-password history policy" "${result_log}"
 test "$(
   grep -Ec "cognito-idp:admin-(disable-user|remove-user-from-group|user-global-sign-out)" \
     "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 run_apply rotate "${rotated_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 assert_operation_state_receipt \
   rotate \
   enabled \
   confirmed-permanent \
-  sole-approver-group \
+  dual-runtime-operator-and-approver-groups \
   confirmed-permanent-rotated \
   response-confirmed \
   rotated-and-readback-verified
@@ -1925,7 +2021,7 @@ if grep -Fq "${rotated_password}" "${result_log}" ||
   exit 1
 fi
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_COGNITO_SUB="12345678-1234-4ABC-8DEF-1234567890AB" \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
@@ -1935,28 +2031,28 @@ grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_COGNITO_SUB="not-a-canonical-uuid" \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_DUPLICATE_SUB_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_OMIT_SUB_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test ! -e "${operation_state_receipt}"
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_PASSWORD_APPLIED_ERROR=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test "$(<"${state_dir}/status")" = "disabled"
@@ -1964,7 +2060,7 @@ test ! -s "${state_dir}/groups"
 grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_PASSWORD_FAILURE=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test "$(<"${state_dir}/status")" = "disabled"
@@ -1976,34 +2072,34 @@ test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers unexpected-admins
+reset_state confirmed archon-approvers archon-runtime-operators unexpected-admins
 expect_failure run_apply rotate "${rotated_password}"
 test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_GROUP_PAGINATION_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 printf '%064d\n' 0 | tr '0' 'b' >"${state_dir}/binding"
 expect_failure run_apply rotate "${rotated_password}"
 test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_VERIFIED_EMAIL_DRIFT=1 \
   expect_failure run_apply rotate "${rotated_password}"
 test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
 )" = "0"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_MFA_DRIFT=1 expect_failure run_apply rotate "${rotated_password}"
 test "$(
   grep -Fc "cognito-idp:admin-set-user-password" "${state_dir}/calls" || true
@@ -2012,7 +2108,7 @@ test "$(
 reset_state disabled
 run_apply reactivate "${rotated_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 assert_operation_state_receipt \
   reactivate \
   disabled \
@@ -2027,7 +2123,7 @@ test "$(
     "${state_dir}/calls" |
     paste -sd '>' -
 )" = \
-  "cognito-idp:admin-user-global-sign-out>cognito-idp:admin-set-user-password>cognito-idp:admin-enable-user>cognito-idp:admin-add-user-to-group"
+  "cognito-idp:admin-user-global-sign-out>cognito-idp:admin-set-user-password>cognito-idp:admin-enable-user>cognito-idp:admin-add-user-to-group>cognito-idp:admin-add-user-to-group"
 test "$(
   grep -E \
     'cognito-idp:admin-(list-groups-for-user|get-user)' \
@@ -2040,7 +2136,7 @@ test "$(
 reset_state disabled-force
 run_apply reactivate "${rotated_password}" >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "confirmed"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 
 reset_state absent
 expect_failure run_apply reactivate "${rotated_password}"
@@ -2139,17 +2235,17 @@ FAKE_SIGNOUT_FAILURE=1 \
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_VERIFIED_EMAIL_DRIFT=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_MFA_DRIFT=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_COGNITO_SUB="not-a-canonical-uuid" \
   expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "disabled"
@@ -2159,7 +2255,7 @@ grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
@@ -2181,7 +2277,7 @@ for emergency_drift in \
   FAKE_REDIRECT_DRIFT \
   FAKE_RISK_ACTION_DRIFT \
   FAKE_WAF_ASSOCIATION_DRIFT; do
-  reset_state confirmed archon-approvers
+  reset_state confirmed archon-approvers archon-runtime-operators
   export "${emergency_drift}=1"
   run_apply deactivate >"${result_log}" 2>&1
   unset "${emergency_drift}"
@@ -2196,7 +2292,7 @@ for emergency_drift in \
   )" = "0"
 done
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_SIGNOUT_FAILURE=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
@@ -2210,35 +2306,35 @@ assert_operation_state_receipt \
   contained-by-disabled-state \
   deactivated-and-readback-verified
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_DISABLE_APPLIED_ERROR=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 grep -Fq "ambiguous error" "${result_log}"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_REMOVE_APPLIED_ERROR=1 run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 grep -Fq "ambiguous error" "${result_log}"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_REENABLE_AFTER_GROUP_READ=1 expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "confirmed"
 test ! -s "${state_dir}/groups"
 test ! -e "${operation_state_receipt}"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_DISABLE_FAILURE=1 expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "confirmed"
 test ! -s "${state_dir}/groups"
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 grep -Fxq "cognito-idp:admin-remove-user-from-group" "${state_dir}/calls"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_REMOVE_FAILURE=1 expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "disabled"
-test "$(<"${state_dir}/groups")" = "archon-approvers"
+test "$(sort "${state_dir}/groups")" = $'archon-approvers\narchon-runtime-operators'
 grep -Fxq "cognito-idp:admin-user-global-sign-out" "${state_dir}/calls"
 
 reset_state confirmed
@@ -2246,12 +2342,12 @@ run_apply deactivate >"${result_log}" 2>&1
 test "$(<"${state_dir}/status")" = "disabled"
 test ! -s "${state_dir}/groups"
 
-reset_state confirmed archon-approvers unexpected-admins
+reset_state confirmed archon-approvers archon-runtime-operators unexpected-admins
 expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "disabled"
 test "$(<"${state_dir}/groups")" = "unexpected-admins"
 
-reset_state confirmed archon-approvers
+reset_state confirmed archon-approvers archon-runtime-operators
 FAKE_GROUP_PAGINATION_DRIFT=1 expect_failure run_apply deactivate
 test "$(<"${state_dir}/status")" = "disabled"
 grep -Fxq "cognito-idp:admin-disable-user" "${state_dir}/calls"

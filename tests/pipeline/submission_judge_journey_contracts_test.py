@@ -64,6 +64,9 @@ ACTION_PINS = {
     "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "actions/attest": "59d89421af93a897026c735860bf21b6eb4f7b26",
+    "aws-actions/configure-aws-credentials": (
+        "e6de054238d6b7531b4efff3b6587d9aade6a06c"
+    ),
 }
 
 
@@ -289,8 +292,9 @@ def validate_workflow(workflow: str) -> None:
             "actions": "read",
             "attestations": "read",
             "contents": "read",
+            "id-token": "write",
         },
-        "prerequisites permissions are not exact read-only capabilities",
+        "prerequisites permissions are not exact read-only observer capabilities",
     )
     require(
         permission_map(journey, "journey")
@@ -310,17 +314,18 @@ def validate_workflow(workflow: str) -> None:
     require(
         workflow.count("    environment: judge-access-production\n") == 1
         and "    environment: judge-access-production\n" in journey,
-        "only the browser journey may use the protected environment",
+        "browser credentials must remain in the judge-access environment",
     )
     require(
-        re.search(r"(?m)^    environment:", prerequisites) is None
+        workflow.count("    environment: production-observer\n") == 1
+        and "    environment: production-observer\n" in prerequisites
         and re.search(r"(?m)^    environment:", attest) is None,
-        "unprivileged prerequisite and attester jobs must not use environments",
+        "only prerequisites may use the read-only observer environment",
     )
     require(
         workflow.count("      attestations: write\n") == 1
-        and workflow.count("      id-token: write\n") == 1,
-        "attestation write and OIDC capabilities must exist only once",
+        and workflow.count("      id-token: write\n") == 2,
+        "attestation and observer OIDC capabilities changed",
     )
     require(
         "    needs: prerequisites\n" in journey
@@ -373,14 +378,34 @@ def validate_workflow(workflow: str) -> None:
             "JUDGE_USERNAME",
             "JUDGE_PASSWORD",
             "JUDGE_PRODUCTION_ACCOUNT_ID",
+            "AWS_ACCOUNT_ID",
+            "AWS_READ_ROLE_ARN",
         },
         "workflow contains an unexpected or missing protected reference",
     )
     workflow_without_protected = workflow.replace(protected, "", 1)
     require(
-        "${{ secrets." not in workflow_without_protected
-        and "${{ vars." not in workflow_without_protected,
-        "protected values must not reach observer, packaging, or attester steps",
+        "${{ secrets." not in workflow_without_protected,
+        "judge credentials must not reach observer, packaging, or attester steps",
+    )
+    observer_identity = named_step(
+        prerequisites, "Validate protected observer identity"
+    )
+    observer_credentials = named_step(
+        prerequisites, "Configure read-only production observer"
+    )
+    require_tokens(
+        observer_identity + observer_credentials + verification,
+        "read-only observer binding",
+        (
+            "${{ vars.AWS_ACCOUNT_ID }}",
+            "${{ vars.AWS_READ_ROLE_ARN }}",
+            "role/archon-production-posture-observer",
+            "aws-actions/configure-aws-credentials@",
+            "Archon-production-Judge",
+            "aws sts get-caller-identity",
+            "aws cloudformation describe-stacks",
+        ),
     )
 
     current_release_tokens = (
@@ -490,28 +515,44 @@ def validate_workflow(workflow: str) -> None:
             ),
         )
     require(
-        verification.count(") == $expectedSubjects") == 2,
-        "deployment and lifecycle attestations must bind their full subject sets",
+        verification.count(") == $expectedSubjects") == 1,
+        "lifecycle attestations must bind their full subject sets",
     )
     require(
-        verification.count("unique_by(.statement)") == 2,
-        "duplicate identical prerequisite attestations must collapse safely",
+        verification.count("unique_by(.statement)") == 1,
+        "duplicate lifecycle attestations must collapse safely",
     )
     require_tokens(
         verification,
-        "prerequisite attestations",
+        "lean deployment and lifecycle attestations",
         (
-            'gh attestation verify "${deployment_evidence}"',
+            "verify-lean-submission-runtime-source.sh",
+            "deployment-evidence.json",
+            "observation.json",
+            "attestations/aws-deployment/v2",
+            "archon.runtime-profiles/v1",
+            '.autoSelection == "cloud"',
+            '== ["READY"]',
+            '== ["LAUNCHABLE"]',
+            "all(.capabilities[]; . == true)",
+            '["openid", "email", "profile", "archon/approve"]',
+            "ArchonCloudRuntimeReleaseDigest",
             'gh attestation verify "${subject_path}"',
             "--signer-digest",
             "--source-digest",
             "--source-ref refs/heads/master",
             "--deny-self-hosted-runners",
-            "exactly one deployment attestation must bind the full subject set",
             "exactly one lifecycle attestation must bind the full subject set",
         ),
     )
 
+    for legacy in (
+        "live-runtime-manifest",
+        "production-cdk-outputs",
+        "attestations/production-deployment/v1",
+        "deployment-evidence-${RELEASE_SHA}-${run_attempt}",
+    ):
+        require(legacy not in workflow, f"journey retained legacy deployment contract: {legacy}")
     sidecar = "terminal-observer-capability.json"
     require_tokens(
         observer,
@@ -931,7 +972,21 @@ tamper_cases = {
         workflow_text,
         "unique_by(.statement) |\n",
         "",
-        count=2,
+        count=1,
+    ),
+    "lean deployment helper removed": replace_in_step(
+        workflow_text,
+        "prerequisites",
+        "Verify deployment, ordered lifecycle, and every attestation",
+        "verify-lean-submission-runtime-source.sh",
+        "verify-legacy-deployment.sh",
+    ),
+    "Cloud default weakened": replace_in_step(
+        workflow_text,
+        "prerequisites",
+        "Verify deployment, ordered lifecycle, and every attestation",
+        '.autoSelection == "cloud"',
+        '.autoSelection == "core"',
     ),
     "attester full subject set removed": replace_in_job(
         workflow_text,

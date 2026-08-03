@@ -1,0 +1,30 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image-setuptools/v1",
+  "author": "https://github.com/upgradedev/archon-datahub",
+  "role": "Document Creator",
+  "timestamp": "2026-08-02T00:00:00Z",
+  "last_updated": "2026-08-02T00:00:00Z",
+  "version": 1,
+  "x-archon-expires-at": "2026-09-02T23:59:59Z",
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-h35f-9h28-mq5c",
+        "name": "CVE-2026-59890",
+        "aliases": [
+          "https://nvd.nist.gov/vuln/detail/CVE-2026-59890",
+          "https://osv.dev/vulnerability/PYSEC-2026-3447"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/setuptools@81.0.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The advisory affects MANIFEST.in exclusion while creating source distributions on macOS APFS/HFS+. This Linux runtime is installed exclusively from the reviewed frozen wheel graph with uv sync --no-build; source distribution creation is absent from the image execution path."
+    }
+  ]
+}

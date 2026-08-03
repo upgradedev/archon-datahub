@@ -1,886 +1,160 @@
+import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import assert from "node:assert/strict";
 
-const workflow = readFileSync(
-  new URL("../../.github/workflows/governed-canary.yml", import.meta.url),
-  "utf8"
-);
-const deploymentWorkflow = readFileSync(
-  new URL("../../.github/workflows/deploy.yml", import.meta.url),
-  "utf8"
-);
-const driver = readFileSync(
-  new URL("../../scripts/governed-canary.ts", import.meta.url),
-  "utf8"
-);
-const recoveryWorkflow = readFileSync(
-  new URL(
-    "../../.github/workflows/governed-canary-recovery.yml",
-    import.meta.url
-  ),
-  "utf8"
-);
+const read = (path: string): string =>
+  readFileSync(new URL("../../" + path, import.meta.url), "utf8");
 
-test("governed canary is dispatch-only, staging-only, and explicitly solo-owner approved", () => {
-  assert.match(workflow, /^on:\n  workflow_dispatch:/mu);
-  assert.doesNotMatch(workflow, /^\s{2}(?:push|pull_request|schedule):/mu);
-  assert.match(workflow, /CANARY_STACK_NAME: Archon-staging/u);
-  assert.doesNotMatch(workflow, /CANARY_STACK_NAME: Archon-production/u);
-  assert.match(workflow, /name: governed-canary\n/u);
-  assert.match(workflow, /name: governed-canary-rollback\n/u);
-  assert.match(workflow, /prevent_self_review == false/u);
-  assert.match(
-    workflow,
-    /\(\$rules\[0\]\.reviewers\[0\]\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
-  );
-  assert.match(workflow, /RUN ISOLATED GOVERNED CANARY/u);
-  assert.match(workflow, /\.path == "\.github\/workflows\/deploy\.yml"/u);
-  assert.match(workflow, /\.head_repository\.full_name == \$repository/u);
-  assert.match(
-    workflow,
-    /expected_artifact="staging-deployment-evidence-\$\{CANARY_RELEASE_SHA\}-\$\{run_attempt\}"/u
-  );
-  assert.match(
-    workflow,
-    /gh run download "\$\{CANARY_DEPLOYMENT_RUN_ID\}" \\\n\s+--repo "\$\{GITHUB_REPOSITORY\}"/u
-  );
-  assert.doesNotMatch(workflow, /startsWith\(\$prefix\)|startswith\(\$prefix\)/u);
+const workflow = read(".github/workflows/governed-canary.yml");
+const recovery = read(".github/workflows/governed-canary-recovery.yml");
+const credentials = read("scripts/load-datahub-cloud-canary-credentials.sh");
+const driver = read("scripts/governed-canary.ts");
+const journey = read("web/e2e/live-judge-journey.live.spec.ts");
+const roles = read("infra/aws/foundation/governed-canary-roles.yml");
+const deploy = read(".github/workflows/deploy.yml");
+const operations = read(".github/workflows/submission-operations.yml");
+
+const section = (source: string, start: string, end?: string): string => {
+  const from = source.indexOf(start);
+  assert.notEqual(from, -1, "missing section " + start);
+  const to = end ? source.indexOf(end, from + start.length) : source.length;
+  assert.notEqual(to, -1, "missing section terminator " + end);
+  return source.slice(from, to);
+};
+
+test("governed canary consumes only current lean deployment evidence and Judge runtime", () => {
+  assert.match(workflow, /^name: Governed DataHub Cloud canary v2$/m);
+  assert.match(workflow, /^permissions: \{\}$/m);
+  assert.match(workflow, /^  workflow_dispatch:$/m);
+  assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):$/m);
+  assert.match(workflow, /archon\.aws-deployment-evidence\/v2/);
+  assert.match(workflow, /archon\.lean-runtime-observation\/v1/);
+  assert.match(workflow, /deployment-evidence-staging-/);
+  assert.match(workflow, /CANARY_STACK_NAME: Archon-staging-Judge/);
+  assert.match(workflow, /CANARY_RUNTIME_PROFILE: cloud/);
+  assert.match(workflow, /ARCHON_LIVE_RUNTIME_PROFILE=cloud/);
+  assert.match(workflow, /ArchonCanonicalDatasetUrn/);
+  assert.match(workflow, /archon_demo\.customers,PROD/);
+  assert.match(workflow, /ArchonGovernedColumnPath/);
+  assert.match(workflow, /customer_email/);
+  assert.match(workflow, /Deploy lean dual-runtime AWS release/);
+  assert.doesNotMatch(workflow, /Deploy immutable AWS release/);
+  assert.doesNotMatch(workflow, /Archon-staging\/(?!Judge)/);
+  assert.doesNotMatch(workflow, /WorkerDesiredCount|live-runtime-manifest|ECS/i);
 });
 
-test("governed canary consumes one exact attested TEST fixture before privileged work", () => {
-  for (const input of [
-    "fixture_run_id",
-    "fixture_run_attempt",
-    "fixture_artifact_id",
-    "fixture_artifact_digest",
-    "fixture_receipt_sha256",
-  ]) {
-    assert.match(
-      workflow,
-      new RegExp(`${input}:[\\s\\S]+required: true[\\s\\S]+type: string`, "u")
-    );
+test("write and inverse are separately approved and share a non-cancelling lock", () => {
+  assert.match(workflow, /group: archon-governed-canary-mutation-recovery/);
+  assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /name: governed-canary-prepare/);
+  assert.match(workflow, /name: governed-canary$/m);
+  assert.match(workflow, /name: governed-canary-recovery/);
+  assert.doesNotMatch(workflow, /^\s+name: governed-canary-rollback$/m);
+  const prepare = section(workflow, "  prepare:", "  execute:");
+  const execute = section(workflow, "  execute:", "  rollback:");
+  const rollback = section(workflow, "  rollback:");
+  for (const job of [prepare, execute, rollback]) {
+    assert.doesNotMatch(job, /secrets\.CANARY_DATAHUB_(READ|WRITE)_TOKEN/);
   }
-  const fixtureVerification = workflow.indexOf(
-    "Verify exact attested governed-canary fixture binding"
-  );
-  const prepareControlPlane = workflow.indexOf(
-    "Revalidate exact control plane before prepare AWS trust"
-  );
-  const prepareOidc = workflow.indexOf(
-    "Assume the read-only canary evidence role"
-  );
-  assert.ok(fixtureVerification > 0);
-  assert.ok(prepareControlPlane > fixtureVerification);
-  assert.ok(prepareOidc > prepareControlPlane);
-  assert.match(
-    workflow,
-    /\.path == "\.github\/workflows\/datahub-canary-fixture\.yml"[\s\S]+\.head_repository\.full_name == \$repository[\s\S]+\.head_branch == "master"[\s\S]+\.head_sha == \$releaseSha/u
-  );
-  assert.match(workflow, /\.id == \$artifactId[\s\S]+\.digest == \$digest/u);
-  assert.match(workflow, /The fixture archive inventory is not exact/u);
-  assert.match(workflow, /fixture archive expands beyond its bound/u);
-  assert.match(workflow, /file_type not in \(0, stat\.S_IFREG\)/u);
-  assert.match(workflow, /The fixture checksum inventory is not exact/u);
-  assert.match(workflow, /sha256sum --check --strict SHA256SUMS/u);
-  assert.match(
-    workflow,
-    /contracts\/datahub-canary-fixture-v1\.json/u
-  );
-  assert.match(
-    workflow,
-    /urn:li:dataset:\(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST\)/u
-  );
-  assert.match(workflow, /\.exactQueryMatchCount == 1/u);
-  assert.match(workflow, /classificationState: "absent"/u);
-  assert.match(
-    workflow,
-    /test "\$\{read_gms\}" = "\$\{write_gms\}"/u
-  );
-  assert.match(
-    workflow,
-    /isolationMarkerSha256' "\$\{receipt_dir\}\/plan\.json"/u
-  );
-  assert.match(
-    workflow,
-    /--signer-workflow[\s\S]+datahub-canary-fixture\.yml/u
-  );
-  assert.match(workflow, /--predicate-type "\$\{predicate_type\}"/u);
-  assert.match(
-    workflow,
-    /\.verificationResult\.statement\.subject[\s\S]+sort_by\(\.name\)[\s\S]+== \$expectedSubjects/u
-  );
-  assert.match(
-    workflow,
-    /schemaVersion:\s+"archon\.governed-canary-fixture-binding\/v1"/u
-  );
-  assert.match(
-    workflow,
-    /CANARY_FIXTURE_BINDING_PATH: \$\{\{ steps\.fixture\.outputs\.binding \}\}/u
-  );
+  assert.match(rollback, /AWS_CANARY_RECOVERY_ROLE_ARN/);
+  assert.match(rollback, /source scripts\/load-datahub-cloud-canary-credentials\.sh/);
+  assert.match(rollback, /allowed-account-ids: \$\{\{ vars\.AWS_ACCOUNT_ID \}\}/);
+  assert.match(execute, /CANARY_COGNITO_USERNAME/);
+  assert.match(execute, /CANARY_COGNITO_PASSWORD/);
+  assert.match(execute, /archon-runtime-operators/);
+  assert.match(execute, /archon-approvers/);
+  assert.match(workflow, /archon\.governed-canary-recovery\/v4/);
+  assert.match(workflow, /archon\.governed-canary-recovery-evidence\/v2/);
+});
+
+test("interrupted recovery authenticates the exact immutable source before AWS retrieval", () => {
+  assert.match(recovery, /^permissions: \{\}$/m);
+  assert.match(recovery, /Governed DataHub Cloud canary v2/);
+  assert.match(recovery, /workflow_run:/);
+  assert.match(recovery, /workflow_dispatch:/);
+  assert.match(recovery, /RECOVER SEALED GOVERNED DATAHUB CLOUD CANARY/);
+  assert.match(recovery, /\.conclusion=="failure" or \.conclusion=="cancelled"/);
+  assert.match(recovery, /expected exactly one sealed recovery artifact/);
+  assert.match(recovery, /node --import tsx scripts\/governed-canary\.ts verify/);
+  assert.match(recovery, /VERIFICATION_MODE: sealed/);
+  assert.match(recovery, /name: governed-canary-recovery/);
+  assert.match(recovery, /AWS_CANARY_RECOVERY_ROLE_ARN/);
+  assert.match(recovery, /source scripts\/load-datahub-cloud-canary-credentials\.sh/);
+  assert.match(recovery, /allowed-account-ids: \$\{\{ vars\.AWS_ACCOUNT_ID \}\}/);
+  assert.doesNotMatch(recovery, /secrets\.CANARY_DATAHUB_(READ|WRITE)_TOKEN/);
+  assert.doesNotMatch(section(recovery, "  resolve:", "  recover:"), /secrets\./);
+  assert.match(recovery, /actions\/attest@[a-f0-9]{40}/);
+});
+
+test("AWS credential loader binds exact current reader and writer secret versions in memory", () => {
+  assert.match(credentials, /BASH_SOURCE\[0\].*==.*\$0/);
+  assert.match(credentials, /Archon-staging-Judge/);
+  assert.match(credentials, /exact_output ArchonCloudReaderSecretArn/);
+  assert.match(credentials, /exact_output ArchonCloudWriterSecretArn/);
+  assert.match(credentials, /--version-stage AWSCURRENT/);
+  assert.match(credentials, /has\("SecretBinary"\) \| not/);
+  assert.match(credentials, /archon\.datahub-cloud-reader-secret\/v1/);
+  assert.match(credentials, /archon\.datahub-cloud-writer-secret\/v1/);
+  assert.match(credentials, /test "\$\{CANARY_DATAHUB_READ_TOKEN\}" !=/);
+  assert.match(credentials, /::add-mask::%s/);
+  assert.match(credentials, /CANARY_DATAHUB_CREDENTIAL_BINDING_SHA256/);
+  assert.doesNotMatch(credentials, /GITHUB_OUTPUT|GITHUB_ENV|mktemp|tee /);
+});
+
+test("recovery is an exact PII-only inverse with endpoint and read-back proofs", () => {
+  for (const contract of [
+    "archon.governed-canary-recovery/v4",
+    "archon.governed-canary-recovery-evidence/v2",
+    "archon.datahub-cloud-endpoint-binding/v1",
+    "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
+    "customer_email",
+    "urn:li:tag:PII",
+    "Archon-staging-Judge",
+  ]) {
+    assert.ok(driver.includes(contract));
+  }
+  assert.match(driver, /operation === "verify"/);
+  assert.match(driver, /removeTags\(\{/);
+  assert.match(driver, /tagUrns: \[PII_TAG_URN\]/);
+  assert.match(driver, /exactProjection\(before, manifest\.target\)/);
   assert.match(
     driver,
-    /const CANARY_DATASET_URN =\s+"urn:li:dataset:\(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST\)"/u
+    /const after = await reader\.readTagProjection\(target\);\s+exactProjection\(after, manifest\.target\);/
   );
+  assert.match(driver, /live DataHub Cloud endpoints changed after recovery was sealed/);
 });
 
-test("deployment requires fixture coordinates only for promotion and seals their digest", () => {
-  assert.match(
-    deploymentWorkflow,
-    /fixture_coordinates:[\s\S]+required: false[\s\S]+type: string/u
-  );
-  const dispatchInputs =
-    deploymentWorkflow
-      .split("\n# Selecting an older successful", 1)[0]
-      ?.match(/^      [a-z][a-z0-9_]+:$/gmu) ?? [];
-  assert.equal(dispatchInputs.length, 10);
-  assert.match(
-    deploymentWorkflow,
-    /if test "\$\{DEPLOYMENT_MODE\}" = "promote"; then[\s\S]+canonical_fixture_coordinates="\$\(jq -ceS[\s\S]+\(keys \| sort\) == \[[\s\S]+"fixture_artifact_digest"[\s\S]+"fixture_run_id"[\s\S]+test "\$\{CANARY_FIXTURE_COORDINATES\}" = \\\n\s+"\$\{canonical_fixture_coordinates\}"[\s\S]+else[\s\S]+test -z "\$\{CANARY_FIXTURE_COORDINATES\}"/u
-  );
-  assert.match(
-    deploymentWorkflow,
-    /fixture_run_id: \$fixtureRunId[\s\S]+fixture_run_attempt: \$fixtureRunAttempt[\s\S]+fixture_artifact_id: \$fixtureArtifactId[\s\S]+fixture_artifact_digest: \$fixtureArtifactDigest[\s\S]+fixture_receipt_sha256: \$fixtureReceiptSha256/u
-  );
-  assert.match(
-    deploymentWorkflow,
-    /\.fixtureBinding == \{[\s\S]+artifactDigest: \$fixtureArtifactDigest[\s\S]+receiptSha256: \$fixtureReceiptSha256[\s\S]+target: \{[\s\S]+TEST/u
-  );
-  assert.match(
-    deploymentWorkflow,
-    /fixtureBindingDigest:\s+\$governedCanaryFixtureBindingDigest/u
-  );
+test("browser proof covers all four DataHub capabilities and official MCP mutation", () => {
+  for (const component of [
+    "DataHub MCP Server",
+    "Agent Context Kit",
+    "DataHub Skills",
+    "Analytics Agent",
+  ]) {
+    assert.ok(journey.includes(component));
+  }
+  assert.match(journey, /ARCHON_LIVE_V2_ONLY/);
+  assert.match(journey, /requestedProfile: runtimeProfile/);
+  assert.match(journey, /resolvedProfile: runtimeProfile/);
+  assert.match(journey, /add_tags/);
+  assert.match(journey, /post-write ACK/i);
+  assert.match(journey, /governedMutationAndContextDeltaVerified: true/);
+  assert.match(journey, /secretMaterialRetained: false/);
 });
 
-test("production requires a fail-closed exact-run governed canary gate", () => {
-  const gateStart = deploymentWorkflow.indexOf("\n  preproduction_canary:");
-  const productionStart = deploymentWorkflow.indexOf("\n  production:");
-  assert.ok(gateStart > 0);
-  assert.ok(productionStart > gateStart);
-  const gate = deploymentWorkflow.slice(gateStart, productionStart);
-  const production = deploymentWorkflow.slice(productionStart);
-
-  assert.match(gate, /needs: staging/u);
-  assert.match(
-    gate,
-    /permissions:\n      actions: write\n      attestations: read\n      contents: read/u
-  );
-  assert.match(
-    gate,
-    /X-GitHub-Api-Version: 2026-03-10[\s\S]+actions\/workflows\/governed-canary\.yml\/dispatches/u
-  );
-  assert.match(gate, /return_run_details: true/u);
-  assert.match(gate, /\.workflow_run_id == \$runId/u);
-  assert.match(gate, /\.run_url == \$apiUrl/u);
-  assert.match(gate, /\.html_url == \$htmlUrl/u);
-  assert.match(gate, /\.path == "\.github\/workflows\/governed-canary\.yml"/u);
-  assert.match(gate, /\.head_repository\.full_name == \$repository/u);
-  assert.match(gate, /\.head_sha == \$sha/u);
-  assert.match(gate, /\.event == "workflow_dispatch"/u);
-  assert.match(gate, /\.conclusion'\s+<<<"\$\{canary_json\}"/u);
-  assert.match(gate, /governed-canary-rollback-\$\{canary_run_id\}-1/u);
-  assert.match(gate, /test "\$\{#archive_entries\[@\]\}" = "3"/u);
-  assert.match(gate, /Unsafe rollback evidence path/u);
-  assert.match(gate, /Symlinks are not permitted in rollback evidence/u);
-  assert.match(gate, /sha256sum --check --strict rollback-subject\.sha256/u);
-  assert.match(gate, /gh attestation verify/u);
-  assert.match(gate, /--signer-digest "\$\{CONTROL_PLANE_SHA\}"/u);
-  assert.match(gate, /--source-digest "\$\{CONTROL_PLANE_SHA\}"/u);
-  assert.match(
-    gate,
-    /\.verificationResult\.statement\.predicate ==\s+\$expectedPredicate/u
-  );
-  assert.match(
-    gate,
-    /\.verificationResult\.statement\.subject\[\][\s\S]+\.digest\.sha256 == \$subjectSha256/u
-  );
-  assert.match(
-    gate,
-    /result == "write-verified-and-rollback-proven"/u
-  );
-  assert.match(
-    gate,
-    /APPROVE ARCHON PRODUCTION run_id=\$\{DEPLOYMENT_RUN_ID\} run_attempt=\$\{DEPLOYMENT_RUN_ATTEMPT\} release_sha=\$\{RELEASE_SHA\} canary_rollback_subject_sha256=\$\{rollback_subject_sha256\}/u
-  );
-
-  assert.match(
-    production,
-    /needs:\n      - staging\n      - preproduction_canary/u
-  );
-  assert.match(
-    production,
-    /CANARY_RUN_ID: \$\{\{ needs\.preproduction_canary\.outputs\.run_id \}\}/u
-  );
-  assert.match(
-    production,
-    /preProductionGovernedCanary: \{[\s\S]+rollbackSubjectSha256:[\s\S]+attestationVerificationSha256:[\s\S]+result: "write-verified-and-rollback-proven"/u
-  );
-  assert.match(
-    production,
-    /EXPECTED_APPROVAL_COMMENT: \$\{\{ needs\.preproduction_canary\.outputs\.approval_comment \}\}/u
-  );
-  assert.match(production, /\.comment == \$expected/u);
-  assert.match(
-    production,
-    /\(\.user\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
-  );
-  assert.match(production, /mode: "explicit-solo-owner"/u);
-  assert.match(
-    production,
-    /deploymentWorkflowRunId:\s+\(\$deploymentRunId \| tonumber\)/u
-  );
-  assert.match(
-    production,
-    /workflowRunId: \(\$governedCanaryRunId \| tonumber\)/u
-  );
-  assert.doesNotMatch(
-    production,
-    /deploymentWorkflowRunId: \$deploymentRunId/u
-  );
-  assert.doesNotMatch(
-    production,
-    /workflowRunId: \$governedCanaryRunId/u
-  );
-});
-
-test("an active parent deployment is accepted only after same-attempt staging and before production", () => {
-  assert.match(
-    workflow,
-    /\.status == "completed" and\s+\.conclusion == "success"[\s\S]+\.status == "in_progress" and\s+\.conclusion == null/u
-  );
-  assert.match(
-    workflow,
-    /actions\/runs\/\$\{CANARY_DEPLOYMENT_RUN_ID\}\/attempts\/\$\{run_attempt\}\/jobs/u
-  );
-  assert.match(
-    workflow,
-    /select\(\.name == "Verify once and deploy staging"\)/u
-  );
-  assert.match(workflow, /\$staging\[0\]\.run_attempt == \$runAttempt/u);
-  assert.match(workflow, /\$staging\[0\]\.status == "completed"/u);
-  assert.match(workflow, /\$staging\[0\]\.conclusion == "success"/u);
-  assert.match(
-    workflow,
-    /select\(\.name == "Explicit solo-owner approval and promote identical artifacts"\)/u
-  );
-  assert.match(
-    workflow,
-    /\.started_at != null or\s+\(\.status != "queued" and \.status != "pending"\)/u
-  );
-});
-
-test("canary mutation and recovery require one exact green control plane", () => {
-  const sharedConcurrency =
-    /concurrency:\n  group: archon-governed-canary-mutation-recovery\n  cancel-in-progress: false/u;
-  assert.match(workflow, sharedConcurrency);
-  assert.match(recoveryWorkflow, sharedConcurrency);
-
-  assert.match(workflow, /-f "head_sha=\$\{GITHUB_SHA\}"/u);
-  assert.doesNotMatch(workflow, /-f status=(?:completed|success)/u);
-  assert.match(workflow, /sort_by\(\.id, \.run_attempt\)\s+\|\s+last/u);
-  assert.match(workflow, /workflow_success ci\.yml CI/u);
-  assert.match(workflow, /workflow_success codeql\.yml CodeQL/u);
-  assert.match(
-    workflow,
-    /workflow_success workflow-security\.yml "Workflow security"/u
-  );
-  assert.match(
-    workflow,
-    /\.head_sha == \$controlPlane[\s\S]+\.source\.deploymentControlPlaneSha == \$controlPlane/u
-  );
-  assert.match(
-    workflow,
-    /\.schemaVersion == "archon\.deployment-control-plane-gates\/v1"/u
-  );
-  assert.match(
-    workflow,
-    /test "\$\{current_default_sha\}" = "\$\{GITHUB_SHA\}"/u
-  );
-  assert.match(
-    workflow,
-    /control_plane_gate_sha256: \$\{\{ steps\.source\.outputs\.control_plane_gate_sha256 \}\}/u
-  );
-  assert.match(
-    workflow,
-    /echo "control_plane_gate_sha256=\$\{expected_gate_sha\}"/u
-  );
-  assert.match(
-    workflow,
-    /control_plane_output="\$\{recovery_dir\}\/control-plane-security-gates\.json"/u
-  );
-  assert.match(
-    workflow,
-    /path: \$\{\{ steps\.prepare\.outputs\.artifact_path \}\}/u
-  );
-  assert.match(
-    driver,
-    /const RECOVERY_SCHEMA = "archon\.governed-canary-recovery\/v3"/u
-  );
-  assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/u);
-  assert.match(workflow, /controlPlaneSha: \$controlPlaneSha/u);
-  assert.match(
-    workflow,
-    /deploymentEvidenceSha256: \$deploymentEvidenceSha256/u
-  );
-
-  assert.match(
-    recoveryWorkflow,
-    /EVENT_PARENT_HEAD_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/u
-  );
-  const recoveryDriverSeal = recoveryWorkflow.indexOf(
-    "Seal trusted recovery driver before protected approval"
-  );
-  assert.ok(recoveryDriverSeal > 0);
-  const historicalRecoveryValidation = recoveryWorkflow.slice(
-    0,
-    recoveryDriverSeal
-  );
-  assert.doesNotMatch(
-    historicalRecoveryValidation,
-    /actions\/workflows\//u
-  );
-  assert.doesNotMatch(
-    historicalRecoveryValidation,
-    /-f "head_sha=\$\{PARENT_HEAD_SHA\}"/u
-  );
-  assert.doesNotMatch(
-    historicalRecoveryValidation,
-    /sort_by\(\.id, \.run_attempt\)\s+\|\s+last/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /CONTROL_PLANE_GATES_PATH: \$\{\{ runner\.temp \}\}\/parent-recovery\/control-plane-security-gates\.json/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /FIXTURE_BINDING_PATH: \$\{\{ runner\.temp \}\}\/parent-recovery\/fixture-binding\.json/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.schemaVersion == "archon\.governed-canary-recovery\/v3"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /id: manifest\n\s+env:\n\s+GH_TOKEN: \$\{\{ github\.token \}\}/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /test "\$\(sha256sum "\$\{CONTROL_PLANE_GATES_PATH\}" \| awk '\{print \$1\}'\)" = \\\n\s+"\$\{expected_gate_sha256\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /jq -cS 'del\(\.recoveryDigest\)' "\$\{RECOVERY_PATH\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /test "\$\{actual_recovery_digest\}" = \\\n\s+"\$\(jq -er '\.recoveryDigest' "\$\{RECOVERY_PATH\}"\)"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.fixtureBinding == \$fixtureBinding\[0\][\s\S]+fixture_binding_digest="sha256:/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /PARENT_HEAD_SHA="\$\(jq -er '\.head_sha' <<<"\$\{parent_json\}"\)"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /test "\$\{EVENT_PARENT_HEAD_SHA\}" = "\$\{PARENT_HEAD_SHA\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.schemaVersion == "archon\.deployment-control-plane-gates\/v1" and\s+\.sourceSha == \$sha/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\(\[\.workflows\[\]\.path\] \| sort\) == \[\s+"\.github\/workflows\/ci\.yml",\s+"\.github\/workflows\/codeql\.yml",\s+"\.github\/workflows\/workflow-security\.yml"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /actions\/runs\/\$\{run_id\}\/attempts\/\$\{run_attempt\}/u
-  );
-  assert.match(recoveryWorkflow, /\.workflow_id == \$workflowId/u);
-  assert.match(recoveryWorkflow, /\.run_attempt == \$runAttempt/u);
-  assert.match(recoveryWorkflow, /\.name == \$name/u);
-  assert.match(
-    recoveryWorkflow,
-    /\.head_sha == \$sha and\s+\.event == "push" and\s+\.status == "completed" and\s+\.conclusion == "success"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /CANARY_CONTROL_PLANE_SHA: \$\{\{ needs\.resolve-parent\.outputs\.control_plane_sha \}\}/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /id: recovery_driver[\s\S]+\/git\/ref\/heads\/master/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /ref: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}/u
-  );
-  assert.doesNotMatch(
-    recoveryWorkflow,
-    /ref: \$\{\{ steps\.recovery_driver\.outputs\.sha \}\}/u
-  );
-  assert.doesNotMatch(
-    recoveryWorkflow,
-    /ref: \$\{\{ needs\.resolve-parent\.outputs\.control_plane_sha \}\}/u
-  );
-  assert.match(recoveryWorkflow, /\.head_sha == \$controlPlane/u);
-  assert.match(recoveryWorkflow, /controlPlaneSha: \$controlPlaneSha/u);
-  assert.match(
-    recoveryWorkflow,
-    /parentControlPlaneGatesSha256:\s+\$parentControlPlaneGatesSha256/u
-  );
-  assert.match(recoveryWorkflow, /recoveryDriverSha: \$recoveryDriverSha/u);
-  assert.match(
-    recoveryWorkflow,
-    /recoveryDriverControlPlaneGatesSha256:\s+\$recoveryDriverControlPlaneGatesSha256/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /fixtureBinding: \$fixtureBinding[\s\S]+fixtureBindingDigest: \$fixtureBindingDigest/u
-  );
-
-  assert.match(workflow, /\.path == \$path/u);
-  assert.match(workflow, /\.head_sha == \$sha/u);
-  assert.match(workflow, /\.head_repository\.full_name == \$repository/u);
-  assert.match(workflow, /\.event == "push"/u);
-  assert.match(workflow, /\.conclusion == "success"/u);
-  assert.match(recoveryWorkflow, /\.conclusion == "success"/u);
-});
-
-test("every canary AWS, secret, and mutation boundary revalidates one sealed gate digest", () => {
-  assert.equal(
-    (workflow.match(/bash scripts\/verify-github-control-plane\.sh/gu) ?? [])
-      .length,
-    5
-  );
-  assert.equal(
-    (workflow.match(/EXPECTED_GATE_SHA256:/gu) ?? []).length,
-    5
-  );
-  assert.equal(
-    (
-      workflow.match(
-        /EXPECTED_GATE_SHA256: \$\{\{ needs\.prepare\.outputs\.control_plane_gate_sha256 \}\}/gu
-      ) ?? []
-    ).length,
-    4
-  );
-
-  const prepareStart = workflow.indexOf("\n  prepare:");
-  const approvalStart = workflow.indexOf("\n  approval:");
-  const rollbackStart = workflow.indexOf("\n  rollback:");
-  assert.ok(prepareStart > 0);
-  assert.ok(approvalStart > prepareStart);
-  assert.ok(rollbackStart > approvalStart);
-  const prepareJob = workflow.slice(prepareStart, approvalStart);
-  const approvalJob = workflow.slice(approvalStart, rollbackStart);
-  const rollbackJob = workflow.slice(rollbackStart);
-
-  const prepareGate = prepareJob.indexOf(
-    "Revalidate exact control plane before prepare AWS trust"
-  );
-  const prepareOidc = prepareJob.indexOf(
-    "Assume the read-only canary evidence role"
-  );
-  assert.ok(prepareGate > 0);
-  assert.ok(prepareOidc > prepareGate);
-  assert.match(
-    prepareJob.slice(prepareGate, prepareOidc),
-    /EXPECTED_GATE_SHA256: \$\{\{ steps\.source\.outputs\.control_plane_gate_sha256 \}\}/u
-  );
-
-  const approvalAwsGate = approvalJob.indexOf(
-    "Revalidate exact control plane before approval AWS trust"
-  );
-  const approvalOidc = approvalJob.indexOf(
-    "Assume the read-only canary evidence role"
-  );
-  const identityGate = approvalJob.indexOf(
-    "Revalidate exact control plane before approver identity secret"
-  );
-  const identitySecret = approvalJob.indexOf(
-    "CANARY_COGNITO_USERNAME: ${{ secrets.CANARY_COGNITO_USERNAME }}"
-  );
-  const mutationGate = approvalJob.indexOf(
-    "Revalidate exact control plane before password-backed mutation"
-  );
-  const passwordSecret = approvalJob.indexOf(
-    "CANARY_COGNITO_PASSWORD: ${{ secrets.CANARY_COGNITO_PASSWORD }}"
-  );
-  assert.ok(approvalAwsGate > 0);
-  assert.ok(approvalOidc > approvalAwsGate);
-  assert.ok(identityGate > approvalOidc);
-  assert.ok(identitySecret > identityGate);
-  assert.ok(mutationGate > identitySecret);
-  assert.ok(passwordSecret > mutationGate);
-
-  const rollbackGate = rollbackJob.indexOf(
-    "Authenticate sealed original control plane before rollback mutation"
-  );
-  const rollbackSecret = rollbackJob.indexOf(
-    "CANARY_DATAHUB_READ_TOKEN: ${{ secrets.CANARY_DATAHUB_READ_TOKEN }}"
-  );
-  assert.ok(rollbackGate > 0);
-  assert.ok(rollbackSecret > rollbackGate);
-  assert.match(
-    rollbackJob.slice(rollbackGate, rollbackSecret),
-    /EXPECTED_GATE_SHA256: \$\{\{ needs\.prepare\.outputs\.control_plane_gate_sha256 \}\}/u
-  );
-  assert.match(
-    rollbackJob.slice(rollbackGate, rollbackSecret),
-    /VERIFICATION_MODE: sealed[\s\S]+SEALED_GATE_PATH: \$\{\{ runner\.temp \}\}\/governed-canary\/recovery\/control-plane-security-gates\.json/u
-  );
-});
-
-test("independent recovery separates the immutable parent from its pre-approval sealed driver", () => {
-  assert.equal(
-    (
-      recoveryWorkflow.match(
-        /bash scripts\/verify-github-control-plane\.sh/gu
-      ) ?? []
-    ).length,
-    2
-  );
-  assert.equal(
-    (recoveryWorkflow.match(/EXPECTED_GATE_SHA256:/gu) ?? []).length,
-    2
-  );
-  assert.match(
-    recoveryWorkflow,
-    /CANARY_CONTROL_PLANE_SHA: \$\{\{ needs\.resolve-parent\.outputs\.control_plane_sha \}\}/u
-  );
-
-  const resolveStart = recoveryWorkflow.indexOf("\n  resolve-parent:");
-  const recoverStart = recoveryWorkflow.indexOf("\n  recover:");
-  assert.ok(resolveStart > 0);
-  assert.ok(recoverStart > resolveStart);
-  const resolveJob = recoveryWorkflow.slice(resolveStart, recoverStart);
-  const recoverJob = recoveryWorkflow.slice(recoverStart);
-
-  assert.match(
-    resolveJob,
-    /Seal trusted recovery driver before protected approval[\s\S]+driver_sha="\$\{GITHUB_SHA\}"/u
-  );
-  assert.match(
-    resolveJob,
-    /-f "head_sha=\$\{driver_sha\}"[\s\S]+sort_by\(\.id, \.run_attempt\)\s+\|\s+last/u
-  );
-  assert.match(
-    resolveJob,
-    /first_gates="\$\(read_driver_gates\)"[\s\S]+second_gates="\$\(read_driver_gates\)"[\s\S]+test "\$\{second_gates\}" = "\$\{first_gates\}"/u
-  );
-  assert.doesNotMatch(resolveJob, /id-token:\s+write|secrets\./u);
-
-  assert.match(
-    recoverJob,
-    /ref: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}[\s\S]+EXPECTED_RECOVERY_DRIVER_SHA: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}[\s\S]+run: test "\$\(git rev-parse HEAD\)" = "\$\{EXPECTED_RECOVERY_DRIVER_SHA\}"/u
-  );
-  assert.doesNotMatch(
-    recoverJob,
-    /\/git\/ref\/heads\/master|actions\/workflows\/|steps\.recovery_driver\.outputs/u
-  );
-
-  const driverGate = recoveryWorkflow.indexOf(
-    "Authenticate sealed recovery driver before AWS trust"
-  );
-  const recoveryOidc = recoveryWorkflow.indexOf(
-    "Assume read-only staging binding role"
-  );
-  const mutationGate = recoveryWorkflow.indexOf(
-    "Authenticate sealed recovery driver before token mutation"
-  );
-  const mutationSecret = recoveryWorkflow.indexOf(
-    "CANARY_DATAHUB_READ_TOKEN: ${{ secrets.CANARY_DATAHUB_READ_TOKEN }}"
-  );
-  assert.ok(driverGate > 0);
-  assert.ok(recoveryOidc > driverGate);
-  assert.ok(mutationGate > recoveryOidc);
-  assert.ok(mutationSecret > mutationGate);
-  assert.match(
-    recoveryWorkflow.slice(driverGate, recoveryOidc),
-    /CONTROL_PLANE_SHA: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}[\s\S]+EXPECTED_GATE_SHA256: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_gate_sha256 \}\}[\s\S]+VERIFICATION_MODE: sealed[\s\S]+SEALED_GATE_PATH: \$\{\{ steps\.recovery_driver_receipt\.outputs\.path \}\}/u
-  );
-  assert.match(
-    recoveryWorkflow.slice(mutationGate, mutationSecret),
-    /CONTROL_PLANE_SHA: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}[\s\S]+EXPECTED_GATE_SHA256: \$\{\{ steps\.recovery_driver_gates\.outputs\.gate_sha256 \}\}/u
-  );
-  assert.match(
-    recoveryWorkflow.slice(mutationGate, mutationSecret),
-    /VERIFICATION_MODE: sealed[\s\S]+SEALED_GATE_PATH: \$\{\{ runner\.temp \}\}\/governed-canary\/recovery-aws-gates\/control-plane-security-gates\.json/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /--arg controlPlaneSha "\$\{CANARY_CONTROL_PLANE_SHA\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /RECOVERY_DRIVER_SHA: \$\{\{ needs\.resolve-parent\.outputs\.recovery_driver_sha \}\}[\s\S]+--arg recoveryDriverSha "\$\{RECOVERY_DRIVER_SHA\}"/u
-  );
-});
-
-test("a reviewer approves the sealed plan, not a generic pre-plan dispatch", () => {
-  const prepare = workflow.indexOf("\n  prepare:");
-  const approval = workflow.indexOf("\n  approval:");
-  const rollback = workflow.indexOf("\n  rollback:");
-  assert.ok(prepare > 0);
-  assert.ok(approval > prepare);
-  assert.ok(rollback > approval);
-
-  const prepareJob = workflow.slice(prepare, approval);
-  const approvalJob = workflow.slice(approval, rollback);
-  assert.match(
-    prepareJob,
-    /environment:\n      name: governed-canary-prepare\n      url: \$\{\{ vars\.CANARY_APPLICATION_URL \}\}/u
-  );
-  assert.match(prepareJob, /deployments: write/u);
-  assert.match(
-    prepareJob,
-    /\(\[\.protection_rules\[\]\?\.type\] \| sort\) == \["branch_policy"\]/u
-  );
-  assert.doesNotMatch(prepareJob, /CANARY_COGNITO_PASSWORD/u);
-  assert.doesNotMatch(prepareJob, /governed-canary\.ts approve/u);
-  assert.match(
-    approvalJob,
-    /name: Human approval — plan \$\{\{ needs\.prepare\.outputs\.plan_digest \}\} \/ recovery \$\{\{ needs\.prepare\.outputs\.recovery_digest \}\}/u
-  );
-  assert.match(approvalJob, /name: governed-canary\n/u);
-  assert.match(approvalJob, /CANARY_COGNITO_PASSWORD: \$\{\{ secrets\./u);
-  assert.match(
-    approvalJob,
-    /Download the exact pre-mutation plan approved by this job/u
-  );
-  assert.match(
-    approvalJob,
-    /Revalidate both protected gates immediately before approval/u
-  );
-  assert.match(prepareJob, /AWS_CANARY_PREPARE_ROLE_ARN/u);
-  assert.match(approvalJob, /AWS_CANARY_APPROVAL_ROLE_ARN/u);
-  assert.doesNotMatch(prepareJob, /AWS_CANARY_APPROVAL_ROLE_ARN/u);
-  assert.match(
-    prepareJob,
-    /aws-region: \$\{\{ vars\.AWS_CANARY_REGION \}\}/u
-  );
-  assert.match(
-    prepareJob,
-    /allowed-account-ids: \$\{\{ vars\.AWS_CANARY_ACCOUNT_ID \}\}/u
-  );
-  assert.match(
-    prepareJob,
-    /AWS_ACCOUNT_ID: \$\{\{ vars\.AWS_CANARY_ACCOUNT_ID \}\}/u
-  );
-  assert.match(
-    prepareJob,
-    /AWS_REGION: \$\{\{ vars\.AWS_CANARY_REGION \}\}/u
-  );
-  assert.doesNotMatch(
-    prepareJob,
-    /\$\{\{ vars\.AWS_(?:ACCOUNT_ID|REGION) \}\}/u
-  );
-});
-
-test("governed canary cannot add an unreviewed auth or browser dependency", () => {
-  const source = `${workflow}\n${driver}`;
-  assert.doesNotMatch(
-    source,
-    /USER_PASSWORD_AUTH|AdminInitiateAuth|InitiateAuthCommand|setup-chrome|playwright|selenium|npx\s|npm install/iu
-  );
-  assert.match(workflow, /npm ci --ignore-scripts/u);
-  assert.match(workflow, /CANARY_CHROME_VERSION/u);
-  assert.match(workflow, /CANARY_CHROME_BINARY_SHA256/u);
-  assert.match(driver, /code_challenge_method: "S256"/u);
-  assert.match(driver, /Fetch\.failRequest/u);
-});
-
-test("Cognito runtime auth is sealed to the staging stack before credential use", () => {
-  const stackBinding = workflow.indexOf(
-    'test "$(output ArchonUserPoolClientId)" = "${CANARY_COGNITO_CLIENT_ID}"'
-  );
-  const browserApproval = workflow.indexOf(
-    "Authenticate with Cognito PKCE, approve, and verify receipt"
-  );
-  const runtimeBinding = workflow.indexOf(
-    "Bind deployed runtime auth before any browser or password use"
-  );
-  assert.ok(stackBinding > 0);
-  assert.ok(runtimeBinding > stackBinding);
-  assert.ok(browserApproval > stackBinding);
-  assert.ok(browserApproval > runtimeBinding);
-  assert.match(workflow, /output ArchonUserPoolClientId/u);
-  assert.match(workflow, /output ArchonCognitoHostedUiOrigin/u);
-  assert.match(
-    workflow,
-    /test "\$\(output ArchonUserPoolClientId\)" = "\$\{CANARY_COGNITO_CLIENT_ID\}"/u
-  );
-  assert.match(driver, /auth\["clientId"\] !== identity\.cognitoClientId/u);
-  assert.match(
-    driver,
-    /new URL\(authorizationEndpoint\)\.origin !== identity\.cognitoHostedUiOrigin/u
-  );
-  assert.ok(
-    driver.indexOf("const runtime = await loadRuntimeConfig(identity)") <
-      driver.indexOf(
-        'const password = required(process.env, "CANARY_COGNITO_PASSWORD"'
-      )
-  );
-  assert.doesNotMatch(
-    workflow,
-    /echo "::add-mask::\$\{CANARY_COGNITO_PASSWORD\}"/u
-  );
-});
-
-test("the recovery artifact is verified locally but never drives approval HTTP", () => {
-  assert.match(
-    workflow,
-    /CANARY_EXPECTED_AUDIT_ID: \$\{\{ needs\.prepare\.outputs\.audit_id \}\}/u
-  );
-  assert.match(
-    workflow,
-    /CANARY_EXPECTED_PLAN_DIGEST: \$\{\{ needs\.prepare\.outputs\.plan_digest \}\}/u
-  );
-  assert.match(
-    workflow,
-    /CANARY_EXPECTED_RECOVERY_DIGEST: \$\{\{ needs\.prepare\.outputs\.recovery_digest \}\}/u
-  );
-  assert.match(
-    driver,
-    /verifyCanaryApprovalBindings\(recovery, expected\)/u
-  );
-  assert.match(driver, /readStatus\(identity, expected\.auditId\)/u);
-  assert.match(driver, /submitApproval\(identity, approval, token\)/u);
-  assert.match(
-    driver,
-    /waitForStatus\(\s+identity,\s+expected\.auditId,/u
-  );
-  assert.doesNotMatch(
-    driver,
-    /readStatus\(identity,\s*recovery\.auditId\)/u
-  );
-  assert.doesNotMatch(
-    driver,
-    /submitApproval\(identity,\s*recovery,/u
-  );
-  assert.doesNotMatch(
-    driver,
-    /waitForStatus\(\s+identity,\s+recovery\.auditId,/u
-  );
-});
-
-test("governed canary seals recovery before approval and proves rollback by read", () => {
-  const recoveryUpload = workflow.indexOf("Seal recovery state before approval");
-  const approval = workflow.indexOf(
-    "Authenticate with Cognito PKCE, approve, and verify receipt"
-  );
-  assert.ok(recoveryUpload > 0);
-  assert.ok(approval > recoveryUpload);
-  assert.match(
-    workflow,
-    /needs:\n\s+- prepare\n\s+- approval\n\s+if: >-\n\s+always\(\) &&\n\s+needs\.prepare\.outputs\.recovery_digest != ''/u
-  );
-  assert.match(
-    workflow,
-    /Revalidate rollback protection immediately before recovery/u
-  );
-  assert.match(
-    driver,
-    /rollbackDispositionForObservedDigest\(\s+current\.digest,\s+recovery\.expectedBefore\.digest,\s+expectedCurrentDigest\s+\)/u
-  );
-  assert.doesNotMatch(driver, /rollbackManifest && !shouldRemove/u);
-  assert.match(driver, /"ALREADY_RESTORED" \| "ROLLED_BACK"/u);
-  assert.match(
-    driver,
-    /rollbackManifestDigest: rollbackManifest\.digest/u
-  );
-  assert.match(driver, /\n\s+disposition,\n/u);
-  assert.match(
-    driver,
-    /restored\.digest !== recovery\.expectedBefore\.digest/u
-  );
-  assert.match(driver, /LiveDataHubMutationClient\(\)\.removeTags/u);
-  assert.match(workflow, /attestations\/governed-canary\/v1/u);
-});
-
-test("failed or cancelled parents have automatic and idempotent manual recovery", () => {
-  assert.match(recoveryWorkflow, /^on:\n  workflow_run:/mu);
-  assert.match(recoveryWorkflow, /^\s{2}workflow_dispatch:/mu);
-  assert.doesNotMatch(
-    recoveryWorkflow,
-    /^\s{2}(?:push|pull_request|schedule):/mu
-  );
-  assert.match(
-    recoveryWorkflow,
-    /parent_run_id:[\s\S]+parent_run_attempt:[\s\S]+confirmation:[\s\S]+RECOVER SEALED GOVERNED CANARY/u
-  );
-  assert.match(recoveryWorkflow, /cancel-in-progress: false/u);
-  assert.match(
-    recoveryWorkflow,
-    /EVENT_PARENT_PATH: \$\{\{ github\.event\.workflow_run\.path \}\}/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.path == "\.github\/workflows\/governed-canary\.yml"/u
-  );
-  assert.match(recoveryWorkflow, /EVENT_PARENT_HEAD_REPOSITORY/u);
-  assert.match(recoveryWorkflow, /EVENT_PARENT_HEAD_BRANCH/u);
-  assert.match(recoveryWorkflow, /CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT/u);
-  assert.match(
-    recoveryWorkflow,
-    /actions\/runs\/\$\{CANARY_SOURCE_WORKFLOW_RUN_ID\}\/attempts\/\$\{CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT\}/u
-  );
-  assert.match(recoveryWorkflow, /name: governed-canary-recovery\n/u);
-  assert.match(recoveryWorkflow, /prevent_self_review == false/u);
-  assert.match(
-    recoveryWorkflow,
-    /\(\$rules\[0\]\.reviewers\[0\]\.reviewer\.login \| ascii_downcase\) ==\s+\(\$owner \| ascii_downcase\)/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.branch_policies\[0\]\.name == "master"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /governed-canary-recovery-\$\{CANARY_SOURCE_WORKFLOW_RUN_ID\}-\$\{CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT\}/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /node --import tsx scripts\/governed-canary\.ts rollback/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\.status == "in_progress" and\s+\.conclusion == null[\s\S]+\.conclusion == "failure"[\s\S]+\.conclusion == "cancelled"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /actions\/runs\/\$\{CANARY_DEPLOYMENT_RUN_ID\}\/attempts\/\$\{deployment_attempt\}\/jobs/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /select\(\.name == "Verify once and deploy staging"\)/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /\$staging\[0\]\.run_attempt == \$runAttempt[\s\S]+\$staging\[0\]\.conclusion == "success"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /select\(\.name == "Explicit solo-owner approval and promote identical artifacts"\)[\s\S]+Active-parent recovery is forbidden after production starts/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /: "\$\{CANARY_DATAHUB_READ_TOKEN:\?CANARY_DATAHUB_READ_TOKEN is required\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /: "\$\{CANARY_DATAHUB_WRITE_TOKEN:\?CANARY_DATAHUB_WRITE_TOKEN is required\}"/u
-  );
-  assert.match(
-    recoveryWorkflow,
-    /attestations\/governed-canary-recovery\/v1/u
-  );
-  assert.doesNotMatch(
-    recoveryWorkflow,
-    /github\.event\.workflow_run\.conclusion == 'success'/u
-  );
+test("AWS roles stay least-privilege and promotion stays independent", () => {
+  assert.equal(roles.match(/stack\/Archon-staging-Judge\/\*/g)?.length, 3);
+  assert.doesNotMatch(roles, /stack\/Archon-staging\/\*/);
+  assert.match(roles, /ReadExactStagingCloudRuntimeSecrets/);
+  assert.match(roles, /DecryptExactStagingCloudRuntimeSecrets/);
+  assert.match(roles, /secretsmanager:GetSecretValue/);
+  assert.match(roles, /kms:Decrypt/);
+  assert.match(roles, /kms:ViaService/);
+  assert.match(roles, /kms:EncryptionContext:SecretARN/);
+  assert.match(deploy, /archon\.aws-deployment-evidence\/v2/);
+  assert.doesNotMatch(deploy, /repository_dispatch|workflow_run:/);
+  assert.match(operations, /archon\.governed-canary-recovery-evidence\/v2/);
+  assert.match(operations, /archon\.governed-canary-recovery\/v4/);
+  assert.match(operations, /governed-canary-cloud-v2/);
+  assert.doesNotMatch(operations, /governed-canary-fixture-binding|rollback-evidence\/v1/);
 });

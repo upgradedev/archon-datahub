@@ -1,0 +1,557 @@
+{
+  "schemaVersion": "archon.datahub-cloud-runtime-cdk-handoff/v1",
+  "ownership": "lean-judge-stack",
+  "imageRelease": {
+    "workflowPath": ".github/workflows/datahub-cloud-runtime-image.yml",
+    "candidateArtifactPattern": "datahub-cloud-runtime-candidate-{sourceSha}",
+    "releaseArtifactPattern": "datahub-cloud-runtime-release-{sourceSha}",
+    "releaseFile": "release.json",
+    "releaseSchemaVersion": "archon.datahub-cloud-runtime-release/v1",
+    "requiredFields": [
+      "sourceSha",
+      "imageUri",
+      "imageDigest",
+      "architecture",
+      "platform",
+      "handlers",
+      "gates",
+      "sbomDigests",
+      "provenanceDigest",
+      "attestationSubjects",
+      "generatedAt",
+      "digest"
+    ],
+    "requiredGates": [
+      "unitTests",
+      "trivy",
+      "sca",
+      "sbom",
+      "provenance",
+      "signature",
+      "attestations"
+    ],
+    "deploymentReference": "{imageUri}@{imageDigest}",
+    "repositoryRequirements": {
+      "imageTagMutability": "IMMUTABLE",
+      "scanOnPush": true,
+      "encryption": "KMS"
+    },
+    "repositoryName": "archon-datahub-cloud-runtime-v2",
+    "repositoryOwner": "protected datahub-cloud-runtime-image publish job",
+    "firstRun": "publish job idempotently creates exact IMMUTABLE scanOnPush KMS repository before first push",
+    "publisherRoleRequiredActions": [
+      "ecr:CreateRepository",
+      "ecr:TagResource",
+      "ecr:DescribeRepositories",
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+      "ecr:DescribeImages",
+      "ecr:BatchDeleteImage",
+      "sts:GetCallerIdentity"
+    ],
+    "judgeStackCreatesRepository": false,
+    "releaseEvidenceRetentionDays": 90
+  },
+  "image": {
+    "platform": "linux/amd64",
+    "architecture": "x86_64",
+    "base": "public.ecr.aws/lambda/python:3.11@sha256:9e99e687e63728988cdd4cc51e16a566a841c0ef46fa54bd6c71762472633ec8",
+    "commands": {
+      "read": "handlers.read_handler",
+      "mutation": "handlers.mutation_handler",
+      "fixtureReset": "handlers.fixture_reset_handler"
+    },
+    "oneDigestForAllFunctions": true
+  },
+  "exports": {
+    "runtimeJobTableName": "ArchonRuntimeJobTableName",
+    "runtimeJobTableStreamArn": "ArchonRuntimeJobTableStreamArn",
+    "runtimeSessionTableName": "ArchonRuntimeSessionTableName",
+    "runtimeSessionTableStreamArn": "ArchonRuntimeSessionTableStreamArn",
+    "checkpointBucketName": "ArchonCloudCheckpointBucketName",
+    "checkpointKeyArn": "ArchonCloudCheckpointKeyArn",
+    "mutationSigningKeyArn": "ArchonRuntimeMutationSigningKeyArn",
+    "readerSecretArn": "ArchonCloudReaderSecretArn",
+    "writerSecretArn": "ArchonCloudWriterSecretArn",
+    "readerFunctionName": "ArchonCloudReaderFunctionName",
+    "readerRoleArn": "ArchonCloudReaderRoleArn",
+    "mutationFunctionName": "ArchonCloudMutationFunctionName",
+    "mutationRoleArn": "ArchonCloudMutationRoleArn",
+    "fixtureResetFunctionName": "ArchonCloudFixtureResetFunctionName",
+    "fixtureResetRoleArn": "ArchonCloudFixtureResetRoleArn"
+  },
+  "stateBindings": {
+    "jobTable": "ArchonRuntimeJobTableName",
+    "coreLeaseTable": "ArchonRuntimeJobTableName",
+    "sessionLeaseCheckpointRegistryAndResetLedgerTable": "ArchonRuntimeSessionTableName",
+    "cloudLeaseKey": {
+      "pk": "CLOUD#LEASE",
+      "sk": "CURRENT"
+    },
+    "registryKey": {
+      "pk": "RUNTIME#cloud",
+      "sk": "HEALTH"
+    },
+    "fixtureResetLedgerKey": {
+      "pk": "FIXTURE#DATAHUB",
+      "skPrefix": "RESET#"
+    },
+    "fixtureResetTtlAttribute": "expiresAt",
+    "fixtureResetRetentionDays": 90,
+    "checkpointBucketVersioning": "ENABLED",
+    "checkpointBucketEncryption": "SSE-KMS"
+  },
+  "functions": {
+    "read": {
+      "command": "handlers.read_handler",
+      "memoryMiB": 4096,
+      "timeoutSeconds": 900,
+      "ephemeralStorageMiB": 1024,
+      "reservedConcurrency": 2,
+      "environment": {
+        "ARCHON_STAGE": "{stage}",
+        "ARCHON_BEDROCK_MODEL": "{bedrockModelId}",
+        "ARCHON_EXPECTED_ANALYTICS_ROLE_ARN": "{ArchonCloudReaderRoleArn}",
+        "RUNTIME_JOB_TABLE": "{ArchonRuntimeJobTableName}",
+        "RUNTIME_SESSION_TABLE": "{ArchonRuntimeSessionTableName}",
+        "CLOUD_RUNTIME_LEASE_TABLE": "{ArchonRuntimeSessionTableName}",
+        "RUNTIME_JOB_STREAM_ARN": "{ArchonRuntimeJobTableStreamArn}",
+        "CLOUD_CHECKPOINT_BUCKET": "{ArchonCloudCheckpointBucketName}",
+        "CLOUD_CHECKPOINT_KMS_KEY_ARN": "{ArchonCloudCheckpointKeyArn}",
+        "DATAHUB_CLOUD_READER_SECRET_ARN": "{ArchonCloudReaderSecretArn}"
+      },
+      "iamAllow": [
+        {
+          "actions": [
+            "dynamodb:GetItem",
+            "dynamodb:UpdateItem"
+          ],
+          "resources": [
+            "{runtimeJobTableArn}"
+          ]
+        },
+        {
+          "actions": [
+            "dynamodb:GetItem",
+            "dynamodb:PutItem"
+          ],
+          "resources": [
+            "{runtimeSessionTableArn}"
+          ]
+        },
+        {
+          "actions": [
+            "dynamodb:DescribeStream",
+            "dynamodb:GetRecords",
+            "dynamodb:GetShardIterator",
+            "dynamodb:ListStreams"
+          ],
+          "resources": [
+            "{runtimeJobTableStreamArn}"
+          ]
+        },
+        {
+          "actions": [
+            "s3:GetObjectVersion",
+            "s3:PutObject",
+            "s3:DeleteObjectVersion"
+          ],
+          "resources": [
+            "{checkpointBucketArn}/cloud-runtime/v2/*"
+          ]
+        },
+        {
+          "actions": [
+            "s3:GetBucketVersioning"
+          ],
+          "resources": [
+            "{checkpointBucketArn}"
+          ]
+        },
+        {
+          "actions": [
+            "kms:Decrypt",
+            "kms:Encrypt",
+            "kms:GenerateDataKey"
+          ],
+          "resources": [
+            "{checkpointKeyArn}"
+          ],
+          "conditions": {
+            "kms:ViaService": "s3.{region}.amazonaws.com"
+          }
+        },
+        {
+          "actions": [
+            "secretsmanager:GetSecretValue"
+          ],
+          "resources": [
+            "{readerSecretArn}"
+          ],
+          "conditions": {
+            "secretsmanager:VersionStage": "AWSCURRENT"
+          }
+        },
+        {
+          "actions": [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream"
+          ],
+          "resources": [
+            "{bedrockModelOrInferenceProfileArn}"
+          ]
+        },
+        {
+          "actions": [
+            "sts:GetCallerIdentity"
+          ],
+          "resources": [
+            "*"
+          ]
+        },
+        {
+          "actions": [
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ],
+          "resources": [
+            "{readLogGroupArn}:*"
+          ]
+        }
+      ],
+      "iamDenyAssertions": [
+        "no writer secret",
+        "no mutation signing key use",
+        "no dynamodb writes outside exact job claim/receipt and checkpoint CAS",
+        "no VPC",
+        "no static AWS credentials"
+      ]
+    },
+    "mutation": {
+      "command": "handlers.mutation_handler",
+      "memoryMiB": 512,
+      "timeoutSeconds": 180,
+      "ephemeralStorageMiB": 512,
+      "reservedConcurrency": 1,
+      "environment": {
+        "ARCHON_STAGE": "{stage}",
+        "RUNTIME_JOB_TABLE": "{ArchonRuntimeJobTableName}",
+        "RUNTIME_SESSION_TABLE": "{ArchonRuntimeSessionTableName}",
+        "CLOUD_RUNTIME_LEASE_TABLE": "{ArchonRuntimeSessionTableName}",
+        "RUNTIME_JOB_STREAM_ARN": "{ArchonRuntimeJobTableStreamArn}",
+        "DATAHUB_CLOUD_WRITER_SECRET_ARN": "{ArchonCloudWriterSecretArn}",
+        "MUTATION_SIGNING_KEY_ARN": "{ArchonRuntimeMutationSigningKeyArn}"
+      },
+      "iamAllow": [
+        {
+          "actions": [
+            "dynamodb:GetItem",
+            "dynamodb:UpdateItem"
+          ],
+          "resources": [
+            "{runtimeJobTableArn}"
+          ]
+        },
+        {
+          "actions": [
+            "dynamodb:GetItem"
+          ],
+          "resources": [
+            "{runtimeSessionTableArn}"
+          ]
+        },
+        {
+          "actions": [
+            "dynamodb:DescribeStream",
+            "dynamodb:GetRecords",
+            "dynamodb:GetShardIterator",
+            "dynamodb:ListStreams"
+          ],
+          "resources": [
+            "{runtimeJobTableStreamArn}"
+          ]
+        },
+        {
+          "actions": [
+            "secretsmanager:GetSecretValue"
+          ],
+          "resources": [
+            "{writerSecretArn}"
+          ],
+          "conditions": {
+            "secretsmanager:VersionStage": "AWSCURRENT"
+          }
+        },
+        {
+          "actions": [
+            "kms:GetPublicKey"
+          ],
+          "resources": [
+            "{mutationSigningKeyArn}"
+          ]
+        },
+        {
+          "actions": [
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ],
+          "resources": [
+            "{mutationLogGroupArn}:*"
+          ]
+        }
+      ],
+      "iamDenyAssertions": [
+        "no Bedrock actions",
+        "no reader secret",
+        "no kms:Sign",
+        "no kms:Verify",
+        "no S3",
+        "no VPC",
+        "no static AWS credentials"
+      ]
+    },
+    "fixtureReset": {
+      "command": "handlers.fixture_reset_handler",
+      "memoryMiB": 512,
+      "timeoutSeconds": 180,
+      "ephemeralStorageMiB": 512,
+      "reservedConcurrency": 1,
+      "environment": {
+        "FIXTURE_RESET_SOURCE_STREAM_ARNS": "[\"{ArchonRuntimeSessionTableStreamArn}\",\"{CoreLeaseTableStreamArn}\"]",
+        "FIXTURE_RESET_TABLE": "{ArchonRuntimeSessionTableName}",
+        "DATAHUB_CLOUD_WRITER_SECRET_ARN": "{ArchonCloudWriterSecretArn}"
+      },
+      "iamAllow": [
+        {
+          "actions": [
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem"
+          ],
+          "resources": [
+            "{runtimeSessionTableArn}"
+          ]
+        },
+        {
+          "actions": [
+            "dynamodb:DescribeStream",
+            "dynamodb:GetRecords",
+            "dynamodb:GetShardIterator",
+            "dynamodb:ListStreams"
+          ],
+          "resources": [
+            "{runtimeSessionTableStreamArn}",
+            "{coreLeaseTableStreamArn}"
+          ]
+        },
+        {
+          "actions": [
+            "secretsmanager:GetSecretValue"
+          ],
+          "resources": [
+            "{writerSecretArn}"
+          ],
+          "conditions": {
+            "secretsmanager:VersionStage": "AWSCURRENT"
+          }
+        },
+        {
+          "actions": [
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ],
+          "resources": [
+            "{fixtureResetLogGroupArn}:*"
+          ]
+        }
+      ],
+      "iamDenyAssertions": [
+        "no Bedrock actions",
+        "no reader secret",
+        "no KMS signing actions",
+        "no job receipt mutation",
+        "no VPC",
+        "no human approval authority"
+      ]
+    }
+  },
+  "eventSources": {
+    "read": {
+      "source": "{ArchonRuntimeJobTableStreamArn}",
+      "startingPosition": "LATEST",
+      "batchSize": 5,
+      "maxBatchingWindowSeconds": 1,
+      "parallelizationFactor": 1,
+      "maxConcurrency": 2,
+      "retryAttempts": 5,
+      "maxRecordAgeSeconds": 3600,
+      "bisectBatchOnError": true,
+      "reportBatchItemFailures": true,
+      "filter": {
+        "eventName": [
+          "INSERT",
+          "MODIFY"
+        ],
+        "dynamodb": {
+          "NewImage": {
+            "schema": {
+              "S": [
+                "archon.runtime-bound-job/v2"
+              ]
+            },
+            "profileId": {
+              "S": [
+                "cloud"
+              ]
+            },
+            "state": {
+              "S": [
+                "QUEUED"
+              ]
+            },
+            "operation": {
+              "S": [
+                "ANALYZE",
+                "READ_TAGS",
+                "IMPROVE_CONTEXT",
+                "POST_ANALYZE",
+                "POST_READ_TAGS"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "mutation": {
+      "source": "{ArchonRuntimeJobTableStreamArn}",
+      "startingPosition": "LATEST",
+      "batchSize": 1,
+      "maxBatchingWindowSeconds": 0,
+      "parallelizationFactor": 1,
+      "maxConcurrency": 1,
+      "retryAttempts": 5,
+      "maxRecordAgeSeconds": 3600,
+      "bisectBatchOnError": true,
+      "reportBatchItemFailures": true,
+      "filter": {
+        "eventName": [
+          "INSERT",
+          "MODIFY"
+        ],
+        "dynamodb": {
+          "NewImage": {
+            "schema": {
+              "S": [
+                "archon.runtime-bound-job/v2"
+              ]
+            },
+            "profileId": {
+              "S": [
+                "cloud"
+              ]
+            },
+            "state": {
+              "S": [
+                "QUEUED"
+              ]
+            },
+            "operation": {
+              "S": [
+                "GOVERNED_TAG_MUTATION"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "fixtureResetSession": {
+      "source": "{ArchonRuntimeSessionTableStreamArn}",
+      "startingPosition": "LATEST",
+      "batchSize": 1,
+      "maxBatchingWindowSeconds": 0,
+      "parallelizationFactor": 1,
+      "maxConcurrency": 1,
+      "retryAttempts": 5,
+      "maxRecordAgeSeconds": 3600,
+      "bisectBatchOnError": true,
+      "reportBatchItemFailures": true,
+      "filter": {
+        "eventName": [
+          "MODIFY"
+        ],
+        "dynamodb": {
+          "NewImage": {
+            "sk": {
+              "S": [
+                "RUNTIME"
+              ]
+            }
+          }
+        }
+      },
+      "handlerEnforcedState": "EXPIRED"
+    },
+    "fixtureResetCoreLease": {
+      "source": "{CoreLeaseTableStreamArn}",
+      "startingPosition": "LATEST",
+      "batchSize": 1,
+      "maxBatchingWindowSeconds": 0,
+      "parallelizationFactor": 1,
+      "maxConcurrency": 1,
+      "retryAttempts": 5,
+      "maxRecordAgeSeconds": 3600,
+      "bisectBatchOnError": true,
+      "reportBatchItemFailures": true,
+      "filter": {
+        "eventName": [
+          "MODIFY"
+        ],
+        "dynamodb": {
+          "NewImage": {
+            "pk": {
+              "S": [
+                "CORE#LEASE"
+              ]
+            },
+            "sk": {
+              "S": [
+                "CURRENT"
+              ]
+            },
+            "state": {
+              "S": [
+                "DRAINING"
+              ]
+            }
+          }
+        }
+      },
+      "handlerEnforcedState": "DRAINING"
+    }
+  },
+  "network": {
+    "vpcAttached": false,
+    "natGateway": false,
+    "permanentCompute": false,
+    "publicAwsServiceEndpoints": true,
+    "dataHubCloudHttpsOnly": true,
+    "managedMcpPath": "/integrations/ai/mcp",
+    "analyticsAgentListener": "127.0.0.1:8100"
+  },
+  "deploymentAssertions": [
+    "release digest self-verifies and every gate is true",
+    "image reference includes immutable @sha256 digest",
+    "all three functions use the same image digest and exact distinct commands",
+    "reader role is the only Bedrock principal",
+    "writer and fixture reset roles can read only the writer secret",
+    "mutation role has KMS GetPublicKey only and verifies ECDSA locally",
+    "fixture reset sources are exactly the runtime session and Core lease physical stream ARNs",
+    "fixture reset reserved concurrency and both event-source maximum concurrency are one",
+    "no VPC, NAT gateway, or permanent runtime resource is synthesized"
+  ]
+}

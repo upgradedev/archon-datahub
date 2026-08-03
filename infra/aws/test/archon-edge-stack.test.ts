@@ -151,7 +151,7 @@ describe("Archon CloudFront edge stack", () => {
       VisibilityConfig: {
         CloudWatchMetricsEnabled: true,
         MetricName: "archon-staging-cloudfront-waf",
-        SampledRequestsEnabled: true
+        SampledRequestsEnabled: false
       }
     });
 
@@ -164,6 +164,9 @@ describe("Archon CloudFront edge stack", () => {
       { name: "AWSManagedRulesKnownBadInputsRuleSet", priority: 20 },
       { name: "PerIpRateLimit", priority: 30 }
     ]);
+    for (const rule of rules) {
+      expect(rule.VisibilityConfig.SampledRequestsEnabled).toBe(false);
+    }
     for (const name of [
       "AWSManagedRulesAmazonIpReputationList",
       "AWSManagedRulesCommonRuleSet",
@@ -189,6 +192,9 @@ describe("Archon CloudFront edge stack", () => {
     const productionRateRule = webAclRules(
       edgeTemplate("production").template
     ).find((rule) => rule.Name === "PerIpRateLimit");
+    expect(
+      productionRateRule.VisibilityConfig.SampledRequestsEnabled
+    ).toBe(false);
     expect(productionRateRule.Statement.RateBasedStatement).toEqual({
       AggregateKeyType: "IP",
       EvaluationWindowSec: 300,

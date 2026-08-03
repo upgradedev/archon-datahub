@@ -1303,6 +1303,30 @@ export async function computeReadiness(
     "tests/unit/governed-canary.test.ts",
     "tests/security/governed-canary-boundary.test.ts",
   ];
+  const judgeStackSource = read("infra/aws/lib/archon-judge-stack.ts");
+  const runtimeControlSource = read(
+    "infra/aws/lambda/runtime-control/index.js"
+  );
+  const serverlessRuntimeControlBound =
+    judgeStackSource.includes(
+      "archon-${stage}-core-session-state-machine-arn"
+    ) &&
+    judgeStackSource.includes('id: "RuntimeControlFunction"') &&
+    judgeStackSource.includes('directory: "runtime-control"') &&
+    judgeStackSource.includes("CORE_SESSION_STATE_MACHINE_ARN:") &&
+    judgeStackSource.includes("addRuntimeControlPolicy(") &&
+    judgeStackSource.includes(
+      'sid: "StartOnlyCoreLifecycleCommands"'
+    ) &&
+    judgeStackSource.includes(
+      'actions: ["states:StartExecution"]'
+    ) &&
+    runtimeControlSource.includes(
+      "const coreStateMachineArn = process.env.CORE_SESSION_STATE_MACHINE_ARN;"
+    ) &&
+    runtimeControlSource.includes("async function coreCommand(") &&
+    runtimeControlSource.includes("new StartExecutionCommand({") &&
+    runtimeControlSource.includes('"START"');
   checks.push(
     check("I5", "originality", 8, "Closed-loop remediation is approval-, state-, and receipt-bound", () => ({
       ok:
@@ -1311,9 +1335,7 @@ export async function computeReadiness(
         read("src/remediation/control-loop.ts").includes("expectedBefore") &&
         read("src/remediation/receipt.ts").includes("previousHash") &&
         read("infra/aws/lambda/control/index.js").includes("DescribeExecutionCommand") &&
-        read("infra/aws/lib/archon-stack.ts").includes(
-          "ArchonRemediationWorkerServiceName"
-        ) &&
+        serverlessRuntimeControlBound &&
         read(".github/workflows/ci.yml").includes(
           "/app/dist/remediation-worker.js"
         ) &&
@@ -1324,7 +1346,7 @@ export async function computeReadiness(
           "workflow_run"
         ) &&
         read("web/src/api.ts").includes("/api/control-loops"),
-      evidence: `${remediationFiles.filter((rel) => existsSync(p(rel))).length}/${remediationFiles.length} control-loop modules/tests present; hosted start/status + isolated CI-proven workers + one-use approval + bounded recovery + hash-chain anchors detected`,
+      evidence: `${remediationFiles.filter((rel) => existsSync(p(rel))).length}/${remediationFiles.length} control-loop modules/tests present; serverless Judge/runtime-control binding=${serverlessRuntimeControlBound}; isolated CI-proven workers + one-use approval + bounded recovery + hash-chain anchors detected`,
     }))
   );
 
@@ -1419,14 +1441,18 @@ export async function computeReadiness(
   const flat = (s: string): string => s.replace(/\s+/g, " ");
   const readme = read("README.md");
   const design = read("docs/DESIGN.md");
+  const designVersionHistoryRecovery =
+    /version[- ]history/i.test(design) &&
+    design.includes("GenericAspectV3") &&
+    design.includes("fails closed");
   const hedged =
     flat(readme).includes("cannot fire from the MCP read tools alone") &&
     /version[- ]history/i.test(readme) &&
-    /version[- ]history/i.test(design);
+    designVersionHistoryRecovery;
   checks.push(
     check("SQ1", "submission-quality", 2, "Docs stay hedged AND document the version-history recovery", () => ({
       ok: hedged,
-      evidence: `README keeps the read-surface hedge + names version-history recovery; DESIGN references it = ${hedged}`,
+      evidence: `README keeps the read-surface hedge + names version-history recovery; DESIGN bounded GenericAspectV3 recovery=${designVersionHistoryRecovery}`,
     }))
   );
 
@@ -1598,11 +1624,30 @@ export async function computeReadiness(
   // L1 — a bounded load harness exists, is wired into CI, and its SLO is documented.
   const loadPresent = existsSync(p("load/audit.js"));
   const ciHasLoad = /\bload:/.test(ci) && ci.includes("npm run load");
-  const readmeSlo = /SLO/.test(read("README.md")) && /p95/i.test(read("README.md"));
+  const loadSource = read("load/audit.js");
+  const loadHarnessSlo =
+    loadSource.includes('const VUS = intEnv("LOAD_VUS", 10);') &&
+    loadSource.includes(
+      'const ITERATIONS = intEnv("LOAD_ITERATIONS", 200);'
+    ) &&
+    loadSource.includes(
+      'const P95_BUDGET_MS = intEnv("LOAD_P95_MS", 1500);'
+    ) &&
+    loadSource.includes("if (errors.length > 0)") &&
+    loadSource.includes("if (completed !== planned)") &&
+    loadSource.includes("if (p95 > P95_BUDGET_MS)");
+  const readmeSlo =
+    readme.includes("CI Offline SLO") &&
+    readme.includes("10 virtual users") &&
+    readme.includes("200 planned iterations") &&
+    readme.includes("p95 audit latency") &&
+    readme.includes("1,500 ms") &&
+    readme.includes("error rate") &&
+    readme.includes("completed iterations");
   checks.push(
-    check("L1", "technical-execution", 3, "Load test harness present, CI-gated, SLO documented", () => ({
-      ok: loadPresent && ciHasLoad && readmeSlo,
-      evidence: `load/audit.js=${loadPresent}; CI load job=${ciHasLoad}; README SLO(p95)=${readmeSlo}`,
+    check("L1", "technical-execution", 3, "Load test harness present, CI-gated, exact SLO documented", () => ({
+      ok: loadPresent && ciHasLoad && loadHarnessSlo && readmeSlo,
+      evidence: `load/audit.js=${loadPresent}; CI load job=${ciHasLoad}; harness defaults/gates=${loadHarnessSlo}; README exact CI Offline SLO=${readmeSlo}`,
     }))
   );
 

@@ -1,369 +1,148 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import {
-  canaryAuthBindingsDigest,
-  canaryEndpointBindingsDigest,
-  parseCanaryApprovalBindings,
-  parseCanaryIdentity,
-  parseRuntimeConfig,
-  rollbackDispositionForObservedDigest,
-  verifyCanaryApprovalBindings,
-  verifyFixtureBinding,
-  verifyRecoveryManifest,
-  type CanaryIdentity,
-  type FixtureBinding,
-  type RecoveryManifest,
+  canonicalize,
+  createRecoveryEvidence,
+  endpointBinding,
+  parseRecoveryManifest,
+  sealRecoveryManifest,
 } from "../../scripts/governed-canary.js";
-import { digest } from "../../src/remediation/integrity.js";
-import { createTagProjection } from "../../src/remediation/planner.js";
 
-const DATASET =
-  "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,TEST)";
+const dataset =
+  "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)";
+const digest = (character: string) => `sha256:${character.repeat(64)}`;
 
 function environment(): Record<string, string> {
   return {
     GITHUB_REPOSITORY: "upgradedev/archon-datahub",
-    GITHUB_RUN_ID: "12345",
-    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_SHA: "a".repeat(40),
     CANARY_SOURCE_WORKFLOW_RUN_ID: "12345",
-    CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: "1",
-    CANARY_DEPLOYMENT_RUN_ID: "98765",
-    CANARY_CONTROL_PLANE_GATES_SHA256: "c".repeat(64),
+    CANARY_SOURCE_WORKFLOW_RUN_ATTEMPT: "2",
+    CANARY_CONTROL_PLANE_GATES_SHA256: digest("1"),
     CANARY_RELEASE_SHA: "a".repeat(40),
-    CANARY_APPLICATION_URL: "https://example.cloudfront.net",
-    CANARY_EVIDENCE_BUCKET: "archon-governed-canary-evidence",
-    CANARY_COGNITO_CLIENT_ID: "canaryclient123",
-    CANARY_COGNITO_HOSTED_UI_ORIGIN:
-      "https://archon-staging.auth.eu-west-1.amazoncognito.com",
-    CANARY_DATASET_URN: DATASET,
-    CANARY_COLUMN_PATH: "email",
-    CANARY_QUERY: "archon_governed_canary_fixture",
-    CANARY_TAG_URN: "urn:li:tag:PII",
+    CANARY_DEPLOYMENT_RUN_ID: "45678",
+    CANARY_DEPLOYMENT_ARTIFACT_ID: "87654",
+    CANARY_DEPLOYMENT_ARTIFACT_DIGEST: digest("2"),
+    CANARY_DEPLOYMENT_EVIDENCE_SHA256: digest("3"),
+    CANARY_OBSERVATION_SHA256: digest("4"),
+    CANARY_APPLICATION_URL: "https://staging.archon-datahub.click",
+    CANARY_STACK_NAME: "Archon-staging-Judge",
+    CANARY_CLOUD_IMAGE_DIGEST: digest("5"),
     CANARY_ISOLATION_MARKER: "archon-canary",
-    CANARY_DATAHUB_READ_GMS_URL: "https://archon-canary.acryl.io",
-    CANARY_DATAHUB_READ_MCP_URL:
-      "https://archon-canary.acryl.io/integrations/ai/mcp/",
-    CANARY_DATAHUB_WRITE_GMS_URL: "https://archon-canary.acryl.io",
-    CANARY_DATAHUB_WRITE_MCP_URL:
-      "https://archon-canary.acryl.io/integrations/ai/mcp-write/",
+    CANARY_DATAHUB_READ_GMS_URL: "https://archon-canary.datahub.example",
+    CANARY_DATAHUB_READ_MCP_URL: "https://archon-canary.datahub.example/api/mcp",
+    CANARY_DATAHUB_WRITE_GMS_URL: "https://archon-canary.datahub.example/",
+    CANARY_DATAHUB_WRITE_MCP_URL: "https://archon-canary.datahub.example/api/mcp/",
   };
 }
 
-function fixtureBinding(identity: CanaryIdentity): FixtureBinding {
-  return {
-    schemaVersion: "archon.governed-canary-fixture-binding/v1",
-    repository: identity.repository,
-    releaseSha: identity.releaseSha,
-    workflowRunId: "54321",
-    workflowRunAttempt: "2",
-    artifactId: "24680",
-    artifactName: "datahub-canary-fixture-receipt-54321-2",
-    artifactDigest: `sha256:${"1".repeat(64)}`,
-    receiptSha256: "2".repeat(64),
-    stateContractSha256: "3".repeat(64),
-    postStateSha256: "4".repeat(64),
-    gmsEndpointFingerprint: "5".repeat(64),
-    isolationMarkerSha256: "6".repeat(64),
-    attestationPredicateSha256: "7".repeat(64),
-    target: {
-      query: "archon_governed_canary_fixture",
-      targetUrn: DATASET,
-    },
-  };
-}
+test("seals one canonical Cloud-only recovery manifest", async () => {
+  const manifest = await sealRecoveryManifest(
+    environment(),
+    "2026-08-02T10:00:00.000Z"
+  );
+  assert.equal(manifest.schemaVersion, "archon.governed-canary-recovery/v4");
+  assert.equal(manifest.runtime.profileId, "cloud");
+  assert.equal(manifest.runtime.resolution, "explicit");
+  assert.equal(manifest.runtime.stackName, "Archon-staging-Judge");
+  const exactTarget: {
+    readonly entityUrn: typeof dataset;
+    readonly columnPath: "customer_email";
+    readonly tagUrn: "urn:li:tag:PII";
+  } = manifest.target;
+  assert.deepEqual(exactTarget, manifest.target);  assert.equal(manifest.target.entityUrn, dataset);
+  assert.equal(manifest.target.columnPath, "customer_email");
+  assert.equal(manifest.target.tagUrn, "urn:li:tag:PII");
+  assert.deepEqual(JSON.parse(canonicalize(manifest as never)), manifest);
+  assert.deepEqual(await parseRecoveryManifest(manifest), manifest);
+});
 
-function recovery(identity: CanaryIdentity): RecoveryManifest {
-  const before = createTagProjection({
-    entityUrn: identity.datasetUrn,
-    columnPath: "email",
-    tags: [],
+test("rejects legacy stacks, endpoint spoofing and manifest tampering", async () => {
+  await assert.rejects(
+    () => sealRecoveryManifest({ ...environment(), CANARY_STACK_NAME: "Archon-staging" }),
+    /only Archon-staging-Judge/u
+  );
+  await assert.rejects(
+    () => endpointBinding({
+      ...environment(),
+      CANARY_DATAHUB_WRITE_MCP_URL:
+        "https://archon-canary.attacker.example/api/mcp",
+    }),
+    /one isolated DataHub Cloud tenant/u
+  );
+  const manifest = await sealRecoveryManifest(environment());
+  await assert.rejects(
+    () => parseRecoveryManifest({
+      ...manifest,
+      runtime: { ...manifest.runtime, profileId: "core" },
+    }),
+    /identity|digest/u
+  );
+});
+
+test("recovery evidence proves the exact PII-only inverse", async () => {
+  const manifest = await sealRecoveryManifest(environment());
+  const evidence = await createRecoveryEvidence({
+    manifest,
+    endpointBindingSha256: manifest.endpointBindingSha256,
+    before: {
+      entityUrn: dataset,
+      columnPath: "customer_email",
+      tags: ["urn:li:tag:Existing", "urn:li:tag:PII"],
+      digest: digest("6") as `sha256:${string}`,
+    },
+    after: {
+      entityUrn: dataset,
+      columnPath: "customer_email",
+      tags: ["urn:li:tag:Existing"],
+      digest: digest("7") as `sha256:${string}`,
+    },
+    mutation: { requestDigest: digest("8"), responseDigest: digest("9") },
+    recoveredAt: "2026-08-02T10:30:00.000Z",
   });
-  const after = createTagProjection({
-    entityUrn: identity.datasetUrn,
-    columnPath: "email",
-    tags: ["urn:li:tag:PII"],
-  });
-  const binding = fixtureBinding(identity);
-  const unsigned = {
-    schemaVersion: "archon.governed-canary-recovery/v3" as const,
-    repository: identity.repository,
-    workflowRunId: identity.workflowRunId,
-    workflowRunAttempt: identity.workflowRunAttempt,
-    deploymentRunId: identity.deploymentRunId,
-    controlPlaneGatesSha256: identity.controlPlaneGatesSha256,
-    releaseSha: identity.releaseSha,
-    applicationUrl: identity.applicationUrl,
-    evidenceBucket: identity.evidenceBucket,
-    authBindingsDigest: canaryAuthBindingsDigest(identity),
-    endpointBindingsDigest: canaryEndpointBindingsDigest(identity),
-    fixtureBinding: binding,
-    fixtureBindingDigest: digest(binding),
-    auditId: "b".repeat(64),
-    executionId:
-      "arn:aws:states:eu-west-1:111111111111:execution:archon-staging-control-loop:b".concat(
-        "b".repeat(63)
-    ),
-    approvalId: "approval-canary-123",
-    approvalExpiresAt: "2026-07-23T18:15:00.000Z",
-    evidenceDigest: digest("audit-evidence"),
-    planDigest: digest("canary-plan"),
-    target: {
-      entityUrn: identity.datasetUrn,
-      columnPath: "email" as const,
-      tagUrn: "urn:li:tag:PII" as const,
-    },
-    expectedBefore: before,
-    expectedAfter: after,
-    inverseAction: {
-      tool: "remove_tags" as const,
-      arguments: {
-        tag_urns: ["urn:li:tag:PII"] as ["urn:li:tag:PII"],
-        entity_urns: [identity.datasetUrn] as [string],
-        column_paths: ["email"] as ["email"],
+  assert.equal(evidence.disposition, "restored");
+  assert.equal(evidence.mutation.performed, true);
+  assert.match(evidence.digest, /^sha256:[a-f0-9]{64}$/u);
+
+  await assert.rejects(
+    () => createRecoveryEvidence({
+      manifest,
+      endpointBindingSha256: digest("0"),
+      before: {
+        entityUrn: dataset,
+        columnPath: "customer_email",
+        tags: [],
+        digest: digest("6") as `sha256:${string}`,
       },
-    },
-    preparedAt: "2026-07-23T18:00:00.000Z",
-  };
-  return { ...unsigned, recoveryDigest: digest(unsigned) };
-}
-
-test("governed canary accepts only the exact reviewed snowflake TEST fixture", () => {
-  const identity = parseCanaryIdentity(environment());
-  assert.equal(identity.datasetUrn, DATASET);
-  assert.equal(identity.columnPath, "email");
-  assert.equal(identity.tagUrn, "urn:li:tag:PII");
-});
-
-test("governed canary rejects production and arbitrary dataset targets", () => {
-  const production = environment();
-  production["CANARY_DATASET_URN"] =
-    "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,PROD)";
-  assert.throws(
-    () => parseCanaryIdentity(production),
-    /reviewed snowflake TEST fixture/u
-  );
-
-  const arbitrary = environment();
-  arbitrary["CANARY_DATASET_URN"] =
-    "urn:li:dataset:(urn:li:dataPlatform:snowflake,customers,TEST)";
-  assert.throws(
-    () => parseCanaryIdentity(arbitrary),
-    /reviewed snowflake TEST fixture/u
-  );
-});
-
-test("fixture binding is exact, content-addressed, and release-bound", () => {
-  const identity = parseCanaryIdentity(environment());
-  const binding = fixtureBinding(identity);
-  assert.deepEqual(verifyFixtureBinding(binding, identity), binding);
-
-  assert.throws(
-    () =>
-      verifyFixtureBinding(
-        { ...binding, receiptSha256: "8".repeat(64), extra: true },
-        identity
-      ),
-    /fixture binding is invalid/u
-  );
-  assert.throws(
-    () =>
-      verifyFixtureBinding(
-        {
-          ...binding,
-          target: {
-            ...binding.target,
-            targetUrn:
-              "urn:li:dataset:(urn:li:dataPlatform:snowflake,archon_governed_canary_fixture,DEV)",
-          },
-        },
-        identity
-      ),
-    /fixture binding is invalid/u
-  );
-});
-
-test("governed canary rejects endpoints outside its dedicated tenant marker", () => {
-  const unsafe = environment();
-  unsafe["CANARY_DATAHUB_WRITE_MCP_URL"] =
-    "https://production.acryl.io/integrations/ai/mcp/";
-  assert.throws(() => parseCanaryIdentity(unsafe), /dedicated canary tenant/u);
-
-  const substringSpoof = environment();
-  substringSpoof["CANARY_DATAHUB_WRITE_MCP_URL"] =
-    "https://evil-archon-canary.acryl.io/integrations/ai/mcp/";
-  assert.throws(
-    () => parseCanaryIdentity(substringSpoof),
-    /dedicated canary tenant/u
-  );
-});
-
-test("runtime Cognito client and origin must equal the sealed staging outputs", () => {
-  const identity = parseCanaryIdentity(environment());
-  const config = {
-    schemaVersion: 1,
-    auth: {
-      clientId: identity.cognitoClientId,
-      authorizationEndpoint: `${identity.cognitoHostedUiOrigin}/oauth2/authorize`,
-      tokenEndpoint: `${identity.cognitoHostedUiOrigin}/oauth2/token`,
-      redirectUri: `${identity.applicationUrl}/`,
-      scopes: ["openid", "email", "archon/approve"],
-    },
-  };
-  assert.deepEqual(parseRuntimeConfig(config, identity), config);
-
-  assert.throws(
-    () =>
-      parseRuntimeConfig(
-        {
-          ...config,
-          auth: { ...config.auth, clientId: "differentclient123" },
-        },
-        identity
-      ),
-    /sealed staging outputs/u
-  );
-  assert.throws(
-    () =>
-      parseRuntimeConfig(
-        {
-          ...config,
-          auth: {
-            ...config.auth,
-            authorizationEndpoint:
-              "https://attacker.example/oauth2/authorize",
-            tokenEndpoint: "https://attacker.example/oauth2/token",
-          },
-        },
-        identity
-      ),
-    /sealed staging outputs/u
-  );
-});
-
-test("rollback recovery is content-addressed and rejects target tampering", () => {
-  const identity = parseCanaryIdentity(environment());
-  const manifest = recovery(identity);
-  assert.deepEqual(verifyRecoveryManifest(manifest, identity), manifest);
-
-  const tampered = structuredClone(manifest);
-  tampered.target.entityUrn =
-    "urn:li:dataset:(urn:li:dataPlatform:snowflake,customers,TEST)";
-  assert.throws(
-    () => verifyRecoveryManifest(tampered, identity),
-    /invalid or does not match/u
-  );
-
-  const fixtureTampered = structuredClone(manifest);
-  fixtureTampered.fixtureBinding.receiptSha256 = "8".repeat(64);
-  const {
-    recoveryDigest: _discardedRecoveryDigest,
-    ...fixtureTamperedUnsigned
-  } = fixtureTampered;
-  fixtureTampered.recoveryDigest = digest(fixtureTamperedUnsigned);
-  assert.throws(
-    () => verifyRecoveryManifest(fixtureTampered, identity),
-    /invalid or does not match/u
-  );
-
-  const differentClient = environment();
-  differentClient["CANARY_COGNITO_CLIENT_ID"] = "otherclient123";
-  assert.throws(
-    () =>
-      verifyRecoveryManifest(
-        manifest,
-        parseCanaryIdentity(differentClient)
-    ),
-    /invalid or does not match/u
-  );
-
-  const differentControlPlane = environment();
-  differentControlPlane["CANARY_CONTROL_PLANE_GATES_SHA256"] = "d".repeat(64);
-  assert.throws(
-    () =>
-      verifyRecoveryManifest(
-        manifest,
-        parseCanaryIdentity(differentControlPlane)
-      ),
-    /invalid or does not match/u
-  );
-});
-
-test("protected approval bindings match the exact recovery artifact", () => {
-  const identity = parseCanaryIdentity(environment());
-  const manifest = recovery(identity);
-  const source = {
-    CANARY_EXPECTED_AUDIT_ID: manifest.auditId,
-    CANARY_EXPECTED_PLAN_DIGEST: manifest.planDigest,
-    CANARY_EXPECTED_RECOVERY_DIGEST: manifest.recoveryDigest,
-  };
-  const bindings = parseCanaryApprovalBindings(source);
-  assert.deepEqual(bindings, {
-    auditId: manifest.auditId,
-    planDigest: manifest.planDigest,
-    recoveryDigest: manifest.recoveryDigest,
-  });
-  assert.doesNotThrow(() =>
-    verifyCanaryApprovalBindings(manifest, bindings)
-  );
-
-  assert.throws(
-    () =>
-      parseCanaryApprovalBindings({
-        ...source,
-        CANARY_EXPECTED_AUDIT_ID: "not-an-audit-id",
-      }),
-    /protected approval bindings are invalid/u
-  );
-  const mismatches: Array<{
-    label: string;
-    bindings: typeof bindings;
-  }> = [
-    {
-      label: "audit ID",
-      bindings: { ...bindings, auditId: "c".repeat(64) },
-    },
-    {
-      label: "plan digest",
-      bindings: {
-        ...bindings,
-        planDigest: digest("different-approved-plan"),
+      after: {
+        entityUrn: dataset,
+        columnPath: "customer_email",
+        tags: [],
+        digest: digest("7") as `sha256:${string}`,
       },
-    },
-    {
-      label: "recovery digest",
-      bindings: {
-        ...bindings,
-        recoveryDigest: digest("different-recovery-artifact"),
-      },
-    },
-  ];
-  for (const mismatch of mismatches) {
-    assert.throws(
-      () => verifyCanaryApprovalBindings(manifest, mismatch.bindings),
-      /does not match the protected approval bindings/u,
-      `${mismatch.label} must remain bound to the protected gate`
-    );
-  }
-});
+      recoveredAt: "2026-08-02T10:30:00.000Z",
+    }),
+    /sealed endpoint binding/u
+  );
 
-test("rollback is idempotent for exact before state and rejects divergence", () => {
-  const before = digest("before");
-  const after = digest("after");
-  assert.equal(
-    rollbackDispositionForObservedDigest(before, before, after),
-    "ALREADY_RESTORED"
-  );
-  assert.equal(
-    rollbackDispositionForObservedDigest(after, before, after),
-    "ROLLED_BACK"
-  );
-  assert.throws(
-    () =>
-      rollbackDispositionForObservedDigest(
-        digest("divergent"),
-        before,
-        after
-      ),
-    /outside the exact before\/after bindings/u
+  await assert.rejects(
+    () => createRecoveryEvidence({
+      manifest,
+      endpointBindingSha256: manifest.endpointBindingSha256,
+      before: {
+        entityUrn: dataset,
+        columnPath: "customer_email",
+        tags: ["urn:li:tag:PII"],
+        digest: digest("a") as `sha256:${string}`,
+      },
+      after: {
+        entityUrn: dataset,
+        columnPath: "customer_email",
+        tags: ["urn:li:tag:PII"],
+        digest: digest("b") as `sha256:${string}`,
+      },
+      recoveredAt: "2026-08-02T10:30:00.000Z",
+    }),
+    /exact pre-canary baseline/u
   );
 });

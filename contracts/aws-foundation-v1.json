@@ -40,6 +40,20 @@
     "foundationPolicies": {
       "sourceBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
       "migrationContract": "contracts/aws-foundation-policy-migration-v1.json",
+      "identityRoleMigration": {
+        "contract": "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+        "workflow": ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml",
+        "policyName": "archon-aws-foundation-identity",
+        "baselineDefaultVersion": "v1",
+        "baselineCanonicalSha256": "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+        "targetVersion": "v2",
+        "targetCanonicalSha256": "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+        "exactRoleDelta": [
+          "archon-datahub-github-staging-cloud-trial",
+          "archon-datahub-github-production-cloud-trial",
+          "archon-datahub-cloud-runtime-publish-production"
+        ]
+      },
       "sourceBundleAttachable": false,
       "renderer": "scripts/render-aws-foundation-policy.mjs",
       "maximumDocumentBytes": 6144,
@@ -115,7 +129,117 @@
       "production": {
         "roleName": "archon-datahub-github-production-deploy",
         "stackName": "Archon-GitHub-Production-Deploy-Role"
+      },
+      "dataHubCloudTrial": {
+        "workflow": ".github/workflows/datahub-cloud-trial.yml",
+        "stackNameTemplate": "Archon-<stage>-Judge",
+        "stackOutputs": [
+          "ArchonCloudReaderSecretArn",
+          "ArchonCloudWriterSecretArn",
+          "ArchonSecretsKeyArn"
+        ],
+        "foundationRole": {
+          "stackNameTemplate": "Archon-GitHub-<stage>-Deploy-Role",
+          "stackOutputs": [
+            "GitHubDataHubCloudTrialRoleArn",
+            "GitHubDataHubCloudTrialRoleName"
+          ],
+          "workflowOutputs": {
+            "staging": "steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn",
+            "production": "steps.reconcile.outputs.datahub_cloud_trial_production_role_arn"
+          }
+        },
+        "permissions": {
+          "describeStack": "exact stage Judge stack",
+          "getSecretValue": "exact retained reader secret only",
+          "putSecretValue": "exact reader and writer secrets only",
+          "describeKey": "alias/archon/<stage>/judge-secrets",
+          "cryptoActions": [
+            "kms:Decrypt",
+            "kms:GenerateDataKey"
+          ],
+          "viaService": "secretsmanager.eu-west-1.amazonaws.com",
+          "encryptionContext": "exact reader or writer secret ARN",
+          "describeSecret": "exact reader and writer secrets, version labels only",
+          "updateSecretVersionStage": "exact reader and writer secrets only"
+        },
+        "forbidden": [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:GetSecretValue on writer",
+          "kms:Encrypt",
+          "iam:*",
+          "broad deployment role reuse",
+          "sts:AssumeRole"
+        ],
+        "roleNameTemplate": "archon-datahub-github-<stage>-cloud-trial",
+        "roleVariable": "AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN",
+        "dedicatedRoleRequired": true,
+        "oidcSubjectTemplate": "repo:upgradedev/archon-datahub:environment:<stage>",
+        "versionCommit": {
+          "stagingLabel": "archon-trial-<run-id>-<run-attempt>",
+          "stageBothBeforePromotion": true,
+          "verifyVersionIdsBeforeAndAfterPromotion": true,
+          "rollbackAndRevokeGeneratedTokensOnFailure": true,
+          "finalProviderTokenInventoryRequired": true
+        }
       }
+    },
+    "cloudRuntimePublisher": {
+      "environment": "production",
+      "condition": "IsProduction",
+      "stackName": "Archon-GitHub-Production-Deploy-Role",
+      "roleName": "archon-datahub-cloud-runtime-publish-production",
+      "roleVariable": "AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN",
+      "foundationWorkflowOutput": "steps.reconcile.outputs.cloud_runtime_publisher_role_arn",
+      "stackOutputs": [
+        "CloudRuntimeImagePublisherRoleArn",
+        "CloudRuntimeImagePublisherRoleName"
+      ],
+      "workflow": {
+        "path": ".github/workflows/datahub-cloud-runtime-image.yml",
+        "name": "DataHub Cloud runtime OCI v2",
+        "branch": "master",
+        "preTrustWorkflowRef": "upgradedev/archon-datahub/.github/workflows/datahub-cloud-runtime-image.yml@refs/heads/master"
+      },
+      "oidcClaims": {
+        "aud": "sts.amazonaws.com",
+        "sub": "repo:upgradedev/archon-datahub:environment:production",
+        "repository": "upgradedev/archon-datahub",
+        "environment": "production",
+        "ref": "refs/heads/master",
+        "workflow": "DataHub Cloud runtime OCI v2",
+        "workflowRefInIam": false
+      },
+      "maximumSessionDurationSeconds": 3600,
+      "workflowRequestedSessionSeconds": 1800,
+      "repository": "archon-datahub-cloud-runtime-v2",
+      "region": "eu-west-1",
+      "inlinePolicyName": "archon-datahub-cloud-runtime-ecr-publish",
+      "allowedActions": [
+        "ecr:GetAuthorizationToken",
+        "ecr:CreateRepository",
+        "ecr:TagResource",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchDeleteImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:DescribeRepositories",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "requiredRepositoryTags": {
+        "archon:component": "datahub-cloud-runtime-v2",
+        "archon:owner": "github-actions"
+      },
+      "forbiddenActions": [
+        "ecr:DeleteRepository",
+        "ecr:PutLifecyclePolicy",
+        "ecr:SetRepositoryPolicy",
+        "iam:*",
+        "kms:*"
+      ]
     },
     "operationalRoles": {
       "judgeAccess": {
@@ -221,7 +345,9 @@
           "roleName": "archon-datahub-github-governed-canary-recovery",
           "variable": "AWS_CANARY_RECOVERY_ROLE_ARN",
           "permissions": [
-            "cloudformation:DescribeStacks"
+            "cloudformation:DescribeStacks",
+            "secretsmanager:GetSecretValue",
+            "kms:Decrypt"
           ]
         }
       }
@@ -247,10 +373,39 @@
       "route53VpcArnConditionAllowed": false,
       "disassociateVpcFromHostedZoneAllowed": false
     },
+    "applicationStackRoleBinding": {
+      "deployRoleArnTemplate": "arn:aws:iam::<account-id>:role/archon-datahub-github-<stage>-deploy",
+      "postDeploy": {
+        "allowAbsent": false,
+        "allowRoleMigration": false
+      },
+      "preflight": {
+        "allowAbsent": true,
+        "allowRoleMigration": false
+      },
+      "validator": "scripts/validate-cloudformation-role-bindings.sh"
+    },
     "stages": {
       "staging": {
         "bootstrapStackName": "CDKToolkit-archonstg",
         "qualifier": "archonstg",
+        "applicationStackRoleBindings": [
+          {
+            "stackName": "Archon-staging-Edge",
+            "region": "us-east-1",
+            "bootstrapQualifier": "archonstg"
+          },
+          {
+            "stackName": "Archon-staging-Core",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonstg"
+          },
+          {
+            "stackName": "Archon-staging-Judge",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonstg"
+          }
+        ],
         "executionPolicyNames": [
           "archon-datahub-cdk-guard-staging",
           "archon-datahub-cdk-identity-staging",
@@ -286,6 +441,23 @@
       "production": {
         "bootstrapStackName": "CDKToolkit-archonprd",
         "qualifier": "archonprd",
+        "applicationStackRoleBindings": [
+          {
+            "stackName": "Archon-production-Edge",
+            "region": "us-east-1",
+            "bootstrapQualifier": "archonprd"
+          },
+          {
+            "stackName": "Archon-production-Core",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonprd"
+          },
+          {
+            "stackName": "Archon-production-Judge",
+            "region": "eu-west-1",
+            "bootstrapQualifier": "archonprd"
+          }
+        ],
         "executionPolicyNames": [
           "archon-datahub-cdk-guard-production",
           "archon-datahub-cdk-identity-production",
@@ -329,64 +501,222 @@
       "schemaVersion": "archon.aws-runtime-boundary/v1",
       "policyNameTemplate": "archon-datahub-runtime-boundary-<stage>",
       "allowedActions": [
-        "bedrock-mantle:CallWithBearerToken",
-        "bedrock-mantle:CreateInference",
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:TransactWriteItems",
-        "dynamodb:UpdateItem",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:BatchGetImage",
-        "ecr:GetAuthorizationToken",
-        "ecr:GetDownloadUrlForLayer",
-        "kms:Decrypt",
-        "kms:Describe*",
-        "kms:Encrypt",
-        "kms:GenerateDataKey*",
-        "kms:ReEncrypt*",
-        "logs:CreateLogDelivery",
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:DeleteLogDelivery",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:DescribeResourcePolicies",
-        "logs:GetLogDelivery",
-        "logs:ListLogDeliveries",
-        "logs:PutLogEvents",
-        "logs:PutResourcePolicy",
-        "logs:UpdateLogDelivery",
-        "s3:GetObject",
-        "s3:GetObjectAttributes",
-        "s3:GetObjectVersion",
-        "s3:PutObject",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:GetSecretValue",
-        "sqs:ChangeMessageVisibility",
-        "sqs:DeleteMessage",
-        "sqs:GetQueueAttributes",
-        "sqs:GetQueueUrl",
-        "sqs:ReceiveMessage",
-        "sqs:SendMessage",
-        "states:DescribeExecution",
-        "states:SendTaskFailure",
-        "states:SendTaskHeartbeat",
-        "states:SendTaskSuccess",
-        "states:StartExecution",
-        "xray:GetSamplingRules",
-        "xray:GetSamplingTargets",
-        "xray:PutTelemetryRecords",
-        "xray:PutTraceSegments"
-      ],
-      "approvedAwsManagedPolicies": {
+      "autoscaling:UpdateAutoScalingGroup",
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+
+
+      "cloudwatch:PutMetricData",
+      "dynamodb:DescribeStream",
+      "dynamodb:DescribeTable",
+      "dynamodb:GetItem",
+      "dynamodb:GetRecords",
+      "dynamodb:GetShardIterator",
+      "dynamodb:ListStreams",
+      "dynamodb:PutItem",
+      "dynamodb:Query",
+      "dynamodb:TransactWriteItems",
+      "dynamodb:UpdateItem",
+      "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:CreateTags",
+      "ec2:CreateVpcEndpoint",
+      "ec2:DeleteVpcEndpoints",
+      "ec2:DescribeImages",
+      "ec2:DescribeVpcEndpoints",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:RevokeSecurityGroupIngress",
+
+
+
+
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:GenerateDataKey*",
+      "kms:GetPublicKey",
+      "kms:ReEncrypt*",
+      "kms:Sign",
+      "lambda:InvokeFunction",
+      "logs:CreateLogDelivery",
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:DeleteLogDelivery",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
+
+      "logs:DescribeResourcePolicies",
+      "logs:GetLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutLogEvents",
+      "logs:PutResourcePolicy",
+      "logs:UpdateLogDelivery",
+      "s3:DeleteObjectVersion",
+      "s3:GetBucketVersioning",
+
+
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+
+      "secretsmanager:GetSecretValue",
+
+
+      "sqs:GetQueueAttributes",
+      "sqs:GetQueueUrl",
+
+      "sqs:SendMessage",
+
+
+
+
+      "states:StartExecution",
+      "sts:AssumeRole",
+      "sts:GetCallerIdentity",
+      "xray:GetSamplingRules",
+      "xray:GetSamplingTargets",
+      "xray:PutTelemetryRecords",
+      "xray:PutTraceSegments"
+    ],
+    "approvedAwsManagedPolicies": {
         "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole": [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
+        ]
+      }
+    },
+    "coreAmiFoundation": {
+      "stackName": "Archon-DataHub-Core-AMI-Builder-Foundation",
+      "template": "infra/aws/foundation/datahub-core-ami-builder.yml",
+      "region": "eu-west-1",
+      "terminationProtection": true,
+      "idleAwsCost": "zero",
+      "reconciler": "scripts/reconcile-datahub-core-ami-foundation.sh",
+      "evidenceSchemaVersion": "archon.aws-core-ami-foundation-evidence/v1",
+      "policyMigration": {
+        "contract": "contracts/aws-foundation-core-ami-policy-migration-v1.json",
+        "workflow": ".github/workflows/aws-foundation-core-ami-policy-migration.yml",
+        "policyName": "archon-aws-foundation-control",
+        "baselineDefaultVersion": "v2",
+        "baselineCanonicalSha256": "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b",
+        "targetVersion": "v3",
+        "deltaSids": [
+          "ReconcileExactCoreAmiFoundationStack",
+          "ReconcileExactCoreAmiFoundationRoles",
+          "ReconcileExactCoreAmiBuilderProfile",
+          "AttachExactCoreAmiBuilderSsmPolicy",
+          "PassExactCoreAmiBuilderRoleForProfile"
+        ]
+      },
+      "githubBuildRole": {
+        "roleName": "archon-datahub-core-ami-build-staging",
+        "variable": "AWS_CORE_AMI_BUILD_ROLE_ARN",
+        "stackOutput": "GitHubCoreAmiBuildRoleArn",
+        "foundationWorkflowOutput": "steps.core_ami_foundation.outputs.build_role_arn",
+        "environment": "staging",
+        "maxSessionDurationSeconds": 7200,
+        "workflowRequestedSessionSeconds": 7200,
+        "policyContract": "infra/aws/packer/datahub-core-ami-builder-policy-contract.json",
+        "packerAmazonPluginVersion": "1.8.0",
+        "requestTagObservation": {
+          "action": "cloudtrail:LookupEvents",
+          "resource": "*",
+          "resourceScopeReason": "aws-action-does-not-support-resource-level-permissions",
+          "region": "eu-west-1",
+          "events": [
+            "CreateKeyPair",
+            "CreateSecurityGroup",
+            "RunInstances"
+          ],
+          "principalBinding": "exact-oidc-role-session-and-build-window",
+          "evidenceSchemaVersion": "archon.packer-request-tag-proof/v1",
+          "buildIdPattern": "^[1-9][0-9]{0,19}$",
+          "requiredTags": {
+            "Application": "archon-datahub",
+            "Environment": "staging",
+            "ManagedBy": "github-actions",
+            "archon:Purpose": "datahub-core-ami",
+            "archon:BuildRun": "exact-buildId"
+          },
+          "sanitizedProjection": [
+            "eventName",
+            "eventTime",
+            "awsRegion",
+            "roleSessionName",
+            "requestTagSpecifications"
+          ],
+          "accountBinding": "validate-active-caller-then-omit-before-digest",
+          "retainedEvidence": "sanitized-counts-and-canonical-digests-only"
+        },
+        "inlinePolicyName": "archon-datahub-core-ami-build",
+        "tags": {
+          "Application": "archon-datahub",
+          "Environment": "staging",
+          "ManagedBy": "aws-foundation",
+          "archon:Purpose": "datahub-core-ami-build"
+        },
+        "trust": {
+          "audience": "sts.amazonaws.com",
+          "subject": "repo:upgradedev/archon-datahub:environment:staging",
+          "repository": "upgradedev/archon-datahub",
+          "environment": "staging",
+          "ref": "refs/heads/master",
+          "workflowRef": "upgradedev/archon-datahub/.github/workflows/datahub-core-ami.yml@refs/heads/master"
+        },
+        "inlinePolicyCharacterLimit": 10240,
+        "inlinePolicySizeValidation": "compact-live-policy-document-before-evidence"
+      },
+      "ec2Builder": {
+        "roleName": "archon-datahub-core-ami-builder-staging",
+        "instanceProfileName": "archon-datahub-core-ami-builder-staging",
+        "instanceProfileVariable": "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE",
+        "stackOutputs": [
+          "CoreAmiBuilderRoleArn",
+          "CoreAmiBuilderInstanceProfileName",
+          "CoreAmiBuilderInstanceProfileArn"
+        ],
+        "instanceProfileFoundationWorkflowOutput": "steps.core_ami_foundation.outputs.instance_profile",
+        "maxSessionDurationSeconds": 3600,
+        "attachedManagedPolicies": [
+          "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        ],
+        "inlinePolicyCount": 0,
+        "tags": {
+          "Application": "archon-datahub",
+          "Environment": "staging",
+          "ManagedBy": "aws-foundation",
+          "archon:Purpose": "datahub-core-ami-builder"
+        },
+        "profileTagging": {
+          "cloudFormationNative": false,
+          "method": "foundation-reconciler-exact-iam-tag-instance-profile",
+          "extraOrMismatchedTags": "fail-closed"
+        }
+      },
+      "baseImage": {
+        "ssmParameter": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+        "parameterArn": "arn:aws:ssm:eu-west-1::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64",
+        "ownerAccount": "137112412989"
+      },
+      "ephemeralBoundary": {
+        "purposeTag": "datahub-core-ami",
+        "buildRunTag": "numeric-github-run-id",
+        "region": "eu-west-1",
+        "publicIngressAllowed": false,
+        "workflowIamMutationAllowed": false,
+        "successfulRetention": [
+          "one tagged AMI",
+          "snapshots referenced by that AMI"
+        ],
+        "failureRetention": []
+      },
+      "githubEnvironment": {
+        "name": "staging",
+        "requiredVariables": [
+          "AWS_ACCOUNT_ID",
+          "AWS_REGION",
+          "AWS_CORE_AMI_BUILD_ROLE_ARN",
+          "AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE"
         ]
       }
     }
@@ -453,7 +783,9 @@
         "detectionStatus": "DETECTION_COMPLETE",
         "stackDriftStatus": "IN_SYNC",
         "driftedStackResourceCount": 0,
-        "returnedResourceStatuses": ["IN_SYNC"]
+        "returnedResourceStatuses": [
+          "IN_SYNC"
+        ]
       },
       "failureMode": "fail-closed",
       "rawAwsStderr": "suppressed",
@@ -520,7 +852,8 @@
       ]
     },
     "applicationStackRolePreflight": {
-      "entryCount": 5,
+      "entryCount": 6,
+      "perStageDeployEntryCount": 3,
       "allowedEntryValidations": [
         "passed",
         "requires-explicit-deploy-migration"

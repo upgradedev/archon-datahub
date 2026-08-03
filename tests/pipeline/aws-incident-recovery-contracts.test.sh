@@ -214,7 +214,7 @@ jq --exit-status '
     ],
     rejectionPoint: "before-PutRolePolicy"
   } and
-  .recoveryRole.stackTemplateSourceSha256 == "0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4" and
+  .recoveryRole.stackTemplateSourceSha256 == "0c636d2af933c03b7752334fd4998141355564696ba08c81e06bda8bb459df73" and
   .recoveryRole.baselinePolicyUnchanged == true and
   .recoveryRole.foundationRolePolicyBroadening == "forbidden" and
   .recoveryRole.attachedManagedPolicies == "forbidden" and
@@ -380,6 +380,8 @@ for blob in "${driver_lock}" "${foundation_inner_lock}"; do
 done
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
+  'deployment-evidence-${{ inputs.stage }}-${{ inputs.release_sha }}-${{ github.run_id }}'
+forbid_text "${deploy_workflow}" \
   '/actions/workflows/governed-canary.yml/dispatches'
 for workflow in "${fixture_workflow}" "${canary_workflow}" "${canary_recovery_workflow}"; do
   lock="$(sed -n '/^concurrency:/,/^env:/p' "${workflow}" | sed '$d')"
@@ -497,7 +499,7 @@ forbid_text "${cleanup_workflow}" 'cloudformation delete-stack' 'delete-stack'
 forbid_text "${reconciler}" 'cloudformation delete-stack' 'delete-stack' 'continue-update-rollback'
 
 test "$(sha256sum "${canary_roles}" | awk '{print $1}')" = \
-  '0ab7fc740588232d25c16f92ccf636e45a80b7d4c1b7d8f462b853ea3c9e75c4' || \
+  '0c636d2af933c03b7752334fd4998141355564696ba08c81e06bda8bb459df73' || \
   fail 'governed-canary role source changed'
 
 require_text "${ci}" \

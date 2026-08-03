@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archon.aws.iac-trivy-exceptions.v1",
+  "scanner": {
+    "name": "Trivy",
+    "version": "0.72.0"
+  },
+  "reviewBy": "2027-08-01",
+  "policy": "Exact evidence-bound exceptions only. Missing expected results, unreviewed findings, scanner drift, resource drift, or weakened synthesized controls fail CI.",
+  "exceptions": [
+    {
+      "stage": "staging",
+      "ruleId": "AWS-0011",
+      "sarifLevel": "error",
+      "severity": "HIGH",
+      "template": "staging/Archon-staging-Judge.template.json",
+      "resourceLogicalIdPattern": "^JudgeDistribution[A-F0-9]{8}$",
+      "resourcePath": "Archon-staging-Judge/JudgeDistribution/Resource",
+      "resourceType": "AWS::CloudFront::Distribution",
+      "evidenceKind": "cross-stack-waf-reference",
+      "rationale": "The distribution imports the exact CLOUDFRONT-scope WAF ARN through a constrained CloudFormation parameter; Trivy 0.72.0 does not resolve the Ref."
+    },
+    {
+      "stage": "staging",
+      "ruleId": "AWS-0190",
+      "sarifLevel": "note",
+      "severity": "LOW",
+      "template": "staging/Archon-staging-Judge.template.json",
+      "resourceLogicalIdPattern": "^JudgeApiDeploymentStagestaging[A-F0-9]{8}$",
+      "resourcePath": "Archon-staging-Judge/JudgeApi/DeploymentStage.staging/Resource",
+      "resourceType": "AWS::ApiGateway::Stage",
+      "evidenceKind": "authenticated-zero-ttl-control-api",
+      "rationale": "The control API is intentionally dynamic and authenticated; API Gateway caching is disabled and CloudFront forwards Authorization through a dedicated zero-TTL cache policy."
+    },
+    {
+      "stage": "production",
+      "ruleId": "AWS-0011",
+      "sarifLevel": "error",
+      "severity": "HIGH",
+      "template": "production/Archon-production-Judge.template.json",
+      "resourceLogicalIdPattern": "^JudgeDistribution[A-F0-9]{8}$",
+      "resourcePath": "Archon-production-Judge/JudgeDistribution/Resource",
+      "resourceType": "AWS::CloudFront::Distribution",
+      "evidenceKind": "cross-stack-waf-reference",
+      "rationale": "The distribution imports the exact CLOUDFRONT-scope WAF ARN through a constrained CloudFormation parameter; Trivy 0.72.0 does not resolve the Ref."
+    },
+    {
+      "stage": "production",
+      "ruleId": "AWS-0190",
+      "sarifLevel": "note",
+      "severity": "LOW",
+      "template": "production/Archon-production-Judge.template.json",
+      "resourceLogicalIdPattern": "^JudgeApiDeploymentStageproduction[A-F0-9]{8}$",
+      "resourcePath": "Archon-production-Judge/JudgeApi/DeploymentStage.production/Resource",
+      "resourceType": "AWS::ApiGateway::Stage",
+      "evidenceKind": "authenticated-zero-ttl-control-api",
+      "rationale": "The control API is intentionally dynamic and authenticated; API Gateway caching is disabled and CloudFront forwards Authorization through a dedicated zero-TTL cache policy."
+    }
+  ]
+}

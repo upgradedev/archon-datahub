@@ -1,1878 +1,978 @@
-name: Live DataHub proof
+name: Live dual-runtime DataHub proof
 
-run-name: Prove deployed release ${{ inputs.release_sha }}
+run-name: Prove ${{ inputs.profile }} runtime for ${{ inputs.release_sha }}
 
 on:
   workflow_dispatch:
     inputs:
+      stage:
+        description: Exact deployed environment
+        required: true
+        type: choice
+        options: [staging, production]
       release_sha:
-        description: Exact deployed 40-character default-branch commit SHA
+        description: Exact deployed merged master SHA
         required: true
         type: string
       deployment_run_id:
-        description: Successful Deploy immutable AWS release run for that SHA
+        description: Successful lean deploy workflow run ID
         required: true
+        type: string
+      deployment_artifact_id:
+        description: Exact deployment-evidence artifact ID
+        required: true
+        type: string
+      deployment_artifact_digest:
+        description: Exact GitHub sha256 artifact digest
+        required: true
+        type: string
+      governed_canary_run_id:
+        description: Successful governed-canary workflow run ID that proves rollback
+        required: true
+        type: string
+      profile:
+        description: Runtime binding to prove
+        required: true
+        type: choice
+        options: [cloud, core]
+      runtime_session_id:
+        description: Required only for Core; active judge runtime session ID
+        required: false
         type: string
       query:
-        description: Narrow query that resolves exactly one demo dataset
+        description: Exact canonical synthetic dataset URN
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: live-datahub-proof
+  group: live-datahub-proof-${{ inputs.stage }}-${{ inputs.profile }}
   cancel-in-progress: false
 
 jobs:
-  prove-live-path:
+  prove:
+    name: Bind deployment, runtime health, and semantic proof
     if: >-
       github.repository == 'upgradedev/archon-datahub' &&
       github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
+    environment:
+      name: ${{ inputs.stage }}
     permissions:
       actions: read
       attestations: write
       contents: read
       id-token: write
-    environment: datahub-demo
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STAGE: ${{ inputs.stage }}
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      DEPLOYMENT_ARTIFACT_ID: ${{ inputs.deployment_artifact_id }}
+      DEPLOYMENT_ARTIFACT_DIGEST: ${{ inputs.deployment_artifact_digest }}
+      GOVERNED_CANARY_RUN_ID: ${{ inputs.governed_canary_run_id }}
+      PROFILE: ${{ inputs.profile }}
+      RUNTIME_SESSION_ID: ${{ inputs.runtime_session_id }}
+      ARCHON_DEMO_QUERY: ${{ inputs.query }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Validate immutable proof coordinates
+        run: |
+          set -euo pipefail
+          [[ "${STAGE}" =~ ^(staging|production)$ ]]
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${DEPLOYMENT_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEPLOYMENT_ARTIFACT_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${DEPLOYMENT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${GOVERNED_CANARY_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${PROFILE}" =~ ^(cloud|core)$ ]]
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha)" = \
+            "${RELEASE_SHA}"
+          canonical_query="$(jq -er '.binding.targetUrn' contracts/datahub-demo-state-v1.json)"
+          test "${ARCHON_DEMO_QUERY}" = "${canonical_query}"
+          if [[ "${PROFILE}" == core ]]; then
+            [[ "${RUNTIME_SESSION_ID}" =~ ^rs_[A-Za-z0-9_-]{43}$ ]]
+          else
+            test -z "${RUNTIME_SESSION_ID}"
+          fi
+
+      - name: Validate Cloud proof identity inputs before OIDC
+        if: inputs.profile == 'cloud'
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          DATAHUB_CLOUD_GMS_URL: ${{ vars.DATAHUB_CLOUD_GMS_URL }}
+        run: |
+          set -euo pipefail
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${AWS_REGION_VALUE}" = "eu-west-1"
+          expected_role="arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-cloud-trial"
+          test "${AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN}" = "${expected_role}"
+          [[ "${DATAHUB_CLOUD_GMS_URL}" =~ ^https://[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.acryl\.io/gms$ ]]
+
+      - name: Bind current green GitHub control plane
+        env:
+          ATTEMPTS: "40"
+          BACKOFF_SECONDS: "15"
+          OUTPUT_PATH: ${{ runner.temp }}/live-proof/control-plane-gates.json
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/live-proof"
+          bash scripts/verify-github-control-plane.sh
+
+      - name: Download and verify exact deployment evidence
+        id: deployment
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/live-proof/deployment"
+          mkdir -p "${root}"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}")"
+          jq -e --arg sha "${RELEASE_SHA}" '
+            .path == ".github/workflows/deploy.yml" and
+            .event == "workflow_dispatch" and
+            .head_branch == "master" and .head_sha == $sha and
+            .status == "completed" and .conclusion == "success"
+          ' <<<"${run_json}" >/dev/null
+          artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${DEPLOYMENT_ARTIFACT_ID}")"
+          expected_name="deployment-evidence-${STAGE}-${RELEASE_SHA}-${DEPLOYMENT_RUN_ID}"
+          jq -e \
+            --arg name "${expected_name}" \
+            --arg digest "${DEPLOYMENT_ARTIFACT_DIGEST}" \
+            --argjson run "${DEPLOYMENT_RUN_ID}" '
+              .name == $name and .digest == $digest and
+              .expired == false and .workflow_run.id == $run
+            ' <<<"${artifact}" >/dev/null
+          archive="${root}/artifact.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${DEPLOYMENT_ARTIFACT_ID}/zip" \
+            >"${archive}"
+          test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = \
+            "${DEPLOYMENT_ARTIFACT_DIGEST}"
+          python3 - "${archive}" "${root}/subjects" <<'PY'
+          import pathlib
+          import shutil
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          destination.mkdir(mode=0o700)
+          expected = {"deployment-evidence.json", "observation.json"}
+          with zipfile.ZipFile(archive) as bundle:
+              names = bundle.namelist()
+              if set(names) != expected or len(names) != len(expected):
+                  raise SystemExit("deployment artifact inventory is not exact")
+              for info in bundle.infolist():
+                  path = pathlib.PurePosixPath(info.filename)
+                  mode = info.external_attr >> 16
+                  if (
+                      path.is_absolute()
+                      or ".." in path.parts
+                      or stat.S_ISLNK(mode)
+                      or (mode and not stat.S_ISREG(mode))
+                      or info.file_size > 2 * 1024 * 1024
+                  ):
+                      raise SystemExit("unsafe deployment artifact member")
+                  target = destination / info.filename
+                  with bundle.open(info) as source, target.open("xb") as output:
+                      shutil.copyfileobj(source, output)
+          PY
+          evidence="${root}/subjects/deployment-evidence.json"
+          observation="${root}/subjects/observation.json"
+          gh attestation verify "${evidence}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml" \
+            --signer-digest "${RELEASE_SHA}" \
+            --source-digest "${RELEASE_SHA}" \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/aws-deployment/v2" \
+            >/dev/null
+          jq -e \
+            --arg stage "${STAGE}" \
+            --arg sha "${RELEASE_SHA}" \
+            --argjson run "${DEPLOYMENT_RUN_ID}" '
+              .schemaVersion == "archon.aws-deployment-evidence/v2" and
+              .stage == $stage and .releaseSha == $sha and
+              .deploymentRunId == $run and
+              .promotion.policy == "build-once-promote-exact-artifacts" and
+              .verification.result == "passed" and
+              .verification.zeroIdleCore == true and
+              .secretsProjected == false
+            ' "${evidence}" >/dev/null
+          test "$(sha256sum "${observation}" | awk '{print $1}')" = \
+            "$(jq -er .verification.observationSha256 "${evidence}")"
+          jq -e --arg stage "${STAGE}" --arg sha "${RELEASE_SHA}" '
+            .schemaVersion == "archon.lean-runtime-observation/v1" and
+            .stage == $stage and .releaseSha == $sha and
+            .topology.legacyAlwaysOnRuntimeAbsent == true and
+            .security.rawIdentifiersProjected == false
+          ' "${observation}" >/dev/null
+          {
+            echo "evidence=${evidence}"
+            echo "observation=${observation}"
+            echo "application_url=$(jq -er .applicationUrl "${evidence}")"
+            echo "deployment_digest=sha256:$(sha256sum "${evidence}" | awk '{print $1}')"
+          } >>"${GITHUB_OUTPUT}"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: inputs.profile == 'cloud'
         with:
           node-version: 22.23.1
           cache: npm
+
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        if: inputs.profile == 'cloud'
         with:
           version: "0.11.31"
           enable-cache: false
 
-      - name: Bind exact green control plane and deployed release
-        id: gate
+      - name: Resolve exact deployed runtime binding
+        id: runtime
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
-          ARCHON_DEMO_QUERY: ${{ inputs.query }}
-        shell: bash
+          APPLICATION_URL: ${{ steps.deployment.outputs.application_url }}
         run: |
           set -euo pipefail
-          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error::release_sha must be a full lowercase commit SHA"
-            exit 1
-          }
-          [[ "${DEPLOYMENT_RUN_ID}" =~ ^[0-9]+$ ]] || {
-            echo "::error::deployment_run_id must be numeric"
-            exit 1
-          }
-          jq -en --arg query "${ARCHON_DEMO_QUERY}" '
-            ($query | length) >= 1 and
-            ($query | length) <= 256 and
-            ($query | test("[\\u0000-\\u001f\\u007f]") | not) and
-            ($query | test("[*?]") | not) and
-            $query != "{}" and
-            $query == ($query | gsub("^\\s+|\\s+$"; ""))
-          ' >/dev/null || {
-            echo "::error::query must be trimmed, 1-256 characters, and non-wildcard"
-            exit 1
-          }
-          contract_query="$(
-            jq -er '.binding.query' contracts/datahub-demo-state-v1.json
-          )"
-          test "${ARCHON_DEMO_QUERY}" = "${contract_query}" || {
-            echo "::error::query must equal the exact reviewed demo-state target"
-            exit 1
-          }
-          test "${GITHUB_SHA}" = "${RELEASE_SHA}" || {
-            echo "::error::the deployed release must equal this workflow's exact dispatch SHA"
-            exit 1
-          }
-          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          work="${RUNNER_TEMP}/live-proof/runtime"
+          mkdir -p "${work}"
+          if [[ "${PROFILE}" == core ]]; then
+            session_url="${APPLICATION_URL}/api/runtime-sessions/${RUNTIME_SESSION_ID}"
+            ready=false
+            for ((attempt = 1; attempt <= 60; attempt++)); do
+              curl --fail --silent --show-error \
+                --proto '=https' --tlsv1.2 --retry 2 --retry-all-errors \
+                --max-time 20 --output "${work}/session.json" "${session_url}"
+              if jq -e \
+                --arg session "${RUNTIME_SESSION_ID}" '
+                  .schemaVersion == "archon.runtime-session-status/v1" and
+                  .sessionId == $session and
+                  .resolvedProfile == "core" and
+                  .state == "READY" and .canRun == true and
+                  .remainingSeconds > 0
+                ' "${work}/session.json" >/dev/null; then
+                ready=true
+                break
+              fi
+              sleep 10
+            done
+            test "${ready}" = true
+          fi
 
-          repository_json="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${GITHUB_REPOSITORY}")"
-          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
-          test "${default_branch}" = "master"
-          test "${GITHUB_REF}" = "refs/heads/${default_branch}"
-          default_branch_ref="$(
-            gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}"
-          )"
-          test "$(
-            jq -er \
-              --arg ref "refs/heads/${default_branch}" '
-                select(
-                  .ref == $ref and
-                  .object.type == "commit" and
-                  (.object.sha | test("^[0-9a-f]{40}$"))
-                ) |
-                .object.sha
-              ' <<<"${default_branch_ref}"
-          )" = "${RELEASE_SHA}" || {
-            echo "::error::The live-proof control plane is no longer the default-branch head"
-            exit 1
-          }
-
-          workflow_success() {
-            local workflow_file="$1"
-            local expected_path=".github/workflows/${workflow_file}"
-            local response
-            local match
-            response="$(gh api \
-              --method GET \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs" \
-              -f "head_sha=${RELEASE_SHA}" \
-              -f "branch=${default_branch}" \
-              -f event=push \
-              -f per_page=100)"
-            match="$(jq -ce \
-              --arg path "${expected_path}" \
-              --arg sha "${RELEASE_SHA}" \
-              --arg branch "${default_branch}" \
-              --arg repository "${GITHUB_REPOSITORY}" '
-                [
-                  .workflow_runs[] |
-                  select(
-                    .path == $path and
-                    .head_sha == $sha and
-                    .head_branch == $branch and
-                    .head_repository.full_name == $repository and
-                    .event == "push"
-                  )
-                ] |
-                sort_by(.id, .run_attempt) |
-                last |
-                select(
-                  . != null and
-                  .status == "completed" and
-                  .conclusion == "success"
-                )
-              ' <<<"${response}")"
-            control_plane_runs="$(
-              jq -cn \
-                --argjson current "${control_plane_runs}" \
-                --argjson match "${match}" '
-                  $current + [{
-                    path: $match.path,
-                    workflowId: $match.workflow_id,
-                    runId: $match.id,
-                    runAttempt: $match.run_attempt,
-                    headSha: $match.head_sha,
-                    conclusion: $match.conclusion
-                  }]
-                '
-            )"
-          }
-
-          control_plane_runs="[]"
-          workflow_success ci.yml
-          workflow_success codeql.yml
-          workflow_success workflow-security.yml
-          test "$(jq 'length' <<<"${control_plane_runs}")" = "3"
-
-          ci_run_id="$(
-            jq -er '
-              .[] |
-              select(.path == ".github/workflows/ci.yml") |
-              .runId
-            ' <<<"${control_plane_runs}"
-          )"
-          ci_artifacts="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}/artifacts?per_page=100")"
-          mcp_security_name="datahub-mcp-security-${RELEASE_SHA}"
-          mcp_security_artifact="$(jq -ce \
-            --arg name "${mcp_security_name}" \
-            --argjson runId "${ci_run_id}" '
-              [
-                .artifacts[] |
-                select(
-                  .name == $name and
-                  .expired == false and
-                  .workflow_run.id == $runId and
-                  (.digest | test("^sha256:[0-9a-f]{64}$"))
-                )
-              ] |
-              if length == 1 then .[0] else error(
-                "expected exact locked MCP SCA/SBOM evidence from CI"
-              ) end
-            ' <<<"${ci_artifacts}")"
-
-          evidence_dir="${RUNNER_TEMP}/live-datahub-proof"
-          mkdir -p "${evidence_dir}"
-          deployment_control_plane_gates="$(
-            printf '%s' \
-              "${evidence_dir}/control-plane-security-gates.json"
-          )"
-          CONTROL_PLANE_SHA="${RELEASE_SHA}" \
-          OUTPUT_PATH="${deployment_control_plane_gates}" \
-            bash scripts/verify-github-control-plane.sh
-          deployment_control_plane_gate_sha="$(
-            sha256sum "${deployment_control_plane_gates}" |
-              awk '{print $1}'
-          )"
-          echo "control_plane_gate_sha=${deployment_control_plane_gate_sha}" \
-            >>"${GITHUB_OUTPUT}"
-          control_plane_gates="${evidence_dir}/control-plane-gates.json"
-          jq -cnS \
-            --arg sha "${RELEASE_SHA}" \
-            --arg branch "${default_branch}" \
-            --argjson workflows "${control_plane_runs}" \
-            --argjson mcpArtifactId "$(jq -er '.id' <<<"${mcp_security_artifact}")" \
-            --arg mcpArtifactName "${mcp_security_name}" \
-            --arg mcpArtifactDigest "$(jq -er '.digest' <<<"${mcp_security_artifact}")" '
-              {
-                schemaVersion: "archon.live-proof-control-plane/v1",
-                sourceSha: $sha,
-                branch: $branch,
-                workflows: ($workflows | sort_by(.path)),
-                mcpDependencyEvidence: {
-                  artifactId: $mcpArtifactId,
-                  name: $mcpArtifactName,
-                  digest: $mcpArtifactDigest
-                }
-              }
-            ' >"${control_plane_gates}"
-
-          deployment_run="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}")"
-          jq --exit-status \
-            --argjson runId "${DEPLOYMENT_RUN_ID}" \
-            --arg sha "${RELEASE_SHA}" \
-            --arg branch "${default_branch}" \
-            --arg repository "${GITHUB_REPOSITORY}" '
-              .id == $runId and
-              .path == ".github/workflows/deploy.yml" and
-              .event == "workflow_dispatch" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .head_sha == $sha and
-              .head_branch == $branch and
-              .head_repository.full_name == $repository
-            ' <<<"${deployment_run}" >/dev/null || {
-              echo "::error::deployment_run_id is not a successful exact-SHA deployment"
-              exit 1
-            }
-          deployment_attempt="$(jq -er '.run_attempt' <<<"${deployment_run}")"
-          artifact_name="deployment-evidence-${RELEASE_SHA}-${deployment_attempt}"
-          artifacts="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}/artifacts?per_page=100")"
-          artifact="$(jq -ce \
-            --arg name "${artifact_name}" \
-            --argjson runId "${DEPLOYMENT_RUN_ID}" '
-              [
-                .artifacts[] |
-                select(
-                  .name == $name and
-                  .expired == false and
-                  .workflow_run.id == $runId and
-                  (.digest | test("^sha256:[0-9a-f]{64}$"))
-                )
-              ] |
-              if length == 1 then .[0] else error(
-                "expected exactly one unexpired deployment evidence artifact"
-              ) end
-            ' <<<"${artifacts}")"
-          query_sha="$(
-            printf '%s' "${ARCHON_DEMO_QUERY}" |
-              sha256sum |
-              awk '{print $1}'
-          )"
-          proof_query_sha="$(
-            printf '%s' "$(
-              jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query: $query}'
-            )" | sha256sum | awk '{print $1}'
-          )"
-          query_binding_sha="$(
-            jq -cnS \
-              --arg query "${ARCHON_DEMO_QUERY}" \
-              '{query: $query, targetUrn: $query}' |
-              sha256sum |
-              awk '{print $1}'
-          )"
-
+          curl --fail --silent --show-error \
+            --proto '=https' --tlsv1.2 --retry 4 --retry-all-errors \
+            --max-time 30 --output "${work}/profiles.json" \
+            "${APPLICATION_URL}/api/runtime-profiles"
+          jq -e '
+            .schemaVersion == "archon.runtime-profiles/v1" and
+            (.serverTime | fromdateiso8601) and
+            (.profiles | length) == 2 and
+            ([.profiles[].profileId] | sort) == ["cloud","core"]
+          ' "${work}/profiles.json" >/dev/null
+          jq -e --arg profile "${PROFILE}" '
+            [.profiles[] | select(.profileId == $profile)] |
+            length == 1 and
+            .[0].generation != null and
+            (.[0].generation | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and
+            (.[0].capabilityDigest | test("^sha256:[0-9a-f]{64}$")) and
+            (.[0].capabilities |
+              keys == ["agentContextKit","analyticsAgent","dataHubSkills","mcpGovernedWrite","mcpRead"] and
+              all(.[]; . == true)) and
+            (if $profile == "cloud"
+             then .[0].availability == "READY"
+             else .[0].availability == "BUSY"
+             end)
+          ' "${work}/profiles.json" >/dev/null
+          jq -cS --arg profile "${PROFILE}" '
+            .profiles[] | select(.profileId == $profile)
+          ' "${work}/profiles.json" >"${work}/binding.json"
+          generation="$(jq -er .generation "${work}/binding.json")"
+          capability="$(jq -er .capabilityDigest "${work}/binding.json")"
+          session_digest=null
+          session_status_digest=null
+          if [[ "${PROFILE}" == core ]]; then
+            session_digest="sha256:$(printf '%s' "${RUNTIME_SESSION_ID}" | sha256sum | awk '{print $1}')"
+            session_status_digest="sha256:$(sha256sum "${work}/session.json" | awk '{print $1}')"
+          fi
           {
-            echo "artifact_id=$(jq -er '.id' <<<"${artifact}")"
-            echo "artifact_name=${artifact_name}"
-            echo "artifact_digest=$(jq -er '.digest' <<<"${artifact}")"
-            echo "deployment_attempt=${deployment_attempt}"
-            echo "query_sha=${query_sha}"
-            echo "proof_query_sha=${proof_query_sha}"
-            echo "query_binding_sha=${query_binding_sha}"
-            echo "control_plane_gates=${control_plane_gates}"
-          } >>"${GITHUB_OUTPUT}"
-
-      - name: Download exact production deployment evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ steps.gate.outputs.artifact_name }}
-          path: ${{ runner.temp }}/selected-deployment-evidence
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.deployment_run_id }}
-
-      - name: Verify inner deployment evidence and query binding
-        id: deployment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
-          DEPLOYMENT_RUN_ATTEMPT: ${{ steps.gate.outputs.deployment_attempt }}
-          DEPLOYMENT_ARTIFACT_ID: ${{ steps.gate.outputs.artifact_id }}
-          DEPLOYMENT_ARTIFACT_NAME: ${{ steps.gate.outputs.artifact_name }}
-          DEPLOYMENT_ARTIFACT_DIGEST: ${{ steps.gate.outputs.artifact_digest }}
-          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
-          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          root_inventory="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -mindepth 1 -maxdepth 1 -type f -name SHA256SUMS -print
-          )"
-          test -n "${root_inventory}"
-          test "$(wc -l <<<"${root_inventory}")" = "1"
-          test ! -L "${root_inventory}"
-          (
-            cd "$(dirname "${root_inventory}")"
-            sha256sum --check --strict SHA256SUMS
-          )
-          deployment_evidence="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -type f -name deployment-evidence.json -print
-          )"
-          test -n "${deployment_evidence}"
-          test "$(wc -l <<<"${deployment_evidence}")" = "1"
-          test -f "${deployment_evidence}"
-          test ! -L "${deployment_evidence}"
-          ci_run_id="$(jq -er '.rollbackSelector.ciRunId' "${deployment_evidence}")"
-          [[ "${ci_run_id}" =~ ^[0-9]+$ ]] || {
-            echo "::error::deployment evidence has an invalid source CI run"
-            exit 1
-          }
-          release_ci_run="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}")"
-          jq --exit-status \
-            --argjson runId "${ci_run_id}" \
-            --arg release "${RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" '
-              .id == $runId and
-              .path == ".github/workflows/ci.yml" and
-              .event == "push" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .head_sha == $release and
-              .head_branch == "master" and
-              .head_repository.full_name == $repository
-            ' <<<"${release_ci_run}" >/dev/null || {
-              echo "::error::deployed artifacts are not from successful exact-SHA CI"
-              exit 1
-            }
-          release_ci_artifacts="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}/artifacts?per_page=100")"
-          release_mcp_artifact_name="datahub-mcp-security-${RELEASE_SHA}"
-          release_mcp_artifact="$(jq -ce \
-            --arg name "${release_mcp_artifact_name}" \
-            --argjson runId "${ci_run_id}" '
-              [
-                .artifacts[] |
-                select(
-                  .name == $name and
-                  .expired == false and
-                  .workflow_run.id == $runId and
-                  (.digest | test("^sha256:[0-9a-f]{64}$"))
-                )
-              ] |
-              if length == 1 then .[0] else error(
-                "deployed CI run has no exact locked MCP SCA/SBOM evidence"
-              ) end
-            ' <<<"${release_ci_artifacts}")"
-          expected_deployment_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${DEPLOYMENT_RUN_ID}"
-          jq --exit-status \
-            --arg release "${RELEASE_SHA}" \
-            --arg controlPlane "${GITHUB_SHA}" \
-            --arg querySha "${QUERY_SHA}" \
-            --arg queryBindingSha "${QUERY_BINDING_SHA}" \
-            --arg deploymentUrl "${expected_deployment_url}" '
-              .schemaVersion == 1 and
-              .promotionPolicy == "build-once-promote-same-artifacts" and
-              .rollbackSelector.releaseSha == $release and
-              .source.deploymentControlPlaneSha == $controlPlane and
-              .source.deploymentRunUrl == $deploymentUrl and
-              .immutableArtifacts.identicalImageDigest == true and
-              (.immutableArtifacts.productionEcrImageDigest |
-                test("^sha256:[0-9a-f]{64}$")) and
-              .staging.result == "passed" and
-              .production.result == "passed" and
-              .staging.demoQuerySha256 == $querySha and
-              .production.demoQuerySha256 == $querySha and
-              .dataHubDemoState.querySha256 == $querySha and
-              .dataHubDemoState.queryBindingSha256 ==
-                $queryBindingSha and
-              .dataHubDemoState.workflow.path ==
-                ".github/workflows/datahub-demo-state.yml" and
-              (.dataHubDemoState.workflow.runId |
-                type == "number" and . > 0) and
-              (.dataHubDemoState.workflow.runAttempt |
-                type == "number" and . > 0) and
-              (.dataHubDemoState.artifact.id |
-                type == "number" and . > 0) and
-              (.dataHubDemoState.artifact.name |
-                test("^datahub-demo-receipt-[1-9][0-9]*-[1-9][0-9]*$")) and
-              (.dataHubDemoState.artifact.digest |
-                test("^sha256:[0-9a-f]{64}$")) and
-              (.dataHubDemoState.receiptSha256 |
-                test("^[0-9a-f]{64}$")) and
-              (.dataHubDemoState.gmsEndpointFingerprint |
-                test("^[0-9a-f]{64}$")) and
-              (.dataHubDemoState.semanticContractSha256 |
-                test("^[0-9a-f]{64}$")) and
-              .dataHubDemoState.semantics == {
-                danglingUpstreamAbsent: true,
-                g6ClassificationAbsent: true,
-                sensitiveFieldPath: "email",
-                stableSourceCount: 2
-              } and
-              .staging.deployedSemanticProofSha256 ==
-                .production.deployedSemanticProofSha256 and
-              (.pipelineSecurity.deploymentControlPlaneGatesSha256 |
-                test("^[0-9a-f]{64}$")) and
-              (.pipelineSecurity.stagingAttestationVerificationSha256 |
-                test("^[0-9a-f]{64}$")) and
-              (.pipelineSecurity.productionAttestationReverificationSha256 |
-                test("^[0-9a-f]{64}$"))
-            ' "${deployment_evidence}" >/dev/null || {
-              echo "::error::deployment evidence is not bound to this release and query"
-              exit 1
-            }
-          demo_binding="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -type f -name datahub-demo-state-binding.json -print
-          )"
-          test -n "${demo_binding}"
-          test "$(wc -l <<<"${demo_binding}")" = "1"
-          test -f "${demo_binding}"
-          test ! -L "${demo_binding}"
-          sealed_receipt_dir="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -type d -name sealed-datahub-demo-receipt -print
-          )"
-          test -n "${sealed_receipt_dir}"
-          test "$(wc -l <<<"${sealed_receipt_dir}")" = "1"
-          test ! -L "${sealed_receipt_dir}"
-          demo_run_id="$(jq -er '.workflow.runId' "${demo_binding}")"
-          demo_run_attempt="$(jq -er '.workflow.runAttempt' "${demo_binding}")"
-          demo_artifact_id="$(jq -er '.artifact.id' "${demo_binding}")"
-          demo_artifact_name="$(jq -er '.artifact.name' "${demo_binding}")"
-          demo_artifact_digest="$(jq -er '.artifact.digest' "${demo_binding}")"
-          demo_receipt_sha="$(jq -er '.receiptSha256' "${demo_binding}")"
-          demo_run="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/runs/${demo_run_id}/attempts/${demo_run_attempt}")"
-          jq --exit-status \
-            --argjson runId "${demo_run_id}" \
-            --argjson runAttempt "${demo_run_attempt}" \
-            --arg release "${RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" '
-              .id == $runId and
-              .run_attempt == $runAttempt and
-              .path == ".github/workflows/datahub-demo-state.yml" and
-              .event == "workflow_dispatch" and
-              .status == "completed" and
-              .conclusion == "success" and
-              .head_sha == $release and
-              .head_branch == "master" and
-              .head_repository.full_name == $repository
-            ' <<<"${demo_run}" >/dev/null
-          demo_artifact="$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${demo_artifact_id}")"
-          jq --exit-status \
-            --argjson id "${demo_artifact_id}" \
-            --argjson runId "${demo_run_id}" \
-            --arg name "${demo_artifact_name}" \
-            --arg digest "${demo_artifact_digest}" '
-              .id == $id and
-              .name == $name and
-              .digest == $digest and
-              .expired == false and
-              .workflow_run.id == $runId
-            ' <<<"${demo_artifact}" >/dev/null
-          verified_demo_binding="$(
-            printf '%s' \
-              "${RUNNER_TEMP}/live-datahub-proof/verified-demo-state-binding.json"
-          )"
-          python3 scripts/datahub-demo-state.py verify-receipt \
-            --contract contracts/datahub-demo-state-v1.json \
-            --receipt-dir "${sealed_receipt_dir}" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --release-sha "${RELEASE_SHA}" \
-            --workflow-run-id "${demo_run_id}" \
-            --workflow-run-attempt "${demo_run_attempt}" \
-            --artifact-id "${demo_artifact_id}" \
-            --artifact-name "${demo_artifact_name}" \
-            --artifact-digest "${demo_artifact_digest}" \
-            --expected-receipt-sha256 "${demo_receipt_sha}" \
-            --output "${verified_demo_binding}" >/dev/null
-          cmp --silent "${verified_demo_binding}" "${demo_binding}" || {
-            echo "::error::deployment evidence altered the sealed demo-state binding"
-            exit 1
-          }
-          test "$(jq -er '.attestation.predicateType' "${demo_binding}")" = \
-            "https://github.com/upgradedev/archon-datahub/attestations/datahub-demo-state/v1"
-          demo_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-demo-state.yml"
-          demo_predicate="$(
-            jq -er '.attestation.predicateType' "${demo_binding}"
-          )"
-          demo_predicate_path="${sealed_receipt_dir}/plan.json"
-          test "$(sha256sum "${demo_predicate_path}" | awk '{print $1}')" = "$(
-            jq -er '.attestation.predicateSha256' "${demo_binding}"
-          )"
-          verification_dir="${RUNNER_TEMP}/live-proof-attestation-verifications"
-          mkdir --mode=0700 "${verification_dir}"
-          verify_demo_attestation() {
-            local subject="$1"
-            local verification="$2"
-            local subject_sha256
-            subject_sha256="$(sha256sum "${subject}" | awk '{print $1}')"
-            gh attestation verify "${subject}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --signer-workflow "${demo_signer}" \
-              --signer-digest "${RELEASE_SHA}" \
-              --source-digest "${RELEASE_SHA}" \
-              --source-ref refs/heads/master \
-              --predicate-type "${demo_predicate}" \
-              --deny-self-hosted-runners \
-              --format json >"${verification}"
-            test -s "${verification}"
-            jq --exit-status \
-              --arg predicateType "${demo_predicate}" \
-              --arg subjectSha256 "${subject_sha256}" \
-              --slurpfile expectedPredicate "${demo_predicate_path}" '
-                [
-                  .[] |
-                  select(
-                    .verificationResult.statement.predicateType ==
-                      $predicateType and
-                    .verificationResult.statement.predicate ==
-                      $expectedPredicate[0] and
-                    any(
-                      .verificationResult.statement.subject[];
-                      .digest.sha256 == $subjectSha256
-                    )
-                  )
-                ] |
-                length == 1
-              ' "${verification}" >/dev/null || {
-                echo "::error::verified demo-state attestation does not bind the exact local plan and subject"
-                exit 1
-              }
-          }
-          verify_demo_attestation \
-            "${sealed_receipt_dir}/SHA256SUMS" \
-            "${verification_dir}/demo-SHA256SUMS.json"
-          verify_demo_attestation \
-            "${sealed_receipt_dir}/receipt.json" \
-            "${verification_dir}/demo-receipt.json"
-          deploy_signer="github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy.yml"
-          deployment_verification="${verification_dir}/production-deployment.json"
-          gh attestation verify "${deployment_evidence}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${deploy_signer}" \
-            --signer-digest "${GITHUB_SHA}" \
-            --source-digest "${GITHUB_SHA}" \
-            --source-ref refs/heads/master \
-            --predicate-type \
-              "https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1" \
-            --deny-self-hosted-runners \
-            --format json >"${deployment_verification}"
-          test -s "${deployment_verification}"
-          deployment_evidence_sha="$(
-            sha256sum "${deployment_evidence}" | awk '{print $1}'
-          )"
-          jq --exit-status \
-            --arg predicateType \
-              "https://github.com/upgradedev/archon-datahub/attestations/production-deployment/v1" \
-            --arg subjectSha256 "${deployment_evidence_sha}" \
-            --slurpfile expectedPredicate "${deployment_evidence}" '
-              [
-                .[] |
-                select(
-                  .verificationResult.statement.predicateType ==
-                    $predicateType and
-                  .verificationResult.statement.predicate ==
-                    $expectedPredicate[0] and
-                  any(
-                    .verificationResult.statement.subject[];
-                    .digest.sha256 == $subjectSha256
-                  )
-                )
-              ] |
-              length == 1
-            ' "${deployment_verification}" >/dev/null || {
-              echo "::error::verified production attestation does not bind the exact deployment evidence"
-              exit 1
-            }
-          rm -- \
-            "${verification_dir}/demo-SHA256SUMS.json" \
-            "${verification_dir}/demo-receipt.json" \
-            "${verification_dir}/production-deployment.json"
-          rmdir -- "${verification_dir}"
-          deployed_semantic_proof="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -type f \
-              -name production-deployed-datahub-semantic-proof.json \
-              -print
-          )"
-          test -n "${deployed_semantic_proof}"
-          test "$(wc -l <<<"${deployed_semantic_proof}")" = "1"
-          test -f "${deployed_semantic_proof}"
-          test ! -L "${deployed_semantic_proof}"
-          expected_semantic_proof_sha="$(
-            jq -er '.production.deployedSemanticProofSha256' \
-              "${deployment_evidence}"
-          )"
-          test "$(sha256sum "${deployed_semantic_proof}" | awk '{print $1}')" = \
-            "${expected_semantic_proof_sha}"
-          production_attestation="$(
-            find "${RUNNER_TEMP}/selected-deployment-evidence" \
-              -type f -name production-attestation-verification.json -print
-          )"
-          test -n "${production_attestation}"
-          test "$(wc -l <<<"${production_attestation}")" = "1"
-          test -f "${production_attestation}"
-          test ! -L "${production_attestation}"
-          expected_attestation_sha="$(
-            jq -er '
-              .pipelineSecurity.productionAttestationReverificationSha256
-            ' "${deployment_evidence}"
-          )"
-          test "$(sha256sum "${production_attestation}" | awk '{print $1}')" = \
-            "${expected_attestation_sha}"
-          release_mcp_artifact_digest="$(
-            jq -er '.digest' <<<"${release_mcp_artifact}"
-          )"
-          jq --exit-status \
-            --arg release "${RELEASE_SHA}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg mcpArtifactDigest "${release_mcp_artifact_digest}" '
-              .schemaVersion ==
-                "archon.production-attestation-reverification/v1" and
-              all(
-                [.ci.image, .ci.web, .ci.lambda][];
-                any(.[];
-                  .verificationResult.statement.predicateType ==
-                    "https://github.com/upgradedev/archon-datahub/attestations/ci-release/v1" and
-                  .verificationResult.statement.predicate.schemaVersion ==
-                    "archon.ci-release/v1" and
-                  .verificationResult.statement.predicate.source.repository ==
-                    $repository and
-                  .verificationResult.statement.predicate.source.commit ==
-                    $release and
-                  .verificationResult.statement.predicate.gates.dataHubMcpDependency ==
-                    "success" and
-                  .verificationResult.statement.predicate.dependencyEvidence.dataHubMcpSecurityArtifactDigest ==
-                    $mcpArtifactDigest
-                )
-              )
-            ' "${production_attestation}" >/dev/null || {
-              echo "::error::signed deployed CI provenance lacks exact MCP security evidence"
-              exit 1
-            }
-
-          binding="${RUNNER_TEMP}/live-datahub-proof/deployment-binding.json"
-          jq -cnS \
-            --arg releaseSha "${RELEASE_SHA}" \
-            --argjson releaseCiRunId "${ci_run_id}" \
-            --argjson releaseMcpArtifactId \
-              "$(jq -er '.id' <<<"${release_mcp_artifact}")" \
-            --arg releaseMcpArtifactName "${release_mcp_artifact_name}" \
-            --arg releaseMcpArtifactDigest "${release_mcp_artifact_digest}" \
-            --argjson deploymentRunId "${DEPLOYMENT_RUN_ID}" \
-            --argjson deploymentRunAttempt "${DEPLOYMENT_RUN_ATTEMPT}" \
-            --argjson artifactId "${DEPLOYMENT_ARTIFACT_ID}" \
-            --arg artifactName "${DEPLOYMENT_ARTIFACT_NAME}" \
-            --arg artifactDigest "${DEPLOYMENT_ARTIFACT_DIGEST}" \
-            --arg evidenceSha256 "${deployment_evidence_sha}" \
-            --arg querySha256 "${QUERY_SHA}" \
-            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" \
-            --arg deployedSemanticProofSha256 \
-              "${expected_semantic_proof_sha}" \
-            --slurpfile demoState "${demo_binding}" '
-              {
-                schemaVersion: "archon.live-proof-deployment-binding/v2",
-                releaseSha: $releaseSha,
-                releaseCiRunId: $releaseCiRunId,
-                releaseMcpDependencyEvidence: {
-                  artifactId: $releaseMcpArtifactId,
-                  name: $releaseMcpArtifactName,
-                  digest: $releaseMcpArtifactDigest
-                },
-                deployment: {
-                  runId: $deploymentRunId,
-                  runAttempt: $deploymentRunAttempt,
-                  result: "production-passed"
-                },
-                artifact: {
-                  id: $artifactId,
-                  name: $artifactName,
-                  digest: $artifactDigest,
-                  deploymentEvidenceSha256: $evidenceSha256
-                },
-                querySha256: $querySha256,
-                queryBindingSha256: $queryBindingSha256,
-                deployedSemanticProofSha256:
-                  $deployedSemanticProofSha256,
-                dataHubDemoState: $demoState[0]
-              }
-            ' >"${binding}"
-          {
-            echo "binding=${binding}"
-            echo "deployment_evidence=${deployment_evidence}"
-            echo "production_application_url=$(jq -er '.production.applicationUrl' "${deployment_evidence}")"
-            echo "demo_binding=${demo_binding}"
-            echo "demo_receipt_dir=${sealed_receipt_dir}"
-            echo "deployed_semantic_proof_sha=${expected_semantic_proof_sha}"
+            echo "binding=${work}/binding.json"
+            echo "generation=${generation}"
+            echo "capability=${capability}"
+            echo "session_digest=${session_digest}"
+            echo "session_status_digest=${session_status_digest}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Install locked application dependencies
+        if: inputs.profile == 'cloud'
         run: npm ci --ignore-scripts
-      - name: Typecheck live-proof code
+
+      - name: Typecheck credentialed live-proof code
+        if: inputs.profile == 'cloud'
         run: npm run typecheck
+
       - name: Materialize exact locked DataHub MCP runtime
+        if: inputs.profile == 'cloud'
         id: mcp
-        shell: bash
         run: |
           set -euo pipefail
-          project="${RUNNER_TEMP}/datahub-mcp-v0.6.0"
+          project="${RUNNER_TEMP}/live-proof/datahub-mcp-v0.6.0"
           bash scripts/materialize-datahub-mcp-lock.sh "${project}"
           python_version="$(
             jq -er '.runtime.pythonVersion' \
               .github/locks/datahub-mcp-v0.6.0.json
           )"
           server="${project}/.venv/bin/mcp-server-datahub"
-          smoke="${project}/.archon-evidence/runtime-smoke.json"
           test -x "${server}"
           test "$("${server}" --version)" = \
             "mcp-server-datahub, version 0.6.0"
-          test ! -e "${smoke}"
-          timeout 60 \
-            "${project}/.venv/bin/python" \
-            scripts/smoke-datahub-mcp-runtime.py \
-            --server "${server}" \
-            --output "${smoke}" \
-            --timeout-seconds 45
-          jq --exit-status '
-            .schemaVersion == "archon.datahub-mcp-runtime-smoke/v1" and
-            .protocol == "mcp-stdio" and
-            .packageVersion == "0.6.0" and
-            (.fastMcpVersion | test("^[0-9]+\\.[0-9]+\\.[0-9]+")) and
-            .serverInfoVersion == .fastMcpVersion and
-            .initialized == true and
-            .pinged == true and
-            .credentialsUsed == false and
-            .networkToolCalls == 0 and
-            .loopbackConfigRequests == 1 and
-            .unexpectedHttpRequests == 0 and
-            .readOnlyHints == true and
-            .tools == [
-              "get_dataset_queries",
-              "get_entities",
-              "get_lineage",
-              "get_lineage_paths_between",
-              "list_schema_fields",
-              "search"
-            ] and
-            (.stderrBytes | type == "number" and . >= 0) and
-            (.stderrSha256 | test("^[0-9a-f]{64}$"))
-          ' "${smoke}" >/dev/null
           {
             echo "project=${project}"
             echo "python_version=${python_version}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Revalidate exact control plane immediately before DataHub secrets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exact_gates="${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
-          OUTPUT_PATH="${exact_gates}" \
-            bash scripts/verify-github-control-plane.sh
-          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
-            "${EXPECTED_GATE_SHA256}" || {
-            echo "::error::The pre-secret control-plane receipt changed"
-            exit 1
-          }
+      - name: Configure read-only step-scoped Cloud proof AWS credentials
+        if: inputs.profile == 'cloud'
+        id: cloud-proof-aws
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          role-session-name: archon-live-proof-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          output-env-credentials: false
+          output-credentials: true
+          inline-session-policy: >-
+            {"Version":"2012-10-17","Statement":[{"Sid":"ReadExactJudgeBinding","Effect":"Allow","Action":"cloudformation:DescribeStacks","Resource":"arn:aws:cloudformation:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:stack/Archon-${{ inputs.stage }}-Judge/*"},{"Sid":"ReadExactCloudReader","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:secret:archon/${{ inputs.stage }}/datahub-cloud/reader-*"},{"Sid":"DecryptExactCloudReader","Effect":"Allow","Action":"kms:Decrypt","Resource":"arn:aws:kms:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:key/*","Condition":{"StringEquals":{"kms:CallerAccount":"${{ vars.AWS_ACCOUNT_ID }}","kms:ViaService":"secretsmanager.eu-west-1.amazonaws.com"},"StringLike":{"kms:EncryptionContext:SecretARN":"arn:aws:secretsmanager:eu-west-1:${{ vars.AWS_ACCOUNT_ID }}:secret:archon/${{ inputs.stage }}/datahub-cloud/reader-*"}}}]}
 
-      - name: Prove one-dataset MCP, retention, provenance, and contradiction path
+      - name: Prove live Cloud MCP, retention, provenance, and contradiction
+        if: inputs.profile == 'cloud'
+        id: semantic
         env:
-          DATAHUB_GMS_URL: ${{ secrets.DATAHUB_GMS_URL }}
-          DATAHUB_GMS_TOKEN: ${{ secrets.DATAHUB_GMS_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ steps.cloud-proof-aws.outputs.aws-access-key-id }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION_VALUE: ${{ vars.AWS_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.cloud-proof-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.cloud-proof-aws.outputs.aws-session-token }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_CLOUD_GMS_URL }}
           DATAHUB_MCP_COMMAND: uv
           DATAHUB_MCP_ARGS: >-
             run --project ${{ steps.mcp.outputs.project }}
             --python ${{ steps.mcp.outputs.python_version }} --frozen --no-sync
             --no-dev mcp-server-datahub
-          ARCHON_DEMO_QUERY: ${{ inputs.query }}
           TOOLS_IS_MUTATION_ENABLED: "false"
           TOOLS_IS_USER_ENABLED: "false"
           DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED: "true"
           SAVE_DOCUMENT_TOOL_ENABLED: "false"
           SEMANTIC_SEARCH_ENABLED: "false"
-          PROOF_QUERY_SHA: ${{ steps.gate.outputs.proof_query_sha }}
-          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
-          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
-        shell: bash
         run: |
           set -euo pipefail
-          test -n "${DATAHUB_GMS_URL:-}" || {
-            echo "::error::DATAHUB_GMS_URL is required"
-            exit 1
+          : "${DATAHUB_GMS_URL:?DATAHUB_CLOUD_GMS_URL is required}"
+          cleanup_cloud_secret() {
+            unset DATAHUB_GMS_TOKEN reader_token reader_secret_arn \
+              reader_secret_json reader_version_id secret_response stack_response
           }
-          test -n "${DATAHUB_GMS_TOKEN:-}" || {
-            echo "::error::DATAHUB_GMS_TOKEN is required"
-            exit 1
-          }
-          expected_endpoint_fingerprint="$(
-            jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
+          trap cleanup_cloud_secret EXIT
+          stack_response="$(
+            aws cloudformation describe-stacks \
+              --stack-name "Archon-${STAGE}-Judge" \
+              --region "${AWS_REGION_VALUE}" \
+              --output json \
+              --no-cli-pager
           )"
-          endpoint_binding="$(
-            printf '%s' \
-              "${RUNNER_TEMP}/live-datahub-proof/endpoint-binding.json"
+          reader_secret_arn="$(
+            jq -er --arg key ArchonCloudReaderSecretArn '
+              .Stacks | select(length == 1) | .[0].Outputs |
+              [.[] | select(.OutputKey == $key)] |
+              select(length == 1) | .[0].OutputValue
+            ' <<<"${stack_response}"
           )"
-          python3 scripts/datahub-demo-state.py validate-config \
-            --expected-fingerprint "${expected_endpoint_fingerprint}" \
-            >"${endpoint_binding}"
-          jq --exit-status \
-            --arg fingerprint "${expected_endpoint_fingerprint}" '
-              .schemaVersion == "archon.datahub-demo-config/v1" and
-              .gmsEndpointFingerprint == $fingerprint and
-              (keys | sort) ==
-                ["gmsEndpointFingerprint", "schemaVersion"]
-            ' "${endpoint_binding}" >/dev/null
-          raw="${RUNNER_TEMP}/live-datahub-proof/proof.raw.json"
+          [[ "${reader_secret_arn}" =~ ^arn:aws:secretsmanager:eu-west-1:${AWS_ACCOUNT_ID}:secret:archon/${STAGE}/datahub-cloud/reader-[A-Za-z0-9]{6}$ ]]
+          secret_response="$(
+            aws secretsmanager get-secret-value \
+              --secret-id "${reader_secret_arn}" \
+              --version-stage AWSCURRENT \
+              --region "${AWS_REGION_VALUE}" \
+              --output json \
+              --no-cli-pager
+          )"
+          jq -e --arg arn "${reader_secret_arn}" '
+            .ARN == $arn and
+            (.VersionId | type == "string" and test("^[A-Za-z0-9-]{32,64}$")) and
+            (.VersionStages | type == "array" and index("AWSCURRENT") != null) and
+            (has("SecretBinary") | not) and
+            (.SecretString | type == "string" and
+              (utf8bytelength >= 1 and utf8bytelength <= 16384))
+          ' <<<"${secret_response}" >/dev/null
+          reader_version_id="$(jq -er .VersionId <<<"${secret_response}")"
+          reader_secret_json="$(jq -er .SecretString <<<"${secret_response}")"
+          jq -e --arg url "${DATAHUB_GMS_URL}" '
+            type == "object" and
+            keys == [
+              "gmsUrl","oauthMasterKey","runHandleFernetKey","schemaVersion","token"
+            ] and
+            .schemaVersion == "archon.datahub-cloud-reader-secret/v1" and
+            .gmsUrl == $url and
+            (.token | type == "string" and length >= 16 and length <= 8192 and
+              test("^[!-~]+$")) and
+            (.runHandleFernetKey | test("^[A-Za-z0-9_-]{43}=$")) and
+            (.oauthMasterKey | test("^[A-Za-z0-9_-]{43}=$")) and
+            .runHandleFernetKey != .oauthMasterKey
+          ' <<<"${reader_secret_json}" >/dev/null
+          reader_token="$(jq -er .token <<<"${reader_secret_json}")"
+          printf '::add-mask::%s\n' "${reader_token}"
+          export DATAHUB_GMS_TOKEN="${reader_token}"
+          credential_binding_digest="sha256:$(
+            jq -cnS \
+              --arg stage "${STAGE}" \
+              --arg releaseSha "${RELEASE_SHA}" \
+              --arg secretArn "${reader_secret_arn}" \
+              --arg versionId "${reader_version_id}" \
+              --arg gmsUrl "${DATAHUB_GMS_URL}" \
+              '{stage:$stage,releaseSha:$releaseSha,secretArn:$secretArn,
+                versionId:$versionId,gmsUrl:$gmsUrl}' |
+              sha256sum | awk '{print $1}'
+          )"
+          unset reader_secret_arn reader_secret_json reader_version_id \
+            secret_response stack_response
+          raw="${RUNNER_TEMP}/live-proof/runtime/cloud-semantic-proof.json"
           npm run --silent verify:live >"${raw}"
-          jq --exit-status \
-            --arg querySha "${PROOF_QUERY_SHA}" \
-            --arg datasetUrnSha "$(
-              jq -er '.targetUrnSha256' "${DEMO_STATE_BINDING}"
-            )" '
-              .schemaVersion == "archon.live-datahub-proof/v1" and
-              .ok == true and
-              .result == "retained-history-contradiction-proven" and
-              .querySha256 == $querySha and
-              .datasetUrnSha256 == $datasetUrnSha and
-              .datasetsDiscovered == 1 and
-              .aspectHistories > 0 and
-              .retainedHistories == 1 and
-              .stableSourceCount == 2 and
-              .recoveredContradictions == 1 and
-              .contradictionAttributeCount == 1
-            ' "${raw}" >/dev/null
-          jq -cS \
-            --arg receiptSha256 "$(
-              jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg stateContractSha256 "$(
-              jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg postStateSha256 "$(
-              jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg endpointFingerprint "${expected_endpoint_fingerprint}" \
-            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" '
-              .schemaVersion = "archon.live-datahub-proof/v2" |
-              .demoState = {
-                receiptSha256: $receiptSha256,
-                stateContractSha256: $stateContractSha256,
-                postStateSha256: $postStateSha256,
-                gmsEndpointFingerprint: $endpointFingerprint,
-                queryBindingSha256: $queryBindingSha256
-              }
-            ' "${raw}" \
-            >"${RUNNER_TEMP}/live-datahub-proof/proof.json"
-          rm "${raw}"
-
-      - name: Reprove deployed G6, dangling blast radius, and retained history
-        id: deployed_semantics
-        env:
-          APPLICATION_URL: ${{ steps.deployment.outputs.production_application_url }}
-          ARCHON_DEMO_QUERY: ${{ inputs.query }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
-          EXPECTED_SEMANTIC_PROOF_SHA: ${{ steps.deployment.outputs.deployed_semantic_proof_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "${EXPECTED_SEMANTIC_PROOF_SHA}" =~ ^[0-9a-f]{64}$ ]]
-          target_urn="$(jq -er '.binding.targetUrn' contracts/datahub-demo-state-v1.json)"
-          dangling_urn="$(
-            jq -er '.binding.danglingUpstreamUrn' \
-              contracts/datahub-demo-state-v1.json
+          cleanup_cloud_secret
+          trap - EXIT
+          query_sha="$(
+            jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query:$query}' |
+              sha256sum | awk '{print $1}'
           )"
-          sensitive_field="$(
-            jq -er '.binding.sensitiveFieldPath' \
-              contracts/datahub-demo-state-v1.json
+          urn_sha="$(
+            printf '%s' "${ARCHON_DEMO_QUERY}" | sha256sum | awk '{print $1}'
           )"
-          expected_history="$(
-            jq -cS '.state.ownershipHistory' \
-              contracts/datahub-demo-state-v1.json
-          )"
-          test "${ARCHON_DEMO_QUERY}" = "${target_urn}"
-          response="${RUNNER_TEMP}/live-datahub-proof/deployed-audit-response.json"
-          payload="$(jq -cn --arg query "${ARCHON_DEMO_QUERY}" '{query: $query}')"
-          curl --fail --silent --show-error \
-            --proto '=https' --tlsv1.3 \
-            --connect-timeout 10 --max-time 35 \
-            --request POST \
-            --header 'content-type: application/json' \
-            --data "${payload}" \
-            --output "${response}" \
-            "${APPLICATION_URL}/api/audits"
-          jq -ce '.report' "${response}" |
-            jq -e -f scripts/validate-audit-report.jq >/dev/null
-          jq --exit-status \
-            --arg release "${RELEASE_SHA}" \
-            --arg target "${target_urn}" \
-            --arg dangling "${dangling_urn}" \
-            --arg field "${sensitive_field}" \
-            --argjson history "${expected_history}" '
-              .releaseSha == $release and
-              (
-              .report as $report |
-              [
-                $report.findings[] |
-                select(
-                  .type == "governance_violation" and
-                  .detail.ruleId == "G6"
-                )
-              ] as $g6 |
-              [
-                $report.findings[] |
-                select(.type == "lineage_gap")
-              ] as $gaps |
-              [
-                $report.findings[] |
-                select(.type == "contradiction")
-              ] as $retained |
-              $retained[0].detail.provenance as $provenance |
-              $report.classification.totalEntities == 1 and
-              $report.classification.withLineage == 1 and
-              $report.classification.sensitiveEntities == 1 and
-              ($report.findings | length) == 3 and
-              ($g6 | length) == 1 and
-              $g6[0].severity == "high" and
-              $g6[0].subject == $target and
-              $g6[0].detail.unclassifiedFields == [$field] and
-              $g6[0].detail.blastRadius.rootUrn == $target and
-              $g6[0].detail.blastRadius.maxHops == 3 and
-              $g6[0].detail.blastRadius.downstream == [] and
-              $g6[0].detail.blastRadius.truncated == false and
-              $g6[0].detail.blastRadius.impact == "none" and
-              ($gaps | length) == 1 and
-              $gaps[0].severity == "medium" and
-              $gaps[0].subject == $dangling and
-              $gaps[0].detail.blastRadius.rootUrn == $dangling and
-              $gaps[0].detail.blastRadius.maxHops == 3 and
-              $gaps[0].detail.blastRadius.downstream == [
-                {urn: $target, minHops: 1}
-              ] and
-              $gaps[0].detail.blastRadius.truncated == false and
-              $gaps[0].detail.blastRadius.impact == "low" and
-              ($retained | length) == 1 and
-              $retained[0].severity == "medium" and
-              $retained[0].subject == $target and
-              $retained[0].detail.attribute == "owner" and
-              ($provenance | length) == 2 and
-              ([$provenance[].source] | sort) ==
-                ([$history[].pipelineName] | sort) and
-              ([$provenance[].status] | sort) ==
-                ["conflicting", "trusted"] and
-              ([
-                $history[] as $expected |
-                any(
-                  $provenance[];
-                  .source == $expected.pipelineName and
-                  (.runId | endswith(":" + $expected.runId)) and
-                  (.observedAt | sub("\\.000Z$"; "Z")) ==
-                    (($expected.lastObserved / 1000) | todateiso8601)
-                )
-              ] | all)
-              )
-            ' "${response}" >/dev/null || {
-              echo "::error::current production API lost exact demo-state semantics"
-              exit 1
-            }
-          proof="${RUNNER_TEMP}/live-datahub-proof/current-deployed-semantic-proof.json"
-          jq -cS \
-            --arg receiptSha256 "$(
-              jq -er '.receiptSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg stateContractSha256 "$(
-              jq -er '.stateContractSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg postStateSha256 "$(
-              jq -er '.postStateSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg semanticContractSha256 "$(
-              jq -er '.semanticContractSha256' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg endpointFingerprint "$(
-              jq -er '.gmsEndpointFingerprint' "${DEMO_STATE_BINDING}"
-            )" \
-            --arg target "${target_urn}" \
-            --arg dangling "${dangling_urn}" \
-            --arg retainedHistorySha256 "$(
-              jq -er '.retainedOwnershipHistorySha256' "${DEMO_STATE_BINDING}"
-            )" '
-              [
-                .report.findings[] |
-                select(
-                  .type == "governance_violation" and
-                  .detail.ruleId == "G6"
-                )
-              ][0] as $g6 |
-              [
-                .report.findings[] |
-                select(.type == "lineage_gap")
-              ][0] as $gap |
-              [
-                .report.findings[] |
-                select(.type == "contradiction")
-              ][0] as $retained |
-              {
-                schemaVersion: "archon.deployed-datahub-semantic-proof/v1",
-                demoState: {
-                  receiptSha256: $receiptSha256,
-                  stateContractSha256: $stateContractSha256,
-                  postStateSha256: $postStateSha256,
-                  semanticContractSha256: $semanticContractSha256,
-                  gmsEndpointFingerprint: $endpointFingerprint
-                },
-                classification: {
-                  totalEntities: .report.classification.totalEntities,
-                  withLineage: .report.classification.withLineage,
-                  sensitiveEntities:
-                    .report.classification.sensitiveEntities
-                },
-                findings: {
-                  totalCount: (.report.findings | length),
-                  g6: {
-                    exactTarget: ($g6.subject == $target),
-                    fieldPath: $g6.detail.unclassifiedFields[0],
-                    classificationAbsent: true,
-                    blastRootBound: (
-                      $g6.detail.blastRadius.rootUrn == $target
-                    ),
-                    downstreamCount:
-                      ($g6.detail.blastRadius.downstream | length),
-                    maxHops: $g6.detail.blastRadius.maxHops,
-                    truncated: $g6.detail.blastRadius.truncated,
-                    impact: $g6.detail.blastRadius.impact
-                  },
-                  danglingLineage: {
-                    exactUpstream: ($gap.subject == $dangling),
-                    upstreamAbsent: true,
-                    blastRootBound: (
-                      $gap.detail.blastRadius.rootUrn == $dangling
-                    ),
-                    targetConsumerMinHops: (
-                      [
-                        $gap.detail.blastRadius.downstream[] |
-                        select(.urn == $target)
-                      ][0].minHops
-                    ),
-                    downstreamCount:
-                      ($gap.detail.blastRadius.downstream | length),
-                    maxHops: $gap.detail.blastRadius.maxHops,
-                    truncated: $gap.detail.blastRadius.truncated,
-                    impact: $gap.detail.blastRadius.impact
-                  },
-                  retainedHistory: {
-                    exactTarget: ($retained.subject == $target),
-                    attribute: $retained.detail.attribute,
-                    provenanceCount:
-                      ($retained.detail.provenance | length),
-                    stableSourceCount: (
-                      [$retained.detail.provenance[].source] |
-                      unique |
-                      length
-                    ),
-                    statuses:
-                      ([$retained.detail.provenance[].status] | sort),
-                    retainedOwnershipHistorySha256:
-                      $retainedHistorySha256
-                  }
-                }
-              }
-            ' "${response}" >"${proof}"
-          rm "${response}"
-          proof_sha="$(sha256sum "${proof}" | awk '{print $1}')"
-          test "${proof_sha}" = "${EXPECTED_SEMANTIC_PROOF_SHA}" || {
-            echo "::error::current production semantics differ from the promoted proof"
-            exit 1
-          }
+          jq -e --arg query "${query_sha}" --arg urn "${urn_sha}" '
+            .schemaVersion == "archon.live-datahub-proof/v1" and
+            .ok == true and
+            .result == "retained-history-contradiction-proven" and
+            .querySha256 == $query and .datasetUrnSha256 == $urn and
+            .datasetsDiscovered == 1 and
+            .retainedHistories >= 1 and
+            .stableSourceCount == 2 and
+            .recoveredContradictions == 1 and
+            .retainedHistories == 1 and
+            .contradictionAttributeCount == 1 and
+            (.semanticProof |
+              .schemaVersion == "archon.deployed-datahub-semantic-proof/v2" and
+              .evidenceClass == "credentialed-live-cloud" and
+              keys == ["classification","evidenceClass","findings","schemaVersion"])
+          ' "${raw}" >/dev/null
+          semantic="${RUNNER_TEMP}/live-proof/runtime/deployed-datahub-semantic-proof.json"
+          jq -cS '.semanticProof' "${raw}" >"${semantic}"
+          jq -e '
+            .schemaVersion == "archon.deployed-datahub-semantic-proof/v2" and
+            .evidenceClass == "credentialed-live-cloud"
+          ' "${semantic}" >/dev/null
           {
-            echo "proof=${proof}"
-            echo "proof_sha=${proof_sha}"
+            echo "path=${raw}"
+            echo "digest=sha256:$(sha256sum "${raw}" | awk '{print $1}')"
+            echo "semantic_path=${semantic}"
+            echo "credential_binding_digest=${credential_binding_digest}"
           } >>"${GITHUB_OUTPUT}"
 
-      - name: Revalidate and bind the exact control plane after live proof
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
-        shell: bash
+      - name: Verify exact governed canary rollback attestation
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        id: canary
         run: |
           set -euo pipefail
-          exact_gates="$(
-            printf '%s' \
-              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
+          root="${RUNNER_TEMP}/live-proof/governed-canary"
+          source="${root}/source"
+          mkdir -p "${source}"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GOVERNED_CANARY_RUN_ID}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" \
+            --argjson runId "${GOVERNED_CANARY_RUN_ID}" '
+              .id == $runId and
+              .path == ".github/workflows/governed-canary.yml" and
+              .event == "workflow_dispatch" and
+              .head_branch == "master" and .head_sha == $release and
+              .head_repository.full_name == $repository and
+              .repository.full_name == $repository and
+              .status == "completed" and .conclusion == "success" and
+              .run_attempt == 1
+            ' <<<"${run_json}" >/dev/null
+          artifacts="$(
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GOVERNED_CANARY_RUN_ID}/artifacts?per_page=100"
           )"
-          enriched_gates="$(
-            printf '%s' \
-              "${RUNNER_TEMP}/live-datahub-proof/control-plane-gates.json"
+          expected_name="governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-1"
+          artifact="$(
+            jq -ce \
+              --arg name "${expected_name}" \
+              --argjson runId "${GOVERNED_CANARY_RUN_ID}" '
+                [.[].artifacts[] |
+                  select(
+                    .name == $name and .expired == false and
+                    .workflow_run.id == $runId and
+                    (.id | type) == "number" and .id > 0 and
+                    (.size_in_bytes | type) == "number" and
+                    .size_in_bytes > 0 and .size_in_bytes <= 52428800 and
+                    (.digest | test("^sha256:[0-9a-f]{64}$"))
+                  )] |
+                if length == 1 then .[0]
+                else error("exact governed-canary rollback artifact is not unique") end
+              ' <<<"${artifacts}"
           )"
-          test -f "${enriched_gates}"
-          test ! -L "${enriched_gates}"
-          OUTPUT_PATH="${exact_gates}" \
-            bash scripts/verify-github-control-plane.sh
-          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
-            "${EXPECTED_GATE_SHA256}"
-          jq -en \
-            --arg sha "${CONTROL_PLANE_SHA}" \
-            --slurpfile exact "${exact_gates}" \
-            --slurpfile enriched "${enriched_gates}" '
-              def receipt:
-                map({
-                  path,
-                  workflowId,
-                  runId,
-                  runAttempt,
-                  conclusion
-                }) |
-                sort_by(.path);
-              $exact[0].schemaVersion ==
-                "archon.deployment-control-plane-gates/v1" and
-              $exact[0].sourceSha == $sha and
-              $exact[0].branch == "master" and
-              $enriched[0].schemaVersion ==
-                "archon.live-proof-control-plane/v1" and
-              $enriched[0].sourceSha == $sha and
-              $enriched[0].branch == "master" and
-              ($exact[0].workflows | receipt) ==
-                ($enriched[0].workflows | receipt)
-            ' >/dev/null || {
-            echo "::error::The enriched live-proof receipt differs from the enforced exact gate"
-            exit 1
-          }
+          artifact_id="$(jq -er .id <<<"${artifact}")"
+          artifact_digest="$(jq -er .digest <<<"${artifact}")"
+          archive="${root}/source.zip"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" >"${archive}"
+          test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = \
+            "${artifact_digest}"
+          python3 - "${archive}" "${source}" <<'PY'
+          import pathlib
+          import shutil
+          import stat
+          import sys
+          import zipfile
 
-      - name: Prepare digest-bound proof evidence
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          expected = {
+              "attestation-predicate.json",
+              "recovery-evidence.json",
+              "recovery-evidence.sha256",
+              "recovery.json",
+          }
+          total = 0
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              names = [entry.filename for entry in entries]
+              if set(names) != expected or len(names) != len(expected):
+                  raise SystemExit("governed-canary artifact inventory is not exact")
+              for entry in entries:
+                  path = pathlib.PurePosixPath(entry.filename)
+                  mode = stat.S_IFMT(entry.external_attr >> 16)
+                  if (
+                      path.is_absolute()
+                      or ".." in path.parts
+                      or entry.is_dir()
+                      or mode not in (0, stat.S_IFREG)
+                      or entry.flag_bits & 0x1
+                      or entry.file_size > 2 * 1024 * 1024
+                  ):
+                      raise SystemExit("unsafe governed-canary artifact member")
+                  total += entry.file_size
+                  if total > 6 * 1024 * 1024:
+                      raise SystemExit("governed-canary artifact is oversized")
+                  target = destination / entry.filename
+                  with bundle.open(entry) as input_file, target.open("xb") as output:
+                      shutil.copyfileobj(input_file, output)
+          PY
+          test "$(wc -l <"${source}/recovery-evidence.sha256" | tr -d ' ')" = 1
+          grep -Eq '^[0-9a-f]{64}  recovery-evidence\.json$' \
+            "${source}/recovery-evidence.sha256"
+          (
+            cd "${source}"
+            sha256sum --check --strict recovery-evidence.sha256
+          )
+          cmp --silent \
+            "${source}/recovery-evidence.json" \
+            "${source}/attestation-predicate.json"
+          evidence="${source}/recovery-evidence.json"
+          jq -e \
+            --arg run "${GOVERNED_CANARY_RUN_ID}" \
+            --arg release "${RELEASE_SHA}" '
+              keys == [
+                "afterDigest","beforeDigest","deploymentEvidenceSha256","digest",
+                "disposition","endpointBindingSha256","mutation","recoveredAt",
+                "recoveryDigest","runtimeProfile","schemaVersion","sourceWorkflow","target"
+              ] and
+              .schemaVersion == "archon.governed-canary-recovery-evidence/v2" and
+              .runtimeProfile == "cloud" and .disposition == "restored" and
+              (.sourceWorkflow |
+                keys == ["controlPlaneGatesSha256","controlPlaneSha","runAttempt","runId"] and
+                .runId == $run and .runAttempt == "1" and
+                .controlPlaneSha == $release) and
+              (.target |
+                keys == ["columnPath","entityUrn","tagUrn"] and
+                .entityUrn == "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)" and
+                .columnPath == "customer_email" and .tagUrn == "urn:li:tag:PII") and
+              (.mutation |
+                keys == ["performed","requestDigest","responseDigest"] and
+                .performed == true) and
+              ([
+                .recoveryDigest,.deploymentEvidenceSha256,.endpointBindingSha256,
+                .beforeDigest,.afterDigest,.mutation.requestDigest,
+                .mutation.responseDigest,.sourceWorkflow.controlPlaneGatesSha256,.digest
+              ] | all(.[]; test("^sha256:[0-9a-f]{64}$")))
+            ' "${evidence}" >/dev/null
+          stored_digest="$(jq -er .digest "${evidence}")"
+          calculated_digest="$(
+            jq -cS 'del(.digest)' "${evidence}" |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          test "${stored_digest}" = "${calculated_digest}"
+          expected_predicate="$(jq -cS . "${source}/attestation-predicate.json")"
+          expected_subjects="$(
+            jq -Rn '
+              [inputs |
+                capture("^(?<sha>[0-9a-f]{64})  (?<name>[A-Za-z0-9][A-Za-z0-9._-]*)$") |
+                {name:.name,digest:{sha256:.sha}}] | sort_by(.name)
+            ' <"${source}/recovery-evidence.sha256"
+          )"
+          raw_verification="${root}/attestation.raw.json"
+          statement="${root}/attestation-statement.json"
+          gh attestation verify "${evidence}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/governed-canary.yml" \
+            --signer-digest "${RELEASE_SHA}" \
+            --source-digest "${RELEASE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2" \
+            --deny-self-hosted-runners \
+            --format json >"${raw_verification}"
+          jq -ceS \
+            --arg predicateType "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2" \
+            --arg subjectName "recovery-evidence.json" \
+            --arg subjectSha "$(awk '{print $1}' "${source}/recovery-evidence.sha256")" \
+            --argjson expectedPredicate "${expected_predicate}" \
+            --argjson expectedSubjects "${expected_subjects}" '
+              [.[] |
+                select(
+                  .verificationResult.statement.predicateType == $predicateType and
+                  .verificationResult.statement.predicate == $expectedPredicate and
+                  (.verificationResult.statement.subject | sort_by(.name)) == $expectedSubjects and
+                  any(.verificationResult.statement.subject[];
+                    .name == $subjectName and .digest.sha256 == $subjectSha)
+                ) | .verificationResult.statement] |
+              unique |
+              if length == 1 then .[0]
+              else error("exactly one governed-canary attestation must match") end
+            ' "${raw_verification}" >"${statement}"
+          {
+            echo "workflow_run_id=${GOVERNED_CANARY_RUN_ID}"
+            echo "rollback_subject_digest=sha256:$(sha256sum "${evidence}" | awk '{print $1}')"
+            echo "rollback_evidence_digest=${stored_digest}"
+            echo "attestation_predicate_digest=sha256:$(sha256sum "${source}/attestation-predicate.json" | awk '{print $1}')"
+            echo "attestation_verification_digest=sha256:$(sha256sum "${statement}" | awk '{print $1}')"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Seal exact runtime-bound live proof
         id: evidence
         env:
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
-          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
-          QUERY_BINDING_SHA: ${{ steps.gate.outputs.query_binding_sha }}
-          CONTROL_PLANE_GATES: ${{ steps.gate.outputs.control_plane_gates }}
-          DEPLOYMENT_BINDING: ${{ steps.deployment.outputs.binding }}
-          DEPLOYMENT_EVIDENCE: ${{ steps.deployment.outputs.deployment_evidence }}
-          DEMO_STATE_BINDING: ${{ steps.deployment.outputs.demo_binding }}
-          DEMO_RECEIPT_DIR: ${{ steps.deployment.outputs.demo_receipt_dir }}
-          DEPLOYED_SEMANTIC_PROOF: ${{ steps.deployed_semantics.outputs.proof }}
-          MCP_PROJECT: ${{ steps.mcp.outputs.project }}
-        shell: bash
+          DEPLOYMENT_EVIDENCE: ${{ steps.deployment.outputs.evidence }}
+          DEPLOYMENT_DIGEST: ${{ steps.deployment.outputs.deployment_digest }}
+          BINDING_PATH: ${{ steps.runtime.outputs.binding }}
+          GENERATION: ${{ steps.runtime.outputs.generation }}
+          CAPABILITY_DIGEST: ${{ steps.runtime.outputs.capability }}
+          SESSION_DIGEST: ${{ steps.runtime.outputs.session_digest }}
+          SESSION_STATUS_DIGEST: ${{ steps.runtime.outputs.session_status_digest }}
+          SEMANTIC_DIGEST: ${{ steps.semantic.outputs.digest || 'null' }}
+          CREDENTIAL_BINDING_DIGEST: ${{ steps.semantic.outputs.credential_binding_digest || 'null' }}
         run: |
           set -euo pipefail
-          evidence_dir="${RUNNER_TEMP}/live-datahub-proof/evidence"
-          mkdir -p "${evidence_dir}"
-          cp "${RUNNER_TEMP}/live-datahub-proof/proof.json" \
-            "${evidence_dir}/proof.json"
-          cp "${CONTROL_PLANE_GATES}" \
-            "${evidence_dir}/control-plane-gates.json"
-          cp \
-            "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" \
-            "${evidence_dir}/control-plane-security-gates.json"
-          cp "${DEPLOYMENT_BINDING}" \
-            "${evidence_dir}/deployment-binding.json"
-          cp "${DEPLOYMENT_EVIDENCE}" \
-            "${evidence_dir}/deployment-evidence.json"
-          cp "${DEMO_STATE_BINDING}" \
-            "${evidence_dir}/datahub-demo-state-binding.json"
-          cp "${RUNNER_TEMP}/live-datahub-proof/endpoint-binding.json" \
-            "${evidence_dir}/datahub-endpoint-binding.json"
-          cp "${DEPLOYED_SEMANTIC_PROOF}" \
-            "${evidence_dir}/deployed-datahub-semantic-proof.json"
-          sealed_receipt="${evidence_dir}/sealed-datahub-demo-receipt"
-          mkdir -p "${sealed_receipt}"
-          for subject in \
-            SHA256SUMS \
-            approval-receipt.json \
-            baseline-manifest.json \
-            control-plane.json \
-            plan.json \
-            receipt.json; do
-            cp "${DEMO_RECEIPT_DIR}/${subject}" \
-              "${sealed_receipt}/${subject}"
-          done
-          (
-            cd "${sealed_receipt}"
-            sha256sum --check --strict SHA256SUMS
-          )
-          cp .github/locks/datahub-mcp-v0.6.0.json \
-            "${evidence_dir}/mcp-lock-contract.json"
-          cp "${MCP_PROJECT}/.archon-evidence/pypi-provenance.json" \
-            "${evidence_dir}/mcp-pypi-provenance.json"
-          cp "${MCP_PROJECT}/.archon-evidence/upstream-pyproject.toml" \
-            "${evidence_dir}/mcp-upstream-pyproject.toml"
-          cp "${MCP_PROJECT}/.archon-evidence/upstream-uv.lock" \
-            "${evidence_dir}/mcp-upstream-uv.lock"
-          cp "${MCP_PROJECT}/.archon-evidence/resolved-pyproject.toml" \
-            "${evidence_dir}/mcp-resolved-pyproject.toml"
-          cp "${MCP_PROJECT}/.archon-evidence/project-overlay.json" \
-            "${evidence_dir}/mcp-project-overlay.json"
-          cp "${MCP_PROJECT}/.archon-evidence/resolved-uv.lock" \
-            "${evidence_dir}/mcp-resolved-uv.lock"
-          cp "${MCP_PROJECT}/.archon-evidence/resolved-lock-binding.json" \
-            "${evidence_dir}/mcp-resolved-lock-binding.json"
-          cp "${MCP_PROJECT}/.archon-evidence/wheel-only-graph.json" \
-            "${evidence_dir}/mcp-wheel-only-graph.json"
-          cp "${MCP_PROJECT}/.archon-evidence/openvex.json" \
-            "${evidence_dir}/mcp-openvex.json"
-          cp "${MCP_PROJECT}/.archon-evidence/runtime-smoke.json" \
-            "${evidence_dir}/mcp-runtime-smoke.json"
-          for artifact in \
-            control-plane-gates.json \
-            control-plane-security-gates.json \
-            datahub-demo-state-binding.json \
-            datahub-endpoint-binding.json \
-            deployed-datahub-semantic-proof.json \
-            deployment-binding.json \
-            deployment-evidence.json \
-            mcp-lock-contract.json \
-            mcp-openvex.json \
-            mcp-pypi-provenance.json \
-            mcp-project-overlay.json \
-            mcp-resolved-lock-binding.json \
-            mcp-resolved-pyproject.toml \
-            mcp-resolved-uv.lock \
-            mcp-runtime-smoke.json \
-            mcp-upstream-pyproject.toml \
-            mcp-upstream-uv.lock \
-            mcp-wheel-only-graph.json \
-            proof.json; do
-            test -f "${evidence_dir}/${artifact}"
-            test ! -L "${evidence_dir}/${artifact}"
-          done
-          (
-            cd "${evidence_dir}"
-            sha256sum \
-              control-plane-gates.json \
-              control-plane-security-gates.json \
-              datahub-demo-state-binding.json \
-              datahub-endpoint-binding.json \
-              deployed-datahub-semantic-proof.json \
-              deployment-binding.json \
-              deployment-evidence.json \
-              mcp-lock-contract.json \
-              mcp-openvex.json \
-              mcp-pypi-provenance.json \
-              mcp-project-overlay.json \
-              mcp-resolved-lock-binding.json \
-              mcp-resolved-pyproject.toml \
-              mcp-resolved-uv.lock \
-              mcp-runtime-smoke.json \
-              mcp-upstream-pyproject.toml \
-              mcp-upstream-uv.lock \
-              mcp-wheel-only-graph.json \
-              sealed-datahub-demo-receipt/SHA256SUMS \
-              sealed-datahub-demo-receipt/approval-receipt.json \
-              sealed-datahub-demo-receipt/baseline-manifest.json \
-              sealed-datahub-demo-receipt/control-plane.json \
-              sealed-datahub-demo-receipt/plan.json \
-              sealed-datahub-demo-receipt/receipt.json \
-              proof.json >proof-subject.sha256
-            sha256sum --check --strict proof-subject.sha256
-          )
-          proof_sha="$(
-            sha256sum "${evidence_dir}/proof.json" | awk '{print $1}'
+          subjects="${RUNNER_TEMP}/live-proof/subjects"
+          mkdir -p "${subjects}"
+          query_digest="sha256:$(
+            printf '%s' "${ARCHON_DEMO_QUERY}" | sha256sum | awk '{print $1}'
           )"
-          binding_sha="$(
-            sha256sum "${evidence_dir}/deployment-binding.json" |
-              awk '{print $1}'
-          )"
-          deployment_evidence_sha="$(
-            sha256sum "${evidence_dir}/deployment-evidence.json" |
-              awk '{print $1}'
-          )"
-          demo_state_binding_sha="$(
-            sha256sum "${evidence_dir}/datahub-demo-state-binding.json" |
-              awk '{print $1}'
-          )"
-          endpoint_binding_sha="$(
-            sha256sum "${evidence_dir}/datahub-endpoint-binding.json" |
-              awk '{print $1}'
-          )"
-          deployed_semantic_proof_sha="$(
-            sha256sum "${evidence_dir}/deployed-datahub-semantic-proof.json" |
-              awk '{print $1}'
-          )"
-          demo_receipt_sha="$(
-            sha256sum \
-              "${evidence_dir}/sealed-datahub-demo-receipt/receipt.json" |
-              awk '{print $1}'
-          )"
-          test "${deployed_semantic_proof_sha}" = "$(
-            jq -er '.deployedSemanticProofSha256' \
-              "${evidence_dir}/deployment-binding.json"
-          )"
-          test "${demo_receipt_sha}" = "$(
-            jq -er '.receiptSha256' \
-              "${evidence_dir}/datahub-demo-state-binding.json"
-          )"
-          gates_sha="$(
-            sha256sum "${evidence_dir}/control-plane-gates.json" |
-              awk '{print $1}'
-          )"
-          exact_gates_sha="$(
-            sha256sum \
-              "${evidence_dir}/control-plane-security-gates.json" |
-              awk '{print $1}'
-          )"
-          test "${exact_gates_sha}" = "$(
-            sha256sum \
-              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json" |
-              awk '{print $1}'
-          )"
-          lock_sha="$(
-            sha256sum "${evidence_dir}/mcp-lock-contract.json" |
-              awk '{print $1}'
-          )"
-          upstream_lock_sha="$(
-            sha256sum "${evidence_dir}/mcp-upstream-uv.lock" |
-              awk '{print $1}'
-          )"
-          resolved_lock_sha="$(
-            sha256sum "${evidence_dir}/mcp-resolved-uv.lock" |
-              awk '{print $1}'
-          )"
-          resolved_binding_sha="$(
-            sha256sum "${evidence_dir}/mcp-resolved-lock-binding.json" |
-              awk '{print $1}'
-          )"
-          wheel_graph_sha="$(
-            sha256sum "${evidence_dir}/mcp-wheel-only-graph.json" |
-              awk '{print $1}'
-          )"
-          project_overlay_sha="$(
-            sha256sum "${evidence_dir}/mcp-project-overlay.json" |
-              awk '{print $1}'
-          )"
-          pypi_provenance_sha="$(
-            sha256sum "${evidence_dir}/mcp-pypi-provenance.json" |
-              awk '{print $1}'
-          )"
-          openvex_sha="$(
-            sha256sum "${evidence_dir}/mcp-openvex.json" |
-              awk '{print $1}'
-          )"
-          runtime_smoke_sha="$(
-            sha256sum "${evidence_dir}/mcp-runtime-smoke.json" |
-              awk '{print $1}'
-          )"
-          test "${upstream_lock_sha}" = "$(
-            jq -er '.files["uv.lock"].sha256' \
-              "${evidence_dir}/mcp-lock-contract.json"
-          )"
-          test "$(
-            sha256sum "${evidence_dir}/mcp-upstream-pyproject.toml" |
-              awk '{print $1}'
-          )" = "$(
-            jq -er '.files["pyproject.toml"].sha256' \
-              "${evidence_dir}/mcp-lock-contract.json"
-          )"
-          test "${resolved_lock_sha}" = "$(
-            jq -er '.resolution.resolvedLockSha256' \
-              "${evidence_dir}/mcp-lock-contract.json"
-          )"
-          test "${openvex_sha}" = "$(
-            jq -er '.advisoryDisposition.vex.sha256' \
-              "${evidence_dir}/mcp-lock-contract.json"
-          )"
-          vex_issued_epoch="$(
-            date -u --date="$(
-              jq -er '.advisoryDisposition.vex.issuedAt' \
-                "${evidence_dir}/mcp-lock-contract.json"
-            )" +%s
-          )"
-          vex_expires_epoch="$(
-            date -u --date="$(
-              jq -er '.advisoryDisposition.vex.expiresAt' \
-                "${evidence_dir}/mcp-lock-contract.json"
-            )" +%s
-          )"
-          now_epoch="$(date -u +%s)"
-          test "$(
-            jq -er '.advisoryDisposition.vex.maxValidityDays' \
-              "${evidence_dir}/mcp-lock-contract.json"
-          )" = "30"
-          test "${vex_issued_epoch}" -le "${now_epoch}"
-          test "${now_epoch}" -lt "${vex_expires_epoch}"
-          test "$((vex_expires_epoch - vex_issued_epoch))" -le \
-            "$((30 * 24 * 60 * 60))"
-          jq --exit-status \
-            --arg upstream "${upstream_lock_sha}" \
-            --arg resolved "${resolved_lock_sha}" '
-              .schemaVersion ==
-                "archon.datahub-mcp-resolved-lock-binding/v1" and
-              .upstreamLockSha256 == $upstream and
-              .expectedResolvedLockSha256 == $resolved and
-              .observedResolvedLockSha256 == $resolved and
-              .matches == true and
-              .placeholder == false
-            ' "${evidence_dir}/mcp-resolved-lock-binding.json" >/dev/null
-          jq --exit-status \
-            --arg upstream "$(
-              jq -er '.files["pyproject.toml"].sha256' \
-                "${evidence_dir}/mcp-lock-contract.json"
-            )" \
-            --arg resolved "$(
-              sha256sum "${evidence_dir}/mcp-resolved-pyproject.toml" |
-                awk '{print $1}'
-            )" '
-              .schemaVersion ==
-                "archon.datahub-mcp-project-overlay/v3" and
-              .upstreamPyprojectSha256 == $upstream and
-              .resolvedPyprojectSha256 == $resolved and
-              .upstreamProjectName == "mcp-server-datahub" and
-              .resolvedProjectName == "archon-datahub-mcp-runtime" and
-              .version == "0.6.0" and
-              .mcpDependency == "mcp-server-datahub==0.6.0" and
-              .package == false and
-              .constraintDependencies == [
-                "acryl-datahub==1.6.0.15",
-                "setuptools==81.0.0"
-              ] and
-              .buildBackendExecution == "forbidden"
-            ' "${evidence_dir}/mcp-project-overlay.json" >/dev/null
-          jq --exit-status '
-              .schemaVersion ==
-                "archon.datahub-mcp-wheel-only-graph/v1" and
-              (.packageCount | type == "number" and . > 10) and
-              (.packages | type == "array") and
-              .packageCount == (.packages | length) and
-              all(
-                .packages[];
-                (.name | type == "string" and length > 0) and
-                (.version | type == "string" and length > 0) and
-                (.wheels | type == "array" and length > 0) and
-                all(
-                  .wheels[];
-                  (.hash | test("^[0-9a-f]{64}$")) and
-                  (.size | type == "number" and . > 0) and
-                  (.url |
-                    startswith("https://files.pythonhosted.org/"))
-                )
-              ) and
-              any(
-                .packages[];
-                .name == "mcp-server-datahub" and
-                .version == "0.6.0" and
-                .wheels == [{
-                  hash:
-                    "2679dcfafc0ae12724efbf0fc6a73014f9085a4e1303cba9b1e41776dab8f001",
-                  size: 119016,
-                  url:
-                    "https://files.pythonhosted.org/packages/fb/5a/5573927ea69ff2a93b1957d6f128b9aacbee50df0b35e6410678d3b62d0b/mcp_server_datahub-0.6.0-py3-none-any.whl"
-                }]
-              )
-            ' "${evidence_dir}/mcp-wheel-only-graph.json" >/dev/null
-          jq --exit-status '
-              .schemaVersion ==
-                "archon.datahub-mcp-runtime-smoke/v1" and
-              .protocol == "mcp-stdio" and
-              .packageVersion == "0.6.0" and
-              (.fastMcpVersion | test("^[0-9]+\\.[0-9]+\\.[0-9]+")) and
-              .serverInfoVersion == .fastMcpVersion and
-              .initialized == true and
-              .pinged == true and
-              .credentialsUsed == false and
-              .networkToolCalls == 0 and
-              .loopbackConfigRequests == 1 and
-              .unexpectedHttpRequests == 0 and
-              .readOnlyHints == true and
-              .tools == [
-                "get_dataset_queries",
-                "get_entities",
-                "get_lineage",
-                "get_lineage_paths_between",
-                "list_schema_fields",
-                "search"
-              ]
-            ' "${evidence_dir}/mcp-runtime-smoke.json" >/dev/null
-          jq -cnS \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg workflowRunId "${GITHUB_RUN_ID}" \
-            --arg workflowRunAttempt "${GITHUB_RUN_ATTEMPT}" \
+          binding_digest="sha256:$(sha256sum "${BINDING_PATH}" | awk '{print $1}')"
+          jq -nS \
+            --slurpfile binding "${BINDING_PATH}" \
+            --arg stage "${STAGE}" \
             --arg releaseSha "${RELEASE_SHA}" \
-            --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
-            --arg provenAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --arg querySha256 "${QUERY_SHA}" \
-            --arg queryBindingSha256 "${QUERY_BINDING_SHA}" \
-            --arg proofSha256 "${proof_sha}" \
-            --arg deploymentBindingSha256 "${binding_sha}" \
-            --arg deploymentEvidenceSha256 "${deployment_evidence_sha}" \
-            --arg demoStateBindingSha256 "${demo_state_binding_sha}" \
-            --arg endpointBindingSha256 "${endpoint_binding_sha}" \
-            --arg deployedSemanticProofSha256 \
-              "${deployed_semantic_proof_sha}" \
-            --arg demoReceiptSha256 "${demo_receipt_sha}" \
-            --arg controlPlaneGatesSha256 "${gates_sha}" \
-            --arg controlPlaneSecurityGatesSha256 "${exact_gates_sha}" \
-            --arg mcpLockContractSha256 "${lock_sha}" \
-            --arg mcpUpstreamLockSha256 "${upstream_lock_sha}" \
-            --arg mcpResolvedLockSha256 "${resolved_lock_sha}" \
-            --arg mcpResolvedLockBindingSha256 "${resolved_binding_sha}" \
-            --arg mcpWheelOnlyGraphSha256 "${wheel_graph_sha}" \
-            --arg mcpProjectOverlaySha256 "${project_overlay_sha}" \
-            --arg mcpPypiProvenanceSha256 "${pypi_provenance_sha}" \
-            --arg mcpOpenVexSha256 "${openvex_sha}" \
-            --arg mcpRuntimeSmokeSha256 "${runtime_smoke_sha}" \
-            --slurpfile proof "${evidence_dir}/proof.json" \
-            --slurpfile demoState \
-              "${evidence_dir}/datahub-demo-state-binding.json" '
+            --argjson deploymentRunId "${DEPLOYMENT_RUN_ID}" \
+            --arg deploymentEvidenceDigest "${DEPLOYMENT_DIGEST}" \
+            --arg profileId "${PROFILE}" \
+            --arg generation "${GENERATION}" \
+            --arg capabilityDigest "${CAPABILITY_DIGEST}" \
+            --arg bindingDigest "${binding_digest}" \
+            --arg sessionIdDigest "${SESSION_DIGEST}" \
+            --arg sessionStatusDigest "${SESSION_STATUS_DIGEST}" \
+            --arg semanticDigest "${SEMANTIC_DIGEST}" \
+            --arg credentialBindingDigest "${CREDENTIAL_BINDING_DIGEST}" \
+            --arg queryDigest "${query_digest}" '
               {
-                schemaVersion: "archon.live-datahub-proof-attestation/v4",
-                repository: $repository,
-                workflow: {
-                  runId: $workflowRunId,
-                  runAttempt: $workflowRunAttempt
+                schemaVersion:"archon.live-dual-runtime-proof/v2",
+                stage:$stage,
+                releaseSha:$releaseSha,
+                deployment:{
+                  runId:$deploymentRunId,
+                  evidenceDigest:$deploymentEvidenceDigest,
+                  verification:"attested-exact-artifact"
                 },
-                releaseSha: $releaseSha,
-                deploymentRunId: $deploymentRunId,
-                provenAt: $provenAt,
-                querySha256: $querySha256,
-                queryBindingSha256: $queryBindingSha256,
-                dataHubDemoState: {
-                  workflow: $demoState[0].workflow,
-                  artifact: $demoState[0].artifact,
-                  attestation: $demoState[0].attestation,
-                  receiptSha256: $demoState[0].receiptSha256,
-                  gmsEndpointFingerprint:
-                    $demoState[0].gmsEndpointFingerprint,
-                  stateContractSha256:
-                    $demoState[0].stateContractSha256,
-                  postStateSha256: $demoState[0].postStateSha256,
-                  semanticContractSha256:
-                    $demoState[0].semanticContractSha256
+                runtimeBinding:{
+                  profileId:$profileId,
+                  generation:$generation,
+                  capabilityDigest:$capabilityDigest,
+                  availability:$binding[0].availability,
+                  capabilities:$binding[0].capabilities,
+                  bindingDigest:$bindingDigest,
+                  sessionIdDigest:
+                    (if $sessionIdDigest == "null" then null else $sessionIdDigest end),
+                  sessionStatusDigest:
+                    (if $sessionStatusDigest == "null" then null else $sessionStatusDigest end)
                 },
-                evidence: {
-                  proofSha256: $proofSha256,
-                  deploymentBindingSha256: $deploymentBindingSha256,
-                  deploymentEvidenceSha256:
-                    $deploymentEvidenceSha256,
-                  dataHubDemoStateBindingSha256:
-                    $demoStateBindingSha256,
-                  dataHubEndpointBindingSha256:
-                    $endpointBindingSha256,
-                  deployedDataHubSemanticProofSha256:
-                    $deployedSemanticProofSha256,
-                  dataHubDemoReceiptSha256:
-                    $demoReceiptSha256,
-                  controlPlaneGatesSha256: $controlPlaneGatesSha256,
-                  controlPlaneSecurityGatesSha256:
-                    $controlPlaneSecurityGatesSha256,
-                  mcpLockContractSha256: $mcpLockContractSha256,
-                  mcpUpstreamLockSha256: $mcpUpstreamLockSha256,
-                  mcpResolvedLockSha256: $mcpResolvedLockSha256,
-                  mcpResolvedLockBindingSha256:
-                    $mcpResolvedLockBindingSha256,
-                  mcpWheelOnlyGraphSha256: $mcpWheelOnlyGraphSha256,
-                  mcpProjectOverlaySha256: $mcpProjectOverlaySha256,
-                  mcpPypiProvenanceSha256: $mcpPypiProvenanceSha256,
-                  mcpOpenVexSha256: $mcpOpenVexSha256,
-                  mcpRuntimeSmokeSha256: $mcpRuntimeSmokeSha256
+                fourComponents:{
+                  dataHubMcpServer:true,
+                  agentContextKit:true,
+                  dataHubSkills:true,
+                  analyticsAgent:true
                 },
-                result: $proof[0].result,
-                datasetUrnSha256: $proof[0].datasetUrnSha256
+                proof:{
+                  level:
+                    (if $profileId == "cloud"
+                     then "credentialed-live-semantic"
+                     else "active-session-capability"
+                     end),
+                  semanticProofDigest:
+                    (if $semanticDigest == "null" then null else $semanticDigest end),
+                  credentialBindingDigest:
+                    (if $credentialBindingDigest == "null"
+                     then null else $credentialBindingDigest end),
+                  exactCanonicalQuery:true,
+                  queryDigest:$queryDigest,
+                  governedMutationAuthority:"separate-human-approved-canary"
+                },
+                secretsProjected:false,
+                rawIdentifiersRetained:false,
+                result:"passed",
+                generatedAt:(now|todateiso8601)
               }
-            ' >"${evidence_dir}/attestation-predicate.json"
-          {
-            echo "directory=${evidence_dir}"
-            echo "checksums=${evidence_dir}/proof-subject.sha256"
-            echo "predicate=${evidence_dir}/attestation-predicate.json"
-            echo "proof_sha=${proof_sha}"
-            echo "demo_receipt_sha=${demo_receipt_sha}"
-            echo "semantic_proof_sha=${deployed_semantic_proof_sha}"
-            echo "endpoint_fingerprint=$(jq -er '.gmsEndpointFingerprint' \
-              "${evidence_dir}/datahub-demo-state-binding.json")"
-          } >>"${GITHUB_OUTPUT}"
+            ' >"${subjects}/payload.json"
+          payload_digest="$(
+            jq -cS . "${subjects}/payload.json" |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          jq -S --arg digest "${payload_digest}" \
+            '. + {digest:$digest}' "${subjects}/payload.json" \
+            >"${subjects}/live-proof.json"
+          rm -- "${subjects}/payload.json"
+          stored_digest="$(jq -er .digest "${subjects}/live-proof.json")"
+          calculated_digest="$(
+            jq -cS 'del(.digest)' "${subjects}/live-proof.json" |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          test "${stored_digest}" = "${calculated_digest}"
+          jq -e --arg profile "${PROFILE}" '
+            .schemaVersion == "archon.live-dual-runtime-proof/v2" and
+            .runtimeBinding.profileId == $profile and
+            (.runtimeBinding.capabilityDigest |
+              test("^sha256:[0-9a-f]{64}$")) and
+            all(.fourComponents[]; . == true) and
+            .secretsProjected == false and
+            .rawIdentifiersRetained == false and
+            .result == "passed" and
+            (.digest | test("^sha256:[0-9a-f]{64}$")) and
+            (if $profile == "cloud"
+             then .proof.level == "credentialed-live-semantic" and
+                  (.proof.semanticProofDigest |
+                    test("^sha256:[0-9a-f]{64}$")) and
+                  (.proof.credentialBindingDigest |
+                    test("^sha256:[0-9a-f]{64}$")) and
+                  .runtimeBinding.sessionIdDigest == null
+             else .proof.level == "active-session-capability" and
+                  .proof.semanticProofDigest == null and
+                  .proof.credentialBindingDigest == null and
+                  (.runtimeBinding.sessionIdDigest |
+                    test("^sha256:[0-9a-f]{64}$"))
+             end)
+          ' "${subjects}/live-proof.json" >/dev/null
+          echo "path=${subjects}/live-proof.json" >>"${GITHUB_OUTPUT}"
 
-      - name: Revalidate exact control plane immediately before proof attestation
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CONTROL_PLANE_SHA: ${{ github.sha }}
-          EXPECTED_GATE_SHA256: ${{ steps.gate.outputs.control_plane_gate_sha }}
-          EVIDENCE_DIR: ${{ steps.evidence.outputs.directory }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exact_gates="$(
-            printf '%s' \
-              "${RUNNER_TEMP}/live-datahub-proof/control-plane-security-gates.json"
-          )"
-          OUTPUT_PATH="${exact_gates}" \
-            bash scripts/verify-github-control-plane.sh
-          test "$(sha256sum "${exact_gates}" | awk '{print $1}')" = \
-            "${EXPECTED_GATE_SHA256}"
-          test -f "${EVIDENCE_DIR}/control-plane-security-gates.json"
-          test ! -L "${EVIDENCE_DIR}/control-plane-security-gates.json"
-          cmp --silent \
-            "${exact_gates}" \
-            "${EVIDENCE_DIR}/control-plane-security-gates.json" || {
-            echo "::error::The signed live-proof gate subject is no longer current"
-            exit 1
-          }
-          jq -en \
-            --arg sha "${CONTROL_PLANE_SHA}" \
-            --slurpfile exact \
-              "${EVIDENCE_DIR}/control-plane-security-gates.json" \
-            --slurpfile enriched \
-              "${EVIDENCE_DIR}/control-plane-gates.json" '
-              def receipt:
-                map({
-                  path,
-                  workflowId,
-                  runId,
-                  runAttempt,
-                  conclusion
-                }) |
-                sort_by(.path);
-              $exact[0].sourceSha == $sha and
-              $enriched[0].sourceSha == $sha and
-              ($exact[0].workflows | receipt) ==
-                ($enriched[0].workflows | receipt)
-            ' >/dev/null || {
-            echo "::error::The signed exact and enriched live-proof receipts differ"
-            exit 1
-          }
-          enriched_sha="$(
-            sha256sum "${EVIDENCE_DIR}/control-plane-gates.json" |
-              awk '{print $1}'
-          )"
-          (
-            cd "${EVIDENCE_DIR}"
-            sha256sum --check --strict proof-subject.sha256
-          )
-          mcp_contract_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-lock-contract.json" |
-              awk '{print $1}'
-          )"
-          mcp_upstream_lock_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-upstream-uv.lock" |
-              awk '{print $1}'
-          )"
-          mcp_resolved_lock_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-resolved-uv.lock" |
-              awk '{print $1}'
-          )"
-          mcp_binding_sha="$(
-            sha256sum \
-              "${EVIDENCE_DIR}/mcp-resolved-lock-binding.json" |
-              awk '{print $1}'
-          )"
-          mcp_graph_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-wheel-only-graph.json" |
-              awk '{print $1}'
-          )"
-          mcp_overlay_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-project-overlay.json" |
-              awk '{print $1}'
-          )"
-          mcp_provenance_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-pypi-provenance.json" |
-              awk '{print $1}'
-          )"
-          mcp_openvex_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-openvex.json" |
-              awk '{print $1}'
-          )"
-          mcp_runtime_smoke_sha="$(
-            sha256sum "${EVIDENCE_DIR}/mcp-runtime-smoke.json" |
-              awk '{print $1}'
-          )"
-          deployment_binding_sha="$(
-            sha256sum "${EVIDENCE_DIR}/deployment-binding.json" |
-              awk '{print $1}'
-          )"
-          deployment_evidence_sha="$(
-            sha256sum "${EVIDENCE_DIR}/deployment-evidence.json" |
-              awk '{print $1}'
-          )"
-          demo_state_binding_sha="$(
-            sha256sum "${EVIDENCE_DIR}/datahub-demo-state-binding.json" |
-              awk '{print $1}'
-          )"
-          endpoint_binding_sha="$(
-            sha256sum "${EVIDENCE_DIR}/datahub-endpoint-binding.json" |
-              awk '{print $1}'
-          )"
-          deployed_semantic_proof_sha="$(
-            sha256sum "${EVIDENCE_DIR}/deployed-datahub-semantic-proof.json" |
-              awk '{print $1}'
-          )"
-          demo_receipt_sha="$(
-            sha256sum \
-              "${EVIDENCE_DIR}/sealed-datahub-demo-receipt/receipt.json" |
-              awk '{print $1}'
-          )"
-          test "$(jq -er '.gmsEndpointFingerprint' \
-            "${EVIDENCE_DIR}/datahub-endpoint-binding.json")" = "$(
-            jq -er '.gmsEndpointFingerprint' \
-              "${EVIDENCE_DIR}/datahub-demo-state-binding.json"
-          )"
-          test "${mcp_upstream_lock_sha}" = "$(
-            jq -er '.files["uv.lock"].sha256' \
-              "${EVIDENCE_DIR}/mcp-lock-contract.json"
-          )"
-          test "${mcp_resolved_lock_sha}" = "$(
-            jq -er '.resolution.resolvedLockSha256' \
-              "${EVIDENCE_DIR}/mcp-lock-contract.json"
-          )"
-          test "${mcp_openvex_sha}" = "$(
-            jq -er '.advisoryDisposition.vex.sha256' \
-              "${EVIDENCE_DIR}/mcp-lock-contract.json"
-          )"
-          vex_expires_epoch="$(
-            date -u --date="$(
-              jq -er '.advisoryDisposition.vex.expiresAt' \
-                "${EVIDENCE_DIR}/mcp-lock-contract.json"
-            )" +%s
-          )"
-          test "$(date -u +%s)" -lt "${vex_expires_epoch}"
-          jq --exit-status \
-            --arg upstream "${mcp_upstream_lock_sha}" \
-            --arg resolved "${mcp_resolved_lock_sha}" '
-              .upstreamLockSha256 == $upstream and
-              .expectedResolvedLockSha256 == $resolved and
-              .observedResolvedLockSha256 == $resolved and
-              .matches == true and
-              .placeholder == false
-            ' "${EVIDENCE_DIR}/mcp-resolved-lock-binding.json" >/dev/null
-          jq -e \
-            --arg exact "${EXPECTED_GATE_SHA256}" \
-            --arg enriched "${enriched_sha}" \
-            --arg mcpContract "${mcp_contract_sha}" \
-            --arg mcpUpstreamLock "${mcp_upstream_lock_sha}" \
-            --arg mcpResolvedLock "${mcp_resolved_lock_sha}" \
-            --arg mcpBinding "${mcp_binding_sha}" \
-            --arg mcpGraph "${mcp_graph_sha}" \
-            --arg mcpOverlay "${mcp_overlay_sha}" \
-            --arg mcpProvenance "${mcp_provenance_sha}" \
-            --arg mcpOpenVex "${mcp_openvex_sha}" \
-            --arg mcpRuntimeSmoke "${mcp_runtime_smoke_sha}" \
-            --arg deploymentBinding "${deployment_binding_sha}" \
-            --arg deploymentEvidence "${deployment_evidence_sha}" \
-            --arg demoStateBinding "${demo_state_binding_sha}" \
-            --arg endpointBinding "${endpoint_binding_sha}" \
-            --arg deployedSemanticProof \
-              "${deployed_semantic_proof_sha}" \
-            --arg demoReceipt "${demo_receipt_sha}" '
-              .schemaVersion ==
-                "archon.live-datahub-proof-attestation/v4" and
-              .evidence.controlPlaneSecurityGatesSha256 == $exact and
-              .evidence.controlPlaneGatesSha256 == $enriched and
-              .evidence.deploymentBindingSha256 ==
-                $deploymentBinding and
-              .evidence.deploymentEvidenceSha256 ==
-                $deploymentEvidence and
-              .evidence.dataHubDemoStateBindingSha256 ==
-                $demoStateBinding and
-              .evidence.dataHubEndpointBindingSha256 ==
-                $endpointBinding and
-              .evidence.deployedDataHubSemanticProofSha256 ==
-                $deployedSemanticProof and
-              .evidence.dataHubDemoReceiptSha256 ==
-                $demoReceipt and
-              .evidence.mcpLockContractSha256 == $mcpContract and
-              .evidence.mcpUpstreamLockSha256 == $mcpUpstreamLock and
-              .evidence.mcpResolvedLockSha256 == $mcpResolvedLock and
-              .evidence.mcpResolvedLockBindingSha256 == $mcpBinding and
-              .evidence.mcpWheelOnlyGraphSha256 == $mcpGraph and
-              .evidence.mcpProjectOverlaySha256 == $mcpOverlay and
-              .evidence.mcpPypiProvenanceSha256 == $mcpProvenance and
-              .evidence.mcpOpenVexSha256 == $mcpOpenVex and
-              .evidence.mcpRuntimeSmokeSha256 == $mcpRuntimeSmoke
-            ' "${EVIDENCE_DIR}/attestation-predicate.json" >/dev/null || {
-            echo "::error::The live-proof predicate lost an exact evidence binding"
-            exit 1
-          }
-
-      - name: Attest exact live proof evidence
+      - name: Attest exact live proof
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-checksums: ${{ steps.evidence.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4
-          predicate-path: ${{ steps.evidence.outputs.predicate }}
+          subject-path: ${{ steps.evidence.outputs.path }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-dual-runtime-proof/v2
+          predicate-path: ${{ steps.evidence.outputs.path }}
 
-      - name: Retain sanitized live proof evidence
-        id: artifact
+      - name: Retain sanitized live proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-datahub-proof-${{ inputs.stage }}-${{ inputs.profile }}-${{ inputs.release_sha }}-${{ github.run_id }}
+          path: ${{ steps.evidence.outputs.path }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+      - name: Seal submission-native live proof bundle
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        id: submission_evidence
+        env:
+          DEPLOYMENT_EVIDENCE: ${{ steps.deployment.outputs.evidence }}
+          RUNTIME_BINDING: ${{ steps.runtime.outputs.binding }}
+          LIVE_SUMMARY: ${{ steps.semantic.outputs.path }}
+          SEMANTIC_PROOF: ${{ steps.semantic.outputs.semantic_path }}
+          CANARY_RUN_ID: ${{ steps.canary.outputs.workflow_run_id }}
+          ROLLBACK_SUBJECT_DIGEST: ${{ steps.canary.outputs.rollback_subject_digest }}
+          ROLLBACK_EVIDENCE_DIGEST: ${{ steps.canary.outputs.rollback_evidence_digest }}
+          CANARY_PREDICATE_DIGEST: ${{ steps.canary.outputs.attestation_predicate_digest }}
+          CANARY_VERIFICATION_DIGEST: ${{ steps.canary.outputs.attestation_verification_digest }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/live-proof/submission-native"
+          mkdir -p "${root}"
+          cp -- "${DEPLOYMENT_EVIDENCE}" "${root}/deployment-evidence.json"
+          cp -- "${SEMANTIC_PROOF}" "${root}/deployed-datahub-semantic-proof.json"
+          binding_digest="sha256:$(sha256sum "${RUNTIME_BINDING}" | awk '{print $1}')"
+          jq -nS \
+            --slurpfile live "${LIVE_SUMMARY}" \
+            --slurpfile binding "${RUNTIME_BINDING}" \
+            --arg generation "${{ steps.runtime.outputs.generation }}" \
+            --arg capabilityDigest "${{ steps.runtime.outputs.capability }}" \
+            --arg bindingDigest "${binding_digest}" \
+            --argjson canaryRunId "${CANARY_RUN_ID}" \
+            --arg rollbackSubjectDigest "${ROLLBACK_SUBJECT_DIGEST}" \
+            --arg rollbackEvidenceDigest "${ROLLBACK_EVIDENCE_DIGEST}" \
+            --arg attestationPredicateDigest "${CANARY_PREDICATE_DIGEST}" \
+            --arg attestationVerificationDigest "${CANARY_VERIFICATION_DIGEST}" '
+              {
+                schemaVersion:"archon.live-datahub-proof/v3",
+                ok:$live[0].ok,
+                result:$live[0].result,
+                querySha256:$live[0].querySha256,
+                datasetUrnSha256:$live[0].datasetUrnSha256,
+                datasetsDiscovered:$live[0].datasetsDiscovered,
+                aspectHistories:$live[0].aspectHistories,
+                retainedHistories:$live[0].retainedHistories,
+                stableSourceCount:$live[0].stableSourceCount,
+                recoveredContradictions:$live[0].recoveredContradictions,
+                contradictionAttributeCount:$live[0].contradictionAttributeCount,
+                runtimeBinding:{
+                  profileId:"cloud",
+                  availability:$binding[0].availability,
+                  generation:$generation,
+                  capabilityDigest:$capabilityDigest,
+                  bindingDigest:$bindingDigest
+                },
+                governedWrite:{
+                  workflowRunId:$canaryRunId,
+                  result:"write-verified-and-rollback-proven",
+                  rollbackSubjectDigest:$rollbackSubjectDigest,
+                  rollbackEvidenceDigest:$rollbackEvidenceDigest,
+                  attestationPredicateDigest:$attestationPredicateDigest,
+                  attestationVerificationDigest:$attestationVerificationDigest
+                }
+              }
+            ' >"${root}/proof.json"
+          jq -e '
+            keys == [
+              "aspectHistories","contradictionAttributeCount","datasetUrnSha256",
+              "datasetsDiscovered","governedWrite","ok","querySha256",
+              "recoveredContradictions","result","retainedHistories","runtimeBinding",
+              "schemaVersion","stableSourceCount"
+            ] and
+            .schemaVersion == "archon.live-datahub-proof/v3" and
+            .ok == true and .result == "retained-history-contradiction-proven" and
+            .datasetsDiscovered == 1 and .retainedHistories == 1 and
+            .stableSourceCount == 2 and .recoveredContradictions == 1 and
+            .contradictionAttributeCount == 1 and
+            (.runtimeBinding |
+              keys == ["availability","bindingDigest","capabilityDigest","generation","profileId"] and
+              .profileId == "cloud" and .availability == "READY") and
+            (.governedWrite |
+              keys == [
+                "attestationPredicateDigest","attestationVerificationDigest","result",
+                "rollbackEvidenceDigest","rollbackSubjectDigest","workflowRunId"
+              ] and
+              .result == "write-verified-and-rollback-proven")
+          ' "${root}/proof.json" >/dev/null
+          (
+            cd "${root}"
+            sha256sum \
+              deployment-evidence.json \
+              deployed-datahub-semantic-proof.json \
+              proof.json >proof-subject.sha256
+          )
+          proven_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -cnS \
+            --slurpfile proof "${root}/proof.json" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg deploymentRunId "${DEPLOYMENT_RUN_ID}" \
+            --arg governedCanaryRunId "${CANARY_RUN_ID}" \
+            --arg provenAt "${proven_at}" \
+            --arg proofSha256 "$(sha256sum "${root}/proof.json" | awk '{print $1}')" \
+            --arg deploymentEvidenceSha256 "$(sha256sum "${root}/deployment-evidence.json" | awk '{print $1}')" \
+            --arg deployedDataHubSemanticProofSha256 "$(sha256sum "${root}/deployed-datahub-semantic-proof.json" | awk '{print $1}')" '
+              {
+                schemaVersion:"archon.live-datahub-proof-attestation/v4",
+                repository:$repository,
+                workflow:{runId:$runId,runAttempt:$runAttempt},
+                releaseSha:$releaseSha,
+                deploymentRunId:$deploymentRunId,
+                governedCanaryRunId:$governedCanaryRunId,
+                provenAt:$provenAt,
+                querySha256:$proof[0].querySha256,
+                runtimeBinding:$proof[0].runtimeBinding,
+                evidence:{
+                  proofSha256:$proofSha256,
+                  deploymentEvidenceSha256:$deploymentEvidenceSha256,
+                  deployedDataHubSemanticProofSha256:$deployedDataHubSemanticProofSha256
+                },
+                result:$proof[0].result,
+                datasetUrnSha256:$proof[0].datasetUrnSha256
+              }
+            ' >"${root}/attestation-predicate.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg release "${RELEASE_SHA}" '
+              keys == [
+                "datasetUrnSha256","deploymentRunId","evidence","governedCanaryRunId",
+                "provenAt","querySha256","releaseSha","repository","result",
+                "runtimeBinding","schemaVersion","workflow"
+              ] and
+              .schemaVersion == "archon.live-datahub-proof-attestation/v4" and
+              .repository == $repository and .releaseSha == $release and
+              .result == "retained-history-contradiction-proven"
+            ' "${root}/attestation-predicate.json" >/dev/null
+          (
+            cd "${root}"
+            sha256sum --check --strict proof-subject.sha256
+          )
+          {
+            echo "directory=${root}"
+            echo "inventory=${root}/proof-subject.sha256"
+            echo "predicate=${root}/attestation-predicate.json"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Attest submission-native live proof subjects
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ steps.submission_evidence.outputs.inventory }}
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4
+          predicate-path: ${{ steps.submission_evidence.outputs.predicate }}
+
+      - name: Retain submission-native live proof bundle
+        if: inputs.profile == 'cloud' && inputs.stage == 'production'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: live-datahub-proof-${{ inputs.release_sha }}-${{ github.run_attempt }}
-          path: ${{ steps.evidence.outputs.directory }}/
+          path: ${{ steps.submission_evidence.outputs.directory }}
           if-no-files-found: error
           retention-days: 90
-
+          compression-level: 9
       - name: Publish proof summary
-        env:
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
-          QUERY_SHA: ${{ steps.gate.outputs.query_sha }}
-          PROOF_SHA: ${{ steps.evidence.outputs.proof_sha }}
-          PROOF_ARTIFACT_ID: ${{ steps.artifact.outputs['artifact-id'] }}
-          PROOF_ARTIFACT_DIGEST: ${{ steps.artifact.outputs['artifact-digest'] }}
-          DEMO_RECEIPT_SHA: ${{ steps.evidence.outputs.demo_receipt_sha }}
-          SEMANTIC_PROOF_SHA: ${{ steps.evidence.outputs.semantic_proof_sha }}
-          ENDPOINT_FINGERPRINT: ${{ steps.evidence.outputs.endpoint_fingerprint }}
-        shell: bash
         run: |
           {
-            echo "## Live DataHub proof complete"
+            echo "### Live dual-runtime DataHub proof"
             echo
-            echo "- Release: \`${RELEASE_SHA}\`"
-            echo "- Deployment run: \`${DEPLOYMENT_RUN_ID}\`"
-            echo "- Sanitized query SHA-256: \`${QUERY_SHA}\`"
-            echo "- Canonical proof SHA-256: \`${PROOF_SHA}\`"
-            echo "- Proof artifact ID: \`${PROOF_ARTIFACT_ID}\`"
-            echo "- Proof artifact digest: \`sha256:${PROOF_ARTIFACT_DIGEST}\`"
-            echo "- Demo-state receipt SHA-256: \`${DEMO_RECEIPT_SHA}\`"
-            echo "- DataHub endpoint fingerprint: \`${ENDPOINT_FINGERPRINT}\`"
-            echo "- Deployed semantic proof SHA-256: \`${SEMANTIC_PROOF_SHA}\`"
-            echo "- Evidence predicate: \`https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4\`"
-            echo "- Scope: exact dataset, G6 gap, dangling blast radius, and retained owner contradiction"
-            echo "- Result: direct and deployed semantics proven"
+            echo "- Stage: ${STAGE}"
+            echo "- Release: ${RELEASE_SHA}"
+            echo "- Runtime: ${PROFILE}"
+            echo "- Generation: ${{ steps.runtime.outputs.generation }}"
+            echo "- Capability digest: ${{ steps.runtime.outputs.capability }}"
+            echo "- Evidence contains no endpoint, token, account ID, or raw dataset URN."
           } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Remove runner-only proof material
+        if: always()
+        run: rm -rf -- "${RUNNER_TEMP}/live-proof"

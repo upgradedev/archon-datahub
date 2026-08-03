@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "archon.core-mutation-authorization-golden/v1",
+  "canonicalization": "archon.sorted-json-utf8/v1",
+  "envelope": {
+    "approvalId": "approval-golden-1",
+    "arguments": {
+      "column_paths": [
+        "customer_email"
+      ],
+      "entity_urns": [
+        "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+      ],
+      "tag_urns": [
+        "urn:li:tag:PII"
+      ]
+    },
+    "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expiresAt": "2026-08-02T08:04:30.000Z",
+    "generation": "core-generation",
+    "issuedAt": "2026-08-02T07:59:30.000Z",
+    "jobId": "job_BBBBBBBBBBBBBBBBBBBBBB",
+    "planDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "policyDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "schemaVersion": "archon.core-mutation-authorization/v1",
+    "sessionId": "rs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "stage": "staging",
+    "target": {
+      "columnPath": "customer_email",
+      "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+    },
+    "tool": "add_tags"
+  },
+  "canonicalJson": "{\"approvalId\":\"approval-golden-1\",\"arguments\":{\"column_paths\":[\"customer_email\"],\"entity_urns\":[\"urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)\"],\"tag_urns\":[\"urn:li:tag:PII\"]},\"capabilityDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expiresAt\":\"2026-08-02T08:04:30.000Z\",\"generation\":\"core-generation\",\"issuedAt\":\"2026-08-02T07:59:30.000Z\",\"jobId\":\"job_BBBBBBBBBBBBBBBBBBBBBB\",\"planDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"policyDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"schemaVersion\":\"archon.core-mutation-authorization/v1\",\"sessionId\":\"rs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"stage\":\"staging\",\"target\":{\"columnPath\":\"customer_email\",\"entityUrn\":\"urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)\"},\"tool\":\"add_tags\"}",
+  "envelopeDigest": "sha256:16aeefe29cea76b19af4270dbe0453b3fbdaa72d425abd18ea969affc066c935",
+  "keySpec": "ECC_NIST_P256",
+  "algorithm": "ECDSA_SHA_256",
+  "publicKeyDerBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEw8Cjm2/B/bJHY1SXSWUzaDxp2+7p5keuTDwOJQ+yKkdxryCXVn1Yn3bdSZtn89HuvKnJ6p7bsS2CnP4wnx56mg==",
+  "signatureBase64": "MEQCIE/UUoYswGVf70htGLE2e0hNoLQ/r9/sN2ECqPHR0ZsFAiAtY0kR+mwS0oxGO2tnc+K4nfudaXZCx5VXsN94c02l1g=="
+}

@@ -5,7 +5,7 @@ application URL and the judge credential are provided separately in the Devpost
 testing instructions. No installation, cloud account, paid subscription, or
 DataHub credential is required from a judge.
 
-## Recommended journey
+## Recommended quick path
 
 1. Open the supplied HTTPS application URL in a new private browser window.
    Confirm that the Archon landing page and the preconfigured demo scope load
@@ -26,6 +26,42 @@ DataHub credential is required from a judge.
    panel shows a rejected outcome and a content-addressed receipt digest.
 7. Select **Sign out**. Reopen the application in another new private window and
    confirm that steward decision controls require authentication again.
+
+## Optional governed-write journey
+
+Use this path only when the final testing instructions mark the staging DataHub Cloud
+canary as ready and its separately governed inverse is armed. It is an optional bounded
+proof; the recommended rejection path above remains the fastest review.
+
+1. Keep the exact synthetic demo target:
+   - dataset:
+     `urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)`;
+   - field: `customer_email`; and
+   - proposed tag: `urn:li:tag:PII`.
+   Do not substitute another entity, field, tag, or tenant.
+2. Sign in with the supplied judge credential, retain the explicit **DataHub Cloud
+   (managed)** profile, keep the prefilled question, and start the DataHub Agent Stack
+   journey.
+3. Wait for the MCP reads, Agent Context Kit provenance envelope, five DataHub Skills,
+   and Analytics Agent result. Select **Generate proposal** and verify that the UI still
+   says **Proposal only** and displays content-addressed before/after digests.
+4. Select **Approve exact plan** after inspecting the exact PII plan. That authenticated
+   click is the explicit human approval boundary; it authorizes only the displayed
+   content-addressed plan.
+5. Wait for **SUCCEEDED · COMPLETE** and
+   **Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.**
+   Confirm both **ACK context · changed** and **Analytics result · changed**. These are
+   the read-after-write and context-delta proofs for the exact synthetic field.
+6. Sign out after the session teardown is shown. Do not attempt manual cleanup. After
+   the browser job, the workflow automatically enters the rollback job even if the
+   browser journey failed or was cancelled after preparation. The separate
+   `governed-canary-recovery` environment requires a fresh human approval, removes
+   only the canonical PII tag when present, reads the baseline again, and seals an
+   attested `restored` or `already-baseline` receipt.
+
+Archon does not mutate autonomously: the write cannot start without explicit steward
+approval of the exact plan, and the inverse uses distinct, separately approved
+authority. If this optional path is not explicitly armed, select **Reject proposal**.
 
 ## What the journey demonstrates
 

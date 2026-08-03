@@ -1,0 +1,372 @@
+name: DataHub Cloud trial bootstrap and canary
+
+run-name: >-
+  ${{ inputs.action || 'contracts' }}
+  ${{ inputs.deployment_environment || 'ci' }}
+  DataHub Cloud trial
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/datahub-cloud-trial.yml"
+      - "contracts/datahub-cloud-trial-v1.json"
+      - "contracts/aws-foundation-v1.json"
+      - "infra/aws/foundation/github-actions-deploy-role.yml"
+      - "docs/DATAHUB_CLOUD_TRIAL.md"
+      - "services/datahub-companion/demo/seed_datahub.py"
+      - "services/datahub-companion/demo/test_seed_datahub.py"
+      - "scripts/datahub_cloud_trial.py"
+      - "scripts/datahub_cloud_trial_clients.py"
+      - "scripts/datahub_cloud_trial_graphql.py"
+      - "tests/pipeline/datahub_cloud_trial_contracts_test.py"
+      - "tests/pipeline/datahub_cloud_trial_workflow_contracts_test.py"
+  pull_request:
+    paths:
+      - ".github/workflows/datahub-cloud-trial.yml"
+      - "contracts/datahub-cloud-trial-v1.json"
+      - "contracts/aws-foundation-v1.json"
+      - "infra/aws/foundation/github-actions-deploy-role.yml"
+      - "docs/DATAHUB_CLOUD_TRIAL.md"
+      - "services/datahub-companion/demo/seed_datahub.py"
+      - "services/datahub-companion/demo/test_seed_datahub.py"
+      - "scripts/datahub_cloud_trial.py"
+      - "scripts/datahub_cloud_trial_clients.py"
+      - "scripts/datahub_cloud_trial_graphql.py"
+      - "tests/pipeline/datahub_cloud_trial_contracts_test.py"
+      - "tests/pipeline/datahub_cloud_trial_workflow_contracts_test.py"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Read-only plan, first bootstrap, reconciliation, explicit rotation, or cleanup
+        required: true
+        type: choice
+        options:
+          - plan
+          - bootstrap
+          - reconcile
+          - rotate
+          - cleanup
+      deployment_environment:
+        description: Stage-scoped service accounts, policy, AWS role, and runtime secrets
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      release_sha:
+        description: Exact current master 40-character commit SHA
+        required: true
+        type: string
+      confirmation:
+        description: Exact action phrase from docs; blank only for plan
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    archon-datahub-cloud-trial-
+    ${{ inputs.deployment_environment || github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.31"
+  PYTHON_VERSION: "3.11.15"
+  PYTHONDONTWRITEBYTECODE: "1"
+  UV_NO_PROGRESS: "1"
+  UV_PYTHON_DOWNLOADS: "manual"
+  AWS_PAGER: ""
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contracts:
+    name: Trial contract and workflow security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify exact GraphQL, authorization, secret-flow, and workflow contracts
+        run: |
+          set -euo pipefail
+          python3 services/datahub-companion/demo/test_seed_datahub.py
+          python3 tests/pipeline/datahub_cloud_trial_contracts_test.py
+          python3 tests/pipeline/datahub_cloud_trial_workflow_contracts_test.py
+
+  operate:
+    name: Governed DataHub Cloud trial operation
+    needs: contracts
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'upgradedev/archon-datahub' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: ${{ inputs.deployment_environment }}
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Bind exact default-branch control plane before credentials
+        env:
+          ACTION: ${{ inputs.action }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEPLOYMENT_ENVIRONMENT: ${{ inputs.deployment_environment }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ACTION}" =~ ^(plan|bootstrap|reconcile|rotate|cleanup)$ ]]
+          [[ "${DEPLOYMENT_ENVIRONMENT}" =~ ^(staging|production)$ ]]
+          case "${ACTION}" in
+            plan) expected="" ;;
+            bootstrap)
+              expected="BOOTSTRAP DATAHUB CLOUD TRIAL 2026-08-04"
+              ;;
+            reconcile) expected="RECONCILE DATAHUB CLOUD TRIAL" ;;
+            rotate) expected="ROTATE DATAHUB CLOUD TRIAL" ;;
+            cleanup) expected="CLEANUP DATAHUB CLOUD TRIAL" ;;
+          esac
+          test "${CONFIRMATION}" = "${expected}" || {
+            echo "::error::confirmation does not exactly match the reviewed action"
+            exit 1
+          }
+          repository_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}")"
+          default_branch="$(jq -er '.default_branch' <<<"${repository_json}")"
+          test "${default_branch}" = "master"
+          current_ref="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${default_branch}")"
+          test "$(jq -er '.object.sha' <<<"${current_ref}")" = "${RELEASE_SHA}" || {
+            echo "::error::release_sha is no longer the current master head"
+            exit 1
+          }
+          test "${GITHUB_SHA}" = "${RELEASE_SHA}"
+
+          workflow_success() {
+            local file="$1"
+            local response
+            response="$(gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${file}/runs" \
+              -f "head_sha=${RELEASE_SHA}" \
+              -f "branch=${default_branch}" \
+              -f event=push \
+              -f per_page=100)"
+            jq -e \
+              --arg path ".github/workflows/${file}" \
+              --arg sha "${RELEASE_SHA}" \
+              --arg branch "${default_branch}" \
+              --arg repository "${GITHUB_REPOSITORY}" '
+                [
+                  .workflow_runs[] |
+                  select(
+                    .path == $path and
+                    .head_sha == $sha and
+                    .head_branch == $branch and
+                    .head_repository.full_name == $repository and
+                    .event == "push"
+                  )
+                ] |
+                sort_by(.id, .run_attempt) |
+                last |
+                select(
+                  .status == "completed" and
+                  .conclusion == "success"
+                )
+              ' <<<"${response}" >/dev/null
+          }
+          ready=false
+          for _ in {1..40}; do
+            if workflow_success ci.yml &&
+              workflow_success codeql.yml &&
+              workflow_success workflow-security.yml; then
+              ready=true
+              break
+            fi
+            sleep 15
+          done
+          test "${ready}" = "true" || {
+            echo "::error::exact-SHA CI, CodeQL, and Workflow security must be green"
+            exit 1
+          }
+
+          environment_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/environments/${DEPLOYMENT_ENVIRONMENT}")"
+          branch_policies="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/environments/${DEPLOYMENT_ENVIRONMENT}/deployment-branch-policies?per_page=100")"
+          jq -e \
+            --arg name "${DEPLOYMENT_ENVIRONMENT}" '
+              .name == $name and
+              .deployment_branch_policy.protected_branches == false and
+              .deployment_branch_policy.custom_branch_policies == true
+            ' <<<"${environment_json}" >/dev/null
+          jq -e --arg branch "${default_branch}" '
+            .total_count == 1 and
+            .branch_policies[0].name == $branch
+          ' <<<"${branch_policies}" >/dev/null
+
+      - name: Check out the exact reviewed release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Re-run trial contracts at the exact release
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${RELEASE_SHA}"
+          git diff --quiet
+          git diff --cached --quiet
+          test -z "$(git ls-files --others --exclude-standard)"
+          python3 services/datahub-companion/demo/test_seed_datahub.py
+          python3 tests/pipeline/datahub_cloud_trial_contracts_test.py
+          python3 tests/pipeline/datahub_cloud_trial_workflow_contracts_test.py
+
+      - name: Validate stage AWS identity inputs before OIDC
+        if: inputs.action != 'plan'
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DEPLOYMENT_ENVIRONMENT: ${{ inputs.deployment_environment }}
+        run: |
+          set -euo pipefail
+          [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${AWS_REGION}" = "eu-west-1"
+          expected="arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-${DEPLOYMENT_ENVIRONMENT}-cloud-trial"
+          test "${AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN}" = "${expected}" || {
+            echo "::error::AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN is not the exact dedicated stage role"
+            exit 1
+          }
+
+      - name: Install the exact frozen DataHub seeder runtime
+        if: >-
+          inputs.action == 'bootstrap' ||
+          inputs.action == 'reconcile' ||
+          inputs.action == 'rotate'
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Resolve the exact frozen DataHub seeder dependencies
+        if: >-
+          inputs.action == 'bootstrap' ||
+          inputs.action == 'reconcile' ||
+          inputs.action == 'rotate'
+        run: |
+          set -euo pipefail
+          uv python install "${PYTHON_VERSION}"
+          uv sync \
+            --project services/datahub-companion \
+            --python "${PYTHON_VERSION}" \
+            --frozen \
+            --no-dev \
+            --no-build
+
+      - name: Configure step-scoped Cloud trial AWS credentials
+        id: cloud-trial-aws
+        if: inputs.action != 'plan'
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
+          role-session-name: archon-cloud-trial-${{ github.run_id }}
+          role-duration-seconds: 3600
+          aws-region: ${{ vars.AWS_REGION }}
+          output-env-credentials: false
+          output-credentials: true
+
+      - name: Execute without credential serialization
+        id: operate
+        env:
+          ACTION: ${{ inputs.action }}
+          AWS_ACCESS_KEY_ID: ${{ steps.cloud-trial-aws.outputs.aws-access-key-id }}
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.cloud-trial-aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.cloud-trial-aws.outputs.aws-session-token }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DATAHUB_CLOUD_ADMIN_PAT: ${{ secrets.DATAHUB_CLOUD_ADMIN_PAT }}
+          DATAHUB_CLOUD_GMS_URL: ${{ vars.DATAHUB_CLOUD_GMS_URL }}
+          DEPLOYMENT_ENVIRONMENT: ${{ inputs.deployment_environment }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          set -euo pipefail
+          : "${DATAHUB_CLOUD_ADMIN_PAT:?protected environment admin PAT is required}"
+          evidence="${RUNNER_TEMP}/datahub-cloud-trial-receipt"
+          test ! -e "${evidence}"
+          mkdir --mode=0700 "${evidence}"
+          command=(python3)
+          if [[ "${ACTION}" =~ ^(bootstrap|reconcile|rotate)$ ]]; then
+            command=(
+              uv run
+              --project services/datahub-companion
+              --frozen
+              --no-dev
+              python
+            )
+          fi
+          "${command[@]}" scripts/datahub_cloud_trial.py \
+            --action "${ACTION}" \
+            --stage "${DEPLOYMENT_ENVIRONMENT}" \
+            --release-sha "${RELEASE_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --confirmation "${CONFIRMATION}" \
+            --receipt "${evidence}/receipt.json"
+          test -f "${evidence}/receipt.json"
+          test ! -L "${evidence}/receipt.json"
+          test "$(find "${evidence}" -mindepth 1 -maxdepth 1 -type f | wc -l)" = 1
+          receipt_sha="$(sha256sum "${evidence}/receipt.json" | awk '{print $1}')"
+          [[ "${receipt_sha}" =~ ^[0-9a-f]{64}$ ]]
+          echo "receipt_sha256=${receipt_sha}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### DataHub Cloud trial operation sealed"
+            echo
+            echo "- Action: \`${ACTION}\`"
+            echo "- Stage: \`${DEPLOYMENT_ENVIRONMENT}\`"
+            echo "- Receipt SHA-256: \`${receipt_sha}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload only the sanitized receipt
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-cloud-trial-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/datahub-cloud-trial-receipt/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest the sanitized trial receipt
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: ${{ runner.temp }}/datahub-cloud-trial-receipt/receipt.json
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-cloud-trial/v1
+          predicate: |
+            {
+              "schemaVersion": "archon.datahub-cloud-trial-attestation/v1",
+              "action": "${{ inputs.action }}",
+              "stage": "${{ inputs.deployment_environment }}",
+              "releaseSha": "${{ inputs.release_sha }}",
+              "receiptSha256": "${{ steps.operate.outputs.receipt_sha256 }}"
+            }

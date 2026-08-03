@@ -217,8 +217,8 @@ jq -e '
     ["branch_policy", "required_reviewers"] and
   .environments.soloOwnerApproval.ownerLogin == "upgradedev" and
   .environments.soloOwnerApproval.preventSelfReview == false and
-  (.environments.exactNames | length) == 17 and
-  (.environments.soloOwnerApproval.exactNames | length) == 12 and
+  (.environments.exactNames | length) == 16 and
+  (.environments.soloOwnerApproval.exactNames | length) == 11 and
   (.environments.reviewerlessByDesign.exactNames | length) == 5 and
   .environments.exactNames == (.environments.exactNames | sort | unique) and
   .environments.reviewerlessByDesign.exactNames ==
@@ -499,7 +499,7 @@ done < <(jq -r '.environments.exactNames[]' "${POLICY_PATH}")
 
 test "$(
   jq -r 'length' <<<"${observed_environments}"
-)" = "17"
+)" = "16"
 
 readonly observed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 temporary_output="${work_dir}/github-repository-posture.json"

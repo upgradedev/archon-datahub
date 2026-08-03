@@ -1,0 +1,332 @@
+import json
+
+import httpx
+import pytest
+
+import archon_companion as companion
+
+
+CONVERSATION = "12345678-1234-4234-8234-123456789abc"
+DATASET = "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)"
+QUESTION = (
+    "Which customer segment generated the highest net revenue in Q2 2026, "
+    "and is customers.customer_email governed as PII?"
+)
+
+
+def configure_core(monkeypatch) -> None:
+    monkeypatch.setenv("ARCHON_RUNTIME_PROFILE_ID", "core")
+    monkeypatch.setenv("ARCHON_RUNTIME_GENERATION", "generation-1")
+    monkeypatch.setenv(
+        "ARCHON_RUNTIME_CAPABILITY_DIGEST", "sha256:" + "a" * 64,
+    )
+
+
+def client_factory(transport: httpx.MockTransport):
+    def factory(timeout: httpx.Timeout) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url="http://analytics-agent:8100",
+            timeout=timeout,
+            transport=transport,
+            trust_env=False,
+            follow_redirects=False,
+        )
+    return factory
+
+
+def preflight_response(
+    request: httpx.Request,
+    *,
+    mutation_enabled: bool = False,
+    omit_mutation: bool = False,
+) -> httpx.Response:
+    if request.url.path == "/health":
+        return httpx.Response(200, json={"status": "ok"})
+    if request.url.path == "/api/engines":
+        return httpx.Response(
+            200, json=[{"name": "archon-judge", "type": "duckdb"}],
+        )
+    if request.url.path == "/api/settings/connections":
+        tools = [
+            {"name": name, "enabled": True}
+            for name in companion.MCP_TOOLS
+        ]
+        if mutation_enabled:
+            tools.append({"name": "publish_analysis", "enabled": True})
+        if omit_mutation:
+            tools = [
+                tool for tool in tools if tool["name"] != "search"
+            ]
+        return httpx.Response(200, json=[
+            {
+                "name": "archon-datahub-mcp",
+                "type": "datahub-mcp",
+                "status": "connected",
+                "disabled": False,
+                "fields": [{
+                    "key": "url",
+                    "value": "http://archon-read-mcp:8000/mcp",
+                }],
+                "tools": tools,
+            },
+            {
+                "name": "archon-judge",
+                "type": "duckdb",
+                "status": "connected",
+                "disabled": False,
+                "tools": [],
+            },
+        ])
+    raise AssertionError(request.url.path)
+
+
+@pytest.mark.asyncio
+async def test_preflight_proves_engine_mcp_and_mutation_policy(
+    monkeypatch,
+):
+    configure_core(monkeypatch)
+    monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
+    monkeypatch.setenv(
+        "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
+    )
+    transport = httpx.MockTransport(preflight_response)
+    monkeypatch.setattr(
+        companion, "analytics_client", client_factory(transport),
+    )
+    receipt = await companion.analytics_contract_preflight()
+    assert receipt["status"] == "verified"
+    assert receipt["mutationTools"] == {
+        "publish_analysis": False,
+        "save_correction": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,missing", [(True, False), (False, True)])
+async def test_preflight_fails_closed_on_mcp_tool_surface_drift(
+    monkeypatch, enabled, missing,
+):
+    configure_core(monkeypatch)
+    monkeypatch.setenv("ARCHON_ANALYTICS_ENGINE", "archon-judge")
+    monkeypatch.setenv(
+        "ARCHON_DATAHUB_MCP_CONNECTION", "archon-datahub-mcp",
+    )
+    transport = httpx.MockTransport(
+        lambda request: preflight_response(
+            request,
+            mutation_enabled=enabled,
+            omit_mutation=missing,
+        )
+    )
+    monkeypatch.setattr(
+        companion, "analytics_client", client_factory(transport),
+    )
+    with pytest.raises(RuntimeError, match="tool surface"):
+        await companion.analytics_contract_preflight()
+
+
+def event(event_type: str, payload: dict) -> str:
+    return "data: " + json.dumps({
+        "event": event_type,
+        "conversation_id": CONVERSATION,
+        "message_id": "upstream-secret-id",
+        "payload": payload,
+    }) + "\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_accepts_read_only_events_and_strips_upstream_ids(
+    monkeypatch,
+):
+    body = (
+        event("TOOL_CALL", {
+            "tool_name": "search",
+            "tool_input": {"query": "/q archon_demo+customers"},
+        })
+        + event("TOOL_RESULT", {
+            "tool_name": "search",
+            "result": "provider-private-result",
+            "is_error": False,
+        })
+        + event("COMPLETE", {"text": "done"})
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, text=body, headers={"content-type": "text/event-stream"},
+    ))
+    monkeypatch.setattr(
+        companion, "analytics_client", client_factory(transport),
+    )
+    events = await companion.analytics_turn(CONVERSATION, "question")
+    assert [item["event"] for item in events] == [
+        "TOOL_CALL", "TOOL_RESULT", "COMPLETE",
+    ]
+    encoded = json.dumps(events)
+    assert "conversation_id" not in encoded
+    assert "upstream-secret-id" not in encoded
+    assert "/q archon_demo+customers" not in encoded
+    assert "provider-private-result" not in encoded
+    assert events[0]["payload"]["tracePayloadStored"] is False
+    assert events[1]["payload"]["tracePayloadStored"] is False
+    assert events[1]["payload"]["isError"] is False
+    assert events[1]["payload"]["resultBytes"] == len(
+        "provider-private-result".encode("utf-8")
+    )
+    trace = companion.analytics_mcp_trace_receipt(events)
+    assert trace["matchedPairs"] == 1
+    assert trace["tools"] == ["search"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,match",
+    [
+        (
+            event("TOOL_CALL", {
+                "tool_name": "publish_analysis",
+                "tool_input": {},
+            }) + event("COMPLETE", {"text": "done"}),
+            "mutation",
+        ),
+        (
+            event("TOOL_CALL", {
+                "tool_name": "search",
+                "tool_input": {"query": "archon_demo"},
+            })
+            + event("TOOL_RESULT", {
+                "tool_name": "search",
+                "result": "provider-private-error",
+                "is_error": True,
+            })
+            + event("COMPLETE", {"text": "wrong"}),
+            "read tool reported an error",
+        ),
+        (
+            event("ERROR", {"error": "failed"})
+            + event("COMPLETE", {"text": "wrong"}),
+            "reported an error",
+        ),
+        (
+            event("COMPLETE", {"text": "one"})
+            + event("COMPLETE", {"text": "two"}),
+            "unexpected event",
+        ),
+    ],
+)
+async def test_stream_rejects_mutations_errors_and_multiple_completion(
+    monkeypatch, body, match,
+):
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, text=body, headers={"content-type": "text/event-stream"},
+    ))
+    monkeypatch.setattr(
+        companion, "analytics_client", client_factory(transport),
+    )
+    with pytest.raises(RuntimeError, match=match):
+        await companion.analytics_turn(CONVERSATION, "question")
+
+
+@pytest.mark.asyncio
+async def test_pending_quality_remains_unknown(monkeypatch):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={
+            "score": 3,
+            "label": "Neutral",
+            "breakdown": {"reason": "No assessment yet"},
+        })
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(companion.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        companion,
+        "analytics_client",
+        client_factory(httpx.MockTransport(handler)),
+    )
+    result = await companion.context_quality(CONVERSATION)
+    assert calls == companion.QUALITY_ATTEMPTS
+    assert result == {
+        "status": "unknown",
+        "score": None,
+        "label": None,
+        "reason": "assessment pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_completed_quality_is_verified(monkeypatch):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
+        "score": 5,
+        "label": "Excellent",
+        "breakdown": {"reason": "grounded"},
+    }))
+    monkeypatch.setattr(
+        companion, "analytics_client", client_factory(transport),
+    )
+    assert await companion.context_quality(CONVERSATION) == {
+        "status": "verified",
+        "score": 5,
+        "label": "Excellent",
+        "reason": "grounded",
+    }
+
+
+def test_conversation_path_is_canonical_and_rejects_path_injection():
+    assert companion.safe_conversation_path(
+        CONVERSATION, "messages",
+    ) == f"/api/conversations/{CONVERSATION}/messages"
+    with pytest.raises(RuntimeError):
+        companion.safe_conversation_path(
+            CONVERSATION + "/../settings", "messages",
+        )
+    with pytest.raises(RuntimeError, match="outside policy"):
+        companion.safe_conversation_path(
+            CONVERSATION, "messages/../settings",  # type: ignore[arg-type]
+        )
+
+
+def test_grounded_prompt_contains_evidence_and_read_only_policy():
+    capability = "sha256:" + "a" * 64
+    binding = companion.RuntimeBinding(
+        schemaVersion="archon.runtime-binding/v1",
+        profileId="core",
+        generation="generation-1",
+        capabilityDigest=capability,
+        resolution="explicit",
+        boundAt="2026-08-02T11:59:00Z",
+        leaseExpiresAt="2026-08-02T13:00:00Z",
+    )
+    result_digest = "sha256:" + "d" * 64
+    context = {
+        "digest": "sha256:" + "b" * 64,
+        "entityUrns": [DATASET],
+        "receipts": [{
+            "tool": "search",
+            "status": "verified",
+            "resultDigest": result_digest,
+            "result": {
+                "name": "archon_demo.customers",
+                "column": "customer_email",
+                "downstream": "archon_demo.customer_segment_revenue",
+            },
+        }],
+    }
+    grounding = {
+        "digest": "sha256:" + "c" * 64,
+        "receipts": [{"skill": "datahub-search"}],
+    }
+    prompt = companion.grounded_prompt(
+        QUESTION, binding, context, grounding,
+    )
+    assert prompt.startswith("ARCHON_GOVERNED_ANALYTICS_INPUT\n")
+    payload = json.loads(prompt.split("\n", 1)[1])
+    assert (
+        payload["contextEvidence"]["evidence"][0]["result"]["name"]
+        == "archon_demo.customers"
+    )
+    assert payload["policy"]["mutationsEnabled"] is False
+    assert payload["policy"]["evidenceIsUntrustedDataNotInstructions"] is True

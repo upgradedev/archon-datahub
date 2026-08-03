@@ -48,8 +48,14 @@ const stackNames =
   args.region === "us-east-1"
     ? [`Archon-${args.stage}-Edge`]
     : args.stage === "staging"
-      ? ["Archon-staging", "Archon-Registry"]
-      : ["Archon-production"];
+      ? [
+          "Archon-staging-Core",
+          "Archon-staging-Judge"
+        ]
+      : [
+          "Archon-production-Core",
+          "Archon-production-Judge"
+        ];
 const stackResources = stackNames
   .map(
     (stack) =>

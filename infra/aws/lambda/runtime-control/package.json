@@ -1,0 +1,15 @@
+{
+  "name": "@archon/datahub-runtime-control-lambda",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dependencies for the server-authoritative dual DataHub runtime session control API",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1093.0",
+    "@aws-sdk/client-sfn": "3.1093.0"
+  }
+}

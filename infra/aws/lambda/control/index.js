@@ -18,6 +18,12 @@ const {
 const dynamodb = new DynamoDBClient({});
 const s3 = new S3Client({});
 const stepFunctions = new SFNClient({});
+const {
+  decideRuntimeV2,
+  requestImproveRuntimeV2,
+  startRuntimeV2,
+  statusRuntimeV2
+} = require("./runtime-v2.js");
 const stateMachineArn = process.env.STATE_MACHINE_ARN;
 const checkpointTable = process.env.CHECKPOINT_TABLE;
 const approvalTable = process.env.APPROVAL_TABLE;
@@ -144,7 +150,7 @@ function boundedString(value, maximum = 2048) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u001f\u007f]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -154,7 +160,7 @@ function configuredDemoQuery() {
     demoQuery !== demoQuery.trim() ||
     demoQuery.length < 1 ||
     demoQuery.length > 256 ||
-    /[\u0000-\u001f\u007f]/u.test(demoQuery) ||
+    /[\u0000-\u001F\u007F]/u.test(demoQuery) ||
     /[*?]/u.test(demoQuery) ||
     demoQuery === "{}"
   ) {
@@ -215,7 +221,7 @@ function parseStartBody(input) {
   if (
     typeof body.query !== "string" ||
     body.query.length > 256 ||
-    /[\u0000-\u001f\u007f]/u.test(body.query)
+    /[\u0000-\u001F\u007F]/u.test(body.query)
   ) {
     return { error: response(400, { error: "invalid_query" }) };
   }
@@ -1008,7 +1014,7 @@ function boundedReportText(value, maximum) {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -2026,6 +2032,55 @@ async function status(auditId) {
 exports.handler = async (event) => {
   try {
     if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "startV2"
+    ) {
+      return await startRuntimeV2(event.body, event.identity);
+    }
+    if (
+      exactKeys(event, ["operation", "requestId", "auditId", "identity"]) &&
+      event.operation === "statusV2"
+    ) {
+      return await statusRuntimeV2(event.auditId, event.identity);
+    }
+    if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "auditId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "improveV2"
+    ) {
+      return await requestImproveRuntimeV2(
+        event.auditId,
+        event.body,
+        event.identity
+      );
+    }
+    if (
+      exactKeys(event, [
+        "operation",
+        "requestId",
+        "auditId",
+        "body",
+        "identity"
+      ]) &&
+      event.operation === "decideV2"
+    ) {
+      return await decideRuntimeV2(
+        event.auditId,
+        event.body,
+        event.identity
+      );
+    }
+    if (
       exactKeys(event, ["operation", "requestId", "body"]) &&
       event.operation === "start"
     ) {
@@ -2039,6 +2094,9 @@ exports.handler = async (event) => {
     }
     return response(404, { error: "not_found" });
   } catch (error) {
+    if (error?.name === "ConditionalCheckFailedException") {
+      return response(409, { error: "runtime_session_conflict" });
+    }
     if (error instanceof RetiredAuditSchemaError) {
       return response(410, {
         error: "audit_schema_retired",

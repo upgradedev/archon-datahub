@@ -69,6 +69,7 @@ jobs:
             scripts/bootstrap-aws-foundation-role.sh \
             scripts/aws-cloudformation-drift.sh \
             scripts/reconcile-aws-foundation.sh \
+            scripts/load-datahub-cloud-canary-credentials.sh \
             scripts/run-aws-incident-recovery.sh \
             scripts/aws-foundation-policy-migration-authorization.sh \
             scripts/aws-foundation-policy-migration-common.sh \
@@ -140,6 +141,8 @@ jobs:
             python3 tests/pipeline/submission_project_access_contracts_test.py
           PYTHONDONTWRITEBYTECODE=1 \
             python3 tests/pipeline/submission_operations_contracts_test.py
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tests/pipeline/post_merge_readiness_contracts_test.py
           bash tests/pipeline/judge-user-contracts.test.sh
           bash tests/pipeline/openvex-maintenance-contracts.test.sh
           bash scripts/validate-model-provenance-corpus.sh
@@ -698,6 +701,7 @@ jobs:
             infra/aws/package-lock.json
             infra/aws/lambda/approval/package-lock.json
             infra/aws/lambda/control/package-lock.json
+            infra/aws/lambda/runtime-control/package-lock.json
       - name: Install locked infrastructure dependencies
         working-directory: infra/aws
         run: npm ci --ignore-scripts
@@ -721,6 +725,9 @@ jobs:
       - name: Package locked control Lambda dependencies
         working-directory: infra/aws/lambda/control
         run: npm ci --omit=dev --ignore-scripts
+      - name: Package locked runtime-control Lambda dependencies
+        working-directory: infra/aws/lambda/runtime-control
+        run: npm ci --omit=dev --ignore-scripts
       - name: Typecheck CDK and Lambda contract tests
         working-directory: infra/aws
         run: npm run build
@@ -733,6 +740,10 @@ jobs:
           node -e "require('./lambda/approval/handoff.js')"
           node --check lambda/control/index.js
           node -e "require('./lambda/control/index.js')"
+          node --check lambda/runtime-control/index.js
+          node -e "require('./lambda/runtime-control/index.js')"
+          node --check lambda/runtime-control/session.js
+          node -e "require('./lambda/runtime-control/session.js')"
       - name: CDK assertion tests and coverage gate
         working-directory: infra/aws
         run: npm test -- --ci --coverage
@@ -758,13 +769,23 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
           --omit=dev
           --audit-level=moderate
+      - name: Runtime-control Lambda SCA gate
+        working-directory: infra/aws/lambda/runtime-control
+        run: >-
+          bash "${GITHUB_WORKSPACE}/scripts/npm-audit-retry.sh"
+          --omit=dev
+          --audit-level=moderate
       - name: Package deterministic Lambda release candidate
         shell: bash
         run: |
           set -euo pipefail
-          for directory in \
-            infra/aws/lambda/approval \
-            infra/aws/lambda/control; do
+          lambda_stage="${RUNNER_TEMP}/lambda-release"
+          archive="${RUNNER_TEMP}/archon-lambdas.tar.gz"
+          members="${RUNNER_TEMP}/archon-lambdas.members"
+          rm -rf -- "${lambda_stage}"
+          mkdir -p "${lambda_stage}"
+          for name in control runtime-control; do
+            directory="infra/aws/lambda/${name}"
             test -f "${directory}/package.json"
             test -f "${directory}/package-lock.json"
             test -d "${directory}/node_modules"
@@ -773,18 +794,54 @@ jobs:
               echo "::error::Lambda release inputs may contain only regular files and directories"
               exit 1
             fi
+            cp --archive -- "${directory}" "${lambda_stage}/${name}"
           done
+          if find "${lambda_stage}" \
+            \( ! -type f -a ! -type d \) -print -quit | grep -q .; then
+            echo "::error::Staged Lambda release may contain only regular files and directories"
+            exit 1
+          fi
           tar \
             --sort=name \
             --mtime='@0' \
             --owner=0 \
             --group=0 \
             --numeric-owner \
-            --directory infra/aws/lambda \
+            --directory "${lambda_stage}" \
             --create \
             --file - \
-            approval control |
-            gzip --no-name --best >"${RUNNER_TEMP}/archon-lambdas.tar.gz"
+            control runtime-control |
+            gzip --no-name --best >"${archive}"
+          tar --list --gzip --file "${archive}" >"${members}"
+          test -s "${members}"
+          while IFS= read -r member; do
+            case "${member}" in
+              control|control/*|runtime-control|runtime-control/*) ;;
+              *)
+                echo "::error::Unexpected Lambda release archive member: ${member}"
+                exit 1
+                ;;
+            esac
+            if [[ "${member}" == /* || "${member}" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Unsafe Lambda release archive member: ${member}"
+              exit 1
+            fi
+          done <"${members}"
+          if LC_ALL=C sort "${members}" | uniq --repeated | grep -q .; then
+            echo "::error::Duplicate Lambda release archive member"
+            exit 1
+          fi
+          for entry in \
+            control/index.js \
+            control/remediation.js \
+            control/package.json \
+            control/package-lock.json \
+            runtime-control/index.js \
+            runtime-control/session.js \
+            runtime-control/package.json \
+            runtime-control/package-lock.json; do
+            grep --fixed-strings --line-regexp --quiet "${entry}" "${members}"
+          done
           (
             cd "${RUNNER_TEMP}"
             sha256sum archon-lambdas.tar.gz >archon-lambdas.tar.gz.sha256
@@ -825,7 +882,7 @@ jobs:
             )
             case "${stage}" in
               staging) expected_template_count=3 ;;
-              production) expected_template_count=2 ;;
+              production) expected_template_count=3 ;;
               *) exit 1 ;;
             esac
             test "${#templates[@]}" -eq "${expected_template_count}"
@@ -873,6 +930,11 @@ jobs:
             --verbose \
             --rules-file infra/aws/policy/archon.guard \
             --test-data infra/aws/policy/archon_tests.yaml
+      - name: Unit-test exact Trivy exception boundary
+        run: |
+          set -euo pipefail
+          node --test \
+            tests/pipeline/trivy-iac-exception-contract.test.mjs
       - name: Enforce preventive controls on synthesized templates
         env:
           GUARD_BIN: ${{ steps.guard.outputs.bin }}
@@ -930,22 +992,14 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           overwrite: true
-      - name: Fail on any IaC finding or malformed scan evidence
+      - name: Enforce exact evidence-bound IaC review
         shell: bash
         run: |
           set -euo pipefail
-          jq --exit-status \
-            '
-              .version == "2.1.0" and
-              (.runs | type == "array" and length > 0) and
-              all(
-                .runs[];
-                (.tool.driver.name | ascii_downcase | contains("trivy")) and
-                (.results | type == "array")
-              ) and
-              ([.runs[].results[]] | length) == 0
-            ' \
-            "${RUNNER_TEMP}/trivy-iac.sarif" >/dev/null
+          node scripts/validate-trivy-iac-sarif.mjs \
+            "${RUNNER_TEMP}/trivy-iac.sarif" \
+            "${RUNNER_TEMP}/cdk.out" \
+            contracts/aws-iac-trivy-exceptions-v1.json
 
   publish-infra-sarif:
     name: Publish trusted default-branch IaC SARIF
@@ -960,34 +1014,61 @@ jobs:
       contents: read
       security-events: write
     steps:
+      - name: Check out the exact trusted default-branch source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Download the exact successful IaC evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: infra-${{ github.sha }}
           path: ${{ runner.temp }}/infra-evidence
-      - name: Revalidate zero-finding SARIF before publication
+      - name: Revalidate raw evidence and project actionable SARIF
+        shell: bash
         run: |
           set -euo pipefail
-          sarif="${RUNNER_TEMP}/infra-evidence/trivy-iac.sarif"
-          test -f "${sarif}"
-          test ! -L "${sarif}"
+          umask 077
+          raw_sarif="${RUNNER_TEMP}/infra-evidence/trivy-iac.sarif"
+          synth_root="${RUNNER_TEMP}/infra-evidence/cdk.out"
+          projection="${RUNNER_TEMP}/trusted-actionable-trivy-iac.sarif"
+          test -f "${raw_sarif}"
+          test ! -L "${raw_sarif}"
+          test -d "${synth_root}"
+          test ! -L "${synth_root}"
           test "$(find "${RUNNER_TEMP}/infra-evidence" \
             -name trivy-iac.sarif -type f | wc -l)" = "1"
+          raw_sha256="$(sha256sum "${raw_sarif}" | cut -d ' ' -f 1)"
+          node scripts/validate-trivy-iac-sarif.mjs \
+            "${raw_sarif}" \
+            "${synth_root}" \
+            contracts/aws-iac-trivy-exceptions-v1.json
+          test "$(sha256sum "${raw_sarif}" | cut -d ' ' -f 1)" = \
+            "${raw_sha256}"
+          jq '(.runs[] | .results) = []' \
+            "${raw_sarif}" >"${projection}"
+          test -s "${projection}"
+          test ! -L "${projection}"
           jq --exit-status \
             '
               .version == "2.1.0" and
-              (.runs | type == "array" and length > 0) and
+              (.runs | type == "array" and length == 1) and
               all(
                 .runs[];
-                (.tool.driver.name | ascii_downcase | contains("trivy")) and
-                (.results | type == "array")
-              ) and
-              ([.runs[].results[]] | length) == 0
-            ' "${sarif}" >/dev/null
-      - name: Upload trusted IaC SARIF
+                .tool.driver.name == "Trivy" and
+                .tool.driver.version == "0.72.0" and
+                (.results | type == "array" and length == 0)
+              )
+            ' "${projection}" >/dev/null
+          test "$(sha256sum "${raw_sarif}" | cut -d ' ' -f 1)" = \
+            "${raw_sha256}"
+      - name: Upload trusted actionable IaC SARIF projection
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
-          sarif_file: ${{ runner.temp }}/infra-evidence/trivy-iac.sarif
+          sarif_file: ${{ runner.temp }}/trusted-actionable-trivy-iac.sarif
           category: trivy-aws-cdk
 
   readiness:
@@ -1993,10 +2074,12 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
-          # aws-cdk-lib@2.262.1 immutably bundles the sole affected path.
-          # The infra job replaces it with integrity-pinned 5.0.8 and accepts
-          # no other advisory/path through its exact compensating audit gate.
-          allow-ghsas: GHSA-mh99-v99m-4gvg
+          # aws-cdk-lib@2.262.1 immutably bundles the first affected path; the
+          # infra job replaces it with integrity-pinned 5.0.8.
+          # ACK pins setuptools<82; its sdist-only macOS finding is governed by
+          # the expiring Linux wheel-only OpenVEX gate in datahub-agent-stack.
+          # No advisory outside these exact two identifiers is accepted.
+          allow-ghsas: GHSA-mh99-v99m-4gvg, GHSA-h35f-9h28-mq5c
 
   load:
     name: Offline SLO

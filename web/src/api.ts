@@ -141,7 +141,7 @@ function narrowAuditQuery(value: string): string {
     query.length > 256 ||
     /[*?]/u.test(query) ||
     query === "{}" ||
-    /[\u0000-\u001f\u007f]/u.test(query)
+    /[\u0000-\u001F\u007F]/u.test(query)
   ) {
     throw new ApiError(
       "A narrow, non-wildcard dataset query is required.",
@@ -177,7 +177,7 @@ function isBoundedText(value: unknown, maximum: number): value is string {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= maximum &&
-    !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+    !/[\u0000-\u001F\u007F]/u.test(value)
   );
 }
 
@@ -554,7 +554,7 @@ function isControlLoopResult(value: unknown): value is ControlLoopResult {
   );
 }
 
-function parseControlLoopStatus(
+export function parseControlLoopStatus(
   value: unknown,
   expectedAuditId: string,
 ): ControlLoopStatus {
@@ -791,7 +791,7 @@ export async function submitApprovalDecision({
   if (
     accessToken.length < 20 ||
     accessToken.length > 16_384 ||
-    /[\s\u0000-\u001F\u007F]/.test(accessToken)
+    /[\u0000-\u0020\u007F]/u.test(accessToken)
   ) {
     throw new ApiError("A valid steward access token is required.", 401);
   }

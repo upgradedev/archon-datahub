@@ -10,6 +10,15 @@ deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
 migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
+publisher_migration_contract="${repository_root}/contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json"
+publisher_migration_entry="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
+publisher_migration_driver="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml"
+publisher_migration_cleanup="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-cleanup.yml"
+publisher_migration_common="${repository_root}/scripts/aws-foundation-cloud-runtime-publisher-policy-migration-common.sh"
+publisher_migration_authorization="${repository_root}/scripts/aws-foundation-cloud-runtime-publisher-policy-migration-authorization.sh"
+publisher_migration_state="${repository_root}/scripts/aws-foundation-cloud-runtime-publisher-policy-migration-state.sh"
+publisher_migration_runner="${repository_root}/scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh"
+cloud_runtime_workflow="${repository_root}/.github/workflows/datahub-cloud-runtime-image.yml"
 infra_package_manifest="${repository_root}/infra/aws/package.json"
 infra_package_lock="${repository_root}/infra/aws/package-lock.json"
 foundation_policy="${repository_root}/infra/aws/foundation/github-actions-foundation-policy.json"
@@ -36,6 +45,7 @@ failure_sanitizer_test="${repository_root}/tests/pipeline/cloudformation-failure
 iam_resource_arn_verifier="${repository_root}/scripts/verify-iam-policy-resource-arns.mjs"
 iam_resource_arn_verifier_test="${repository_root}/tests/pipeline/iam-policy-resource-arn-verifier.test.mjs"
 runtime_verifier="${repository_root}/scripts/verify-aws-runtime-boundary.mjs"
+role_binding_validator="${repository_root}/scripts/validate-cloudformation-role-bindings.sh"
 runbook="${repository_root}/docs/AWS_FOUNDATION.md"
 
 fail() {
@@ -70,6 +80,15 @@ for path in \
   "${ci_workflow}" \
   "${contract}" \
   "${migration_contract}" \
+  "${publisher_migration_contract}" \
+  "${publisher_migration_entry}" \
+  "${publisher_migration_driver}" \
+  "${publisher_migration_cleanup}" \
+  "${publisher_migration_common}" \
+  "${publisher_migration_authorization}" \
+  "${publisher_migration_state}" \
+  "${publisher_migration_runner}" \
+  "${cloud_runtime_workflow}" \
   "${infra_package_manifest}" \
   "${infra_package_lock}" \
   "${foundation_policy}" \
@@ -95,6 +114,7 @@ for path in \
   "${iam_resource_arn_verifier}" \
   "${iam_resource_arn_verifier_test}" \
   "${runtime_verifier}" \
+  "${role_binding_validator}" \
   "${runbook}"; do
   test -f "${path}" || fail "missing ${path#${repository_root}/}"
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
@@ -145,6 +165,24 @@ jq --exit-status '
       "archon-aws-foundation-identity",
       "archon-aws-foundation-attachments"
     ],
+    identityRoleMigration: {
+      baselineCanonicalSha256:
+        "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+      baselineDefaultVersion: "v1",
+      contract:
+        "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+      exactRoleDelta: [
+        "archon-datahub-github-staging-cloud-trial",
+        "archon-datahub-github-production-cloud-trial",
+        "archon-datahub-cloud-runtime-publish-production"
+      ],
+      policyName: "archon-aws-foundation-identity",
+      targetCanonicalSha256:
+        "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+      targetVersion: "v2",
+      workflow:
+        ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
+    },
     maximumDocumentBytes: 6144,
     migrationContract:
       "contracts/aws-foundation-policy-migration-v1.json",
@@ -228,7 +266,11 @@ jq --exit-status '
   } and
   .aws.governedCanaryRoles.roles.recovery == {
     environment: "governed-canary-recovery",
-    permissions: ["cloudformation:DescribeStacks"],
+    permissions: [
+      "cloudformation:DescribeStacks",
+      "secretsmanager:GetSecretValue",
+      "kms:Decrypt"
+    ],
     roleName: "archon-datahub-github-governed-canary-recovery",
     variable: "AWS_CANARY_RECOVERY_ROLE_ARN"
   } and
@@ -323,8 +365,55 @@ jq --exit-status '
     route53DomainsAllowed: false,
     validationRecordTypes: ["CNAME"]
   } and
+  .aws.applicationStackRoleBinding == {
+    deployRoleArnTemplate:
+      "arn:aws:iam::<account-id>:role/archon-datahub-github-<stage>-deploy",
+    postDeploy: {
+      allowAbsent: false,
+      allowRoleMigration: false
+    },
+    preflight: {
+      allowAbsent: true,
+      allowRoleMigration: false
+    },
+    validator: "scripts/validate-cloudformation-role-bindings.sh"
+  } and
   .aws.stages.staging.qualifier == "archonstg" and
   .aws.stages.production.qualifier == "archonprd" and
+  .aws.stages.staging.applicationStackRoleBindings == [
+    {
+      stackName: "Archon-staging-Edge",
+      region: "us-east-1",
+      bootstrapQualifier: "archonstg"
+    },
+    {
+      stackName: "Archon-staging-Core",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonstg"
+    },
+    {
+      stackName: "Archon-staging-Judge",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonstg"
+    }
+  ] and
+  .aws.stages.production.applicationStackRoleBindings == [
+    {
+      stackName: "Archon-production-Edge",
+      region: "us-east-1",
+      bootstrapQualifier: "archonprd"
+    },
+    {
+      stackName: "Archon-production-Core",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonprd"
+    },
+    {
+      stackName: "Archon-production-Judge",
+      region: "eu-west-1",
+      bootstrapQualifier: "archonprd"
+    }
+  ] and
   (.aws.stages.staging.executionPolicyNames | length) == 10 and
   (.aws.stages.production.executionPolicyNames | length) == 10 and
   .aws.stages.staging.executionPolicyAttachments == {
@@ -370,7 +459,8 @@ jq --exit-status '
       "requires-explicit-deploy-migration"
     ],
     deployFinalPostcheckRequiresExactBindings: true,
-    entryCount: 5,
+    entryCount: 6,
+    perStageDeployEntryCount: 3,
     migrationRequiredState:
       "foundation-complete-deploy-migration-required",
     readyState: "ready-for-deploy"
@@ -483,12 +573,16 @@ jq --exit-status '
     [.aws.runtimeBoundary.allowedActions[] |
       select(
         startswith("iam:") or
-        startswith("sts:") or
         startswith("account:") or
         startswith("organizations:")
       )] |
     length
-  ) == 0
+  ) == 0 and
+  (
+    [.aws.runtimeBoundary.allowedActions[] |
+      select(startswith("sts:"))] |
+    sort
+  ) == ["sts:AssumeRole", "sts:GetCallerIdentity"]
 ' "${contract}" >/dev/null
 
 trigger_contract="$(
@@ -623,7 +717,14 @@ require_text "${bootstrap_sealer}" \
 require_text "${bootstrap_patcher}" \
   "Default: 'AWS CDK: Default Resources'" \
   'Default: "AWS CDK: Default Resources"' \
+  '"Archon-staging-Core"' \
+  '"Archon-staging-Judge"' \
+  '"Archon-production-Core"' \
+  '"Archon-production-Judge"' \
   'defaultVariantCount !== 1'
+forbid_text "${bootstrap_patcher}" \
+  '["Archon-staging", "Archon-Registry"]' \
+  '["Archon-production"]'
 if grep -Fq '${{ secrets.' "${foundation_workflow}"; then
   fail "AWS foundation must not consume long-lived GitHub secrets"
 fi
@@ -664,7 +765,61 @@ jq --exit-status '
     .Resource |
     map(select(contains("governed-canary"))) |
     length
-  ) == 3
+  ) == 3 and
+  (
+    [.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles")][0] |
+    .Resource |
+    sort
+  ) == (
+    [
+      "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Core/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Judge/*",
+      "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Core/*",
+      "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Judge/*"
+    ] |
+    sort
+  ) and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiFoundationStack")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiFoundationRoles")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactCoreAmiBuilderProfile")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "AttachExactCoreAmiBuilderSsmPolicy")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "PassExactCoreAmiBuilderRoleForProfile")] |
+    length
+  ) == 1 and
+  (
+    [.Statement[] |
+      select(.Sid == "ReconcileExactBootstrapAndDeployRoles")][0] |
+    .Resource |
+    map(select(endswith("-cloud-trial"))) |
+    sort
+  ) == (
+    [
+      "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-production-cloud-trial",
+      "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-github-staging-cloud-trial"
+    ] |
+    sort
+  )
 ' "${foundation_policy}" >/dev/null
 
 require_text "${foundation_renderer}" \
@@ -700,6 +855,23 @@ for group in control assets identity attachments; do
       (tostring | contains("${aws:PrincipalAccount}") | not)
     ' <<<"${renderer_stdout[${group}]}" >/dev/null
 done
+
+jq --exit-status '
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiFoundationStack")) != null and
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiFoundationRoles")) != null and
+  ([.Statement[].Sid] |
+    index("ReconcileExactCoreAmiBuilderProfile")) != null and
+  ([.Statement[].Sid] |
+    index("AttachExactCoreAmiBuilderSsmPolicy")) != null and
+  ([.Statement[].Sid] |
+    index("PassExactCoreAmiBuilderRoleForProfile")) != null
+' <<<"${renderer_stdout[control]}" >/dev/null
+jq --exit-status '
+  ([.Statement[].Sid] |
+    index("ReconcileExactBootstrapAndDeployRoles")) != null
+' <<<"${renderer_stdout[identity]}" >/dev/null
 
 node "${foundation_renderer}" \
   --input "${foundation_policy}" \
@@ -869,6 +1041,29 @@ require_text "${execution_policy}" \
   'ArchonCdkUsEast1ExecutionPolicyArns:' \
   'ArchonCdkExecutionPolicyNames:' \
   'ArchonRuntimeBoundaryArn:' \
+  'ScaleOnlyStageCoreRuntime' \
+  'InvokeOnlyReviewedAnalyticsModels' \
+  'EmitOnlyCoreRuntimeMetrics' \
+  'UseOnlyStageTableStreams' \
+  'CreateOnlyTaggedCoreSessionEndpoints' \
+  'TagOnlyNewCoreSessionEndpoints' \
+  'ReconcileOnlyOwnedCoreSessionEndpoints' \
+  'InspectOnlyEuWest1CoreResources' \
+  'UseOnlyStageRuntimeEncryptionKeys' \
+  'ReadOnlyStageMutationVerificationKeys' \
+  'SignOnlyStageGovernedMutations' \
+  'InvokeOnlyStageRuntimeFunctions' \
+  'ObserveOnlyStageCloudCheckpointVersioning' \
+  'AssumeOnlyStageCoreScopedRuntimeRoles' \
+  'ConfirmOnlyCurrentRuntimeIdentity' \
+  'DenyVersionDeletionOutsideCloudCheckpointResets' \
+  'kms:SigningAlgorithm: ECDSA_SHA_256' \
+  'alias/archon/${DeploymentEnvironment}/datahub-core-mutation-signing' \
+  'bedrock:InferenceProfileArn: !Sub arn:aws:bedrock:eu-west-1:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0' \
+  'arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0' \
+  'secret:archon/${DeploymentEnvironment}/datahub-cloud/*' \
+  '- dynamodb:ListStreams' \
+  'NotResource: !Sub arn:aws:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-*/cloud-runtime/v2/*' \
   'DenySharedApiGatewayAccountMutation' \
   'DenyRuntimeBoundaryRemoval' \
   'DenyFoundationControlPlaneMutation' \
@@ -901,6 +1096,11 @@ require_text "${execution_policy}" \
   'CreateOnlyTaggedStageCloudFrontFunctions' \
   'ReconcileOnlyExactCanonicalHostFunction'
 forbid_text "${execution_policy}" \
+  'Action: sts:*' \
+  'kms:Describe*' \
+  'application-inference-profile' \
+  'secret:archon/${DeploymentEnvironment}/datahub-read-' \
+  'secret:archon/${DeploymentEnvironment}/datahub-write-' \
   'route53:DisassociateVPCFromHostedZone' \
   'route53:VPCs: arn:' \
   'route53:*' \
@@ -1227,6 +1427,10 @@ forbid_text "${failure_sanitizer}" \
   'physicalResourceId' \
   'StackId'
 require_text "${runtime_verifier}" \
+  'function normalizeAction(action)' \
+  'return action.toLowerCase();' \
+  'allowedActions.map(normalizeAction)' \
+  'case-insensitively unique' \
   'const uncovered' \
   'const unusedAllowed' \
   'const unseenApprovedPolicies' \
@@ -1250,10 +1454,67 @@ require_text "${ci_workflow}" \
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
   'cancel-in-progress: false' \
+  'permissions: {}' \
+  '    permissions:' \
+  '      actions: read' \
+  '      attestations: write' \
+  '      contents: read' \
+  '      id-token: write' \
+  'Fail closed on exact stage deployment role before AWS trust' \
+  'id: deploy_authority' \
   'AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}' \
+  'expected_deploy_role_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-github-${STAGE}-deploy"' \
+  'printf '\''role_arn=%s\n'\'' "${AWS_DEPLOY_ROLE_ARN}" >>"${GITHUB_OUTPUT}"' \
+  'role-to-assume: ${{ steps.deploy_authority.outputs.role_arn }}' \
+  'allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}' \
+  'mask-aws-account-id: true' \
+  'unset-current-credentials: true' \
+  'Preflight exact lean stack execution-role bindings' \
+  'ALLOW_ABSENT=true' \
+  'Verify exact post-deploy CloudFormation role bindings' \
   'ALLOW_ABSENT=false' \
   'ALLOW_ROLE_MIGRATION=false' \
   'bash scripts/validate-cloudformation-role-bindings.sh'
+forbid_text "${deploy_workflow}" \
+  'role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}'
+test "$(
+  grep -Ec '^permissions: \{\}$' "${deploy_workflow}"
+)" -eq 1 || fail 'deploy workflow must deny permissions by default at root'
+test "$(
+  grep -Fc 'bash scripts/validate-cloudformation-role-bindings.sh' \
+    "${deploy_workflow}"
+)" -eq 2 || fail 'deploy workflow must verify role bindings twice'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=true' "${deploy_workflow}"
+)" -eq 1 || fail 'deploy preflight must allow only first-deploy absence'
+test "$(
+  grep -Fc 'ALLOW_ABSENT=false' "${deploy_workflow}"
+)" -eq 1 || fail 'post-deploy role verification must forbid absence'
+test "$(
+  grep -Fc 'ALLOW_ROLE_MIGRATION=false' "${deploy_workflow}"
+)" -eq 2 || fail 'deploy role verification must always forbid migration'
+
+require_text "${role_binding_validator}" \
+  'bootstrap_qualifier="archonstg"' \
+  'bootstrap_qualifier="archonprd"' \
+  '"Archon-${EXPECTED_STAGE}-Edge|us-east-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Core|eu-west-1|${bootstrap_qualifier}"' \
+  '"Archon-${EXPECTED_STAGE}-Judge|eu-west-1|${bootstrap_qualifier}"' \
+  'state: "present-and-exact"'
+forbid_text "${role_binding_validator}" \
+  '"Archon-staging|eu-west-1|archonstg"' \
+  '"Archon-production|eu-west-1|archonprd"'
+require_text "${reconciler}" \
+  'Archon-staging-Core "${staging_cfn_eu}"' \
+  'Archon-staging-Judge "${staging_cfn_eu}"' \
+  'Archon-production-Core "${production_cfn_eu}"' \
+  'Archon-production-Judge "${production_cfn_eu}"' \
+  'application stack role preflight inventory must contain six entries' \
+  'stack_names='\''["Archon-staging-Core","Archon-staging-Judge"]'\''' \
+  'stack_names='\''["Archon-production-Core","Archon-production-Judge"]'\'''
+forbid_text "${reconciler}" \
+  'stack_names='\''["Archon-staging","Archon-Registry"]'\''' \
+  'stack_names='\''["Archon-production"]'\'''
 require_text "${foundation_workflow}" \
   'Render the inline-safe IAM foundation template' \
   'scripts/render-canonical-flow-yaml.mjs' \
@@ -1272,6 +1533,11 @@ require_text "${foundation_workflow}" \
   'Application stack RoleARN transition:'
 require_text "${deploy_role}" \
   'CloudFrontHostedZoneId:' \
+  'GitHubDataHubCloudTrialRoleArn:' \
+  'AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN in the matching' \
+  'Value: !GetAtt GitHubDataHubCloudTrialRole.Arn' \
+  'RoleName: !Sub archon-datahub-github-${DeploymentEnvironment}-cloud-trial' \
+  'StageAndPromoteExactCloudRuntimeSecrets' \
   'RoleName: !Sub archon-${DeploymentEnvironment}-judge-user' \
   'RoleName: archon-production-posture-observer' \
   'RoleName: archon-production-runtime-read' \
@@ -1282,20 +1548,76 @@ require_text "${deploy_role}" \
   'ProductionPostureObserverRoleArn:' \
   'ProductionRuntimeReadRoleArn:' \
   'ProductionPagingTestRoleArn:' \
-  'acm:DescribeCertificate' \
-  'cloudfront:GetDistributionConfig' \
-  'cloudfront:DescribeFunction' \
-  'route53:GetHostedZone' \
-  'route53:ListResourceRecordSets' \
-  'ec2:DescribeAvailabilityZones' \
-  'ec2:DescribeSecurityGroupRules' \
-  'ec2:DescribeSecurityGroups' \
-  'ec2:DescribeSubnets' \
-  'ec2:DescribeVpcEndpointServices' \
-  'ec2:DescribeVpcEndpoints'
+  'CloudRuntimeImagePublisherRoleArn:' \
+  'CloudRuntimeImagePublisherRoleName:' \
+  'token.actions.githubusercontent.com:workflow: DataHub Cloud runtime OCI v2' \
+  'ProveRetiredStacksAbsent' \
+  'ResolveExactDeploymentAndRuntimeInputs' \
+  'ReadExactCloudRuntimeImage' \
+  'ReadExactStageRuntimeTables' \
+  'ReadExactStageBucketPosture' \
+  'PublishExactStageSpaBucket' \
+  'PublishExactStageSpaObjects' \
+  'UseExactStageSpaKeyViaS3' \
+  'ReadExactStageFunctionConfiguration' \
+  'ReadExactStageImageFunctions' \
+  'ReadAndInvalidateTaggedStageDistribution' \
+  'ReadExactStageRegionalWebAcl' \
+  'ReadTaggedStageCognitoWebAclAssociation' \
+  'ReadExactStageRuntimeAlarms' \
+  'autoscaling:DescribeAutoScalingGroups' \
+  'ec2:DescribeImages' \
+  'ec2:DescribeManagedPrefixLists' \
+  'ecr:DescribeRepositories' \
+  'repository/archon-datahub-cloud-runtime-v2' \
+  'dynamodb:DescribeContinuousBackups' \
+  's3:GetBucketPublicAccessBlock' \
+  'lambda:GetFunctionConcurrency' \
+  'cloudfront:GetDistribution' \
+  'cognito-idp:GetWebACLForResource' \
+  'cloudwatch:DescribeAlarms' \
+  'alias/archon/${DeploymentEnvironment}/judge-spa' \
+  'archon-${DeploymentEnvironment}-cloud-checkpoints-${AWS::AccountId}-eu-west-1' \
+  'stack/Archon-${DeploymentEnvironment}-Core/*' \
+  'stack/Archon-${DeploymentEnvironment}-Judge/*' \
+  'stack/Archon-${DeploymentEnvironment}-Edge/*'
+
+github_deploy_role_block="$(
+  awk '
+    /^  GitHubDeployRole:$/ { inside=1 }
+    /^  CloudRuntimeImagePublisherRole:$/ { inside=0 }
+    inside { print }
+  ' "${deploy_role}"
+)"
+for stale in \
+  'ecs:' \
+  'elasticloadbalancing:' \
+  'route53:' \
+  'acm:' \
+  'secretsmanager:' \
+  'iam:SimulatePrincipalPolicy'; do
+  if grep -Fq -- "${stale}" <<<"${github_deploy_role_block}"; then
+    fail "GitHub deploy role retains unused permission: ${stale}"
+  fi
+done
+if grep -Eq 'repository/archon-datahub[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains the retired ECR repository'
+fi
+if grep -Eq 'alias/archon/\${DeploymentEnvironment\}/(data|secrets|spa)[[:space:]]*$' \
+  <<<"${github_deploy_role_block}"; then
+  fail 'GitHub deploy role retains a legacy runtime KMS alias'
+fi
+test "$(
+  grep -Fc 'stack/Archon-${DeploymentEnvironment}/*' \
+    <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'legacy monolith read must exist only for absence proof'
+test "$(
+  grep -Fc 'stack/Archon-Registry/*' <<<"${github_deploy_role_block}"
+)" -eq 1 || fail 'retired Registry read must exist only for absence proof'
 test "$(
   grep -Fc 'Action: sts:AssumeRoleWithWebIdentity' "${deploy_role}"
-)" -eq 5
+)" -eq 7
 if grep -Eq \
   "^[[:space:]]*(Action:[[:space:]]*|-)[[:space:]]*['\"]?\\*['\"]?[[:space:]]*$" \
   "${deploy_role}"; then
@@ -1305,6 +1627,8 @@ require_text "${foundation_policy}" \
   'cloudformation:DescribeStackEvents' \
   'cloudformation:DetectStackResourceDrift' \
   'cloudformation:BatchDescribeTypeConfigurations' \
+  'role/archon-datahub-github-staging-cloud-trial' \
+  'role/archon-datahub-github-production-cloud-trial' \
   'role/archon-staging-judge-user' \
   'role/archon-production-judge-user' \
   'role/archon-production-posture-observer' \
@@ -1388,57 +1712,21 @@ if grep -Fq 'AdministratorAccess' "${execution_policy}"; then
 fi
 
 require_text "${runbook}" \
-  'exact committed `infra/aws/package-lock.json` entry' \
-  'installed CLI version must exactly match that decoded lock entry' \
-  'version `32`' \
-  'Nine CloudFormation stack instances are always managed by Archon' \
-  'ten managed stacks' \
-  'nine managed stacks plus one pinned external account binding' \
-  '`AWS_SHARED_API_GATEWAY_ROLE_ARN_SHA256`' \
-  '`foundation-managed`' \
-  '`external-pinned`' \
-  '`pinned-and-unchanged`' \
-  'no API Gateway account mutation' \
-  'managed stack must be absent' \
-  '`Archon-Governed-Canary-Roles`' \
-  '`archon-aws-foundation-control`' \
-  '`archon-aws-foundation-assets`' \
-  '`archon-aws-foundation-identity`' \
-  '`archon-aws-foundation-attachments`' \
-  '`STAGING_CLOUDFRONT_DOMAIN_NAME`' \
-  '`STAGING_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`PRODUCTION_CLOUDFRONT_DOMAIN_NAME`' \
-  '`PRODUCTION_CLOUDFRONT_HOSTED_ZONE_ID`' \
-  '`AWS_CANARY_PREPARE_ROLE_ARN`' \
-  '`AWS_CANARY_APPROVAL_ROLE_ARN`' \
-  '`AWS_CANARY_RECOVERY_ROLE_ARN`' \
-  '`prevent_self_review=false`' \
-  'not account-grade isolation' \
-  'policy-first' \
-  'On a fresh account' \
-  'On an existing account' \
-  'current policyless role' \
-  'Before any role update' \
-  'missing canonical `Sid`' \
-  'Every other mismatch fails closed' \
-  '`foundation-complete-deploy-migration-required`' \
-  '`requires-explicit-deploy-migration`' \
-  '`ready-for-deploy`' \
-  'Sanitized managed-stack failure evidence' \
-  'stdout and stderr are suppressed before capture' \
-  'selects the newest failed event whose safe reason category is not' \
-  '`unknown` remains eligible' \
-  'fall back to the newest failed event' \
-  'exact recursive inventory of two root regular non-symlink files' \
-  'recomputes the diagnostic digest from the seven safe fields' \
-  'never stores, prints, or hashes the raw CloudFormation' \
-  'does not delete, recreate, or' \
-  '`cfn-failure.json`' \
-  'retained for 90 days'
+  'The active application topology is Edge, zero-idle Core and Judge.' \
+  'exact three-stack resources' \
+  'Before any AWS trust is acquired' \
+  '`AWS_DEPLOY_ROLE_ARN` equals the exact foundation-owned' \
+  '`archon-datahub-github-<stage>-deploy`' \
+  'exactly three bindings for the selected stage' \
+  '`Archon-<stage>-Edge` in `us-east-1`' \
+  '`Archon-<stage>-Core` in `eu-west-1`' \
+  '`Archon-<stage>-Judge` in `eu-west-1`' \
+  '`ALLOW_ABSENT=false`' \
+  '`ALLOW_ROLE_MIGRATION=false`' \
+  'machine-readable authority'
 forbid_text "${runbook}" \
-  'ten CloudFormation stack instances' \
-  'reconciles all ten stacks' \
-  'ten-stack drift evidence'
+  'always-on container cluster is the active topology' \
+  'implicit role migration'
 require_text "${ci_workflow}" \
   'scripts/aws-cloudformation-drift.sh \' \
   'tests/pipeline/aws-cloudformation-drift-poll.test.sh \' \
@@ -1555,13 +1843,14 @@ test "${reconciler_poll_line}" -lt "${reconciler_exact_line}" || fail 'poll resu
 test "${reconciler_exact_line}" -lt "${reconciler_verify_line}" || fail 'exact binding must precede resource proof'
 test "${reconciler_verify_line}" -lt "${reconciler_evidence_line}" || fail 'resource proof must precede evidence'
 require_text "${runbook}" \
-  'Bounded CloudFormation drift polling' \
+  'Bounded CloudFormation drift evidence' \
+  'bounded CloudFormation drift polling' \
   'hard 900-second wall-clock deadline' \
   'SDK retries are fixed' \
   'LastCheckTimestamp' \
   'deleted on every' \
-  '30596290772' \
-  'cloudformation-supported-resources'
+  'cloudformation-supported-resources' \
+  'all fail closed'
 require_text "${reconciler}" \
   'set -Eeuo pipefail' \
   "readonly FOUNDATION_DIAGNOSTIC_SOURCE='scripts/reconcile-aws-foundation.sh'" \
@@ -1593,11 +1882,12 @@ require_text "${reconciler}" \
   "foundation_phase='preflight:foundation-stack-role-binding:shared-api'" \
   "foundation_phase='preflight:foundation-stack-role-binding:governed-canary'" \
   "foundation_phase='preflight:shared-api-gateway'" \
-  "foundation_phase='preflight:application-stack-role-binding:staging:registry'" \
-  "foundation_phase='preflight:application-stack-role-binding:staging:primary'" \
   "foundation_phase='preflight:application-stack-role-binding:staging:edge'" \
-  "foundation_phase='preflight:application-stack-role-binding:production:primary'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:staging:judge'" \
   "foundation_phase='preflight:application-stack-role-binding:production:edge'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:core'" \
+  "foundation_phase='preflight:application-stack-role-binding:production:judge'" \
   "foundation_phase='preflight:application-stack-role-transition'" \
   "foundation_phase='stage-iam'" \
   "foundation_phase='shared-api-gateway'" \
@@ -1611,5 +1901,168 @@ forbid_text "${reconciler}" \
   'set -x' \
   'printenv' \
   'declare -p'
-test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 37 ||
-  fail 'reconciler diagnostic phases must be the 37 reviewed public labels'
+test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
+  fail 'reconciler diagnostic phases must be the 38 reviewed public labels'
+jq -e '
+  .aws.foundationPolicies.identityRoleMigration == {
+    baselineCanonicalSha256:
+      "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+    baselineDefaultVersion: "v1",
+    contract:
+      "contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json",
+    exactRoleDelta: [
+      "archon-datahub-github-staging-cloud-trial",
+      "archon-datahub-github-production-cloud-trial",
+      "archon-datahub-cloud-runtime-publish-production"
+    ],
+    policyName: "archon-aws-foundation-identity",
+    targetCanonicalSha256:
+      "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+    targetVersion: "v2",
+    workflow:
+      ".github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
+  } and
+  .aws.cloudRuntimePublisher.roleName ==
+    "archon-datahub-cloud-runtime-publish-production" and
+  .aws.cloudRuntimePublisher.roleVariable ==
+    "AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN" and
+  .aws.cloudRuntimePublisher.condition == "IsProduction" and
+  .aws.cloudRuntimePublisher.stackName ==
+    "Archon-GitHub-Production-Deploy-Role" and
+  .aws.cloudRuntimePublisher.stackOutputs == [
+    "CloudRuntimeImagePublisherRoleArn",
+    "CloudRuntimeImagePublisherRoleName"
+  ] and
+  .aws.cloudRuntimePublisher.oidcClaims.workflow ==
+    "DataHub Cloud runtime OCI v2" and
+  .aws.cloudRuntimePublisher.oidcClaims.workflowRefInIam == false and
+  .aws.cloudRuntimePublisher.workflowRequestedSessionSeconds == 1800 and
+  .aws.cloudRuntimePublisher.repository ==
+    "archon-datahub-cloud-runtime-v2"
+' "${contract}" >/dev/null || fail 'Cloud runtime publisher contract differs'
+
+jq -e '
+  .schemaVersion ==
+    "archon.aws-foundation-cloud-runtime-publisher-policy-migration/v1" and
+  .status == "ready-for-migration" and
+  .policy.group == "identity" and
+  .policy.name == "archon-aws-foundation-identity" and
+  .policy.liveBaseline == {
+    canonicalSha256:
+      "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
+    isDefault: true,
+    versionId: "v1"
+  } and
+  .policy.target == {
+    canonicalSha256:
+      "f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3",
+    expectedVersionId: "v2"
+  } and
+  (.policy.exactDelta.resourceAdditions[0].resources |
+    map(split("/")[-1]) | sort) ==
+      (["archon-datahub-github-production-cloud-trial",
+        "archon-datahub-github-staging-cloud-trial"] | sort) and
+  .policy.exactDelta.newStatements[0].sid ==
+    "ReconcileExactCloudRuntimePublisherRole" and
+  .policy.exactDelta.newStatements[0].resource ==
+    "arn:aws:iam::${aws:PrincipalAccount}:role/archon-datahub-cloud-runtime-publish-production" and
+  .authorization.temporaryPolicyName ==
+    "archon-foundation-cloud-runtime-publisher-identity-policy-migration" and
+  .authorization.ttlSeconds == 1200 and
+  .evidence.schemaVersion ==
+    "archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1"
+' "${publisher_migration_contract}" >/dev/null ||
+  fail 'Publisher identity-policy migration contract differs'
+
+require_text "${deploy_role}" \
+  'CloudRuntimeImagePublisherRole:' \
+  'Condition: IsProduction' \
+  'RoleName: archon-datahub-cloud-runtime-publish-production' \
+  'token.actions.githubusercontent.com:workflow: DataHub Cloud runtime OCI v2' \
+  'PolicyName: archon-datahub-cloud-runtime-ecr-publish' \
+  'CreateOnlyExactTaggedRepository' \
+  'aws:RequestTag/archon:component: datahub-cloud-runtime-v2' \
+  'aws:RequestTag/archon:owner: github-actions' \
+  'PublishInspectAndBoundedCleanupExactRepository' \
+  'CloudRuntimeImagePublisherRoleArn:' \
+  'CloudRuntimeImagePublisherRoleName:'
+forbid_text "${deploy_role}" 'token.actions.githubusercontent.com:workflow_ref'
+
+require_text "${foundation_policy}" \
+  '"Sid": "ReconcileExactCloudRuntimePublisherRole"' \
+  'role/archon-datahub-cloud-runtime-publish-production' \
+  'role/archon-datahub-github-staging-cloud-trial' \
+  'role/archon-datahub-github-production-cloud-trial'
+
+require_text "${cloud_runtime_workflow}" \
+  'name: DataHub Cloud runtime OCI v2' \
+  'WORKFLOW_REF: ${{ github.workflow_ref }}' \
+  'upgradedev/archon-datahub/.github/workflows/datahub-cloud-runtime-image.yml@refs/heads/master' \
+  'role-to-assume: ${{ vars.AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN }}' \
+  'allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}' \
+  'role-duration-seconds: 1800' \
+  'mask-aws-account-id: true' \
+  'unset-current-credentials: true'
+
+require_text "${publisher_migration_entry}" \
+  'MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY' \
+  'aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml'
+require_text "${publisher_migration_driver}" \
+  'RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION' \
+  'run-aws-foundation-cloud-runtime-publisher-policy-migration.sh' \
+  'archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1'
+require_text "${publisher_migration_cleanup}" \
+  'Migrate AWS foundation cloud runtime publisher identity policy' \
+  'cleanup-rollback'
+require_text "${publisher_migration_common}" \
+  '--stdout-group identity' \
+  'afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553' \
+  'f8aab593f428ac9d990cefb525d0919241e81c42b09f22d737a97d1fd3dc18a3' \
+  'ReconcileExactCloudRuntimePublisherRole'
+require_text "${publisher_migration_runner}" \
+  'archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1' \
+  'archon-aws-foundation-identity'
+
+require_text "${reconciler}" \
+  'verify_cloud_runtime_publisher() {' \
+  'token.actions.githubusercontent.com:workflow' \
+  'CloudRuntimeImagePublisherRoleArn' \
+  'cloud_runtime_publisher_role_arn=' \
+  'cloud_runtime_publisher_binding_sha=' \
+  'OPERATIONAL_ROLE_BINDING_SHA["cloud-runtime-publisher"]'
+require_text "${foundation_workflow}" \
+  'contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json' \
+  'scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh' \
+  'CLOUD_RUNTIME_PUBLISHER_ROLE_ARN: ${{ steps.reconcile.outputs.cloud_runtime_publisher_role_arn }}' \
+  'Set production AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN'
+require_text "${runbook}" \
+  'Identity-policy migration and Cloud runtime publisher handoff' \
+  'MIGRATE EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY' \
+  'token.actions.githubusercontent.com:workflow' \
+  'Safe dispatch order for one exact signed master SHA'
+
+require_text "${deploy_role}" \
+  'GitHubDataHubCloudTrialRoleName:' \
+  'Value: !Ref GitHubDataHubCloudTrialRole'
+require_text "${reconciler}" \
+  '(.aws.applicationStackRolePreflight | length) == 6' \
+  '"datahub-cloud-trial-${stage}"' \
+  'datahub_cloud_trial_staging_role_arn=' \
+  'datahub_cloud_trial_production_role_arn=' \
+  'OPERATIONAL_ROLE_ARN["${kind}"]="${role_arn}"'
+test "$(grep -Fc '"GitHubDataHubCloudTrialRoleArn",' "${reconciler}")" -eq 2 ||
+  fail "trial role ARN output must be allowlisted for both stage stacks"
+test "$(grep -Fc '"GitHubDataHubCloudTrialRoleName",' "${reconciler}")" -eq 2 ||
+  fail "trial role name output must be allowlisted for both stage stacks"
+for role_kind in \
+  judge-staging datahub-cloud-trial-staging \
+  judge-production datahub-cloud-trial-production \
+  cloud-runtime-publisher posture-observer runtime-read paging-test; do
+  grep -Fq "\"${role_kind}\"" "${reconciler}" ||
+    fail "operational role receipt is missing ${role_kind}"
+done
+require_text "${foundation_workflow}" \
+  'DATAHUB_CLOUD_TRIAL_STAGING_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_staging_role_arn }}' \
+  'DATAHUB_CLOUD_TRIAL_PRODUCTION_ROLE_ARN: ${{ steps.reconcile.outputs.datahub_cloud_trial_production_role_arn }}' \
+  'Set staging AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN' \
+  'Set production AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN'

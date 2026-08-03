@@ -1,0 +1,9 @@
+name: Archon Python security scope
+
+paths:
+  - services/datahub-companion
+  - infra/aws
+
+paths-ignore:
+  - "**/.venv/**"
+  - "**/__pycache__/**"

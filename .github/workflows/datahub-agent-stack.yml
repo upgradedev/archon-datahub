@@ -1,0 +1,220 @@
+name: DataHub agent stack
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/locks/datahub-agent-stack.json"
+      - ".github/workflows/datahub-agent-stack.yml"
+      - ".github/workflows/ci.yml"
+      - "services/datahub-companion/**"
+      - "scripts/verify_datahub_agent_stack.py"
+      - "scripts/evaluate_datahub_agent_stack_audit.py"
+      - ".github/security/datahub-agent-stack.openvex.json"
+  pull_request:
+    paths:
+      - ".github/locks/datahub-agent-stack.json"
+      - ".github/workflows/datahub-agent-stack.yml"
+      - ".github/workflows/ci.yml"
+      - "services/datahub-companion/**"
+      - "scripts/verify_datahub_agent_stack.py"
+      - "scripts/evaluate_datahub_agent_stack_audit.py"
+      - ".github/security/datahub-agent-stack.openvex.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: datahub-agent-stack-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lock, provenance, SCA, SBOM, runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      UV_NO_PROGRESS: "1"
+      UV_PYTHON_DOWNLOADS: "manual"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+      - name: Verify source, release, wheel, and Skill provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          uv --version | grep --extended-regexp '^uv 0\.11\.31( |$)'
+          uv python install 3.11.15
+          CI=true GITHUB_ACTIONS=true             "$(uv python find 3.11.15)" scripts/verify_datahub_agent_stack.py --network
+      - name: Resolve the frozen companion lock
+        id: lock
+        run: |
+          set -euo pipefail
+          project="services/datahub-companion"
+          candidate_dir="${RUNNER_TEMP}/datahub-agent-stack-lock"
+          mkdir -p "${candidate_dir}"
+          existing="${RUNNER_TEMP}/committed-uv.lock"
+          if [[ -f "${project}/uv.lock" ]]; then
+            cp "${project}/uv.lock" "${existing}"
+          fi
+          uv lock             --project "${project}"             --python 3.11.15             --upgrade
+          cp "${project}/uv.lock" "${candidate_dir}/uv.lock"
+          lock_sha="$(sha256sum "${candidate_dir}/uv.lock" | cut -d' ' -f1)"
+          jq -nS             --arg sourceSha "${GITHUB_SHA}"             --arg lockSha256 "${lock_sha}"             --arg python "3.11.15"             --arg uv "0.11.31"             '{
+              schemaVersion: "archon.datahub-agent-stack-lock-candidate/v1",
+              sourceSha: $sourceSha,
+              pythonVersion: $python,
+              uvVersion: $uv,
+              lockSha256: $lockSha256
+            }' >"${candidate_dir}/provenance.json"
+          (
+            cd "${candidate_dir}"
+            sha256sum provenance.json uv.lock >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          if [[ -f "${existing}" ]] && cmp --silent "${existing}" "${project}/uv.lock"; then
+            echo "adopted=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "adopted=false" >>"${GITHUB_OUTPUT}"
+          fi
+      - name: Upload short-lived validated companion lock
+        if: steps.lock.outputs.adopted != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-agent-stack-lock-${{ github.sha }}
+          path: ${{ runner.temp }}/datahub-agent-stack-lock/
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+      - name: Require reviewed lock adoption
+        if: steps.lock.outputs.adopted != 'true'
+        run: |
+          echo "::error::Adopt the remotely validated services/datahub-companion/uv.lock"
+          exit 1
+      - name: Install only the frozen wheel runtime
+        if: steps.lock.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          uv sync             --project services/datahub-companion             --python 3.11.15             --frozen             --no-dev             --no-build
+      - name: Exercise ACK and Analytics Agent contracts
+        if: steps.lock.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          uv run             --project services/datahub-companion             --frozen             --no-dev             python - <<'PY'
+          import importlib.metadata
+          import inspect
+
+          from datahub_agent_context.context import DataHubContext
+          from datahub_agent_context.langchain_tools import build_langchain_tools
+          from analytics_agent.main import app
+
+          assert importlib.metadata.version("datahub-agent-context") == "1.6.0.17"
+          assert importlib.metadata.version("datahub-analytics-agent") == "0.4.0"
+          assert inspect.isclass(DataHubContext)
+          assert "include_mutations" in inspect.signature(build_langchain_tools).parameters
+          assert app.title
+          print("ACK and Analytics Agent runtime contracts verified")
+          PY
+      - name: Verify hardened companion v2
+        if: steps.lock.outputs.adopted == 'true'
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          set -euo pipefail
+          uv sync \
+            --project services/datahub-companion \
+            --python 3.11.15 \
+            --frozen \
+            --no-build \
+            --group test
+          (
+            cd services/datahub-companion
+            uv run --frozen --group test python -m pytest \
+              --cov=archon_companion \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-report="xml:$RUNNER_TEMP/datahub-companion-coverage.xml" \
+              --cov-fail-under=80 \
+              --junitxml="$RUNNER_TEMP/datahub-companion-junit.xml"
+          )
+          test -s "$RUNNER_TEMP/datahub-companion-coverage.xml"
+          test -s "$RUNNER_TEMP/datahub-companion-junit.xml"
+      - name: Retain companion test evidence
+        if: always() && steps.lock.outputs.adopted == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-companion-tests-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/datahub-companion-coverage.xml
+            ${{ runner.temp }}/datahub-companion-junit.xml
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+      - name: Audit the exact Python dependency closure
+        id: audit
+        if: steps.lock.outputs.adopted == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          uv audit             --project services/datahub-companion             --python-version 3.11.15             --python-platform linux             --output-format sarif >"${RUNNER_TEMP}/datahub-agent-stack.sarif"
+          test -s "${RUNNER_TEMP}/datahub-agent-stack.sarif"
+      - name: Evaluate exact OpenVEX disposition
+        id: disposition
+        if: steps.lock.outputs.adopted == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          CI=true GITHUB_ACTIONS=true \
+            "$(uv python find 3.11.15)" \
+            scripts/evaluate_datahub_agent_stack_audit.py \
+            --sarif "$RUNNER_TEMP/datahub-agent-stack.sarif" \
+            --vex ".github/security/datahub-agent-stack.openvex.json" \
+            --decision "$RUNNER_TEMP/datahub-agent-stack-vex-decision.json" \
+            --projection "$RUNNER_TEMP/datahub-agent-stack.code-scanning.sarif"
+      - name: Export the frozen CycloneDX inventory
+        if: steps.lock.outputs.adopted == 'true'
+        run: |
+          set -euo pipefail
+          uv export             --project services/datahub-companion             --frozen             --no-dev             --format cyclonedx1.5             --output-file "${RUNNER_TEMP}/datahub-agent-stack.cdx.json"
+          jq --exit-status '
+            .bomFormat == "CycloneDX" and
+            .specVersion == "1.5" and
+            any(.components[]; .name == "datahub-agent-context" and .version == "1.6.0.17") and
+            any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0")
+          ' "${RUNNER_TEMP}/datahub-agent-stack.cdx.json" >/dev/null
+      - name: Upload VEX-dispositioned Python SARIF
+        if: always() && steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'skipped'
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
+          category: uv-datahub-agent-stack
+      - name: Retain immutable agent stack evidence
+        if: always() && steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-agent-stack-security-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/datahub-agent-stack.sarif
+            ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
+            ${{ runner.temp }}/datahub-agent-stack.cdx.json
+            .github/security/datahub-agent-stack.openvex.json
+            ${{ runner.temp }}/datahub-agent-stack-vex-decision.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+      - name: Fail on actionable Python findings
+        if: steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'success'
+        run: |
+          echo "::error::The frozen DataHub agent stack has unresolved or unauthorized findings"
+          exit 1

@@ -102,11 +102,11 @@ def valid_facts() -> dict[str, dict]:
         "runId": 201,
         "runAttempt": 2,
         "artifactId": 202,
-        "artifactName": f"deployment-evidence-{RELEASE}-2",
+        "artifactName": f"deployment-evidence-production-{RELEASE}-201",
         "artifactDigest": DIGEST,
         "predicateType": (
             "https://github.com/upgradedev/archon-datahub/"
-            "attestations/production-deployment/v1"
+            "attestations/aws-deployment/v2"
         ),
         "predicateDigest": DIGEST,
     }
@@ -242,12 +242,12 @@ def valid_facts() -> dict[str, dict]:
                 "availabilityRunAttempt": 3,
                 "availabilityArtifactId": 204,
                 "availabilityArtifactName": (
-                    f"production-availability-{RELEASE}-3"
+                    f"production-availability-{RELEASE}-203"
                 ),
                 "availabilityArtifactDigest": DIGEST,
                 "availabilityPredicateType": (
                     "https://github.com/upgradedev/archon-datahub/"
-                    "attestations/production-availability/v1"
+                    "attestations/production-availability/v2"
                 ),
                 "availabilityPredicateDigest": DIGEST,
             },
@@ -456,45 +456,49 @@ def valid_facts() -> dict[str, dict]:
                 "runId": 203,
                 "runAttempt": 3,
                 "artifactId": 204,
-                "artifactName": f"production-availability-{RELEASE}-3",
+                "artifactName": f"production-availability-{RELEASE}-203",
                 "artifactDigest": DIGEST,
                 "predicateType": (
                     "https://github.com/upgradedev/archon-datahub/"
-                    "attestations/production-availability/v1"
+                    "attestations/production-availability/v2"
                 ),
                 "predicateDigest": DIGEST,
                 "observedAt": availability_observed_at,
                 "result": "passed",
+                "profileResponseDigest": DIGEST,
+                "observationDigest": DIGEST,
             },
             "posture": {
                 "workflowPath": ".github/workflows/production-posture.yml",
                 "runId": 403,
                 "runAttempt": 5,
                 "artifactId": 404,
-                "artifactName": f"production-posture-{RELEASE}-5",
+                "artifactName": f"production-posture-{RELEASE}-403",
                 "artifactDigest": DIGEST,
                 "predicateType": (
                     "https://github.com/upgradedev/archon-datahub/"
-                    "attestations/production-posture/v1"
+                    "attestations/production-posture/v2"
                 ),
                 "predicateDigest": DIGEST,
                 "observedAt": iso(),
                 "result": "passed",
-                "topicArnSha256": DIGEST,
-                "subscriptionArnSha256": ALT_DIGEST,
-                "alarmInventory": {
-                    "observedAt": iso(),
-                    "alarmCount": 10,
-                    "allActionsEnabled": True,
-                    "alarmActionsBoundToTopic": True,
-                    "okActionsBoundToTopic": True,
-                    "insufficientDataActionsEmpty": True,
-                    "inventoryDigest": DIGEST,
+                "checks": {
+                    "leanRuntimeControls": True,
+                    "zeroIdleCore": True,
+                    "cloudFormationDrift": "IN_SYNC",
+                    "alarmsNotFiring": True,
+                    "legacyAlwaysOnRuntimeAbsent": True,
                 },
+                "observationDigest": DIGEST,
+                "driftEvidenceDigest": ALT_DIGEST,
+                "alarmNames": [
+                    "archon-production-control-plane-errors",
+                    "archon-production-runtime-failure-queue-visible",
+                ],
             },
             "alerting": {
                 "alarmsActive": True,
-                "snsSubscriptionConfirmed": True,
+                "encryptedRouteBound": True,
                 "externalPagingDeliveryTested": True,
                 "lastPagingTestAt": iso(),
                 "pagingDelivery": {
@@ -505,17 +509,25 @@ def valid_facts() -> dict[str, dict]:
                     "runAttempt": 6,
                     "artifactId": 406,
                     "artifactName": (
-                        f"production-paging-delivery-{RELEASE}-6"
+                        f"production-alarm-delivery-{RELEASE}-405"
                     ),
                     "artifactDigest": DIGEST,
                     "predicateType": (
-                        "https://archon.datahub.dev/attestations/"
-                        "production-paging-delivery/v1"
+                        "https://github.com/upgradedev/archon-datahub/"
+                        "attestations/production-alarm-delivery/v2"
                     ),
                     "predicateDigest": DIGEST,
-                    "observedAt": iso(),
-                    "topicArnSha256": DIGEST,
-                    "subscriptionArnSha256": ALT_DIGEST,
+                    "provedAt": iso(),
+                    "route": "CloudWatch->SNS(KMS)->SQS(KMS)",
+                    "checks": {
+                        "exactAlarm": True,
+                        "alarmTransition": True,
+                        "topicBinding": True,
+                        "encryptedProofQueue": True,
+                        "endToEndDelivery": True,
+                        "cleanupRegistered": True,
+                    },
+                    "deliveryDigest": DIGEST,
                 },
             },
             "recovery": {
@@ -534,7 +546,7 @@ def valid_facts() -> dict[str, dict]:
                     "artifactDigest": DIGEST,
                     "predicateType": (
                         "https://github.com/upgradedev/archon-datahub/"
-                        "attestations/governed-canary/v1"
+                        "attestations/governed-canary-cloud-v2"
                     ),
                     "predicateDigest": DIGEST,
                     "verifiedAt": iso(),
@@ -570,7 +582,8 @@ def valid_facts() -> dict[str, dict]:
                 },
             },
             "monitoringWindow": {
-                "schedule": "17 */6 * * *",
+                "schedule": "*/30 * * * *",
+                "maximumExpectedGapMinutes": 90,
                 "active": True,
                 "through": "2026-08-31T21:00:00Z",
             },
@@ -1234,8 +1247,15 @@ rejects_mutation(
 )
 rejects_mutation(
     "SQ10",
-    lambda value: value["alerting"].update(externalPagingDeliveryTested=False),
+    lambda value: value["alerting"].update(
+        externalPagingDeliveryTested=False
+    ),
     "SQ10 accepted untested external paging",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"].update(encryptedRouteBound=False),
+    "SQ10 accepted an unbound encrypted alarm route",
 )
 rejects_mutation(
     "SQ10",
@@ -1254,9 +1274,9 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["alerting"]["pagingDelivery"].update(
-        artifactName=f"production-paging-delivery-{RELEASE}-5"
+        artifactName=f"production-alarm-delivery-{RELEASE}-404"
     ),
-    "SQ10 accepted paging provenance for a different producer attempt",
+    "SQ10 accepted paging provenance for a different run ID",
 )
 rejects_mutation(
     "SQ10",
@@ -1268,16 +1288,58 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["alerting"]["pagingDelivery"].update(
-        topicArnSha256=ALT_DIGEST
+        route="CloudWatch->SNS"
     ),
-    "SQ10 accepted paging and posture evidence for different topics",
+    "SQ10 accepted a truncated alarm-delivery route",
 )
 rejects_mutation(
     "SQ10",
-    lambda value: value["posture"]["alarmInventory"].update(
-        allActionsEnabled=False
+    lambda value: value["alerting"]["pagingDelivery"]["checks"].update(
+        encryptedProofQueue=False
     ),
-    "SQ10 accepted disabled production alarm actions",
+    "SQ10 accepted an unencrypted alarm proof queue",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"]["checks"].update(
+        alarmsNotFiring=False
+    ),
+    "SQ10 accepted firing production alarms",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        alarmNames=["archon-production-control-plane-errors"]
+    ),
+    "SQ10 accepted an incomplete lean alarm inventory",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["availability"].update(
+        profileResponseDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid runtime-profile response digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["availability"].update(
+        observationDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid availability observation digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        observationDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid posture observation digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        driftEvidenceDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid drift evidence digest",
 )
 rejects_mutation(
     "SQ10",
@@ -1327,9 +1389,23 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["availability"].update(
-        observedAt=iso(NOW - dt.timedelta(hours=8))
+        observedAt=iso(NOW - dt.timedelta(hours=2))
     ),
     "SQ10 accepted a stale availability observation",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["monitoringWindow"].update(
+        schedule="17 */6 * * *"
+    ),
+    "SQ10 accepted a legacy availability cadence",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["monitoringWindow"].update(
+        maximumExpectedGapMinutes=420
+    ),
+    "SQ10 accepted a widened availability gap",
 )
 rejects_sq10_cross_mutation(
     lambda value: value["recovery"]["governedCanary"].update(
@@ -1353,7 +1429,7 @@ rejects_sq10_cross_mutation(
 rejects_sq10_cross_mutation(
     lambda value: value["availability"].update(
         runId=205,
-        artifactName=f"production-availability-{RELEASE}-3",
+        artifactName=f"production-availability-{RELEASE}-205",
     ),
     "SQ10 accepted availability evidence different from SQ3",
 )
@@ -2725,6 +2801,181 @@ with tempfile.TemporaryDirectory(prefix="submission-evidence-contracts-") as raw
         "receipt inventory ignored an extra non-JSON file",
     )
 
+derive_live_source = VALIDATOR_PATH.read_text(encoding="utf-8").split(
+    "def derive_live(", maxsplit=1
+)[1].split("def standard_subject_names(", maxsplit=1)[0]
+assert "archon.aws-deployment-evidence/v2" in derive_live_source
+assert 'proof["governedWrite"]' in derive_live_source
+assert "preProductionGovernedCanary" not in derive_live_source
+assert "pipelineSecurity" not in derive_live_source
+assert "fixtureBinding" not in derive_live_source
+
+with tempfile.TemporaryDirectory(prefix="native-live-v3-derive-") as raw:
+    native_root = Path(raw)
+    live_source = sources["live-datahub"]
+    runtime_binding = {
+        "profileId": "cloud",
+        "availability": "READY",
+        "generation": "cloud-release-v1",
+        "capabilityDigest": DIGEST,
+        "bindingDigest": ALT_DIGEST,
+    }
+    proof = {
+        "schemaVersion": "archon.live-datahub-proof/v3",
+        "ok": True,
+        "result": "retained-history-contradiction-proven",
+        "querySha256": "c" * 64,
+        "datasetUrnSha256": "b" * 64,
+        "datasetsDiscovered": 1,
+        "aspectHistories": 1,
+        "retainedHistories": 1,
+        "stableSourceCount": 2,
+        "recoveredContradictions": 1,
+        "contradictionAttributeCount": 1,
+        "runtimeBinding": runtime_binding,
+        "governedWrite": copy.deepcopy(
+            facts_by_id["D4"]["governedWrite"]
+        ),
+    }
+    semantic = {
+        "schemaVersion": "archon.deployed-datahub-semantic-proof/v2",
+        "evidenceClass": "credentialed-live-cloud",
+        "classification": copy.deepcopy(
+            facts_by_id["U3"]["classification"]
+        ),
+        "findings": copy.deepcopy(facts_by_id["U3"]["findings"]),
+    }
+    deployment = {
+        "schemaVersion": "archon.aws-deployment-evidence/v2",
+        "stage": "production",
+        "releaseSha": RELEASE,
+        "ciRunId": 701,
+        "deploymentRunId": 702,
+        "applicationUrl": facts_by_id["D4"]["applicationUrl"],
+        "promotion": {
+            "policy": "build-once-promote-exact-artifacts",
+            "webArtifactDigest": DIGEST,
+            "lambdaArtifactDigest": ALT_DIGEST,
+            "cloudRuntimeReleaseDigest": THIRD_DIGEST,
+            "coreCapabilityDigest": DIGEST,
+            "coreImageManifestDigest": ALT_DIGEST,
+        },
+        "verification": {
+            "result": "passed",
+            "zeroIdleCore": True,
+            "httpBoundary": True,
+            "securityHeaders": True,
+            "directApiRejected": True,
+            "canonicalHostEnforced": True,
+            "observationSha256": "e" * 64,
+        },
+        "secretsProjected": False,
+        "generatedAt": iso(),
+    }
+    proof_path = native_root / "proof.json"
+    semantic_path = (
+        native_root / "deployed-datahub-semantic-proof.json"
+    )
+    deployment_path = native_root / "deployment-evidence.json"
+    validator.write_json(proof_path, proof)
+    validator.write_json(semantic_path, semantic)
+    validator.write_json(deployment_path, deployment)
+    predicate = {
+        "schemaVersion": live_source["predicateSchemaVersion"],
+        "repository": validator.REPOSITORY,
+        "workflow": {"runId": "703", "runAttempt": "1"},
+        "releaseSha": RELEASE,
+        "deploymentRunId": "702",
+        "governedCanaryRunId": str(
+            proof["governedWrite"]["workflowRunId"]
+        ),
+        "provenAt": iso(),
+        "querySha256": proof["querySha256"],
+        "runtimeBinding": runtime_binding,
+        "evidence": {
+            "proofSha256": validator.sha256_file(
+                proof_path
+            ).removeprefix("sha256:"),
+            "deploymentEvidenceSha256": validator.sha256_file(
+                deployment_path
+            ).removeprefix("sha256:"),
+            "deployedDataHubSemanticProofSha256":
+                validator.sha256_file(semantic_path).removeprefix(
+                    "sha256:"
+                ),
+        },
+        "result": proof["result"],
+        "datasetUrnSha256": proof["datasetUrnSha256"],
+    }
+    predicate_path = native_root / "attestation-predicate.json"
+    validator.write_json(predicate_path, predicate)
+    inventory = {
+        name: validator.sha256_file(native_root / name)
+        for name in (
+            "deployment-evidence.json",
+            "deployed-datahub-semantic-proof.json",
+            "proof.json",
+        )
+    }
+    inventory_path = native_root / "proof-subject.sha256"
+    inventory_path.write_text(
+        validator.checksum_inventory_text(inventory),
+        encoding="utf-8",
+    )
+    derived = validator.derive_live(
+        native_root,
+        live_source,
+        validator.REPOSITORY,
+        RELEASE,
+        703,
+        1,
+        704,
+        f"live-datahub-proof-{RELEASE}-1",
+        THIRD_DIGEST,
+        validator.sha256_file(predicate_path),
+        validator.checksum_subject_set_digest(inventory),
+        ALT_DIGEST,
+    )
+    derived_by_id = {receipt["id"]: receipt for receipt in derived}
+    assert derived_by_id["D4"]["facts"] == facts_by_id["D4"]
+    assert derived_by_id["U3"]["facts"] == facts_by_id["U3"]
+
+    legacy_deployment = copy.deepcopy(deployment)
+    legacy_deployment["pipelineSecurity"] = {
+        "preProductionGovernedCanary": {}
+    }
+    deployment_path.unlink()
+    validator.write_json(deployment_path, legacy_deployment)
+    predicate["evidence"]["deploymentEvidenceSha256"] = (
+        validator.sha256_file(deployment_path).removeprefix("sha256:")
+    )
+    predicate_path.unlink()
+    validator.write_json(predicate_path, predicate)
+    inventory["deployment-evidence.json"] = validator.sha256_file(
+        deployment_path
+    )
+    inventory_path.write_text(
+        validator.checksum_inventory_text(inventory),
+        encoding="utf-8",
+    )
+    expect_rejected(
+        lambda: validator.derive_live(
+            native_root,
+            live_source,
+            validator.REPOSITORY,
+            RELEASE,
+            703,
+            1,
+            704,
+            f"live-datahub-proof-{RELEASE}-1",
+            THIRD_DIGEST,
+            validator.sha256_file(predicate_path),
+            validator.checksum_subject_set_digest(inventory),
+            ALT_DIGEST,
+        ),
+        "native D4 accepted legacy deploy.pipelineSecurity canary facts",
+    )
+
 with tempfile.TemporaryDirectory(prefix="native-live-subject-set-") as raw:
     native_root = Path(raw) / "upstream-subjects" / "live-datahub"
     native_root.mkdir(parents=True)
@@ -3083,114 +3334,161 @@ availability = (ROOT / ".github/workflows/availability.yml").read_text(
 )
 
 
-def assert_availability_retry_contract(workflow: str) -> None:
-    assert "\n  attest:\n" in workflow
-    probe_job, attest_job = workflow.split("\n  attest:\n", maxsplit=1)
-    assert (
-        "producer_run_attempt: "
-        "${{ steps.probe.outputs.producer_run_attempt }}" in probe_job
-    )
-    assert (
-        "artifact_name: production-availability-"
-        "${{ steps.probe.outputs.release_sha }}-"
-        "${{ steps.probe.outputs.producer_run_attempt }}" in probe_job
-    )
-    assert 'echo "producer_run_attempt=${GITHUB_RUN_ATTEMPT}"' in probe_job
-    assert "attestations: write" not in probe_job
-    assert "id-token: write" not in probe_job
-
-    producer_attempt_binding = (
-        "PRODUCER_RUN_ATTEMPT: "
-        "${{ needs.probe.outputs.producer_run_attempt }}"
-    )
-    assert attest_job.count(producer_attempt_binding) == 2
-    assert attest_job.count(
-        "(( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))"
-    ) == 2
-    assert (
-        'expected_artifact_name="production-availability-'
-        '${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}"' in attest_job
-    )
-    assert (
-        'test "${ARTIFACT_NAME}" = "${expected_artifact_name}"'
-        in attest_job
-    )
-    assert '--arg name "${expected_artifact_name}"' in attest_job
-    assert (
-        '--argjson runAttempt "${PRODUCER_RUN_ATTEMPT}"' in attest_job
-    )
-    assert '--argjson runAttempt "${GITHUB_RUN_ATTEMPT}"' not in attest_job
-    assert (
-        "artifact-ids: ${{ needs.probe.outputs.artifact_id }}" in attest_job
-    )
-    assert ".workflow_run.id == $runId" in attest_job
-    assert ".workflow_run.head_sha == $sha" in attest_job
-    assert "attestations: write" in attest_job
-    assert "id-token: write" in attest_job
-    assert "GH_TOKEN: ${{ github.token }}" in attest_job
-    assert "    environment:" not in attest_job
-    assert "secrets." not in attest_job
+def assert_availability_contract(workflow: str) -> None:
+    assert workflow.startswith("name: Lean production availability\n")
+    assert '    - cron: "*/30 * * * *"' in workflow
+    assert "  workflow_dispatch:\n" in workflow
+    assert "permissions: {}\n" in workflow
+    assert "  group: archon-production-availability\n" in workflow
+    assert "  cancel-in-progress: false\n" in workflow
+    assert workflow.count("\n  probe:\n") == 1
+    assert "\n  attest:\n" not in workflow
+    for required in (
+        "environment: production-observer",
+        "actions: read",
+        "attestations: write",
+        "contents: read",
+        "id-token: write",
+        "aws-actions/configure-aws-credentials@",
+        "scripts/verify-github-control-plane.sh",
+        "scripts/observe-aws-live-runtime.sh",
+        "EXPECT_CORE_IDLE: \"true\"",
+        "archon.runtime-profiles/v1",
+        '([.profiles[].profileId] | sort) == ["cloud","core"]',
+        '.autoSelection == "cloud"',
+        'select(.profileId == "cloud")',
+        '== ["READY"]',
+        'select(.profileId == "core")',
+        '== ["LAUNCHABLE"]',
+        "all(.capabilities[]; . == true)",
+        'test("^sha256:[0-9a-f]{64}$")',
+        "agentContextKit",
+        "analyticsAgent",
+        "dataHubSkills",
+        "mcpGovernedWrite",
+        "mcpRead",
+        "archon.production-availability/v2",
+        "publicSpa:true",
+        "runtimeProfiles:true",
+        "securityHeaders:true",
+        "leanAwsControls:true",
+        "coreIdle:true",
+        "rawIdentifiersRetained:false",
+        "actions/attest@",
+        "attestations/production-availability/v2",
+        "subject-path: ${{ steps.probe.outputs.evidence }}",
+        "predicate-path: ${{ steps.probe.outputs.evidence }}",
+        "name: production-availability-${{ github.sha }}-${{ github.run_id }}",
+        "path: |\n"
+        "            ${{ runner.temp }}/availability/evidence.json\n"
+        "            ${{ runner.temp }}/availability/observation.json",
+        "retention-days: 90",
+        "Remove runner-only evidence",
+    ):
+        assert required in workflow, f"availability lost lean-v2 contract {required}"
+    for forbidden in (
+        "producer_run_attempt",
+        "PRODUCER_RUN_ATTEMPT",
+        "availability-subject.sha256",
+        "attestation-predicate.json",
+        "archon.production-availability-attestation/v1",
+        "attestations/production-availability/v1",
+        "live-runtime-manifest",
+        'IN("READY","LAUNCHABLE","STARTING","BUSY","UNAVAILABLE")',
+    ):
+        assert forbidden not in workflow, f"availability retained legacy contract {forbidden}"
+    assert "secrets." not in workflow
 
 
 def expect_availability_contract_rejected(
     tampered_workflow: str, message: str
 ) -> None:
     try:
-        assert_availability_retry_contract(tampered_workflow)
+        assert_availability_contract(tampered_workflow)
     except AssertionError:
         return
     raise AssertionError(message)
 
 
-assert_availability_retry_contract(availability)
+assert_availability_contract(availability)
 availability_tamper_cases = (
     (
         availability.replace(
-            "producer_run_attempt: "
-            "${{ steps.probe.outputs.producer_run_attempt }}",
-            "producer_run_attempt: ${{ github.run_attempt }}",
+            "archon.production-availability/v2",
+            "archon.production-availability/v1",
             1,
         ),
-        "availability accepted a retry-time producer-attempt output",
+        "availability accepted a legacy evidence schema",
     ),
     (
         availability.replace(
-            "${RELEASE_SHA}-${PRODUCER_RUN_ATTEMPT}\"",
-            "${RELEASE_SHA}-${GITHUB_RUN_ATTEMPT}\"",
+            "attestations/production-availability/v2",
+            "attestations/production-availability/v1",
             1,
         ),
-        "availability accepted an artifact name bound to the attester retry",
+        "availability accepted a legacy predicate type",
+    ),
+    (
+        availability.replace("coreIdle:true", "coreIdle:false", 1),
+        "availability accepted a non-idle Core observation",
     ),
     (
         availability.replace(
-            '--argjson runAttempt "${PRODUCER_RUN_ATTEMPT}"',
-            '--argjson runAttempt "${GITHUB_RUN_ATTEMPT}"',
+            '.autoSelection == "cloud"',
+            '.autoSelection == "core"',
             1,
         ),
-        "availability accepted a predicate bound to the attester retry",
+        "availability accepted Core as the default judge runtime",
+    ),
+    (
+        availability.replace('== ["READY"]', '== ["UNAVAILABLE"]', 1),
+        "availability accepted an unavailable Cloud runtime",
+    ),
+    (
+        availability.replace('== ["LAUNCHABLE"]', '== ["UNAVAILABLE"]', 1),
+        "availability accepted an unavailable optional Core runtime",
     ),
     (
         availability.replace(
-            "(( PRODUCER_RUN_ATTEMPT <= GITHUB_RUN_ATTEMPT ))",
-            "(( PRODUCER_RUN_ATTEMPT == GITHUB_RUN_ATTEMPT ))",
+            "all(.capabilities[]; . == true)",
+            'all(.capabilities[]; type == "boolean")',
+            1,
         ),
-        "availability accepted a retry contract that requires equal attempts",
+        "availability accepted a missing required DataHub capability",
     ),
     (
         availability.replace(
-            "  attest:\n    name:",
-            "  attest:\n    environment: production-observer\n    name:",
+            "            ${{ runner.temp }}/availability/observation.json\n",
+            "            ${{ runner.temp }}/availability/index.html\n",
             1,
         ),
-        "availability accepted an environment-bound attester",
+        "availability dropped the sanitized topology observation",
+    ),
+    (
+        availability.replace(
+            "name: production-availability-${{ github.sha }}-${{ github.run_id }}",
+            "name: production-availability-${{ github.sha }}-${{ github.run_attempt }}",
+            1,
+        ),
+        "availability artifact identity became retry-attempt based",
+    ),
+    (
+        availability.replace(
+            "  workflow_dispatch:\n",
+            "  workflow_call:\n",
+            1,
+        ),
+        "availability lost explicit operational dispatch",
     ),
 )
 for tampered_availability, tamper_message in availability_tamper_cases:
+    assert tampered_availability != availability, (
+        f"availability mutation was a no-op: {tamper_message}"
+    )
     expect_availability_contract_rejected(
         tampered_availability,
         tamper_message,
     )
-
 
 for forbidden_input in (
     "claims_json:",
@@ -3308,9 +3606,9 @@ assert (
 for required_availability_contract in (
     "attestations: write",
     "id-token: write",
-    "archon.production-availability-attestation/v1",
-    "availability-subject.sha256",
-    "attestations/production-availability/v1",
+    "archon.production-availability/v2",
+    "observation.json",
+    "attestations/production-availability/v2",
     "actions/attest@",
 ):
     assert required_availability_contract in availability, (

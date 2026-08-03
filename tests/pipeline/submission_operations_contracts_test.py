@@ -289,31 +289,66 @@ def validate_workflow(source: str) -> None:
         "--source-digest",
         "--source-ref refs/heads/master",
         "unique |",
-        "latest-retained",
+        "exact-run-id",
         "exact-current",
-        "availability-subject.sha256",
-        "posture-subject.sha256",
-        "paging-subject.sha256",
-        "rollback-subject.sha256",
-        "production-paging-delivery-${RELEASE_SHA}-",
+        "latest-retained",
+        "attested-subjects.sha256",
+        "recovery-evidence.sha256",
+        "evidence.json,observation.json",
+        "drift.json,evidence.json,observation.json",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v2",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-posture/v2",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-alarm-delivery/v2",
+        "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2",
+        'exact(availability_predicate, availability, "availability attestation predicate/evidence")',
+        'exact(posture_predicate, posture, "posture attestation predicate/evidence")',
+        'exact(paging_predicate, paging, "paging attestation predicate/evidence")',
+        '"archon.production-availability/v2"',
+        '"archon.production-posture/v2"',
+        '"archon.production-alarm-delivery/v2"',
+        '"archon.lean-runtime-observation/v1"',
+        '"archon.governed-canary-recovery-evidence/v2"',
+        '"archon.governed-canary-recovery/v4"',
+        'exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")',
+        '"Archon-staging-Judge"',
+        '"archon_demo.customers,PROD)"',
+        'exact(canary_predicate, recovery, "canary attestation predicate/evidence")',
+        'canonical_digest(recovery, "canary recovery evidence")',
+        'canonical_digest(manifest, "canary recovery manifest")',
+        "production-alarm-delivery-${RELEASE_SHA}-",
         "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-",
         "availabilityObservedAt",
-        "dt.timedelta(hours=7)",
+        '"profileResponseDigest": availability["profileResponseDigest"]',
+        '"observationDigest": file_sha(\n'
+        '                availability_dir / "observation.json"\n'
+        '            )',
+        '"observationDigest": file_sha(\n'
+        '                posture_dir / "observation.json"\n'
+        '            )',
+        "dt.timedelta(minutes=90)",
         "dt.timedelta(hours=30)",
         "dt.timedelta(days=7)",
-        '"alarmCount": 10',
-        '"allActionsEnabled": True',
-        '"alarmActionsBoundToTopic": True',
-        '"okActionsBoundToTopic": True',
-        '"insufficientDataActionsEmpty": True',
-        'embedded_canary["attestationVerificationSha256"]',
-        'embedded_canary["fixtureBindingDigest"]',
-        'canary_predicate["fixtureBinding"]',
-        '"archon.governed-canary-fixture-binding/v1"',
-        '"canary fixture binding content digest"',
-        '"archon_governed_canary_fixture,TEST)"',
-        "positive_decimal(rollback[\"workflowRunId\"]",
-        '"17 */6 * * *"',
+        '"archon-production-control-plane-errors"',
+        '"archon-production-runtime-failure-queue-visible"',
+        '"alarmsNotFiring": True',
+        '"CloudWatch->SNS(KMS)->SQS(KMS)"',
+        '"encryptedRouteBound": True',
+        '"externalPagingDeliveryTested": True',
+        '"endToEndDelivery": True',
+        'canary_dir.parent / "verification" / "recovery-evidence.json.json"',
+        'recovery["deploymentEvidenceSha256"]',
+        (
+            'exact(\n'
+            '    manifest["endpointBindingSha256"],\n'
+            '    recovery["endpointBindingSha256"],\n'
+            '    "canary endpoint binding",\n'
+            ')'
+        ),
+        'positive_decimal(source["runId"]',
+        '"canary source runAttempt exceeds ten digits"',
+        "dt.timedelta(hours=2)",
+        '"*/30 * * * *"',
+        '"maximumExpectedGapMinutes": 90',
         '"2026-08-31T21:00:00Z"',
         '.state == "active"',
         "recheck_native",
@@ -323,6 +358,20 @@ def validate_workflow(source: str) -> None:
     )
     for marker in required_collector_contracts:
         require(marker in collector, f"collector lost contract: {marker}")
+    require(
+        collector.count("production-alarm-delivery-${RELEASE_SHA}-") == 2,
+        "collector must bind the exact paging prefix in resolve and recheck only",
+    )
+    require(
+        "production-alarm-delivery-candidate-" not in collector,
+        "collector accepted a paging candidate artifact prefix",
+    )
+    require(
+        collector.count("exact-run-id") == 6
+        and collector.count("latest-retained") == 1
+        and collector.count("exact-current") == 3,
+        "collector native selection policies are not exact and complete",
+    )
     forbidden_collector_contracts = (
         "rm -rf",
         "eval ",
@@ -330,9 +379,28 @@ def validate_workflow(source: str) -> None:
         "wget ",
         "secrets.",
         "production-paging-delivery-candidate-",
+        "availability-subject.sha256",
+        "posture-subject.sha256",
+        "paging-subject.sha256",
+        "attestations/production-availability/v1",
+        "attestations/production-posture/v1",
+        "attestations/production-alarm-delivery/v1",
+        "attestations/production-paging-delivery/v1",
+        "attestations/governed-canary/v1",
+        '"17 */6 * * *"',
+        '"alarmCount": 10',
     )
     for marker in forbidden_collector_contracts:
         require(marker not in collector, f"collector contains forbidden token: {marker}")
+    require(
+        count(collector, "selection_policy=exact-run-id") == 3,
+        "the three lean-v2 producers must use run-ID artifact selection",
+    )
+    require(
+        count(collector, "selection_policy=latest-retained") == 1
+        and 'artifact_prefix="submission-project-access-${RELEASE_SHA}-"' in collector,
+        "only project-access may retain attempt-based artifact selection",
+    )
     require(
         'observation["availabilityObservedAt"],\n'
         '    availability["observedAt"],'
@@ -369,10 +437,10 @@ mutations = {
     "optional canary selector": replace_once(
         workflow,
         "      governed_canary_run_id:\n"
-        "        description: Exact governed-canary run bound by live deployment evidence\n"
+        "        description: Exact successful governed DataHub Cloud canary v2 run\n"
         "        required: true\n",
         "      governed_canary_run_id:\n"
-        "        description: Exact governed-canary run bound by live deployment evidence\n"
+        "        description: Exact successful governed DataHub Cloud canary v2 run\n"
         "        required: false\n",
     ),
     "producer signing authority": replace_once(
@@ -411,8 +479,64 @@ mutations = {
     ),
     "paging candidate accepted": replace_once(
         workflow,
-        '#|   "production-paging-delivery-${RELEASE_SHA}-" \\\n',
-        '#|   "production-paging-delivery-candidate-${RELEASE_SHA}-" \\\n',
+        '#|   "production-alarm-delivery-${RELEASE_SHA}-" \\\n',
+        '#|   "production-alarm-delivery-candidate-${RELEASE_SHA}-" \\\n',
+    ),
+    "availability selector weakened to attempt policy": replace_once(
+        workflow,
+        '#|   "production-availability-${RELEASE_SHA}-" \\\n'
+        "#|   exact-run-id \\\n",
+        '#|   "production-availability-${RELEASE_SHA}-" \\\n'
+        "#|   latest-retained \\\n",
+    ),
+    "availability predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-availability/v2",
+        "attestations/production-availability/v1",
+    ),
+    "posture predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-posture/v2",
+        "attestations/production-posture/v1",
+    ),
+    "paging predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-alarm-delivery/v2",
+        "attestations/production-alarm-delivery/v1",
+    ),
+    "canary predicate downgraded": replace_once(
+        workflow,
+        "attestations/governed-canary-cloud-v2",
+        "attestations/governed-canary/v1",
+    ),
+    "availability cadence weakened": replace_once(
+        workflow,
+        '#|   grep -Fxc \'    - cron: "*/30 * * * *"\' \\\n',
+        '#|   grep -Fxc \'    - cron: "17 */6 * * *"\' \\\n',
+    ),
+    "availability maximum gap widened": replace_once(
+        workflow,
+        '#|         "maximumExpectedGapMinutes": 90,\n',
+        '#|         "maximumExpectedGapMinutes": 420,\n',
+    ),
+    "runtime profile response detached": replace_once(
+        workflow,
+        '#|             "profileResponseDigest": availability["profileResponseDigest"],\n',
+        '#|             "profileResponseDigest": availability_binding["artifact"]["digest"],\n',
+    ),
+    "availability observation detached": replace_once(
+        workflow,
+        '#|             "observationDigest": file_sha(\n'
+        '#|                 availability_dir / "observation.json"\n'
+        '#|             ),\n',
+        '#|             "observationDigest": availability_binding["artifact"]["digest"],\n',
+    ),
+    "posture observation detached": replace_once(
+        workflow,
+        '#|             "observationDigest": file_sha(\n'
+        '#|                 posture_dir / "observation.json"\n'
+        '#|             ),\n',
+        '#|             "observationDigest": posture_binding["artifact"]["digest"],\n',
     ),
     "public probe relabeled availability": replace_once(
         workflow,
@@ -421,23 +545,46 @@ mutations = {
     ),
     "canary verification rederived": replace_once(
         workflow,
-        '#|     embedded_canary["attestationVerificationSha256"],\n',
-        '#|     file_sha(canary_dir / "attestation-predicate.json"),\n',
+        '#|     canary_dir.parent / "verification" / "recovery-evidence.json.json"\n',
+        '#|     canary_dir / "attestation-predicate.json"\n',
     ),
-    "canary fixture binding detached from deployment": replace_once(
+    "canary Cloud runtime weakened to Core": replace_once(
         workflow,
-        '#|         embedded_canary["fixtureBindingDigest"],\n',
-        '#|         fixture_binding_digest,\n',
+        '#| exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")\n',
+        '#| exact(recovery["runtimeProfile"], "core", "canary runtime profile")\n',
+    ),
+    "canary endpoint binding detached": replace_once(
+        workflow,
+        '#|     recovery["endpointBindingSha256"],\n'
+        '#|     "canary endpoint binding",\n',
+        '#|     manifest["endpointBindingSha256"],\n'
+        '#|     "canary endpoint binding",\n',
+    ),
+    "canary manifest digest accepted without canonical verification": replace_once(
+        workflow,
+        '#| manifest_digest = canonical_digest(manifest, "canary recovery manifest")\n',
+        '#| manifest_digest = digest(manifest["digest"], "canary recovery manifest")\n',
     ),
     "canary run identifier coercion accepted": replace_once(
         workflow,
-        '#|     positive_decimal(rollback["workflowRunId"], "canary workflowRunId"),\n',
-        '#|     int(rollback["workflowRunId"]),\n',
+        '#|     positive_decimal(source["runId"], "canary source runId"),\n',
+        '#|     int(source["runId"]),\n',
     ),
-    "alarm inventory weakened": replace_once(
+    "stale sealed canary recovery accepted": replace_once(
         workflow,
-        '#|         "alarmCount": 10,\n',
-        '#|         "alarmCount": alarm_inventory["alarmCount"],\n',
+        '#| if recovered_at - prepared_at > dt.timedelta(hours=2):\n'
+        '#|     fail("canary sealed recovery capability is stale")\n',
+        "",
+    ),
+    "lean alarm inventory weakened": replace_once(
+        workflow,
+        '#|     "archon-production-runtime-failure-queue-visible",\n',
+        '#|     "archon-production-legacy-runtime-errors",\n',
+    ),
+    "posture alarm state check weakened": replace_once(
+        workflow,
+        '#|         "alarmsNotFiring": True,\n',
+        '#|         "alarmsNotFiring": posture["checks"]["alarmsNotFiring"],\n',
     ),
     "monitor no longer active": replace_once(
         workflow,

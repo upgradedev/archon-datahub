@@ -34,7 +34,6 @@ EXPECTED_ENVIRONMENTS = [
     "governed-canary",
     "governed-canary-prepare",
     "governed-canary-recovery",
-    "governed-canary-rollback",
     "judge-access-production",
     "judge-access-staging",
     "production",
@@ -51,7 +50,6 @@ EXPECTED_SOLO_OWNER_ENVIRONMENTS = [
     "datahub-demo-seed",
     "governed-canary",
     "governed-canary-recovery",
-    "governed-canary-rollback",
     "judge-access-production",
     "judge-access-staging",
     "production",
@@ -518,10 +516,10 @@ def validate_script(script: str) -> None:
 
     for policy_anchor in (
         '(.administrationOnly.actions.patternsAllowed | length) == 16',
-        '(.environments.exactNames | length) == 17',
+        '(.environments.exactNames | length) == 16',
         (
             '(.environments.soloOwnerApproval.exactNames '
-            '| length) == 12'
+            '| length) == 11'
         ),
         (
             '(.environments.reviewerlessByDesign.exactNames '
@@ -564,9 +562,9 @@ def validate_script(script: str) -> None:
         "observed environment names must equal the policy set",
     )
     require(
-        "jq -r 'length' <<<\"${observed_environments}\"\n)\" = \"17\""
+        "jq -r 'length' <<<\"${observed_environments}\"\n)\" = \"16\""
         in script,
-        "the terminal observed environment count must remain exactly seventeen",
+        "the terminal observed environment count must remain exactly sixteen",
     )
     require(
         ".environments.canAdminsBypass == false" in script,

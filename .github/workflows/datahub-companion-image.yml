@@ -1,0 +1,500 @@
+name: DataHub companion OCI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/locks/datahub-agent-stack.json"
+      - ".github/locks/datahub-mcp-v0.6.0.json"
+      - ".github/security/datahub-companion-image.openvex.json"
+      - ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json"
+      - ".github/workflows/datahub-companion-image.yml"
+      - "contrib/datahub-audit/SKILL.md"
+      - "scripts/materialize-datahub-mcp-lock.sh"
+      - "scripts/smoke-datahub-mcp-runtime.py"
+      - "services/datahub-companion/**"
+  pull_request:
+    paths:
+      - ".github/locks/datahub-agent-stack.json"
+      - ".github/locks/datahub-mcp-v0.6.0.json"
+      - ".github/security/datahub-companion-image.openvex.json"
+      - ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json"
+      - ".github/workflows/datahub-companion-image.yml"
+      - "contrib/datahub-audit/SKILL.md"
+      - "scripts/materialize-datahub-mcp-lock.sh"
+      - "scripts/smoke-datahub-mcp-runtime.py"
+      - "services/datahub-companion/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: datahub-companion-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    name: Build, scan, SBOM, provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    outputs:
+      artifact_id: ${{ steps.candidate.outputs['artifact-id'] }}
+      artifact_digest: ${{ steps.candidate.outputs['artifact-digest'] }}
+    env:
+      IMAGE_REF: archon-datahub-companion:${{ github.event.pull_request.head.sha || github.sha }}
+      VEX_PATH: .github/security/datahub-companion-image.openvex.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Materialize the exact official DataHub Skills source
+        env:
+          SKILLS_COMMIT: f7c7c53648b71dc0841742781e108051d46fa360
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/datahub-skills"
+          mkdir -p "${destination}"
+          curl \
+            --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --max-time 60 \
+            "https://codeload.github.com/datahub-project/datahub-skills/tar.gz/${SKILLS_COMMIT}" \
+            | tar --extract --gzip --strip-components=1 --directory "${destination}"
+          test ! -e "${destination}/.git"
+          for skill in datahub-search datahub-lineage datahub-quality datahub-enrich using-datahub; do
+            test -f "${destination}/skills/${skill}/SKILL.md"
+            test ! -L "${destination}/skills/${skill}/SKILL.md"
+          done
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build once and load the exact companion candidate
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: services/datahub-companion/Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE_REF }}
+          build-args: |
+            ARCHON_RELEASE_SHA=${{ env.SOURCE_SHA }}
+          build-contexts: |
+            datahub-skills=${{ runner.temp }}/datahub-skills
+          cache-from: type=gha,scope=datahub-companion
+          cache-to: type=gha,mode=max,scope=datahub-companion
+          provenance: false
+          sbom: false
+
+      - name: Prove immutable non-root runtime configuration
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "${IMAGE_REF}" --format '{{.Config.User}}')" = "65532:65532"
+          test "$(docker image inspect "${IMAGE_REF}" --format '{{json .Config.Entrypoint}}')" = 'null'
+          test "$(docker image inspect "${IMAGE_REF}" --format '{{json .Config.Cmd}}')" = '["/opt/archon/companion/.venv/bin/python","-m","uvicorn","archon_companion:app","--host","0.0.0.0","--port","8080","--no-access-log"]'
+          docker image inspect "${IMAGE_REF}" --format '{{json .Config.Env}}' \
+            | jq --exit-status '
+                . as $env |
+                all(
+                  $env[];
+                  test("^(DATAHUB_GMS_TOKEN|ARCHON_RUN_HANDLE_FERNET_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)=")
+                  | not
+                ) and
+                (
+                  [
+                    "TOOLS_IS_MUTATION_ENABLED=false",
+                    "TOOLS_IS_USER_ENABLED=false",
+                    "DATA_QUALITY_TOOLS_ENABLED=false",
+                    "DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED=true",
+                    "SEMANTIC_SEARCH_ENABLED=false",
+                    "FASTMCP_HOST=0.0.0.0",
+                    "FASTMCP_PORT=8000",
+                    "FASTMCP_MASK_ERROR_DETAILS=true",
+                    "FASTMCP_STRICT_INPUT_VALIDATION=true",
+                    "FASTMCP_CHECK_FOR_UPDATES=off",
+                    "FASTMCP_ENABLE_RICH_LOGGING=false",
+                    "FASTMCP_HOME=/tmp/fastmcp"
+                  ] |
+                  all(.[]; . as $required | $env | index($required) != null)
+                )
+              ' >/dev/null
+
+      - name: Exercise the image with production isolation flags
+        run: |
+          set -euo pipefail
+          docker run --rm --interactive \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=8m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --network none \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/scripts/smoke-datahub-mcp-runtime.py,dst=/opt/archon/mcp-smoke.py,readonly" \
+            "${IMAGE_REF}" /opt/archon/companion/.venv/bin/python - <<'PY'
+          import importlib.metadata
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          import archon_companion as companion
+
+          assert os.getuid() == 65532
+          global_site = Path("/usr/local/lib/python3.11/site-packages")
+          assert global_site.is_dir() and not any(global_site.iterdir())
+          assert Path("/usr/local/bin/python3.11").is_file()
+          assert all(
+              not Path(path).exists()
+              for path in (
+                  "/usr/local/bin/pip",
+                  "/usr/local/bin/pip3",
+                  "/usr/local/bin/pip3.11",
+                  "/usr/local/bin/wheel",
+              )
+          )
+          assert importlib.metadata.version("datahub-agent-context") == "1.6.0.17"
+          assert importlib.metadata.version("datahub-analytics-agent") == "0.4.0"
+          assert importlib.metadata.version("cryptography") == "50.0.0"
+          assert Path(os.environ["ARCHON_AGENT_STACK_LOCK"]).is_file()
+          assert Path(os.environ["ARCHON_DATAHUB_MCP_LOCK"]).is_file()
+          mcp = Path(os.environ["ARCHON_DATAHUB_MCP_BIN"])
+          assert mcp.is_file() and not mcp.is_symlink()
+          assert subprocess.check_output(
+              [mcp, "--version"], text=True,
+          ).strip() == "mcp-server-datahub, version 0.6.0"
+          smoke_path = Path("/tmp/mcp-smoke.json")
+          subprocess.run(
+              [
+                  str(mcp.parent / "python"),
+                  "/opt/archon/mcp-smoke.py",
+                  "--server",
+                  str(mcp),
+                  "--output",
+                  str(smoke_path),
+                  "--timeout-seconds",
+                  "45",
+              ],
+              check=True,
+          )
+          smoke = json.loads(smoke_path.read_text())
+          assert smoke["schemaVersion"] == "archon.datahub-mcp-runtime-smoke/v1"
+          assert smoke["protocol"] == "mcp-stdio"
+          assert smoke["packageVersion"] == "0.6.0"
+          assert smoke["initialized"] is True
+          assert smoke["pinged"] is True
+          assert smoke["credentialsUsed"] is False
+          assert smoke["networkToolCalls"] == 0
+          assert smoke["unexpectedHttpRequests"] == 0
+          assert smoke["readOnlyHints"] is True
+          assert smoke["tools"] == list(companion.MCP_TOOLS)
+          binding = json.loads(Path(
+              "/opt/archon/mcp/.archon-evidence/resolved-lock-binding.json"
+          ).read_text())
+          assert binding["matches"] is True
+          assert binding["placeholder"] is False
+          assert binding["observedResolvedLockSha256"] == binding[
+              "expectedResolvedLockSha256"
+          ]
+          assert len(companion.MCP_TOOLS) == 6
+          assert len(companion.load_skill_receipt()["official"]) == 5
+          assert companion.load_mcp_provenance()["version"] == "0.6.0"
+          routes = {route.path for route in companion.app.routes}
+          assert "/livez" in routes
+          assert "/healthz" in routes
+          assert "/v2/analyze" in routes
+          assert "/v2/improve-context" in routes
+          assert "/v1/analyze" not in routes
+          PY
+
+      - name: Validate the exact expiring image OpenVEX statement
+        run: |
+          set -euo pipefail
+          jq --exit-status '
+            ."@context" == "https://openvex.dev/ns/v0.2.0" and
+            ."@id" == "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image-setuptools/v1" and
+            .author == "https://github.com/upgradedev/archon-datahub" and
+            .timestamp == .last_updated and
+            .version == 1 and
+            (.statements | length) == 1 and
+            .statements[0].vulnerability.name == "CVE-2026-59890" and
+            .statements[0].products == [
+              {"@id": "pkg:pypi/setuptools@81.0.0"}
+            ] and
+            .statements[0].status == "not_affected" and
+            .statements[0].justification == "vulnerable_code_not_in_execute_path"
+          ' "${VEX_PATH}" >/dev/null
+          python - <<'PY'
+          import json
+          import os
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+
+          vex = json.loads(Path(os.environ["VEX_PATH"]).read_text())
+          issued = datetime.fromisoformat(
+              vex["timestamp"].removesuffix("Z") + "+00:00"
+          )
+          expires = datetime.fromisoformat(
+              vex["x-archon-expires-at"].removesuffix("Z") + "+00:00"
+          )
+          now = datetime.now(UTC)
+          assert issued <= now < expires
+          assert timedelta(0) < expires - issued <= timedelta(days=32)
+          PY
+
+      - name: Scan the raw exact companion image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_REF }}
+          scanners: vuln
+          format: sarif
+          output: ${{ runner.temp }}/datahub-companion-image.raw.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: false
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Scan the exact image with the reviewed OpenVEX
+        env:
+          TRIVY_VEX: .github/security/datahub-companion-image.openvex.json
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_REF }}
+          scanners: vuln
+          format: sarif
+          output: ${{ runner.temp }}/datahub-companion-image.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: "0"
+          hide-progress: true
+          version: v0.72.0
+
+      - name: Evaluate actionable image findings and evidence
+        id: image_policy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for sarif in \
+            "${RUNNER_TEMP}/datahub-companion-image.raw.sarif" \
+            "${RUNNER_TEMP}/datahub-companion-image.sarif"
+          do
+            jq --exit-status '
+              .version == "2.1.0" and
+              (.runs | type == "array" and length > 0) and
+              all(
+                .runs[];
+                (.tool.driver.name | ascii_downcase | contains("trivy")) and
+                (.results | type == "array")
+              )
+            ' "${sarif}" >/dev/null
+          done
+          jq --exit-status '
+            ([.runs[].results[]] | length) == 0
+          ' "${RUNNER_TEMP}/datahub-companion-image.sarif" >/dev/null
+
+      - name: Upload trusted companion image SARIF
+        if: >-
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/datahub-companion-image.sarif
+          category: trivy-datahub-companion-image
+
+      - name: Generate SBOMs and immutable provenance
+        env:
+          BUILD_DIGEST: ${{ steps.image.outputs.digest }}
+          SKILLS_COMMIT: f7c7c53648b71dc0841742781e108051d46fa360
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/datahub-companion-evidence"
+          mkdir -p "${evidence}"
+          trivy image \
+            --format cyclonedx \
+            --output "${evidence}/companion.cdx.json" \
+            "${IMAGE_REF}"
+          trivy image \
+            --format spdx-json \
+            --output "${evidence}/companion.spdx.json" \
+            "${IMAGE_REF}"
+          jq --exit-status '
+            .bomFormat == "CycloneDX" and
+            any(.components[]; .name == "datahub-agent-context" and .version == "1.6.0.17") and
+            any(.components[]; .name == "datahub-analytics-agent" and .version == "0.4.0") and
+            any(.components[]; .name == "mcp-server-datahub" and .version == "0.6.0") and
+            any(.components[]; .name == "acryl-datahub" and .version == "1.6.0.15") and
+            any(.components[]; .name == "cryptography" and .version == "50.0.0")
+          ' "${evidence}/companion.cdx.json" >/dev/null
+          docker image inspect "${IMAGE_REF}" >"${evidence}/image-inspect.json"
+          docker save "${IMAGE_REF}" | gzip -9 >"${evidence}/companion-image.tar.gz"
+          (
+            cd "${evidence}"
+            sha256sum companion-image.tar.gz >image-subject.sha256
+          )
+          image_id="$(docker image inspect "${IMAGE_REF}" --format '{{.Id}}')"
+          archive_sha="$(cut -d' ' -f1 "${evidence}/image-subject.sha256")"
+          [[ "${image_id}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${BUILD_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "${archive_sha}" =~ ^[a-f0-9]{64}$ ]]
+          dockerfile_sha="$(sha256sum services/datahub-companion/Dockerfile | cut -d' ' -f1)"
+          stack_lock_sha="$(sha256sum .github/locks/datahub-agent-stack.json | cut -d' ' -f1)"
+          mcp_lock_sha="$(sha256sum .github/locks/datahub-mcp-v0.6.0.json | cut -d' ' -f1)"
+          mcp_binding="$(
+            docker run --rm --network none "${IMAGE_REF}" /bin/cat \
+              /opt/archon/mcp/.archon-evidence/resolved-lock-binding.json
+          )"
+          mcp_resolved_lock_sha="$(
+            jq --exit-status --raw-output '
+              select(.matches == true and .placeholder == false) |
+              .observedResolvedLockSha256
+            ' <<<"${mcp_binding}"
+          )"
+          mcp_wheel_graph_sha="$(
+            docker run --rm --network none "${IMAGE_REF}" /usr/bin/sha256sum \
+              /opt/archon/mcp/.archon-evidence/wheel-only-graph.json |
+              cut -d' ' -f1
+          )"
+          [[ "${mcp_resolved_lock_sha}" =~ ^[a-f0-9]{64}$ ]]
+          [[ "${mcp_wheel_graph_sha}" =~ ^[a-f0-9]{64}$ ]]
+          jq -nS \
+            --arg sourceSha "${SOURCE_SHA}" \
+            --arg imageId "${image_id}" \
+            --arg buildDigest "${BUILD_DIGEST}" \
+            --arg archiveSha256 "${archive_sha}" \
+            --arg dockerfileSha256 "${dockerfile_sha}" \
+            --arg stackLockSha256 "${stack_lock_sha}" \
+            --arg mcpLockSha256 "${mcp_lock_sha}" \
+            --arg mcpResolvedLockSha256 "${mcp_resolved_lock_sha}" \
+            --arg mcpWheelGraphSha256 "${mcp_wheel_graph_sha}" \
+            --arg skillsCommit "${SKILLS_COMMIT}" \
+            '{
+              schemaVersion: "archon.datahub-companion-image-provenance/v1",
+              sourceSha: $sourceSha,
+              imageId: $imageId,
+              buildDigest: $buildDigest,
+              archiveSha256: $archiveSha256,
+              dockerfileSha256: $dockerfileSha256,
+              agentStackLockSha256: $stackLockSha256,
+              mcpLockSha256: $mcpLockSha256,
+              mcpResolvedLockSha256: $mcpResolvedLockSha256,
+              mcpWheelOnlyGraphSha256: $mcpWheelGraphSha256,
+              officialReadOnlyMcp: {
+                package: "mcp-server-datahub",
+                version: "0.6.0",
+                tools: [
+                  "get_dataset_queries",
+                  "get_entities",
+                  "get_lineage",
+                  "get_lineage_paths_between",
+                  "list_schema_fields",
+                  "search"
+                ],
+                mutationsEnabled: false
+              },
+              governedMutationGatewayBundled: false,
+              dataHubSkillsCommit: $skillsCommit,
+              pythonImage: "python:3.11.15-slim-trixie@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93",
+              uvImage: "ghcr.io/astral-sh/uv@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437",
+              sourceBuilds: "deny",
+              runtimeUser: "65532:65532"
+            }' >"${evidence}/provenance.json"
+          (
+            cd "${evidence}"
+            sha256sum \
+              companion.cdx.json \
+              companion.spdx.json \
+              image-inspect.json \
+              provenance.json \
+              >SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+            sha256sum --check --strict image-subject.sha256
+          )
+
+      - name: Stage available sealed companion evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          artifact="${RUNNER_TEMP}/datahub-companion-artifact"
+          mkdir -p "${artifact}"
+          if [[ -d "${RUNNER_TEMP}/datahub-companion-evidence" ]]; then
+            cp -R "${RUNNER_TEMP}/datahub-companion-evidence" "${artifact}/evidence"
+          fi
+          for evidence in \
+            "${RUNNER_TEMP}/datahub-companion-image.raw.sarif" \
+            "${RUNNER_TEMP}/datahub-companion-image.sarif"
+          do
+            if [[ -f "${evidence}" ]]; then
+              cp "${evidence}" "${artifact}/"
+            fi
+          done
+          cp "${VEX_PATH}" "${artifact}/image.openvex.json"
+          cp .github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json \
+            "${artifact}/mcp.openvex.json"
+
+      - name: Retain exact candidate and security evidence
+        id: candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-companion-image-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/datahub-companion-artifact/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'push' && 90 || 1 }}
+          overwrite: true
+
+      - name: Enforce the companion image policy after evidence retention
+        if: steps.image_policy.outcome != 'success'
+        run: |
+          echo "::error::The companion image has actionable findings or malformed evidence"
+          exit 1
+
+  attest:
+    name: Attest exact companion candidate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the exact candidate by immutable artifact id
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
+          path: ${{ runner.temp }}/candidate
+      - name: Revalidate the sealed candidate before signing
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/candidate/evidence"
+          (
+            cd "${evidence}"
+            sha256sum --check --strict SHA256SUMS
+            sha256sum --check --strict image-subject.sha256
+          )
+          test "$(jq --raw-output .sourceSha "${evidence}/provenance.json")" = "${SOURCE_SHA}"
+      - name: Sign companion provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/candidate/evidence/image-subject.sha256
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-companion-image/v1
+          predicate-path: ${{ runner.temp }}/candidate/evidence/provenance.json
+      - name: Sign companion SPDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: ${{ runner.temp }}/candidate/evidence/image-subject.sha256
+          sbom-path: ${{ runner.temp }}/candidate/evidence/companion.spdx.json

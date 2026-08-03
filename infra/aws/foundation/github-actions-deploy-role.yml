@@ -115,8 +115,8 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/${BootstrapStackName}/*
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${BootstrapStackName}/*
-                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
-                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Core/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Judge/*
                   - !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Edge/*
               - Sid: DetectExactStageIamFoundationDrift
                 Effect: Allow
@@ -139,55 +139,111 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:ssm:eu-west-1:${AWS::AccountId}:parameter/cdk-bootstrap/${BootstrapQualifier}/version
                   - !Sub arn:${AWS::Partition}:ssm:us-east-1:${AWS::AccountId}:parameter/cdk-bootstrap/${BootstrapQualifier}/version
-              - Sid: ResolveDeploymentNetworkAndDnsInputs
+              - Sid: ProveRetiredStacksAbsent
                 Effect: Allow
                 Action:
-                  - ec2:DescribeAvailabilityZones
+                  - cloudformation:DescribeStacks
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-Registry/*
+              - Sid: ResolveExactDeploymentAndRuntimeInputs
+                Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - ec2:DescribeImages
                   - ec2:DescribeManagedPrefixLists
-                  - ec2:GetManagedPrefixListEntries
-                  - ec2:DescribeSecurityGroupRules
-                  - ec2:DescribeSecurityGroups
-                  - ec2:DescribeSubnets
-                  - ec2:DescribeVpcEndpointServices
-                  - ec2:DescribeVpcEndpoints
-                  - ec2:DescribeVpcs
-                  - elasticloadbalancing:DescribeLoadBalancers
-                  - logs:DescribeLogGroups
                 Resource: "*"
-              - Sid: ReadEdgeAndApiPosture
+              - Sid: ReadExactCloudRuntimeImage
                 Effect: Allow
                 Action:
-                  - apigateway:GET
-                  - cloudfront:GetOriginRequestPolicyConfig
-                  - cloudformation:GetResource
-                  - kms:DescribeKey
-                  - kms:GetKeyRotationStatus
-                  - wafv2:GetLoggingConfiguration
-                  - wafv2:GetWebACL
-                  - wafv2:GetWebACLForResource
-                Resource: "*"
-              - Sid: ReadTaggedStageCloudFrontCertificate
-                Effect: Allow
-                Action:
-                  - acm:DescribeCertificate
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:acm:us-east-1:${AWS::AccountId}:certificate/*
+                  arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub-cloud-runtime-v2
+              - Sid: ReadExactStageRuntimeTables
+                Effect: Allow
+                Action:
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-Core-CoreLeaseTable*
+                  - !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-Judge-RuntimeSessionTable*
                 Condition:
                   StringEquals:
                     aws:ResourceTag/Application: archon-datahub
                     aws:ResourceTag/Environment: !Ref DeploymentEnvironment
                     aws:ResourceTag/ManagedBy: aws-cdk
-              - Sid: ReadExactCloudFrontHostedZone
+              - Sid: ReadExactStageBucketPosture
                 Effect: Allow
                 Action:
-                  - route53:GetHostedZone
-                  - route53:ListResourceRecordSets
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketVersioning
+                  - s3:GetEncryptionConfiguration
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1
+                  - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-${AWS::AccountId}-eu-west-1
+              - Sid: PublishExactStageSpaBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:route53:::hostedzone/${CloudFrontHostedZoneId}
-              - Sid: ReadTaggedStageCloudFrontDistribution
+                  arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1
+              - Sid: PublishExactStageSpaObjects
                 Effect: Allow
                 Action:
-                  - cloudfront:GetDistributionConfig
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1/*
+              - Sid: UseExactStageSpaKeyViaS3
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases:
+                      - !Sub alias/archon/${DeploymentEnvironment}/judge-spa
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService: !Sub s3.eu-west-1.${AWS::URLSuffix}
+                  StringLike:
+                    "kms:EncryptionContext:aws:s3:arn":
+                      - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1
+                      - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1/*
+              - Sid: ReadExactStageFunctionConfiguration
+                Effect: Allow
+                Action:
+                  - lambda:GetFunctionConcurrency
+                  - lambda:GetFunctionConfiguration
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-runtime-control
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-control
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-runtime-remediation
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-read
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-mutation
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-reset
+              - Sid: ReadExactStageImageFunctions
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-read
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-mutation
+                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-cloud-reset
+              - Sid: ReadAndInvalidateTaggedStageDistribution
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetInvalidation
                 Resource: !Sub >-
                   arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*
                 Condition:
@@ -195,139 +251,31 @@ Resources:
                     aws:ResourceTag/Application: archon-datahub
                     aws:ResourceTag/Environment: !Ref DeploymentEnvironment
                     aws:ResourceTag/ManagedBy: aws-cdk
-              - Sid: ReadExactStageCanonicalHostFunction
+              - Sid: ReadExactStageRegionalWebAcl
                 Effect: Allow
                 Action:
-                  - cloudfront:DescribeFunction
-                  - cloudfront:GetFunction
+                  - wafv2:GetWebACL
+                  - wafv2:GetWebACLForResource
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/archon-${DeploymentEnvironment}-canonical-host
-              - Sid: InspectArchonTaskPolicies
+                  arn:${AWS::Partition}:wafv2:eu-west-1:${AWS::AccountId}:regional/webacl/archon-${DeploymentEnvironment}-api/*
+              - Sid: ReadTaggedStageCognitoWebAclAssociation
                 Effect: Allow
                 Action:
-                  - iam:GetRole
-                  - iam:SimulatePrincipalPolicy
-                Resource:
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/Archon-${DeploymentEnvironment}-*
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-sns-delivery-status
-              - Sid: ReadExactStageRuntimeBoundary
-                Effect: Allow
-                Action:
-                  - iam:GetPolicy
-                  - iam:GetPolicyVersion
-                  - iam:ListPolicyVersions
-                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/archon-datahub-runtime-boundary-${DeploymentEnvironment}
-              - Sid: ReadImmutableApplicationImage
-                Effect: Allow
-                Action:
-                  - ecr:BatchGetImage
-                  - ecr:DescribeImages
-                  - ecr:DescribeImageScanFindings
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:ListImages
+                  - cognito-idp:GetWebACLForResource
                 Resource: !Sub >-
-                  arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub
-              - !If
-                - IsStaging
-                - Sid: PublishImmutableApplicationImageFromStaging
-                  Effect: Allow
-                  Action:
-                    - ecr:BatchCheckLayerAvailability
-                    - ecr:BatchDeleteImage
-                    - ecr:CompleteLayerUpload
-                    - ecr:InitiateLayerUpload
-                    - ecr:PutImage
-                    - ecr:UploadLayerPart
-                  Resource: !Sub >-
-                    arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub
-                - !Ref AWS::NoValue
-              - !If
-                - IsStaging
-                - Sid: AuthenticateToEcrForStagingPublish
-                  Effect: Allow
-                  Action:
-                    - ecr:GetAuthorizationToken
-                  Resource: "*"
-                - !Ref AWS::NoValue
-              - Sid: RotateOnlyArchonRuntimeSecrets
-                Effect: Allow
-                Action:
-                  - secretsmanager:PutSecretValue
-                Resource:
-                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-read-*
-                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-write-*
-              - Sid: UseOnlyArchonRuntimeKeys
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:DescribeKey
-                  - kms:Encrypt
-                  - kms:GenerateDataKey
-                  - kms:GenerateDataKeyWithoutPlaintext
-                  - kms:ReEncryptFrom
-                  - kms:ReEncryptTo
-                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
-                Condition:
-                  ForAnyValue:StringLike:
-                    kms:ResourceAliases:
-                      - !Sub alias/archon/${DeploymentEnvironment}/data
-                      - !Sub alias/archon/${DeploymentEnvironment}/secrets
-                      - !Sub alias/archon/${DeploymentEnvironment}/spa
-              - Sid: ReconcileOnlyArchonServices
-                Effect: Allow
-                Action:
-                  - ecs:DescribeServices
-                  - ecs:UpdateService
-                Resource:
-                  - !Sub arn:${AWS::Partition}:ecs:eu-west-1:${AWS::AccountId}:service/Archon-${DeploymentEnvironment}-*/*
-              - Sid: ObserveArchonRuntime
-                Effect: Allow
-                Action:
-                  - ecs:DescribeTaskDefinition
-                  - ecs:DescribeTasks
-                  - ecs:ListTasks
-                Resource: "*"
-              - Sid: ReadOnlyArchonFunctions
-                Effect: Allow
-                Action:
-                  - lambda:GetFunction
-                  - lambda:GetFunctionConfiguration
-                Resource:
-                  - !Sub arn:${AWS::Partition}:lambda:eu-west-1:${AWS::AccountId}:function:archon-${DeploymentEnvironment}-*
-              - Sid: ReadArchonBuckets
-                Effect: Allow
-                Action:
-                  - s3:GetEncryptionConfiguration
-                  - s3:GetBucketLocation
-                  - s3:GetBucketVersioning
-                  - s3:ListBucket
-                  - s3:ListBucketMultipartUploads
-                  - s3:ListBucketVersions
-                Resource:
-                  - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1
-              - Sid: PublishSpaAndReadDeploymentEvidence
-                Effect: Allow
-                Action:
-                  - s3:AbortMultipartUpload
-                  - s3:DeleteObject
-                  - s3:GetObject
-                  - s3:GetObjectAttributes
-                  - s3:GetObjectVersion
-                  - s3:ListMultipartUploadParts
-                  - s3:PutObject
-                  - s3:PutObjectTagging
-                Resource:
-                  - !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-spa-${AWS::AccountId}-eu-west-1/*
-              - Sid: InvalidateOnlyAccountDistributions
-                Effect: Allow
-                Action:
-                  - cloudfront:CreateInvalidation
-                  - cloudfront:GetInvalidation
-                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*
+                  arn:${AWS::Partition}:cognito-idp:eu-west-1:${AWS::AccountId}:userpool/*
                 Condition:
                   StringEquals:
                     aws:ResourceTag/Application: archon-datahub
                     aws:ResourceTag/Environment: !Ref DeploymentEnvironment
+                    aws:ResourceTag/ManagedBy: aws-cdk
+              - Sid: ReadExactStageRuntimeAlarms
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudwatch:eu-west-1:${AWS::AccountId}:alarm:archon-${DeploymentEnvironment}-control-plane-errors
+                  - !Sub arn:${AWS::Partition}:cloudwatch:eu-west-1:${AWS::AccountId}:alarm:archon-${DeploymentEnvironment}-runtime-failure-queue-visible
       Tags:
         - Key: Application
           Value: archon-datahub
@@ -335,6 +283,183 @@ Resources:
           Value: cloudformation
         - Key: Purpose
           Value: immutable-deployment
+        - Key: Environment
+          Value: !Ref DeploymentEnvironment
+
+  CloudRuntimeImagePublisherRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    Properties:
+      RoleName: archon-datahub-cloud-runtime-publish-production
+      Description: >-
+        Short-lived GitHub OIDC role for publishing only the immutable Archon
+        DataHub Cloud runtime repository.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubCloudRuntimePublisherOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:production
+                token.actions.githubusercontent.com:repository: !Sub >-
+                  ${GitHubOrganization}/${GitHubRepository}
+                token.actions.githubusercontent.com:environment: production
+                token.actions.githubusercontent.com:ref: refs/heads/master
+                token.actions.githubusercontent.com:workflow: DataHub Cloud runtime OCI v2
+      Policies:
+        - PolicyName: archon-datahub-cloud-runtime-ecr-publish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AuthenticateOnlyToEcrInPrimaryRegion
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-1
+              - Sid: CreateOnlyExactTaggedRepository
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:TagResource
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub-cloud-runtime-v2
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-1
+                    aws:RequestTag/archon:component: datahub-cloud-runtime-v2
+                    aws:RequestTag/archon:owner: github-actions
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - archon:component
+                      - archon:owner
+              - Sid: PublishInspectAndBoundedCleanupExactRepository
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchDeleteImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub-cloud-runtime-v2
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: eu-west-1
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Purpose
+          Value: cloud-runtime-image-publisher
+        - Key: Environment
+          Value: production
+  GitHubDataHubCloudTrialRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub archon-datahub-github-${DeploymentEnvironment}-cloud-trial
+      Description: !Sub >-
+        Short-lived GitHub OIDC role for the protected ${DeploymentEnvironment}
+        DataHub Cloud trial credential transaction only.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubDataHubCloudTrialEnvironmentOnly
+            Effect: Allow
+            Principal:
+              Federated: !Sub >-
+                arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub >-
+                  repo:${GitHubOrganization}/${GitHubRepository}:environment:${DeploymentEnvironment}
+      Policies:
+        - PolicyName: archon-datahub-cloud-trial-transaction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: VerifyCloudTrialCaller
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: ReadExactJudgeStackOutputBindings
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:cloudformation:eu-west-1:${AWS::AccountId}:stack/Archon-${DeploymentEnvironment}-Judge/*
+              - Sid: DescribeExactCloudRuntimeSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+              - Sid: ReadOnlyRetainedCloudReaderSecretForStableKeys
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+              - Sid: StageAndPromoteExactCloudRuntimeSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:UpdateSecretVersionStage
+                Resource:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+              - Sid: DescribeOnlyExactJudgeSecretsKey
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases:
+                      - !Sub alias/archon/${DeploymentEnvironment}/judge-secrets
+              - Sid: UseOnlyExactJudgeSecretsKeyThroughSecretsManager
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
+                Condition:
+                  ForAnyValue:StringEquals:
+                    kms:ResourceAliases:
+                      - !Sub alias/archon/${DeploymentEnvironment}/judge-secrets
+                  StringEquals:
+                    kms:CallerAccount: !Ref AWS::AccountId
+                    kms:ViaService: secretsmanager.eu-west-1.amazonaws.com
+                  StringLike:
+                    "kms:EncryptionContext:SecretARN":
+                      - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/reader-*
+                      - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/writer-*
+      Tags:
+        - Key: Application
+          Value: archon-datahub
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: Purpose
+          Value: datahub-cloud-trial-control-plane
         - Key: Environment
           Value: !Ref DeploymentEnvironment
 
@@ -699,6 +824,21 @@ Outputs:
     Value: !GetAtt JudgeUserRole.Arn
   JudgeUserRoleName:
     Value: !Ref JudgeUserRole
+  GitHubDataHubCloudTrialRoleArn:
+    Description: >-
+      Configure this value as AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN in the matching
+      deployment environment.
+    Value: !GetAtt GitHubDataHubCloudTrialRole.Arn
+  GitHubDataHubCloudTrialRoleName:
+    Value: !Ref GitHubDataHubCloudTrialRole
+  CloudRuntimeImagePublisherRoleArn:
+    Condition: IsProduction
+    Description: >-
+      Configure this value as production AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN.
+    Value: !GetAtt CloudRuntimeImagePublisherRole.Arn
+  CloudRuntimeImagePublisherRoleName:
+    Condition: IsProduction
+    Value: !Ref CloudRuntimeImagePublisherRole
   ProductionPostureObserverRoleArn:
     Condition: IsProduction
     Description: Configure this value as production-observer AWS_READ_ROLE_ARN.

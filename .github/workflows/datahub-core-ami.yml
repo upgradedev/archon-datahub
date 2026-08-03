@@ -1,0 +1,1336 @@
+name: DataHub Core AMI
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type BUILD_EPHEMERAL_DATAHUB_CORE_AMI to authorize billable AWS resources
+        required: true
+        type: string
+      companion_run_id:
+        description: Successful DataHub companion OCI workflow run ID
+        required: true
+        type: string
+      companion_source_sha:
+        description: Exact 40-character source SHA sealed by that OCI run
+        required: true
+        type: string
+      generation:
+        description: Immutable Core runtime generation
+        required: true
+        default: core-20260802-1
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: datahub-core-ami-staging
+  cancel-in-progress: false
+
+env:
+  AWS_PAGER: ""
+  PACKER_VERSION: 1.16.0
+  UV_VERSION: 0.11.31
+  TRIVY_VERSION: v0.70.0
+  SESSION_MANAGER_PLUGIN_VERSION: 1.2.835.0
+  SESSION_MANAGER_PLUGIN_SHA256: 7c6dcad12518571cc7959a713e6a8ae1bdf6ed66fd9bee37dc189e39ca58ae03
+
+jobs:
+  validate:
+    name: Contracts, tests, Packer validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Validate non-billable dispatch contract
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          COMPANION_RUN_ID: ${{ inputs.companion_run_id }}
+          COMPANION_SOURCE_SHA: ${{ inputs.companion_source_sha }}
+          GENERATION: ${{ inputs.generation }}
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION}" = "BUILD_EPHEMERAL_DATAHUB_CORE_AMI"
+          [[ "${COMPANION_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "${COMPANION_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${COMPANION_SOURCE_SHA}" = "${GITHUB_SHA}"
+          [[ "${GENERATION}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: infra/aws/package-lock.json
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: ${{ env.PACKER_VERSION }}
+      - name: Run Core Python contracts independently
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX="${RUNNER_TEMP}/core-pycache" python3 -m py_compile \
+            infra/aws/lambda/core-lifecycle/lifecycle.py \
+            infra/aws/image/core_job_adapter.py \
+            infra/aws/image/governed_datahub_gateway.py \
+            infra/aws/image/datahub_core_bootstrap.py \
+            services/datahub-companion/demo/seed_datahub.py
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 infra/aws/lambda/core-lifecycle/test_lifecycle.py
+          python3 infra/aws/image/test_core_job_adapter.py
+          python3 infra/aws/image/test_governed_datahub_gateway.py
+          python3 infra/aws/image/test_datahub_core_bootstrap.py
+          python3 services/datahub-companion/demo/test_seed_datahub.py
+          python3 infra/aws/image/test_datahub_core_ami_contract.py
+      - name: Run AWS CDK contracts
+        working-directory: infra/aws
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run build
+          npm test -- --runInBand
+      - name: Validate provisioning and Packer source
+        run: |
+          set -euo pipefail
+          bash -n infra/aws/packer/provision-datahub-core.sh
+          shellcheck infra/aws/packer/provision-datahub-core.sh
+          packer fmt -check infra/aws/packer/datahub-core.pkr.hcl
+          packer init infra/aws/packer/datahub-core.pkr.hcl
+          packer validate \
+            -var region=eu-west-1 \
+            -var base_ami_id=ami-0123456789abcdef0 \
+            -var builder_subnet_id=subnet-0123456789abcdef0 \
+            -var builder_security_group_id=sg-0123456789abcdef0 \
+            -var builder_instance_profile=archon-datahub-core-ami-builder-staging \
+            -var builder_key_pair_name=archon-datahub-core-ami-1 \
+            -var builder_private_key_file=/tmp/archon-validation-key \
+            -var source_bundle=/tmp/archon-validation.tar.gz \
+            -var release_sha=0000000000000000000000000000000000000000 \
+            -var companion_source_sha=1111111111111111111111111111111111111111 \
+            -var generation=core-validation \
+            -var capability_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            -var image_manifest_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            -var workflow_run_id=1 \
+            -var packer_manifest_output=/tmp/packer-validation.json \
+            -var bake_evidence_output=/tmp/bake-validation.tar.gz \
+            infra/aws/packer/datahub-core.pkr.hcl
+
+  build:
+    name: Build immutable AMI through no-ingress SSM
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    environment:
+      name: staging
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
+        with:
+          version: ${{ env.PACKER_VERSION }}
+      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: false
+      - name: Verify exact companion workflow and artifact
+        id: companion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.companion_run_id }}
+          SOURCE_SHA: ${{ inputs.companion_source_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${SOURCE_SHA}"
+          test "$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha
+          )" = "${SOURCE_SHA}"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          jq --exit-status \
+            --argjson runId "${RUN_ID}" \
+            --arg sourceSha "${SOURCE_SHA}" \
+            --arg repository "${GITHUB_REPOSITORY}" '
+              .id == $runId and
+              .name == "DataHub companion OCI" and
+              .path == ".github/workflows/datahub-companion-image.yml" and
+              .event == "push" and
+              .head_branch == "master" and
+              .head_repository.full_name == $repository and
+              .head_sha == $sourceSha and
+              .status == "completed" and
+              .conclusion == "success"
+            ' <<<"${run_json}" >/dev/null
+          artifact_name="datahub-companion-image-${SOURCE_SHA}"
+          artifact_json="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+              --paginate --slurp |
+              jq -c --arg name "${artifact_name}" '
+                [.[].artifacts[] | select(.name == $name and .expired == false)]
+              '
+          )"
+          test "$(jq 'length' <<<"${artifact_json}")" = "1"
+          echo "artifact_name=${artifact_name}" >>"${GITHUB_OUTPUT}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.companion.outputs.artifact_name }}
+          path: ${{ runner.temp }}/companion
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.companion_run_id }}
+      - name: Revalidate immutable companion evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.companion_source_sha }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/companion"
+          test -f evidence/companion-image.tar.gz
+          test -f evidence/image-subject.sha256
+          test -f evidence/SHA256SUMS
+          test -f evidence/provenance.json
+          test -f evidence/companion.cdx.json
+          test -f evidence/companion.spdx.json
+          test -f evidence/image-inspect.json
+          test -f datahub-companion-image.sarif
+          test -f image.openvex.json
+          sha256sum --check --strict evidence/SHA256SUMS
+          sha256sum --check --strict evidence/image-subject.sha256
+          gh attestation verify evidence/companion-image.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/datahub-companion-image.yml" \
+            --signer-digest "${SOURCE_SHA}" \
+            --source-digest "${SOURCE_SHA}" \
+            --source-ref refs/heads/master \
+            --predicate-type "https://github.com/upgradedev/archon-datahub/attestations/datahub-companion-image/v1" \
+            --deny-self-hosted-runners \
+            >/dev/null
+          archive_sha="$(sha256sum evidence/companion-image.tar.gz | awk '{print $1}')"
+          jq --exit-status \
+            --arg sourceSha "${SOURCE_SHA}" \
+            --arg archiveSha "${archive_sha}" '
+              .schemaVersion == "archon.datahub-companion-image-provenance/v1" and
+              .sourceSha == $sourceSha and
+              .archiveSha256 == $archiveSha and
+              .sourceBuilds == "deny" and
+              (.imageId | test("^sha256:[0-9a-f]{64}$"))
+            ' evidence/provenance.json >/dev/null
+          jq --exit-status '.bomFormat == "CycloneDX"' evidence/companion.cdx.json >/dev/null
+          jq --exit-status '.spdxVersion | startswith("SPDX-")' evidence/companion.spdx.json >/dev/null
+      - name: Resolve once, scan sequentially, and seal all Core images
+        id: core_images
+        env:
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/core-supply-chain"
+          reports="${evidence}/images"
+          mkdir -p "${reports}"
+          upstream="${evidence}/upstream-compose.yml"
+          curl --fail --silent --show-error --location \
+            --output "${upstream}" \
+            "https://raw.githubusercontent.com/datahub-project/datahub/059a36c0b035a6057de00114ccac0ea9003d6bc2/docker/quickstart/docker-compose.quickstart.yml"
+          echo "e74f42d5382e2a3cf98620322f8e20f1cbd7fb356af078a233001085b734108a  ${upstream}" |
+            sha256sum --check --strict
+          cat >"${RUNNER_TEMP}/core-compose.env" <<'ENV'
+          HOME=/tmp/archon-core-build
+          DATAHUB_VERSION=v1.6.0
+          DATAHUB_CONFLUENT_VERSION=7.9.2
+          DATAHUB_SEARCH_TAG=7.16.1
+          DATAHUB_MYSQL_VERSION=8.2
+          ENV
+          docker compose --env-file "${RUNNER_TEMP}/core-compose.env" \
+            -f "${upstream}" config --format json >"${RUNNER_TEMP}/compose.json"
+          jq --exit-status '.services | type == "object" and length >= 8' \
+            "${RUNNER_TEMP}/compose.json" >/dev/null
+          jq -cS '
+            [.services | to_entries[] |
+              {service:.key,declaredReference:.value.image}] |
+            sort_by(.service)
+          ' "${RUNNER_TEMP}/compose.json" >"${RUNNER_TEMP}/services-source.json"
+          mapfile -t references < <(
+            jq -r '.[].declaredReference' "${RUNNER_TEMP}/services-source.json" |
+              LC_ALL=C sort -u
+          )
+          ((${#references[@]} >= 8 && ${#references[@]} <= 32))
+
+          trivy image --download-db-only
+          trivy --version >"${evidence}/trivy-version.txt"
+          test "$(awk 'NR == 1 {print $2}' "${evidence}/trivy-version.txt")" = "0.70.0"
+          test -f "${TRIVY_CACHE_DIR}/db/metadata.json"
+          cp "${TRIVY_CACHE_DIR}/db/metadata.json" "${evidence}/trivy-db-metadata.json"
+          jq --exit-status 'type == "object"' "${evidence}/trivy-db-metadata.json" >/dev/null
+
+          : >"${RUNNER_TEMP}/images.ndjson"
+          index=0
+          for reference in "${references[@]}"; do
+            index=$((index + 1))
+            slug="$(printf '%02d' "${index}")"
+            docker pull --quiet "${reference}" >/dev/null
+            repository="${reference%:*}"
+            mapfile -t matching_digests < <(
+              docker image inspect --format '{{json .RepoDigests}}' "${reference}" |
+                jq -r --arg prefix "${repository}@sha256:" \
+                  '.[] | select(startswith($prefix))' | LC_ALL=C sort -u
+            )
+            test "${#matching_digests[@]}" = "1"
+            resolved="${matching_digests[0]}"
+            image_id="$(docker image inspect --format '{{.Id}}' "${reference}")"
+            [[ "${resolved}" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+            [[ "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+            json_report="${reports}/${slug}.trivy.json"
+            sarif_report="${reports}/${slug}.trivy.sarif"
+            cdx_report="${reports}/${slug}.cdx.json"
+            spdx_report="${reports}/${slug}.spdx.json"
+            trivy image --scanners vuln --format json \
+              --output "${json_report}" "${resolved}"
+            trivy image --scanners vuln --format sarif \
+              --output "${sarif_report}" "${resolved}"
+            trivy image --scanners vuln --format cyclonedx \
+              --output "${cdx_report}" "${resolved}"
+            trivy image --scanners vuln --format spdx-json \
+              --output "${spdx_report}" "${resolved}"
+            jq --exit-status '.Results | type == "array"' "${json_report}" >/dev/null
+            jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
+              "${sarif_report}" >/dev/null
+            jq --exit-status '.bomFormat == "CycloneDX" and (.components | type == "array")' \
+              "${cdx_report}" >/dev/null
+            jq --exit-status '.spdxVersion | startswith("SPDX-")' \
+              "${spdx_report}" >/dev/null
+            actionable="$(
+              jq '[.Results[]?.Vulnerabilities[]? |
+                select(.Severity == "HIGH" or .Severity == "CRITICAL") |
+                select(.FixedVersion != null and .FixedVersion != "")] | length' \
+                "${json_report}"
+            )"
+            jq -cnS \
+              --arg declaredReference "${reference}" \
+              --arg resolvedReference "${resolved}" \
+              --arg imageId "${image_id}" \
+              --arg scanJson "images/${slug}.trivy.json" \
+              --arg scanSarif "images/${slug}.trivy.sarif" \
+              --arg cycloneDx "images/${slug}.cdx.json" \
+              --arg spdx "images/${slug}.spdx.json" \
+              --argjson actionableFixedHighCritical "${actionable}" '
+                {
+                  declaredReference:$declaredReference,
+                  resolvedReference:$resolvedReference,
+                  imageId:$imageId,
+                  evidence:{
+                    scanJson:$scanJson,
+                    scanSarif:$scanSarif,
+                    cycloneDx:$cycloneDx,
+                    spdx:$spdx
+                  },
+                  actionableFixedHighCritical:$actionableFixedHighCritical
+                }
+              ' >>"${RUNNER_TEMP}/images.ndjson"
+            docker image rm --force "${reference}" "${resolved}" >/dev/null 2>&1 || true
+            docker system prune --all --force --volumes >/dev/null
+          done
+          jq -sS 'sort_by(.declaredReference)' "${RUNNER_TEMP}/images.ndjson" \
+            >"${RUNNER_TEMP}/images.json"
+          jq --slurpfile images "${RUNNER_TEMP}/images.json" '
+            map(
+              . as $service |
+              ($images[0][] | select(.declaredReference == $service.declaredReference)) as $image |
+              $service + {resolvedReference:$image.resolvedReference}
+            )
+          ' "${RUNNER_TEMP}/services-source.json" >"${RUNNER_TEMP}/services.json"
+          test "$(jq 'length' "${RUNNER_TEMP}/services.json")" = \
+            "$(jq 'length' "${RUNNER_TEMP}/services-source.json")"
+
+          jq -sS \
+            --arg timestamp "$(date --utc +'%Y-%m-%dT%H:%M:%SZ')" '
+              {
+                bomFormat:"CycloneDX",
+                specVersion:"1.6",
+                version:1,
+                metadata:{
+                  timestamp:$timestamp,
+                  component:{type:"application",name:"archon-datahub-core-images"}
+                },
+                components:([.[].components[]?] | unique_by([.type,.name,.version,.purl]))
+              }
+            ' "${reports}"/*.cdx.json >"${evidence}/aggregate.cdx.json"
+          : >"${RUNNER_TEMP}/spdx-refs.ndjson"
+          for document in "${reports}"/*.spdx.json; do
+            namespace="$(jq -er '.documentNamespace' "${document}")"
+            checksum="$(sha256sum "${document}" | awk '{print $1}')"
+            identifier="DocumentRef-$(basename "${document}" .spdx.json)"
+            jq -cnS \
+              --arg externalDocumentId "${identifier}" \
+              --arg spdxDocument "${namespace}" \
+              --arg checksumValue "${checksum}" '
+                {
+                  externalDocumentId:$externalDocumentId,
+                  spdxDocument:$spdxDocument,
+                  checksum:{algorithm:"SHA256",checksumValue:$checksumValue}
+                }
+              ' >>"${RUNNER_TEMP}/spdx-refs.ndjson"
+          done
+          jq -sS \
+            --arg namespace "https://archon.invalid/spdx/datahub-core/${GITHUB_SHA}/${GITHUB_RUN_ID}" \
+            --arg created "$(date --utc +'%Y-%m-%dT%H:%M:%SZ')" '
+              {
+                spdxVersion:"SPDX-2.3",
+                dataLicense:"CC0-1.0",
+                SPDXID:"SPDXRef-DOCUMENT",
+                name:"archon-datahub-core-images",
+                documentNamespace:$namespace,
+                creationInfo:{created:$created,creators:["Tool: Trivy-0.70.0"]},
+                externalDocumentRefs:.
+              }
+            ' "${RUNNER_TEMP}/spdx-refs.ndjson" >"${evidence}/aggregate.spdx.json"
+          jq --exit-status '.bomFormat == "CycloneDX"' "${evidence}/aggregate.cdx.json" >/dev/null
+          jq --exit-status '.spdxVersion == "SPDX-2.3"' "${evidence}/aggregate.spdx.json" >/dev/null
+
+          db_sha="$(sha256sum "${evidence}/trivy-db-metadata.json" | awk '{print $1}')"
+          cdx_sha="$(sha256sum "${evidence}/aggregate.cdx.json" | awk '{print $1}')"
+          spdx_sha="$(sha256sum "${evidence}/aggregate.spdx.json" | awk '{print $1}')"
+          actionable_total="$(jq '[.[].actionableFixedHighCritical] | add // 0' \
+            "${RUNNER_TEMP}/images.json")"
+          jq -cnS \
+            --arg commit "059a36c0b035a6057de00114ccac0ea9003d6bc2" \
+            --arg tree "7b444fc729abbd5c831862b3821c06ee323aeb9d" \
+            --arg composeSha256 "e74f42d5382e2a3cf98620322f8e20f1cbd7fb356af078a233001085b734108a" \
+            --arg trivyVersion "0.70.0" \
+            --arg trivyDbMetadataSha256 "${db_sha}" \
+            --arg aggregateCycloneDxSha256 "${cdx_sha}" \
+            --arg aggregateSpdxSha256 "${spdx_sha}" \
+            --argjson images "$(cat "${RUNNER_TEMP}/images.json")" \
+            --argjson services "$(cat "${RUNNER_TEMP}/services.json")" \
+            --argjson actionableFixedHighCritical "${actionable_total}" '
+              {
+                schemaVersion:"archon.datahub-core-resolved-images/v1",
+                source:{commit:$commit,tree:$tree,composeSha256:$composeSha256},
+                scanner:{name:"Trivy",version:$trivyVersion,dbMetadataSha256:$trivyDbMetadataSha256},
+                security:{
+                  rawFindingsRetained:true,
+                  unfixedFindingsRetained:true,
+                  actionableGate:"fixed HIGH,CRITICAL",
+                  actionableFixedHighCritical:$actionableFixedHighCritical,
+                  vexGenerated:false
+                },
+                sbom:{
+                  perImageCycloneDx:true,
+                  perImageSpdx:true,
+                  aggregateCycloneDxSha256:$aggregateCycloneDxSha256,
+                  aggregateSpdxSha256:$aggregateSpdxSha256
+                },
+                images:$images,
+                services:$services,
+                resolutionCount:1,
+                scanOrder:"sequential",
+                runtimePullsAllowed:false
+              }
+            ' >"${evidence}/resolved-images.json"
+          checksums="${RUNNER_TEMP}/core-supply-chain-SHA256SUMS"
+          (
+            cd "${evidence}"
+            find . -type f ! -name SHA256SUMS -print0 |
+              LC_ALL=C sort -z | xargs -0 sha256sum >"${checksums}"
+            mv "${checksums}" SHA256SUMS
+          )
+          manifest_sha="$(sha256sum "${evidence}/resolved-images.json" | awk '{print $1}')"
+          {
+            echo "directory=${evidence}"
+            echo "manifest_sha256=${manifest_sha}"
+            echo "actionable_total=${actionable_total}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Upload Core image SARIF
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ runner.temp }}/core-supply-chain/images
+          category: datahub-core-images
+      - name: Retain raw scans and SBOMs before the billable build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-core-supply-chain-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.core_images.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+      - name: Enforce actionable Core image vulnerability gate
+        env:
+          ACTIONABLE_TOTAL: ${{ steps.core_images.outputs.actionable_total }}
+        run: |
+          set -euo pipefail
+          [[ "${ACTIONABLE_TOTAL}" =~ ^[0-9]+$ ]]
+          test "${ACTIONABLE_TOTAL}" = "0"
+      - name: Configure staging AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_CORE_AMI_BUILD_ROLE_ARN }}
+          role-session-name: archon-core-ami-${{ github.run_id }}
+          role-duration-seconds: 7200
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+      - name: Preflight exact AWS identity, region, and stable builder profile
+        env:
+          EXPECTED_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          DEPLOY_REGION: ${{ vars.AWS_REGION }}
+          BUILD_ROLE_ARN: ${{ vars.AWS_CORE_AMI_BUILD_ROLE_ARN }}
+          BUILDER_INSTANCE_PROFILE: ${{ vars.AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]
+          test "${DEPLOY_REGION}" = "eu-west-1"
+          test "${BUILD_ROLE_ARN}" = \
+            "arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/archon-datahub-core-ami-build-staging"
+          test "${BUILDER_INSTANCE_PROFILE}" = \
+            "archon-datahub-core-ami-builder-staging"
+          test "$(aws sts get-caller-identity --query Account --output text)" = \
+            "${EXPECTED_ACCOUNT_ID}"
+          profile="$(aws iam get-instance-profile \
+            --instance-profile-name "${BUILDER_INSTANCE_PROFILE}")"
+          jq --exit-status \
+            --arg account "${EXPECTED_ACCOUNT_ID}" \
+            --arg name "${BUILDER_INSTANCE_PROFILE}" '
+              .InstanceProfile.InstanceProfileName == $name and
+              .InstanceProfile.Arn ==
+                ("arn:aws:iam::" + $account + ":instance-profile/" + $name) and
+              (.InstanceProfile.Roles | length == 1) and
+              .InstanceProfile.Roles[0].RoleName == $name and
+              .InstanceProfile.Roles[0].Arn ==
+                ("arn:aws:iam::" + $account + ":role/" + $name)
+            ' <<<"${profile}" >/dev/null
+          profile_tags="$(aws iam list-instance-profile-tags \
+            --instance-profile-name "${BUILDER_INSTANCE_PROFILE}")"
+          role_tags="$(aws iam list-role-tags \
+            --role-name "${BUILDER_INSTANCE_PROFILE}")"
+          for document in "${profile_tags}" "${role_tags}"; do
+            jq --exit-status '
+              (.Tags | map({key:.Key,value:.Value}) | from_entries) as $tags |
+              $tags.Application == "archon-datahub" and
+              $tags.ManagedBy == "aws-foundation" and
+              $tags.Environment == "staging" and
+              $tags["archon:Purpose"] == "datahub-core-ami-builder"
+            ' <<<"${document}" >/dev/null
+          done
+      - name: Install exact Session Manager plugin
+        run: |
+          set -euo pipefail
+          package="${RUNNER_TEMP}/session-manager-plugin.deb"
+          curl --fail --silent --show-error --location \
+            --output "${package}" \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/${SESSION_MANAGER_PLUGIN_VERSION}/ubuntu_64bit/session-manager-plugin.deb"
+          echo "${SESSION_MANAGER_PLUGIN_SHA256}  ${package}" |
+            sha256sum --check --strict
+          sudo dpkg --install "${package}"
+          test "$(session-manager-plugin --version)" = "${SESSION_MANAGER_PLUGIN_VERSION}"
+      - name: Assemble deterministic source bundle in runner temp
+        id: bundle
+        env:
+          COMPANION_RUN_ID: ${{ inputs.companion_run_id }}
+          COMPANION_SOURCE_SHA: ${{ inputs.companion_source_sha }}
+          CORE_SUPPLY_CHAIN: ${{ steps.core_images.outputs.directory }}
+          RESOLVED_MANIFEST_SHA256: ${{ steps.core_images.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          staging="${RUNNER_TEMP}/core-source"
+          bundle="${RUNNER_TEMP}/archon-datahub-core-source.tar.gz"
+          mkdir -p \
+            "${staging}/repo" "${staging}/companion" \
+            "${staging}/tools" "${staging}/supply-chain"
+          git archive --format=tar "${GITHUB_SHA}" |
+            tar --extract --file - --directory "${staging}/repo"
+          cp -a "${RUNNER_TEMP}/companion/." "${staging}/companion/"
+          cp -a "${CORE_SUPPLY_CHAIN}/." "${staging}/supply-chain/"
+          test "$(sha256sum "${staging}/supply-chain/resolved-images.json" | awk '{print $1}')" = \
+            "${RESOLVED_MANIFEST_SHA256}"
+          (
+            cd "${staging}/supply-chain"
+            sha256sum --check --strict SHA256SUMS
+          )
+          uv_binary="$(command -v uv)"
+          trivy_binary="$(command -v trivy)"
+          cp "${uv_binary}" "${staging}/tools/uv"
+          cp "${trivy_binary}" "${staging}/tools/trivy"
+          chmod 0755 "${staging}/tools/uv" "${staging}/tools/trivy"
+          (
+            cd "${staging}/tools"
+            sha256sum uv >uv.sha256
+            sha256sum trivy >trivy.sha256
+          )
+          test "$("${staging}/tools/trivy" --version | awk 'NR == 1 {print $2}')" = "0.70.0"
+          image_lock_sha="$(
+            sha256sum infra/aws/image/datahub-core-image.lock.json | awk '{print $1}'
+          )"
+          companion_provenance_sha="$(
+            sha256sum "${RUNNER_TEMP}/companion/evidence/provenance.json" | awk '{print $1}'
+          )"
+          jq -cnS \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg companionSourceSha "${COMPANION_SOURCE_SHA}" \
+            --arg companionRunId "${COMPANION_RUN_ID}" \
+            --arg resolvedImagesManifestSha256 "${RESOLVED_MANIFEST_SHA256}" \
+            --arg imageLockSha256 "${image_lock_sha}" \
+            --arg companionProvenanceSha256 "${companion_provenance_sha}" '
+              {
+                schemaVersion:"archon.datahub-core-source-bundle/v2",
+                releaseSha:$releaseSha,
+                companionSourceSha:$companionSourceSha,
+                companionRunId:$companionRunId,
+                companionArtifactVerified:true,
+                resolvedImagesManifestSha256:$resolvedImagesManifestSha256,
+                imageLockSha256:$imageLockSha256,
+                companionProvenanceSha256:$companionProvenanceSha256
+              }
+            ' >"${staging}/bundle-manifest.json"
+          tar --create --gzip --file "${bundle}" \
+            --directory "${staging}" --sort=name --mtime='@0' \
+            --owner=0 --group=0 --numeric-owner .
+          bundle_sha="$(sha256sum "${bundle}" | awk '{print $1}')"
+          capability_digest="$(
+            jq -cnS '{mcpRead:true,mcpGovernedWrite:true,agentContextKit:true,dataHubSkills:true,analyticsAgent:true}' |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          image_manifest_digest="sha256:${RESOLVED_MANIFEST_SHA256}"
+          {
+            echo "path=${bundle}"
+            echo "sha256=${bundle_sha}"
+            echo "capability_digest=${capability_digest}"
+            echo "image_manifest_digest=${image_manifest_digest}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Create exact no-ingress builder boundary
+        id: boundary
+        run: |
+          set -euo pipefail
+          started_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          vpc_id=""
+          subnet_id=""
+          internet_gateway_id=""
+          route_table_id=""
+          route_association_id=""
+          security_group_id=""
+          key_pair_name="archon-datahub-core-ami-${GITHUB_RUN_ID}"
+          key_pair_id=""
+          private_key_path="${RUNNER_TEMP}/datahub-core-builder-${GITHUB_RUN_ID}.pem"
+          cleanup_partial() {
+            set +e
+            [[ -z "${route_association_id}" ]] || aws ec2 disassociate-route-table \
+              --association-id "${route_association_id}" >/dev/null 2>&1
+            [[ -z "${route_table_id}" ]] || aws ec2 delete-route-table \
+              --route-table-id "${route_table_id}" >/dev/null 2>&1
+            [[ -z "${key_pair_id}" ]] || aws ec2 delete-key-pair \
+              --key-name "${key_pair_name}" >/dev/null 2>&1
+            rm -f -- "${private_key_path}"
+            [[ -z "${security_group_id}" ]] || aws ec2 delete-security-group \
+              --group-id "${security_group_id}" >/dev/null 2>&1
+            [[ -z "${subnet_id}" ]] || aws ec2 delete-subnet \
+              --subnet-id "${subnet_id}" >/dev/null 2>&1
+            if [[ -n "${internet_gateway_id}" && -n "${vpc_id}" ]]; then
+              aws ec2 detach-internet-gateway --internet-gateway-id "${internet_gateway_id}" \
+                --vpc-id "${vpc_id}" >/dev/null 2>&1
+              aws ec2 delete-internet-gateway --internet-gateway-id "${internet_gateway_id}" >/dev/null 2>&1
+            fi
+            [[ -z "${vpc_id}" ]] || aws ec2 delete-vpc --vpc-id "${vpc_id}" >/dev/null 2>&1
+          }
+          trap cleanup_partial ERR
+          vpc_id="$(aws ec2 create-vpc --cidr-block 10.88.0.0/24 \
+            --tag-specifications "ResourceType=vpc,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]" \
+            --query Vpc.VpcId --output text)"
+          aws ec2 modify-vpc-attribute --vpc-id "${vpc_id}" --enable-dns-support Value=true
+          aws ec2 modify-vpc-attribute --vpc-id "${vpc_id}" --enable-dns-hostnames Value=true
+          availability_zone="$(aws ec2 describe-availability-zones \
+            --filters Name=state,Values=available --query 'AvailabilityZones[0].ZoneName' --output text)"
+          subnet_id="$(aws ec2 create-subnet --vpc-id "${vpc_id}" \
+            --cidr-block 10.88.0.0/28 --availability-zone "${availability_zone}" \
+            --tag-specifications "ResourceType=subnet,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]" \
+            --query Subnet.SubnetId --output text)"
+          internet_gateway_id="$(aws ec2 create-internet-gateway \
+            --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]" \
+            --query InternetGateway.InternetGatewayId --output text)"
+          aws ec2 attach-internet-gateway --internet-gateway-id "${internet_gateway_id}" --vpc-id "${vpc_id}"
+          route_table_id="$(aws ec2 create-route-table --vpc-id "${vpc_id}" \
+            --tag-specifications "ResourceType=route-table,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]" \
+            --query RouteTable.RouteTableId --output text)"
+          aws ec2 create-route --route-table-id "${route_table_id}" \
+            --destination-cidr-block 0.0.0.0/0 --gateway-id "${internet_gateway_id}" >/dev/null
+          route_association_id="$(aws ec2 associate-route-table --route-table-id "${route_table_id}" \
+            --subnet-id "${subnet_id}" --query AssociationId --output text)"
+          security_group_id="$(aws ec2 create-security-group --group-name "archon-datahub-core-ami-${GITHUB_RUN_ID}" \
+            --description 'No ingress; bounded AMI builder egress' --vpc-id "${vpc_id}" \
+            --tag-specifications "ResourceType=security-group,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]" \
+            --query GroupId --output text)"
+          aws ec2 revoke-security-group-egress --group-id "${security_group_id}" \
+            --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]'
+          aws ec2 authorize-security-group-egress --group-id "${security_group_id}" \
+            --ip-permissions '[{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0","Description":"Pinned HTTPS build inputs and SSM"}]},{"IpProtocol":"udp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"10.88.0.2/32","Description":"VPC DNS"}]},{"IpProtocol":"tcp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"10.88.0.2/32","Description":"VPC DNS fallback"}]}]'
+          ingress_count="$(aws ec2 describe-security-groups --group-ids "${security_group_id}" \
+            --query 'length(SecurityGroups[0].IpPermissions)' --output text)"
+          test "${ingress_count}" = "0"
+          key_pair_response="$(aws ec2 create-key-pair \
+            --key-name "${key_pair_name}" --key-type ed25519 \
+            --tag-specifications "ResourceType=key-pair,Tags=[{Key=Application,Value=archon-datahub},{Key=Environment,Value=staging},{Key=ManagedBy,Value=github-actions},{Key=archon:Purpose,Value=datahub-core-ami},{Key=archon:BuildRun,Value=${GITHUB_RUN_ID}}]")"
+          key_pair_id="$(jq -er '.KeyPairId' <<<"${key_pair_response}")"
+          jq -er '.KeyMaterial' <<<"${key_pair_response}" >"${private_key_path}"
+          unset key_pair_response
+          [[ "${key_pair_id}" =~ ^key-[0-9a-f]{8,17}$ ]]
+          chmod 0600 "${private_key_path}"
+          test -s "${private_key_path}"
+          base_ami_id="$(aws ssm get-parameter \
+            --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+            --query Parameter.Value --output text)"
+          [[ "${base_ami_id}" =~ ^ami-[0-9a-f]{8,17}$ ]]
+          aws ec2 describe-images --image-ids "${base_ami_id}" --owners amazon \
+            --query 'Images[0].[State,Architecture,RootDeviceType,VirtualizationType]' \
+            --output text | grep -Fx $'available\tx86_64\tebs\thvm'
+          {
+            echo "vpc_id=${vpc_id}"
+            echo "subnet_id=${subnet_id}"
+            echo "internet_gateway_id=${internet_gateway_id}"
+            echo "route_table_id=${route_table_id}"
+            echo "route_association_id=${route_association_id}"
+            echo "security_group_id=${security_group_id}"
+            echo "key_pair_name=${key_pair_name}"
+            echo "key_pair_id=${key_pair_id}"
+            echo "private_key_path=${private_key_path}"
+            echo "started_at=${started_at}"
+            echo "base_ami_id=${base_ami_id}"
+          } >>"${GITHUB_OUTPUT}"
+          trap - ERR
+      - name: Build and verify AMI
+        id: packer
+        env:
+          SOURCE_BUNDLE: ${{ steps.bundle.outputs.path }}
+          CAPABILITY_DIGEST: ${{ steps.bundle.outputs.capability_digest }}
+          IMAGE_MANIFEST_DIGEST: ${{ steps.bundle.outputs.image_manifest_digest }}
+          BASE_AMI_ID: ${{ steps.boundary.outputs.base_ami_id }}
+          SUBNET_ID: ${{ steps.boundary.outputs.subnet_id }}
+          SECURITY_GROUP_ID: ${{ steps.boundary.outputs.security_group_id }}
+          INSTANCE_PROFILE: ${{ vars.AWS_CORE_AMI_BUILDER_INSTANCE_PROFILE }}
+          KEY_PAIR_NAME: ${{ steps.boundary.outputs.key_pair_name }}
+          PRIVATE_KEY_FILE: ${{ steps.boundary.outputs.private_key_path }}
+          GENERATION: ${{ inputs.generation }}
+          COMPANION_SOURCE_SHA: ${{ inputs.companion_source_sha }}
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/datahub-core-packer-manifest.json"
+          bake_evidence="${RUNNER_TEMP}/datahub-core-bake-evidence.tar.gz"
+          packer init infra/aws/packer/datahub-core.pkr.hcl
+          packer build -color=false -on-error=cleanup \
+            -var region=eu-west-1 \
+            -var "base_ami_id=${BASE_AMI_ID}" \
+            -var "builder_subnet_id=${SUBNET_ID}" \
+            -var "builder_security_group_id=${SECURITY_GROUP_ID}" \
+            -var "builder_instance_profile=${INSTANCE_PROFILE}" \
+            -var "builder_key_pair_name=${KEY_PAIR_NAME}" \
+            -var "builder_private_key_file=${PRIVATE_KEY_FILE}" \
+            -var "source_bundle=${SOURCE_BUNDLE}" \
+            -var "release_sha=${GITHUB_SHA}" \
+            -var "companion_source_sha=${COMPANION_SOURCE_SHA}" \
+            -var "generation=${GENERATION}" \
+            -var "capability_digest=${CAPABILITY_DIGEST}" \
+            -var "image_manifest_digest=${IMAGE_MANIFEST_DIGEST}" \
+            -var "workflow_run_id=${GITHUB_RUN_ID}" \
+            -var "packer_manifest_output=${manifest}" \
+            -var "bake_evidence_output=${bake_evidence}" \
+            infra/aws/packer/datahub-core.pkr.hcl
+          ami_id="$(jq -er '.builds | select(length == 1) | .[0].artifact_id | split(":") | .[1]' "${manifest}")"
+          [[ "${ami_id}" =~ ^ami-[0-9a-f]{8,17}$ ]]
+          aws ec2 wait image-available --image-ids "${ami_id}"
+          image="$(aws ec2 describe-images --owners self --image-ids "${ami_id}")"
+          jq --exit-status \
+            --arg generation "${GENERATION}" \
+            --arg capabilityDigest "${CAPABILITY_DIGEST}" \
+            --arg manifestDigest "${IMAGE_MANIFEST_DIGEST}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg companionSourceSha "${COMPANION_SOURCE_SHA}" \
+            --arg buildRun "${GITHUB_RUN_ID}" '
+              .Images | length == 1 and
+              .[0].State == "available" and
+              .[0].Architecture == "x86_64" and
+              .[0].RootDeviceType == "ebs" and
+              .[0].EnaSupport == true and
+              .[0].ImdsSupport == "v2.0" and
+              (.[0].Tags | from_entries) as $tags |
+              $tags.Application == "archon-datahub" and
+              $tags.Environment == "staging" and
+              $tags.ArchonDataHubCore == "verified" and
+              $tags.ArchonFourComponents == "mcp,ack,skills,analytics" and
+              $tags.ArchonGeneration == $generation and
+              $tags.ArchonCapabilityDigest == $capabilityDigest and
+              $tags.ArchonImageManifestDigest == $manifestDigest and
+              $tags.ArchonReleaseSha == $releaseSha and
+              $tags.ArchonCompanionSourceSha == $companionSourceSha and
+              $tags.ManagedBy == "github-actions" and
+              $tags["archon:Purpose"] == "datahub-core-ami" and
+              $tags["archon:BuildRun"] == $buildRun
+            ' <<<"${image}" >/dev/null
+          test -s "${bake_evidence}"
+          {
+            echo "ami_id=${ami_id}"
+            echo "manifest=${manifest}"
+            echo "bake_evidence=${bake_evidence}"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Validate downloaded AMI bake evidence
+        id: bake
+        env:
+          ARCHIVE: ${{ steps.packer.outputs.bake_evidence }}
+          IMAGE_MANIFEST_DIGEST: ${{ steps.bundle.outputs.image_manifest_digest }}
+          BASE_AMI_ID: ${{ steps.boundary.outputs.base_ami_id }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/verified-bake-evidence"
+          mkdir -p "${output}"
+          python3 - "${ARCHIVE}" <<'PY'
+          import pathlib, sys, tarfile
+          archive = pathlib.Path(sys.argv[1])
+          with tarfile.open(archive, "r:gz") as value:
+              members = value.getmembers()
+              if not members or len(members) > 10_000:
+                  raise SystemExit("bake evidence member count is invalid")
+              total = 0
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit("bake evidence contains an unsafe path")
+                  if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                      raise SystemExit("bake evidence contains an unsafe member")
+                  total += max(0, member.size)
+              if total > 1_000_000_000:
+                  raise SystemExit("bake evidence exceeds its size bound")
+          PY
+          tar --extract --gzip --file "${ARCHIVE}" --directory "${output}" \
+            --no-same-owner --no-same-permissions
+          test "$(sha256sum "${output}/supply-chain/resolved-images.json" | awk '{print "sha256:" $1}')" = \
+            "${IMAGE_MANIFEST_DIGEST}"
+          (
+            cd "${output}/supply-chain"
+            sha256sum --check --strict SHA256SUMS
+          )
+          jq --exit-status \
+            --arg digest "${IMAGE_MANIFEST_DIGEST}" \
+            --arg baseAmiId "${BASE_AMI_ID}" '
+              .schemaVersion == "archon.datahub-core-ami-manifest/v2" and
+              .resolvedImagesDigest == $digest and
+              .baseAmiId == $baseAmiId and
+              .runtimePullsAllowed == false and
+              .composePullPolicy == "never" and
+              .allCoreImagesDigestPinned == true and
+              .rawTrivyFindingsRetained == true and
+              .unfixedFindingsRetained == true and
+              .vexGenerated == false and
+              .al2023Patched == true and
+              .applicableSecurityUpdates == 0 and
+              .scannerBinaryPresent == false and
+              .scannerDatabasePresent == false and
+              .osScanner.name == "Trivy" and
+              .osScanner.version == "0.70.0" and
+              (.osScanner.databaseMetadataSha256 | test("^[0-9a-f]{64}$")) and
+              .analyticsOauthMasterKeyRequired == true and
+              .plaintextAnalyticsTokenAtRestAllowed == false and
+              .mutationAuthorization == "KMS_ECDSA_SHA_256"
+            ' "${output}/image-manifest.json" >/dev/null
+          os_trivy_db_sha="$(sha256sum "${output}/supply-chain/os/trivy-db-metadata.json" | awk '{print $1}')"
+          test "${os_trivy_db_sha}" = "$(jq -er '.osScanner.databaseMetadataSha256' "${output}/image-manifest.json")"
+          jq --exit-status \
+            '.schemaVersion == "archon.al2023-security-update-proof/v1" and
+             .exitCode == 0 and .applicableSecurityUpdates == []' \
+            "${output}/supply-chain/os/security-update-proof.json" >/dev/null
+          jq --exit-status \
+            '.schemaVersion == "archon.ami-scanner-removal-proof/v1" and
+             .trivyBinaryPresent == false and .trivyDatabasePresent == false' \
+            "${output}/supply-chain/os/scanner-removal-proof.json" >/dev/null
+          test -z "$(find "${output}" -type f \( -name '*.openvex.json' -o -name '*.vex.json' \) -print -quit)"
+          archive_sha="$(sha256sum "${ARCHIVE}" | awk '{print $1}')"
+          echo "directory=${output}" >>"${GITHUB_OUTPUT}"
+          echo "archive_sha256=${archive_sha}" >>"${GITHUB_OUTPUT}"
+      - name: Clean exact ephemeral builder resources
+        if: always() && steps.boundary.outcome == 'success'
+        env:
+          BUILD_OUTCOME: ${{ steps.packer.outcome }}
+          VPC_ID: ${{ steps.boundary.outputs.vpc_id }}
+          SUBNET_ID: ${{ steps.boundary.outputs.subnet_id }}
+          INTERNET_GATEWAY_ID: ${{ steps.boundary.outputs.internet_gateway_id }}
+          ROUTE_TABLE_ID: ${{ steps.boundary.outputs.route_table_id }}
+          ROUTE_ASSOCIATION_ID: ${{ steps.boundary.outputs.route_association_id }}
+          SECURITY_GROUP_ID: ${{ steps.boundary.outputs.security_group_id }}
+          KEY_PAIR_NAME: ${{ steps.boundary.outputs.key_pair_name }}
+          KEY_PAIR_ID: ${{ steps.boundary.outputs.key_pair_id }}
+          PRIVATE_KEY_FILE: ${{ steps.boundary.outputs.private_key_path }}
+        run: |
+          set -euo pipefail
+          retry_aws() {
+            for _ in 1 2 3 4 5 6; do
+              if "$@"; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          require_ec2_tags() {
+            local resource_id="$1"
+            aws ec2 describe-tags \
+              --filters "Name=resource-id,Values=${resource_id}" --output json |
+              jq --exit-status --arg run "${GITHUB_RUN_ID}" '
+                (.Tags | map({key:.Key,value:.Value}) | from_entries) as $tags |
+                $tags["archon:Purpose"] == "datahub-core-ami" and
+                $tags["archon:BuildRun"] == $run
+              ' >/dev/null
+          }
+          [[ "${VPC_ID}" =~ ^vpc-[0-9a-f]{8,17}$ ]]
+          [[ "${SUBNET_ID}" =~ ^subnet-[0-9a-f]{8,17}$ ]]
+          [[ "${INTERNET_GATEWAY_ID}" =~ ^igw-[0-9a-f]{8,17}$ ]]
+          [[ "${ROUTE_TABLE_ID}" =~ ^rtb-[0-9a-f]{8,17}$ ]]
+          [[ "${ROUTE_ASSOCIATION_ID}" =~ ^rtbassoc-[0-9a-f]{8,17}$ ]]
+          [[ "${SECURITY_GROUP_ID}" =~ ^sg-[0-9a-f]{8,17}$ ]]
+          [[ "${KEY_PAIR_NAME}" =~ ^archon-datahub-core-ami-[1-9][0-9]{0,19}$ ]]
+          [[ "${KEY_PAIR_ID}" =~ ^key-[0-9a-f]{8,17}$ ]]
+          test "${PRIVATE_KEY_FILE}" = \
+            "${RUNNER_TEMP}/datahub-core-builder-${GITHUB_RUN_ID}.pem"
+          for resource_id in \
+            "${VPC_ID}" "${SUBNET_ID}" "${INTERNET_GATEWAY_ID}" \
+            "${ROUTE_TABLE_ID}" "${SECURITY_GROUP_ID}" "${KEY_PAIR_ID}"; do
+            require_ec2_tags "${resource_id}"
+          done
+          mapfile -t instances < <(aws ec2 describe-instances \
+            --filters "Name=tag:archon:BuildRun,Values=${GITHUB_RUN_ID}" "Name=tag:archon:Purpose,Values=datahub-core-ami" \
+              Name=instance-state-name,Values=pending,running,stopping,stopped \
+            --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sed '/^$/d')
+          if ((${#instances[@]})); then
+            aws ec2 terminate-instances --instance-ids "${instances[@]}" >/dev/null
+            aws ec2 wait instance-terminated --instance-ids "${instances[@]}"
+          fi
+          retry_aws aws ec2 delete-key-pair --key-name "${KEY_PAIR_NAME}"
+          rm -f -- "${PRIVATE_KEY_FILE}"
+          test ! -e "${PRIVATE_KEY_FILE}"
+          if [[ "${BUILD_OUTCOME}" != "success" ]]; then
+            mapfile -t failed_amis < <(aws ec2 describe-images --owners self \
+              --filters "Name=tag:archon:BuildRun,Values=${GITHUB_RUN_ID}" "Name=tag:archon:Purpose,Values=datahub-core-ami" \
+              --query 'Images[].ImageId' --output text | tr '\t' '\n' | sed '/^$/d')
+            for ami in "${failed_amis[@]}"; do
+              mapfile -t snapshots < <(aws ec2 describe-images --owners self --image-ids "${ami}" \
+                --query 'Images[].BlockDeviceMappings[].Ebs.SnapshotId' --output text | tr '\t' '\n' | sed '/^$/d')
+              aws ec2 deregister-image --image-id "${ami}"
+              for snapshot in "${snapshots[@]}"; do
+                if [[ -n "${snapshot}" ]]; then
+                  require_ec2_tags "${snapshot}"
+                  retry_aws aws ec2 delete-snapshot --snapshot-id "${snapshot}"
+                fi
+              done
+            done
+          fi
+          retry_aws aws ec2 disassociate-route-table --association-id "${ROUTE_ASSOCIATION_ID}"
+          retry_aws aws ec2 delete-route-table --route-table-id "${ROUTE_TABLE_ID}"
+          retry_aws aws ec2 delete-security-group --group-id "${SECURITY_GROUP_ID}"
+          retry_aws aws ec2 delete-subnet --subnet-id "${SUBNET_ID}"
+          retry_aws aws ec2 detach-internet-gateway --internet-gateway-id "${INTERNET_GATEWAY_ID}" \
+            --vpc-id "${VPC_ID}"
+          retry_aws aws ec2 delete-internet-gateway --internet-gateway-id "${INTERNET_GATEWAY_ID}"
+          retry_aws aws ec2 delete-vpc --vpc-id "${VPC_ID}"
+      - name: Seal CloudTrail request-tag proof
+        if: steps.packer.outcome == 'success'
+        id: request_tags
+        env:
+          STARTED_AT: ${{ steps.boundary.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          ended_at="$(date --utc +'%Y-%m-%dT%H:%M:%SZ')"
+          output="${RUNNER_TEMP}/packer-request-tag-proof.json"
+          python3 - "${output}" "${STARTED_AT}" "${ended_at}" \
+            "${GITHUB_RUN_ID}" "archon-core-ami-${GITHUB_RUN_ID}" <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import re
+          import subprocess
+          import sys
+          import time
+
+          output, started, ended, build_id, session_name = sys.argv[1:]
+          if re.fullmatch(r"[1-9][0-9]{0,19}", build_id) is None:
+              raise SystemExit("build ID is invalid")
+          for value in (started, ended):
+              dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+          required = {
+              "Application": "archon-datahub",
+              "Environment": "staging",
+              "ManagedBy": "github-actions",
+              "archon:Purpose": "datahub-core-ami",
+              "archon:BuildRun": build_id,
+          }
+
+          def canonical(value):
+              return json.dumps(
+                  value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+              ).encode("utf-8")
+
+          def tag_specifications(event):
+              request = event.get("requestParameters") or {}
+              raw = request.get("tagSpecificationSet") or {}
+              items = raw.get("items") if isinstance(raw, dict) else raw
+              if not isinstance(items, list):
+                  items = request.get("tagSpecifications") or []
+              normalized = []
+              for item in items:
+                  if not isinstance(item, dict):
+                      continue
+                  tags = item.get("tags") or item.get("tagSet") or []
+                  if isinstance(tags, dict):
+                      tags = tags.get("items") or []
+                  clean_tags = sorted(
+                      [
+                          {"key": str(tag.get("key", "")), "value": str(tag.get("value", ""))}
+                          for tag in tags
+                          if isinstance(tag, dict)
+                      ],
+                      key=lambda tag: (tag["key"], tag["value"]),
+                  )
+                  normalized.append(
+                      {
+                          "resourceType": str(item.get("resourceType", "")),
+                          "tags": clean_tags,
+                      }
+                  )
+              return sorted(normalized, key=lambda item: item["resourceType"])
+
+          def lookup(event_name):
+              matches = []
+              for attempt in range(31):
+                  raw = subprocess.run(
+                      [
+                          "aws", "cloudtrail", "lookup-events",
+                          "--lookup-attributes",
+                          f"AttributeKey=EventName,AttributeValue={event_name}",
+                          "--start-time", started,
+                          "--end-time", ended,
+                          "--region", "eu-west-1",
+                          "--output", "json",
+                      ],
+                      check=True,
+                      capture_output=True,
+                      text=True,
+                      timeout=45,
+                  )
+                  candidates = json.loads(raw.stdout).get("Events", [])
+                  matches = []
+                  for candidate in candidates:
+                      event = json.loads(candidate["CloudTrailEvent"])
+                      arn = str((event.get("userIdentity") or {}).get("arn", ""))
+                      if arn.endswith("/" + session_name):
+                          matches.append(event)
+                  if matches:
+                      break
+                  if attempt < 30:
+                      time.sleep(10)
+              if not matches:
+                  raise SystemExit(f"CloudTrail did not converge for {event_name}")
+              digests = []
+              for event in matches:
+                  specifications = tag_specifications(event)
+                  observed = [
+                      {tag["key"]: tag["value"] for tag in item["tags"]}
+                      for item in specifications
+                  ]
+                  if not any(
+                      all(tags.get(key) == value for key, value in required.items())
+                      for tags in observed
+                  ):
+                      raise SystemExit(f"{event_name} omitted an exact required request tag")
+                  sanitized = {
+                      "eventName": event_name,
+                      "eventTime": str(event.get("eventTime", "")),
+                      "awsRegion": str(event.get("awsRegion", "")),
+                      "roleSessionName": session_name,
+                      "requestTagSpecifications": specifications,
+                  }
+                  if sanitized["awsRegion"] != "eu-west-1":
+                      raise SystemExit("CloudTrail region binding is invalid")
+                  digests.append("sha256:" + hashlib.sha256(canonical(sanitized)).hexdigest())
+              return {"count": len(matches), "eventDigests": sorted(digests)}
+
+          events = {
+              name: lookup(name)
+              for name in ("CreateKeyPair", "CreateSecurityGroup", "RunInstances")
+          }
+          proof = {
+              "schemaVersion": "archon.packer-request-tag-proof/v1",
+              "buildId": build_id,
+              "region": "eu-west-1",
+              "roleSessionName": session_name,
+              "window": {"startedAt": started, "endedAt": ended},
+              "requiredTags": required,
+              "events": events,
+          }
+          proof["proofDigest"] = "sha256:" + hashlib.sha256(canonical(proof)).hexdigest()
+          with open(output, "x", encoding="utf-8") as stream:
+              json.dump(proof, stream, sort_keys=True, separators=(",", ":"))
+              stream.write("\n")
+          PY
+          jq --exit-status \
+            --arg buildId "${GITHUB_RUN_ID}" '
+              keys == ["buildId","events","proofDigest","region","requiredTags","roleSessionName","schemaVersion","window"] and
+              .schemaVersion == "archon.packer-request-tag-proof/v1" and
+              .buildId == $buildId and .region == "eu-west-1" and
+              .roleSessionName == ("archon-core-ami-" + $buildId) and
+              (.events | keys == ["CreateKeyPair","CreateSecurityGroup","RunInstances"]) and
+              all(.events[]; keys == ["count","eventDigests"] and .count >= 1 and (.eventDigests | length) == .count) and
+              (.proofDigest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${output}" >/dev/null
+          echo "path=${output}" >>"${GITHUB_OUTPUT}"
+          echo "digest=$(jq -er '.proofDigest' "${output}")" >>"${GITHUB_OUTPUT}"
+      - name: Seal AMI build evidence
+        if: steps.packer.outcome == 'success'
+        id: evidence
+        env:
+          AMI_ID: ${{ steps.packer.outputs.ami_id }}
+          BASE_AMI_ID: ${{ steps.boundary.outputs.base_ami_id }}
+          CAPABILITY_DIGEST: ${{ steps.bundle.outputs.capability_digest }}
+          IMAGE_MANIFEST_DIGEST: ${{ steps.bundle.outputs.image_manifest_digest }}
+          SOURCE_BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+          COMPANION_SOURCE_SHA: ${{ inputs.companion_source_sha }}
+          COMPANION_RUN_ID: ${{ inputs.companion_run_id }}
+          GENERATION: ${{ inputs.generation }}
+          REQUEST_TAG_PROOF: ${{ steps.request_tags.outputs.path }}
+          REQUEST_TAG_PROOF_DIGEST: ${{ steps.request_tags.outputs.digest }}
+          BAKE_EVIDENCE: ${{ steps.packer.outputs.bake_evidence }}
+          BAKE_EVIDENCE_SHA256: ${{ steps.bake.outputs.archive_sha256 }}
+          VERIFIED_BAKE_EVIDENCE: ${{ steps.bake.outputs.directory }}
+          CORE_SUPPLY_CHAIN: ${{ steps.core_images.outputs.directory }}
+          RESOLVED_MANIFEST_SHA256: ${{ steps.core_images.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/ami-build-evidence.json"
+          test -f "${REQUEST_TAG_PROOF}"
+          test -f "${BAKE_EVIDENCE}"
+          test -d "${VERIFIED_BAKE_EVIDENCE}"
+          test -d "${CORE_SUPPLY_CHAIN}"
+          (
+            cd "${CORE_SUPPLY_CHAIN}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          manifest_sha="$(sha256sum "${CORE_SUPPLY_CHAIN}/resolved-images.json" | awk '{print $1}')"
+          test "${manifest_sha}" = "${RESOLVED_MANIFEST_SHA256}"
+          test "sha256:${manifest_sha}" = "${IMAGE_MANIFEST_DIGEST}"
+          bake_sha="$(sha256sum "${BAKE_EVIDENCE}" | awk '{print $1}')"
+          test "${bake_sha}" = "${BAKE_EVIDENCE_SHA256}"
+          proof_payload_digest="$(
+            jq -cS -j 'del(.proofDigest)' "${REQUEST_TAG_PROOF}" |
+              sha256sum | awk '{print "sha256:" $1}'
+          )"
+          test "${proof_payload_digest}" = "${REQUEST_TAG_PROOF_DIGEST}"
+          test "$(jq -er '.proofDigest' "${REQUEST_TAG_PROOF}")" = \
+            "${REQUEST_TAG_PROOF_DIGEST}"
+          request_tag_proof_file_sha="$(sha256sum "${REQUEST_TAG_PROOF}" | awk '{print $1}')"
+          supply_checksums_sha="$(sha256sum "${CORE_SUPPLY_CHAIN}/SHA256SUMS" | awk '{print $1}')"
+          aggregate_cdx_sha="$(sha256sum "${CORE_SUPPLY_CHAIN}/aggregate.cdx.json" | awk '{print $1}')"
+          aggregate_spdx_sha="$(sha256sum "${CORE_SUPPLY_CHAIN}/aggregate.spdx.json" | awk '{print $1}')"
+          resolved_cdx_sha="$(jq -er '.sbom.aggregateCycloneDxSha256' \
+            "${CORE_SUPPLY_CHAIN}/resolved-images.json")"
+          resolved_spdx_sha="$(jq -er '.sbom.aggregateSpdxSha256' \
+            "${CORE_SUPPLY_CHAIN}/resolved-images.json")"
+          test "${aggregate_cdx_sha}" = "${resolved_cdx_sha}"
+          test "${aggregate_spdx_sha}" = "${resolved_spdx_sha}"
+          image_count="$(jq -er '.images | length' "${CORE_SUPPLY_CHAIN}/resolved-images.json")"
+          actionable_total="$(jq -er '.security.actionableFixedHighCritical' \
+            "${CORE_SUPPLY_CHAIN}/resolved-images.json")"
+          trivy_db_sha="$(jq -er '.scanner.dbMetadataSha256' \
+            "${CORE_SUPPLY_CHAIN}/resolved-images.json")"
+          os_trivy_db_sha="$(sha256sum \
+            "${VERIFIED_BAKE_EVIDENCE}/supply-chain/os/trivy-db-metadata.json" | awk '{print $1}')"
+          test "${os_trivy_db_sha}" = "$(jq -er '.osScanner.databaseMetadataSha256' \
+            "${VERIFIED_BAKE_EVIDENCE}/image-manifest.json")"
+          jq --exit-status \
+            --arg manifestSha "${manifest_sha}" '
+              .schemaVersion == "archon.datahub-core-resolved-images/v1" and
+              .resolutionCount == 1 and .scanOrder == "sequential" and
+              .runtimePullsAllowed == false and
+              .scanner.name == "Trivy" and .scanner.version == "0.70.0" and
+              .security.rawFindingsRetained == true and
+              .security.unfixedFindingsRetained == true and
+              .security.actionableGate == "fixed HIGH,CRITICAL" and
+              .security.actionableFixedHighCritical == 0 and
+              .security.vexGenerated == false and
+              .sbom.perImageCycloneDx == true and .sbom.perImageSpdx == true and
+              (.images | length) >= 8 and
+              all(.images[];
+                (.resolvedReference | test("@sha256:[0-9a-f]{64}$")) and
+                (.evidence | keys == ["cycloneDx","scanJson","scanSarif","spdx"]))
+            ' "${CORE_SUPPLY_CHAIN}/resolved-images.json" >/dev/null
+          image_json="$(
+            aws ec2 describe-images --owners self --image-ids "${AMI_ID}" \
+              --query 'Images[0]' --output json |
+              jq -cS '{
+                ImageId,
+                Architecture,
+                CreationDate,
+                RootDeviceName,
+                VirtualizationType,
+                Hypervisor,
+                State,
+                EnaSupport,
+                ImdsSupport,
+                Tags: ((.Tags // []) |
+                  map(select(.Key | startswith("archon:"))) | sort_by(.Key)),
+                BlockDeviceMappings: ((.BlockDeviceMappings // []) |
+                  map({DeviceName,Ebs:{DeleteOnTermination,Encrypted,VolumeSize,VolumeType}}))
+              }'
+          )"
+          test "$(jq -er '.ImageId' <<<"${image_json}")" = "${AMI_ID}"
+          jq -cnS \
+            --arg amiId "${AMI_ID}" \
+            --arg baseAmiId "${BASE_AMI_ID}" \
+            --arg releaseSha "${GITHUB_SHA}" \
+            --arg companionSourceSha "${COMPANION_SOURCE_SHA}" \
+            --arg companionRunId "${COMPANION_RUN_ID}" \
+            --arg generation "${GENERATION}" \
+            --arg capabilityDigest "${CAPABILITY_DIGEST}" \
+            --arg imageManifestDigest "${IMAGE_MANIFEST_DIGEST}" \
+            --arg resolvedManifestSha256 "${manifest_sha}" \
+            --arg sourceBundleSha256 "${SOURCE_BUNDLE_SHA256}" \
+            --arg workflowRunId "${GITHUB_RUN_ID}" \
+            --arg requestTagProofDigest "${REQUEST_TAG_PROOF_DIGEST}" \
+            --arg requestTagProofFileSha256 "${request_tag_proof_file_sha}" \
+            --arg bakeEvidenceArchiveSha256 "${bake_sha}" \
+            --arg supplyChecksumsSha256 "${supply_checksums_sha}" \
+            --arg trivyDbMetadataSha256 "${trivy_db_sha}" \
+            --arg osTrivyDbMetadataSha256 "${os_trivy_db_sha}" \
+            --arg aggregateCycloneDxSha256 "${aggregate_cdx_sha}" \
+            --arg aggregateSpdxSha256 "${aggregate_spdx_sha}" \
+            --argjson imageCount "${image_count}" \
+            --argjson actionableFixedHighCritical "${actionable_total}" \
+            --argjson image "${image_json}" '
+              {
+                schemaVersion: "archon.datahub-core-ami-build/v2",
+                amiId: $amiId,
+                baseAmiId: $baseAmiId,
+                region: "eu-west-1",
+                releaseSha: $releaseSha,
+                companionSourceSha: $companionSourceSha,
+                companionRunId: $companionRunId,
+                generation: $generation,
+                capabilityDigest: $capabilityDigest,
+                imageManifestDigest: $imageManifestDigest,
+                sourceBundleSha256: $sourceBundleSha256,
+                workflowRunId: $workflowRunId,
+                provenance: {
+                  requestTagProofSchema: "archon.packer-request-tag-proof/v1",
+                  requestTagProofDigest: $requestTagProofDigest,
+                  requestTagProofFileSha256: $requestTagProofFileSha256,
+                  requestTagEvents: ["CreateKeyPair","CreateSecurityGroup","RunInstances"],
+                  exactRequestTagsVerified: true,
+                  accountIdentifierRetained: false
+                },
+                supplyChain: {
+                  scanner: {
+                    name: "Trivy",
+                    version: "0.70.0",
+                    databaseMetadataRetained: true,
+                    databaseMetadataSha256: $trivyDbMetadataSha256
+                  },
+                  coreImages: {
+                    resolvedManifestSha256: $resolvedManifestSha256,
+                    resolutionCount: 1,
+                    imageCount: $imageCount,
+                    scanOrder: "sequential",
+                    runtimePullsAllowed: false,
+                    rawJsonRetained: true,
+                    rawSarifRetained: true,
+                    unfixedFindingsRetained: true,
+                    actionableGate: "fixed HIGH,CRITICAL",
+                    actionableFixedHighCritical: $actionableFixedHighCritical,
+                    vexGenerated: false,
+                    perImageCycloneDx: true,
+                    perImageSpdx: true,
+                    aggregateCycloneDxSha256: $aggregateCycloneDxSha256,
+                    aggregateSpdxSha256: $aggregateSpdxSha256,
+                    checksumsSha256: $supplyChecksumsSha256
+                  },
+                  ami: {
+                    bakeEvidenceArchiveSha256: $bakeEvidenceArchiveSha256,
+                    baseImagePatched: true,
+                    applicableSecurityUpdates: 0,
+                    osCycloneDx: true,
+                    osSpdx: true,
+                    osScanner: {
+                      name: "Trivy",
+                      version: "0.70.0",
+                      databaseMetadataSha256: $osTrivyDbMetadataSha256
+                    },
+                    scannerBinaryPresent: false,
+                    scannerDatabasePresent: false,
+                    composePullPolicy: "never"
+                  }
+                },
+                image: $image
+              }
+            ' >"${output}"
+          jq --exit-status \
+            --arg amiId "${AMI_ID}" \
+            --arg proofDigest "${REQUEST_TAG_PROOF_DIGEST}" '
+              .schemaVersion == "archon.datahub-core-ami-build/v2" and
+              .amiId == $amiId and
+              .provenance.requestTagProofDigest == $proofDigest and
+              .provenance.accountIdentifierRetained == false and
+              .supplyChain.scanner.version == "0.70.0" and
+              .supplyChain.scanner.databaseMetadataRetained == true and
+              .supplyChain.coreImages.runtimePullsAllowed == false and
+              .supplyChain.coreImages.actionableFixedHighCritical == 0 and
+              .supplyChain.coreImages.vexGenerated == false and
+              .supplyChain.ami.applicableSecurityUpdates == 0 and
+              .supplyChain.ami.osScanner.version == "0.70.0" and
+              (.supplyChain.ami.osScanner.databaseMetadataSha256 | test("^[0-9a-f]{64}$")) and
+              .supplyChain.ami.scannerBinaryPresent == false and
+              .supplyChain.ami.scannerDatabasePresent == false and
+              .image.ImageId == $amiId and
+              (.image | has("OwnerId") | not)
+            ' "${output}" >/dev/null
+          digest="$(sha256sum "${output}" | awk '{print $1}')"
+          echo "path=${output}" >>"${GITHUB_OUTPUT}"
+          echo "sha256=${digest}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "### DataHub Core AMI"
+            echo ""
+            echo "- AMI: \`${AMI_ID}\`"
+            echo "- Generation: \`${GENERATION}\`"
+            echo "- Core images: \`${image_count}\`, scanned sequentially at immutable digests"
+            echo "- Raw JSON/SARIF and per-image + aggregate SBOMs retained"
+            echo "- CloudTrail request-tag proof: \`${REQUEST_TAG_PROOF_DIGEST}\`"
+            echo "- Evidence SHA-256: \`${digest}\`"
+            echo "- Idle compute: ASG remains at zero until a governed session starts."
+          } >>"${GITHUB_STEP_SUMMARY}"
+      - name: Attest AMI evidence projection
+        if: steps.packer.outcome == 'success'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.evidence.outputs.path }}
+      - name: Upload sealed AMI evidence
+        if: steps.packer.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-core-ami-${{ steps.packer.outputs.ami_id }}
+          path: |
+            ${{ steps.evidence.outputs.path }}
+            ${{ steps.packer.outputs.manifest }}
+            ${{ steps.request_tags.outputs.path }}
+            ${{ steps.packer.outputs.bake_evidence }}
+            ${{ steps.bake.outputs.directory }}
+            ${{ steps.core_images.outputs.directory }}
+            ${{ runner.temp }}/companion/evidence/provenance.json
+            infra/aws/image/datahub-core-image.lock.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9

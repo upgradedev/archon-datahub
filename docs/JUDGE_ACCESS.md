@@ -8,17 +8,18 @@ hosted users from a laptop or with long-lived AWS keys.
 
 | Operation | Preconditions | Result proved by read-back |
 |---|---|---|
-| `provision` | The exact lower-case email does not exist. | One enabled, email-bound `CONFIRMED` user with a pipeline-managed permanent password and exactly the `archon-approvers` group. |
-| `rotate` | The exact user exists in `CONFIRMED`, is enabled, and already has exactly the approver group. | Global sign-out, a rotated permanent password, `CONFIRMED`, and the same sole approver group. |
-| `reactivate` | The exact immutable email/binding is disabled in `CONFIRMED` or `FORCE_CHANGE_PASSWORD`, has no recovery/MFA drift, and has zero groups. | Global sign-out while disabled, a genuinely new permanent password, enablement, `CONFIRMED`, and exactly the approver group, with automatic containment on every partial failure. |
-| `deactivate` | The exact stage account/region/role session, stable stack, pool/group outputs, and immutable email/binding resolve. Availability-sensitive access, group, client, risk, or WAF drift is tolerated. | Disable and global sign-out are always attempted; success additionally requires exact disabled and zero-group read-back. |
+| `provision` | The exact lower-case email does not exist. | An enabled, email-bound `CONFIRMED` user with a pipeline-managed permanent password whose complete authorization membership is exactly the two-group set `archon-approvers` and `archon-runtime-operators`. |
+| `rotate` | The exact user exists in `CONFIRMED`, is enabled, and already has the complete two-group set: `archon-approvers` plus `archon-runtime-operators`. | Global sign-out, a rotated permanent password, `CONFIRMED`, and that same exact two-group set. |
+| `reactivate` | The exact immutable email/binding is disabled in `CONFIRMED` or `FORCE_CHANGE_PASSWORD`, has no recovery/MFA drift, and has no group memberships. | Global sign-out while disabled, a genuinely new permanent password, enablement, `CONFIRMED`, and the exact two-group set `archon-approvers` plus `archon-runtime-operators`, with automatic containment on every partial failure. |
+| `deactivate` | The exact stage account/region/role session, stable stack, pool/group outputs, and immutable email/binding resolve. Availability-sensitive access, group, client, risk, or WAF drift is tolerated. | Disable and global sign-out are always attempted; success additionally requires an exact disabled-state read-back with no group memberships. |
 
 Provision, rotation, reactivation, and deactivation are always explicit choices; none
 silently becomes another, and deactivation never deletes evidence-bearing user history. The dispatch contains only
 stage and operation; the fixed judge email is an environment secret and never enters
-Actions input/event metadata. The workflow always reads `ArchonUserPoolId` and
-`ArchonApproverGroupName` from the exact `Archon-staging` or `Archon-production` stack,
-accepts only a stable stack, and rejects an unexpected group output. Access-enabling
+Actions input/event metadata. The workflow always reads `ArchonUserPoolId`,
+`ArchonApproverGroupName`, and `ArchonRuntimeOperatorGroupName` from the exact
+`Archon-staging` or `Archon-production` stack, accepts only a stable stack, proves the
+two group outputs are distinct, and rejects either unexpected group output. Access-enabling
 operations additionally read and verify the client, application-origin, and WAF outputs.
 
 Provision writes the stage's high-entropy opaque `JUDGE_ACCOUNT_ID` into the immutable
@@ -30,7 +31,8 @@ identity with the same email is therefore never disabled. Rotation binds compens
 the already-read canonical Cognito username before changing its password. If create or
 either permanent-password mutation returns an applied-then-error response, or any
 required read-back fails, the trap independently attempts disable, global sign-out, and
-approver-group removal, then reads back the exact disabled and group-free state. The run
+removal of both exact runtime-authorization groups, then reads back the exact disabled
+state with no group memberships. The run
 remains red; containment is not presented as a successful lifecycle result.
 
 ## Protected-environment configuration
@@ -121,7 +123,7 @@ password manager, copy them to the selected protected environment secrets, and d
 the password to the intended judge through an independent secure channel. A rotation
 means replacing `JUDGE_PASSWORD` with a genuinely new value before dispatching `rotate`.
 Do the same before `reactivate`; Cognito password history must reject reuse while the
-identity remains disabled and group-free.
+identity remains disabled with no group memberships.
 Do not rotate either opaque account ID; changing it intentionally makes the existing
 identity ineligible and requires a separately reviewed migration.
 
@@ -129,8 +131,9 @@ Provision generates a separate high-entropy password only inside the runner, use
 `AdminCreateUser`, proves the exact workflow-bound bootstrap identity, and immediately
 calls `AdminSetUserPassword` with `Permanent: true` and `JUDGE_PASSWORD`. The internal
 bootstrap value is never exported or delivered and is unset after the permanent set.
-Every access-enabling operation finishes by proving exactly the sole approver group and
-then re-reading `Enabled: true` and `UserStatus: CONFIRMED`; judge access
+Every access-enabling operation finishes by proving the complete two-group set:
+`archon-approvers` plus `archon-runtime-operators`, and then re-reading `Enabled: true`
+and `UserStatus: CONFIRMED`; judge access
 therefore does not depend on Cognito's three-day temporary-password TTL or a
 first-login password-change challenge. The Plus-tier pool retains 24 previous passwords.
 The pipeline proves `PasswordHistorySize: 24` before any user read, and Cognito rejects a
@@ -164,8 +167,8 @@ credential hashes. A failed operation does not produce a receipt.
 For an access-enabling operation, success is not committed inside the lifecycle script
 until the sanitized state receipt has been written and validated. If that write fails
 after a successful AWS read-back, the script's exit trap disables the exact bound
-identity, attempts global sign-out, removes its approver group, and requires the
-contained state before the red run exits. The workflow likewise makes one bounded second
+identity, attempts global sign-out, removes both exact runtime-authorization groups, and
+requires the contained state with no group memberships before the red run exits. The workflow likewise makes one bounded second
 artifact-upload attempt when the first upload fails without creating an artifact. It
 then resolves exactly one canonical artifact through the Actions API. If receipt sealing
 or both durable-retention paths still fail after the script returned a verified enabled
@@ -192,8 +195,9 @@ lifecycle mutation. Do not use **Re-run all jobs** to recover `provision`.
 
 For emergency deactivation, `sessionRevocation` is
 `response-confirmed` only when global sign-out returned success. An ambiguous response
-is recorded as `contained-by-disabled-state`; the run can still prove the disabled,
-group-free containment boundary without overclaiming session-revocation confirmation.
+is recorded as `contained-by-disabled-state`; the run can still prove the disabled
+containment boundary with no group memberships without overclaiming
+session-revocation confirmation.
 The project-access evidence pipeline accepts four distinct exact production
 run IDs and independently verifies their artifacts and attestations. It is responsible for
 enforcing the strictly ordered
@@ -257,8 +261,8 @@ must not prevent disable and global sign-out attempts; unexpected residual group
 keep the run red after the revocation attempts.
 
 All group reads use Cognito's maximum 60-item page and reject `NextToken`; no first-page
-result can be presented as sole-group or zero-group proof while hidden memberships
-remain.
+result can be presented as exact two-group or empty-membership proof while hidden
+memberships remain.
 
 ## OIDC and least-privilege IAM
 

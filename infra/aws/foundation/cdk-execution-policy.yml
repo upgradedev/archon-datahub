@@ -38,164 +38,196 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: InvokeOnlyBedrockMantleProjects
-            Effect: Allow
+          - Effect: Allow
             Action:
-              - bedrock-mantle:CreateInference
-            Resource: !Sub arn:${AWS::Partition}:bedrock-mantle:eu-west-1:${AWS::AccountId}:project/*
-            Condition:
-              StringEquals:
-                bedrock-mantle:Model: qwen.qwen3-235b-a22b-2507
-          - Sid: MintOnlyShortTermBedrockMantleTokens
-            Effect: Allow
-            Action: bedrock-mantle:CallWithBearerToken
-            Resource: "*"
-            Condition:
-              StringEquals:
-                bedrock-mantle:BearerTokenType: SHORT_TERM
-          - Sid: UseOnlyStageTables
-            Effect: Allow
-            Action:
-              - dynamodb:GetItem
-              - dynamodb:PutItem
-              - dynamodb:TransactWriteItems
-              - dynamodb:UpdateItem
-            Resource: !Sub arn:${AWS::Partition}:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*
-          - Sid: RestrictDefaultStageSecurityGroup
-            Effect: Allow
-            Action:
+
+
+              - dynamodb:ListStreams
               - ec2:AuthorizeSecurityGroupEgress
               - ec2:AuthorizeSecurityGroupIngress
               - ec2:RevokeSecurityGroupEgress
               - ec2:RevokeSecurityGroupIngress
-            Resource: !Sub arn:${AWS::Partition}:ec2:eu-west-1:${AWS::AccountId}:security-group/*
-          - Sid: AuthenticateRuntimeImagePull
-            Effect: Allow
-            Action: ecr:GetAuthorizationToken
-            Resource: "*"
-          - Sid: PullOnlySharedImmutableImage
-            Effect: Allow
-            Action:
-              - ecr:BatchCheckLayerAvailability
-              - ecr:BatchGetImage
-              - ecr:GetDownloadUrlForLayer
-            Resource: !Sub arn:${AWS::Partition}:ecr:eu-west-1:${AWS::AccountId}:repository/archon-datahub
-          - Sid: UseOnlyStageRuntimeKeys
-            Effect: Allow
-            Action:
-              - kms:Decrypt
-              - kms:Describe*
-              - kms:Encrypt
-              - kms:GenerateDataKey*
-              - kms:ReEncrypt*
-            Resource: !Sub arn:${AWS::Partition}:kms:eu-west-1:${AWS::AccountId}:key/*
-            Condition:
-              ForAnyValue:StringLike:
-                kms:ResourceAliases: !Sub alias/archon/${DeploymentEnvironment}/*
-              StringLike:
-                kms:ViaService:
-                  - s3.eu-west-1.amazonaws.com
-                  - secretsmanager.eu-west-1.amazonaws.com
-                  - sqs.eu-west-1.amazonaws.com
-                  - logs.eu-west-1.amazonaws.com
-          - Sid: WriteOnlyStageRuntimeLogs
-            Effect: Allow
-            Action:
+
+
+
+
+              - logs:CreateLogDelivery
               - logs:CreateLogGroup
               - logs:CreateLogStream
-              - logs:DescribeLogStreams
-              - logs:PutLogEvents
-            Resource:
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/archon/${DeploymentEnvironment}/*:*
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:/aws/lambda/Archon-${DeploymentEnvironment}-*:*
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:aws-waf-logs-archon-${DeploymentEnvironment}-api*
-              - !Sub arn:${AWS::Partition}:logs:eu-west-1:${AWS::AccountId}:log-group:sns/eu-west-1/${AWS::AccountId}/archon-${DeploymentEnvironment}-alarms*
-          - Sid: DeliverStepFunctionsLogs
-            Effect: Allow
-            Action:
-              - logs:CreateLogDelivery
               - logs:DeleteLogDelivery
               - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+
               - logs:DescribeResourcePolicies
               - logs:GetLogDelivery
               - logs:ListLogDeliveries
+              - logs:PutLogEvents
               - logs:PutResourcePolicy
               - logs:UpdateLogDelivery
-            Resource: "*"
-          - Sid: UseOnlyStageObjects
-            Effect: Allow
-            Action:
-              - s3:GetObject
-              - s3:GetObjectAttributes
+              - s3:DeleteObjectVersion
+
+
               - s3:GetObjectVersion
               - s3:PutObject
-            Resource: !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-*/*
-          - Sid: ReadOnlyStageRuntimeSecrets
-            Effect: Allow
-            Action:
-              - secretsmanager:DescribeSecret
-              - secretsmanager:GetSecretValue
-            Resource:
-              - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-read-*
-              - !Sub arn:${AWS::Partition}:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-write-*
-          - Sid: UseOnlyStageQueues
-            Effect: Allow
-            Action:
-              - sqs:ChangeMessageVisibility
-              - sqs:DeleteMessage
+
+
               - sqs:GetQueueAttributes
               - sqs:GetQueueUrl
-              - sqs:ReceiveMessage
+
               - sqs:SendMessage
-            Resource: !Sub arn:${AWS::Partition}:sqs:eu-west-1:${AWS::AccountId}:archon-${DeploymentEnvironment}-*
-          - Sid: UseOnlyStageStateMachine
-            Effect: Allow
-            Action:
-              - states:DescribeExecution
+
+
+
+
               - states:StartExecution
-            Resource:
-              - !Sub arn:${AWS::Partition}:states:eu-west-1:${AWS::AccountId}:stateMachine:archon-${DeploymentEnvironment}-*
-              - !Sub arn:${AWS::Partition}:states:eu-west-1:${AWS::AccountId}:execution:archon-${DeploymentEnvironment}-*:*
-          - Sid: ReturnOpaqueTaskTokens
-            Effect: Allow
-            Action:
-              - states:SendTaskFailure
-              - states:SendTaskHeartbeat
-              - states:SendTaskSuccess
-            Resource: "*"
-          - Sid: EmitRuntimeTraces
-            Effect: Allow
-            Action:
               - xray:GetSamplingRules
               - xray:GetSamplingTargets
               - xray:PutTelemetryRecords
               - xray:PutTraceSegments
             Resource: "*"
-          - Sid: DenyIdentityEscalation
+          - Sid: ScaleOnlyStageCoreRuntime
+            Effect: Allow
+            Action: autoscaling:UpdateAutoScalingGroup
+            Resource: !Sub arn:aws:autoscaling:eu-west-1:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/archon-${DeploymentEnvironment}-datahub-core
+          - Sid: InvokeOnlyReviewedAnalyticsModels
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: !Sub arn:aws:bedrock:eu-west-1:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0
+            Condition:
+              StringEquals:
+                bedrock:InferenceProfileArn: !Sub arn:aws:bedrock:eu-west-1:${AWS::AccountId}:inference-profile/eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+          - Sid: EmitOnlyCoreRuntimeMetrics
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+            Condition:
+              StringEquals:
+                cloudwatch:namespace: Archon/DataHubCore
+          - Sid: UseOnlyStageTableStreams
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeStream
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:TransactWriteItems
+              - dynamodb:UpdateItem
+            Resource: !Sub arn:aws:dynamodb:eu-west-1:${AWS::AccountId}:table/Archon-${DeploymentEnvironment}-*
+          - Sid: CreateOnlyTaggedCoreSessionEndpoints
+            Effect: Allow
+            Action: ec2:CreateVpcEndpoint
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                aws:RequestedRegion: eu-west-1
+                ec2:VpceServiceName:
+                  - com.amazonaws.eu-west-1.bedrock-runtime
+                  - com.amazonaws.eu-west-1.kms
+                  - com.amazonaws.eu-west-1.sts
+          - Sid: TagOnlyNewCoreSessionEndpoints
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource: !Sub arn:aws:ec2:eu-west-1:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Application: archon-datahub
+                aws:RequestTag/Environment: !Ref DeploymentEnvironment
+                ec2:CreateAction: CreateVpcEndpoint
+          - Sid: ReconcileOnlyOwnedCoreSessionEndpoints
+            Effect: Allow
+            Action: ec2:DeleteVpcEndpoints
+            Resource: !Sub arn:aws:ec2:eu-west-1:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/Application: archon-datahub
+                ec2:ResourceTag/Environment: !Ref DeploymentEnvironment
+                ec2:ResourceTag/ManagedBy: archon-core-lifecycle
+              StringLike:
+                ec2:ResourceTag/ArchonSessionId: rs_*
+          - Sid: InspectOnlyEuWest1CoreResources
+            Effect: Allow
+            Action:
+              - ec2:DescribeImages
+              - ec2:DescribeVpcEndpoints
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: eu-west-1
+          - Sid: UseOnlyStageRuntimeEncryptionKeys
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Resource: !Sub arn:aws:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              ForAnyValue:StringLike:
+                kms:ResourceAliases: !Sub alias/archon/${DeploymentEnvironment}/*
+          - Sid: ReadOnlyStageMutationVerificationKeys
+            Effect: Allow
+            Action: kms:GetPublicKey
+            Resource: !Sub arn:aws:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              ForAnyValue:StringEquals:
+                kms:ResourceAliases: !Sub alias/archon/${DeploymentEnvironment}/datahub-core-mutation-signing
+          - Sid: SignOnlyStageGovernedMutations
+            Effect: Allow
+            Action: kms:Sign
+            Resource: !Sub arn:aws:kms:eu-west-1:${AWS::AccountId}:key/*
+            Condition:
+              ForAnyValue:StringEquals:
+                kms:ResourceAliases: !Sub alias/archon/${DeploymentEnvironment}/datahub-core-mutation-signing
+              StringEquals:
+                kms:SigningAlgorithm: ECDSA_SHA_256
+          - Sid: InvokeOnlyStageRuntimeFunctions
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub arn:aws:lambda:eu-west-1:${AWS::AccountId}:function:Archon-${DeploymentEnvironment}-*
+          - Sid: ObserveOnlyStageCloudCheckpointVersioning
+            Effect: Allow
+            Action: s3:GetBucketVersioning
+            Resource: !Sub arn:aws:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-*
+          - Effect: Allow
+            Action:
+
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub arn:aws:secretsmanager:eu-west-1:${AWS::AccountId}:secret:archon/${DeploymentEnvironment}/datahub-cloud/*
+          - Sid: AssumeOnlyStageCoreScopedRuntimeRoles
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-datahub-core-analytics
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/archon-${DeploymentEnvironment}-datahub-core-gateway
+          - Sid: ConfirmOnlyCurrentRuntimeIdentity
+            Effect: Allow
+            Action: sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: DenyRuntimeIdentityAdministration
             Effect: Deny
             Action:
               - account:*
               - iam:*
               - organizations:*
-              - sts:AssumeRole
             Resource: "*"
-          - Sid: DenyLongTermBedrockMantleTokens
+          - Sid: DenyVersionDeletionOutsideCloudCheckpointResets
             Effect: Deny
-            Action: bedrock-mantle:CallWithBearerToken
-            Resource: "*"
-            Condition:
-              StringEquals:
-                bedrock-mantle:BearerTokenType: LONG_TERM
-          - Sid: DenyEvidenceDeletionAndRetentionBypass
-            Effect: Deny
-            Action:
-              - s3:BypassGovernanceRetention
-              - s3:DeleteObject
-              - s3:DeleteObjectVersion
-              - s3:PutObjectRetention
-            Resource: !Sub arn:${AWS::Partition}:s3:::archon-${DeploymentEnvironment}-*/*
+            Action: s3:DeleteObjectVersion
+            NotResource: !Sub arn:aws:s3:::archon-${DeploymentEnvironment}-cloud-checkpoints-*/cloud-runtime/v2/*
 
   ArchonCdkIdentityPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -638,7 +670,6 @@ Resources:
             Action:
               - secretsmanager:CreateSecret
               - secretsmanager:DeleteResourcePolicy
-              - secretsmanager:DescribeSecret
               - secretsmanager:GetResourcePolicy
               - secretsmanager:ListSecretVersionIds
               - secretsmanager:ListTagsForResource

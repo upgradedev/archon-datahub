@@ -1,0 +1,131 @@
+{
+  "schemaVersion": "archon.aws-foundation-core-ami-policy-migration/v1",
+  "status": "ready-for-migration",
+  "rationale": "Foundation control policy must authorize one exact zero-cost Core AMI identity stack before the ordinary foundation reconciler can create it.",
+  "source": {
+    "repository": "upgradedev/archon-datahub",
+    "branch": "master",
+    "policyBundle": "infra/aws/foundation/github-actions-foundation-policy.json",
+    "renderer": "scripts/render-aws-foundation-policy.mjs"
+  },
+  "workflow": {
+    "entry": ".github/workflows/aws-foundation-core-ami-policy-migration.yml",
+    "driver": ".github/workflows/aws-foundation-core-ami-policy-migration-driver.yml",
+    "cleanup": ".github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml",
+    "branch": "master",
+    "installerEnvironment": "aws-foundation",
+    "executorEnvironment": "governed-canary-recovery",
+    "outerConcurrencyGroup": "archon-aws-control-plane",
+    "innerConcurrencyGroup": "archon-governed-canary-mutation-recovery",
+    "queue": "max",
+    "confirmation": "MIGRATE EXACT CORE AMI FOUNDATION CONTROL POLICY",
+    "cleanupConfirmation": "RECOVER EXACT CORE AMI FOUNDATION CONTROL POLICY MIGRATION",
+    "exactHeadRequired": true,
+    "ownerActorOnly": true,
+    "automaticCleanupOnNonSuccess": true,
+    "automaticCleanupCurrentHeadIndependent": true,
+    "exactParentAttemptJobsRequired": true
+  },
+  "policy": {
+    "group": "control",
+    "name": "archon-aws-foundation-control",
+    "arnTemplate": "arn:aws:iam::<AWS_ACCOUNT_ID>:policy/archon-aws-foundation-control",
+    "liveBaseline": [
+      {
+        "versionId": "v1",
+        "isDefault": false,
+        "canonicalSha256": "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
+      },
+      {
+        "versionId": "v2",
+        "isDefault": true,
+        "canonicalSha256": "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b"
+      }
+    ],
+    "target": {
+      "expectedVersionId": "v3",
+      "canonicalSha256": "52e0a5d619c426b8c58b111a8e410e41548522411ff18a9ffbe346d89e6bd3cf"
+    },
+    "retainBaselineVersionsForRollback": true,
+    "exactDeltaSids": [
+      "ReconcileExactCoreAmiFoundationStack",
+      "ReconcileExactCoreAmiFoundationRoles",
+      "ReconcileExactCoreAmiBuilderProfile",
+      "AttachExactCoreAmiBuilderSsmPolicy",
+      "PassExactCoreAmiBuilderRoleForProfile"
+    ],
+    "noOtherStatementChange": true,
+    "maximumDocumentBytes": 6144
+  },
+  "authorization": {
+    "foundationRoleName": "archon-datahub-github-foundation",
+    "executorRoleName": "archon-datahub-github-governed-canary-recovery",
+    "temporaryInlinePolicyName": "archon-foundation-core-ami-control-policy-migration",
+    "ttlSeconds": 1200,
+    "targetManagedPolicyActions": [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "rollbackManagedPolicyActions": [
+      "iam:DeletePolicyVersion",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion"
+    ],
+    "temporaryPolicyReadAction": "iam:GetRolePolicy",
+    "canonicalReadbackRequired": true,
+    "selfPersistenceAllowed": false,
+    "mandatoryRevocation": true,
+    "absenceReadCount": 3
+  },
+  "implementation": {
+    "driver": "scripts/run-aws-foundation-core-ami-policy-migration.sh",
+    "libraries": [
+      "scripts/aws-foundation-core-ami-policy-migration-common.sh",
+      "scripts/aws-foundation-core-ami-policy-migration-authorization.sh",
+      "scripts/aws-foundation-core-ami-policy-migration-state.sh"
+    ],
+    "environmentVerifier": "scripts/verify-github-environment-protection.sh"
+  },
+  "transaction": {
+    "phases": [
+      "validate-protected-exact-master",
+      "authorize-bounded-recovery-role",
+      "create-and-canonically-verify-v3",
+      "switch-default-once",
+      "postverify",
+      "revoke-temporary-authorization"
+    ],
+    "rollback": "set-v2-default-delete-only-v3",
+    "historicalV1Mutation": "forbidden",
+    "cancellationRecovery": "workflow-run-cleanup",
+    "manualRecovery": {
+      "enabled": true,
+      "mode": "cleanup-rollback"
+    },
+    "parentOutcomeClassification": {
+      "validationNotSucceeded": "no-aws",
+      "validatedPrepareNotSucceeded": "cleanup-revoke",
+      "prepareSucceededWithoutSuccessfulMigrationOrRollback": "cleanup-rollback",
+      "rollbackSucceeded": "cleanup-revoke",
+      "migrateSucceeded": "cleanup-migrated"
+    }
+  },
+  "evidence": {
+    "schemaVersion": "archon.aws-foundation-core-ami-policy-migration-receipt/v1",
+    "artifactFiles": [
+      "SHA256SUMS",
+      "migration.json"
+    ],
+    "retentionDays": 90,
+    "canonicalJson": true,
+    "checksumSealed": true,
+    "attestationRequired": true,
+    "rawAccountOrArnAllowed": false
+  }
+}
