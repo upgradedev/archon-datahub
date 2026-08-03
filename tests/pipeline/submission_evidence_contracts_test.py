@@ -465,36 +465,39 @@ def valid_facts() -> dict[str, dict]:
                 "predicateDigest": DIGEST,
                 "observedAt": availability_observed_at,
                 "result": "passed",
+                "observationDigest": DIGEST,
             },
             "posture": {
                 "workflowPath": ".github/workflows/production-posture.yml",
                 "runId": 403,
                 "runAttempt": 5,
                 "artifactId": 404,
-                "artifactName": f"production-posture-{RELEASE}-5",
+                "artifactName": f"production-posture-{RELEASE}-403",
                 "artifactDigest": DIGEST,
                 "predicateType": (
                     "https://github.com/upgradedev/archon-datahub/"
-                    "attestations/production-posture/v1"
+                    "attestations/production-posture/v2"
                 ),
                 "predicateDigest": DIGEST,
                 "observedAt": iso(),
                 "result": "passed",
-                "topicArnSha256": DIGEST,
-                "subscriptionArnSha256": ALT_DIGEST,
-                "alarmInventory": {
-                    "observedAt": iso(),
-                    "alarmCount": 10,
-                    "allActionsEnabled": True,
-                    "alarmActionsBoundToTopic": True,
-                    "okActionsBoundToTopic": True,
-                    "insufficientDataActionsEmpty": True,
-                    "inventoryDigest": DIGEST,
+                "checks": {
+                    "leanRuntimeControls": True,
+                    "zeroIdleCore": True,
+                    "cloudFormationDrift": "IN_SYNC",
+                    "alarmsNotFiring": True,
+                    "legacyAlwaysOnRuntimeAbsent": True,
                 },
+                "observationDigest": DIGEST,
+                "driftEvidenceDigest": ALT_DIGEST,
+                "alarmNames": [
+                    "archon-production-control-plane-errors",
+                    "archon-production-runtime-failure-queue-visible",
+                ],
             },
             "alerting": {
                 "alarmsActive": True,
-                "snsSubscriptionConfirmed": True,
+                "encryptedRouteBound": True,
                 "externalPagingDeliveryTested": True,
                 "lastPagingTestAt": iso(),
                 "pagingDelivery": {
@@ -505,17 +508,25 @@ def valid_facts() -> dict[str, dict]:
                     "runAttempt": 6,
                     "artifactId": 406,
                     "artifactName": (
-                        f"production-paging-delivery-{RELEASE}-6"
+                        f"production-alarm-delivery-{RELEASE}-405"
                     ),
                     "artifactDigest": DIGEST,
                     "predicateType": (
-                        "https://archon.datahub.dev/attestations/"
-                        "production-paging-delivery/v1"
+                        "https://github.com/upgradedev/archon-datahub/"
+                        "attestations/production-alarm-delivery/v2"
                     ),
                     "predicateDigest": DIGEST,
-                    "observedAt": iso(),
-                    "topicArnSha256": DIGEST,
-                    "subscriptionArnSha256": ALT_DIGEST,
+                    "provedAt": iso(),
+                    "route": "CloudWatch->SNS(KMS)->SQS(KMS)",
+                    "checks": {
+                        "exactAlarm": True,
+                        "alarmTransition": True,
+                        "topicBinding": True,
+                        "encryptedProofQueue": True,
+                        "endToEndDelivery": True,
+                        "cleanupRegistered": True,
+                    },
+                    "deliveryDigest": DIGEST,
                 },
             },
             "recovery": {
@@ -534,7 +545,7 @@ def valid_facts() -> dict[str, dict]:
                     "artifactDigest": DIGEST,
                     "predicateType": (
                         "https://github.com/upgradedev/archon-datahub/"
-                        "attestations/governed-canary/v1"
+                        "attestations/governed-canary-cloud-v2"
                     ),
                     "predicateDigest": DIGEST,
                     "verifiedAt": iso(),
@@ -570,12 +581,12 @@ def valid_facts() -> dict[str, dict]:
                 },
             },
             "monitoringWindow": {
-                "schedule": "17 */6 * * *",
+                "schedule": "*/30 * * * *",
+                "maximumExpectedGapMinutes": 90,
                 "active": True,
                 "through": "2026-08-31T21:00:00Z",
             },
-        },
-        "SQ11": {
+        },        "SQ11": {
             "rules": {
                 **copy.deepcopy(rules),
                 "judgingStart": "2026-08-17T14:00:00Z",
@@ -1234,8 +1245,15 @@ rejects_mutation(
 )
 rejects_mutation(
     "SQ10",
-    lambda value: value["alerting"].update(externalPagingDeliveryTested=False),
+    lambda value: value["alerting"].update(
+        externalPagingDeliveryTested=False
+    ),
     "SQ10 accepted untested external paging",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["alerting"].update(encryptedRouteBound=False),
+    "SQ10 accepted an unbound encrypted alarm route",
 )
 rejects_mutation(
     "SQ10",
@@ -1254,9 +1272,9 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["alerting"]["pagingDelivery"].update(
-        artifactName=f"production-paging-delivery-{RELEASE}-5"
+        artifactName=f"production-alarm-delivery-{RELEASE}-404"
     ),
-    "SQ10 accepted paging provenance for a different producer attempt",
+    "SQ10 accepted paging provenance for a different run ID",
 )
 rejects_mutation(
     "SQ10",
@@ -1268,16 +1286,51 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["alerting"]["pagingDelivery"].update(
-        topicArnSha256=ALT_DIGEST
+        route="CloudWatch->SNS"
     ),
-    "SQ10 accepted paging and posture evidence for different topics",
+    "SQ10 accepted a truncated alarm-delivery route",
 )
 rejects_mutation(
     "SQ10",
-    lambda value: value["posture"]["alarmInventory"].update(
-        allActionsEnabled=False
+    lambda value: value["alerting"]["pagingDelivery"]["checks"].update(
+        encryptedProofQueue=False
     ),
-    "SQ10 accepted disabled production alarm actions",
+    "SQ10 accepted an unencrypted alarm proof queue",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"]["checks"].update(
+        alarmsNotFiring=False
+    ),
+    "SQ10 accepted firing production alarms",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        alarmNames=["archon-production-control-plane-errors"]
+    ),
+    "SQ10 accepted an incomplete lean alarm inventory",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["availability"].update(
+        observationDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid availability observation digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        observationDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid posture observation digest",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["posture"].update(
+        driftEvidenceDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid drift evidence digest",
 )
 rejects_mutation(
     "SQ10",
@@ -1327,9 +1380,23 @@ rejects_mutation(
 rejects_mutation(
     "SQ10",
     lambda value: value["availability"].update(
-        observedAt=iso(NOW - dt.timedelta(hours=8))
+        observedAt=iso(NOW - dt.timedelta(hours=2))
     ),
     "SQ10 accepted a stale availability observation",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["monitoringWindow"].update(
+        schedule="17 */6 * * *"
+    ),
+    "SQ10 accepted a legacy availability cadence",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["monitoringWindow"].update(
+        maximumExpectedGapMinutes=420
+    ),
+    "SQ10 accepted a widened availability gap",
 )
 rejects_sq10_cross_mutation(
     lambda value: value["recovery"]["governedCanary"].update(
@@ -1389,8 +1456,7 @@ rejects_sq10_cross_mutation(
         validThrough="2026-09-01T21:00:00Z"
     ),
     "SQ10 accepted judge-access validity different from its SQ4 evidence",
-)
-rejects_content_cross_mutation(
+)rejects_content_cross_mutation(
     "SQ7",
     lambda value: value.update(
         reviewedAt=iso(NOW - dt.timedelta(minutes=1))
