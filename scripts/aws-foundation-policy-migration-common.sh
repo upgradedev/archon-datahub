@@ -316,7 +316,6 @@ render_policy_documents() {
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" || fail "The migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered assets policy exceeds the managed-policy document limit"
-
 }
 verify_recovery_role_baseline() {
   local role="${WORK_ROOT}/recovery-role.json"
