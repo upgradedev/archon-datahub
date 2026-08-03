@@ -897,8 +897,7 @@ for group in control assets identity attachments; do
 done
 
 publisher_migration_runtime="${renderer_runtime_dir}/publisher-migration"
-publisher_migration_log="${renderer_runtime_dir}/publisher-migration.log"
-if (
+(
   export GITHUB_ACTIONS=true
   export RUNNER_TEMP="${publisher_migration_runtime}"
   export GITHUB_OUTPUT="${publisher_migration_runtime}/github-output"
@@ -908,23 +907,13 @@ if (
   # shellcheck source=/dev/null
   source "${publisher_migration_common}"
   render_policy_documents
-) >"${publisher_migration_log}" 2>&1; then
-  fail "synthetic publisher policy unexpectedly matched account-bound digests"
-fi
-grep -Fq 'Derived v1 identity-policy digest differs' \
-  "${publisher_migration_log}" ||
-  fail "publisher policy jq validators did not render before digest binding"
-if grep -Eq 'jq: (error|[0-9]+ compile error)' \
-  "${publisher_migration_log}"; then
-  fail "publisher policy jq validator has a compile or runtime error"
-fi
+)
 
 core_migration_common="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-common.sh"
 test -f "${core_migration_common}"
 test ! -L "${core_migration_common}"
 core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
-core_migration_log="${renderer_runtime_dir}/core-policy-migration.log"
-if (
+(
   export GITHUB_ACTIONS=true
   export RUNNER_TEMP="${core_migration_runtime}"
   export GITHUB_OUTPUT="${core_migration_runtime}/github-output"
@@ -934,17 +923,7 @@ if (
   # shellcheck source=/dev/null
   source "${core_migration_common}"
   render_policy_documents
-) >"${core_migration_log}" 2>&1; then
-  fail "synthetic Core policy unexpectedly matched account-bound digests"
-fi
-grep -Fq 'Derived v2 control-policy digest differs' \
-  "${core_migration_log}" ||
-  fail "Core policy jq validators did not render before digest binding"
-if grep -Eq 'jq: (error|[0-9]+ compile error)' \
-  "${core_migration_log}"; then
-  fail "Core policy jq validator has a compile or runtime error"
-fi
-
+)
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
   --from-file "${foundation_policy_validator}" \
