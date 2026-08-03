@@ -39,22 +39,91 @@
       {
         "versionId": "v2",
         "isDefault": true,
-        "canonicalSha256": "c04fa232282c099ddf1c311f239ac9f2080f1a0c41e3c5e4420d0c061a707137"
+        "canonicalSha256": "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b"
       }
     ],
+    "baselineProvenance": {
+      "role": "last-known-good-successful-control-policy-validation",
+      "sourceRevision": "270846e6a2acc849e755627e101252b02216d924",
+      "workflow": {
+        "path": ".github/workflows/aws-foundation.yml",
+        "blobSha": "44050799845adae8cbfbbae95a3e4e8124489a50",
+        "runId": 30620980994,
+        "attempt": 1,
+        "jobId": 91125214676,
+        "event": "workflow_dispatch",
+        "headBranch": "master",
+        "conclusion": "success"
+      },
+      "artifact": {
+        "id": 8789473042,
+        "name": "aws-foundation-270846e6a2acc849e755627e101252b02216d924-30620980994-1",
+        "digest": "sha256:c1a6354cc33a0dd60fdcb6995b7ec0f633db6b88ddf758d1b09a73b9603efdc9",
+        "sizeBytes": 19004
+      },
+      "inputs": {
+        "policyBundle": {
+          "path": "infra/aws/foundation/github-actions-foundation-policy.json",
+          "blobSha": "dacf1b901ec350cc75543a663f309c7ba9bd5ce5"
+        },
+        "renderer": {
+          "path": "scripts/render-aws-foundation-policy.mjs",
+          "blobSha": "c33c5f83c35cd79f656f7f69161182f6fb4f830b",
+          "group": "control"
+        },
+        "reconciler": {
+          "path": "scripts/reconcile-aws-foundation.sh",
+          "blobSha": "cdba551bebdce4f5b179fd2a07126893af37a368"
+        },
+        "foundationContract": {
+          "path": "contracts/aws-foundation-v1.json",
+          "blobSha": "867895fbbb85aadfb0728aa0f009211c2f6d0ce8"
+        }
+      },
+      "validation": {
+        "defaultVersionId": "v2",
+        "canonicalReadback": true
+      }
+    },
     "target": {
       "expectedVersionId": "v3",
       "canonicalSha256": "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33"
     },
     "retainBaselineVersionsForRollback": true,
-    "exactDeltaSids": [
-      "ReconcileExactCoreAmiFoundationStack",
-      "ReconcileExactCoreAmiFoundationRoles",
-      "ReconcileExactCoreAmiBuilderProfile",
-      "AttachExactCoreAmiBuilderSsmPolicy",
-      "PassExactCoreAmiBuilderRoleForProfile"
-    ],
-    "noOtherStatementChange": true,
+    "exactDelta": {
+      "newStatementSids": [
+        "ReconcileExactCoreAmiFoundationStack",
+        "ReconcileExactCoreAmiFoundationRoles",
+        "ReconcileExactCoreAmiBuilderProfile",
+        "AttachExactCoreAmiBuilderSsmPolicy",
+        "PassExactCoreAmiBuilderRoleForProfile"
+      ],
+      "resourceReplacements": [
+        {
+          "statementSid": "InspectExistingApplicationStackRoles",
+          "effect": "Allow",
+          "actions": [
+            "cloudformation:DescribeStacks"
+          ],
+          "baselineResources": [
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Registry/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*"
+          ],
+          "targetResources": [
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Core/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Judge/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Core/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Judge/*"
+          ]
+        }
+      ],
+      "noOtherStatementChange": true
+    },
     "maximumDocumentBytes": 6144
   },
   "authorization": {
