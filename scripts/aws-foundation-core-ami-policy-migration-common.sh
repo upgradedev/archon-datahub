@@ -157,21 +157,88 @@ validate_common() {
         versionId: "v2"
       }
     ] and
-    .policy.target == {
+    .policy.baselineProvenance == {
+      role: "last-known-good-successful-control-policy-validation",
+      sourceRevision: "270846e6a2acc849e755627e101252b02216d924",
+      workflow: {
+        path: ".github/workflows/aws-foundation.yml",
+        blobSha: "44050799845adae8cbfbbae95a3e4e8124489a50",
+        runId: 30620980994,
+        attempt: 1,
+        jobId: 91125214676,
+        event: "workflow_dispatch",
+        headBranch: "master",
+        conclusion: "success"
+      },
+      artifact: {
+        id: 8789473042,
+        name: "aws-foundation-270846e6a2acc849e755627e101252b02216d924-30620980994-1",
+        digest:
+          "sha256:c1a6354cc33a0dd60fdcb6995b7ec0f633db6b88ddf758d1b09a73b9603efdc9",
+        sizeBytes: 19004
+      },
+      inputs: {
+        policyBundle: {
+          path:
+            "infra/aws/foundation/github-actions-foundation-policy.json",
+          blobSha: "dacf1b901ec350cc75543a663f309c7ba9bd5ce5"
+        },
+        renderer: {
+          path: "scripts/render-aws-foundation-policy.mjs",
+          blobSha: "c33c5f83c35cd79f656f7f69161182f6fb4f830b",
+          group: "control"
+        },
+        reconciler: {
+          path: "scripts/reconcile-aws-foundation.sh",
+          blobSha: "cdba551bebdce4f5b179fd2a07126893af37a368"
+        },
+        foundationContract: {
+          path: "contracts/aws-foundation-v1.json",
+          blobSha: "867895fbbb85aadfb0728aa0f009211c2f6d0ce8"
+        }
+      },
+      validation: {
+        defaultVersionId: "v2",
+        canonicalReadback: true
+      }
+    } and    .policy.target == {
       canonicalSha256:
         "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33",
       expectedVersionId: "v3"
     } and
     .policy.retainBaselineVersionsForRollback == true and
-    .policy.exactDeltaSids == [
-      "ReconcileExactCoreAmiFoundationStack",
-      "ReconcileExactCoreAmiFoundationRoles",
-      "ReconcileExactCoreAmiBuilderProfile",
-      "AttachExactCoreAmiBuilderSsmPolicy",
-      "PassExactCoreAmiBuilderRoleForProfile"
-    ] and
-    .policy.noOtherStatementChange == true and
-    .policy.maximumDocumentBytes == 6144 and
+    .policy.exactDelta == {
+      newStatementSids: [
+        "ReconcileExactCoreAmiFoundationStack",
+        "ReconcileExactCoreAmiFoundationRoles",
+        "ReconcileExactCoreAmiBuilderProfile",
+        "AttachExactCoreAmiBuilderSsmPolicy",
+        "PassExactCoreAmiBuilderRoleForProfile"
+      ],
+      resourceReplacements: [
+        {
+          statementSid: "InspectExistingApplicationStackRoles",
+          effect: "Allow",
+          actions: ["cloudformation:DescribeStacks"],
+          baselineResources: [
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-Registry/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*"
+          ],
+          targetResources: [
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-staging-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Core/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-staging-Judge/*",
+            "arn:aws:cloudformation:us-east-1:${aws:PrincipalAccount}:stack/Archon-production-Edge/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Core/*",
+            "arn:aws:cloudformation:eu-west-1:${aws:PrincipalAccount}:stack/Archon-production-Judge/*"
+          ]
+        }
+      ],
+      noOtherStatementChange: true
+    } and    .policy.maximumDocumentBytes == 6144 and
     .authorization.foundationRoleName ==
       "archon-datahub-github-foundation" and
     .authorization.executorRoleName ==
@@ -242,6 +309,87 @@ verify_caller() {
     ' "${identity}" >/dev/null || fail "AWS migration caller identity differs"
 }
 
+validate_policy_delta() {
+  local new_policy="$1"
+  local old_policy="$2"
+  jq -e \
+    --arg account "${AWS_ACCOUNT_ID}" \
+    --slurpfile contract "${CONTRACT}" \
+    --slurpfile previous "${old_policy}" '
+      def bind_resources:
+        map(gsub("\\$\\{aws:PrincipalAccount\\}"; $account)) | sort;
+      . as $new |
+      ($previous[0]) as $old |
+      ($contract[0].policy.exactDelta) as $delta |
+      ($delta.newStatementSids) as $newSids |
+      ($delta.resourceReplacements) as $replacements |
+      ($replacements[0]) as $replacement |
+      ($replacement.statementSid) as $replacementSid |
+      ($replacement.baselineResources | bind_resources) as $baselineResources |
+      ($replacement.targetResources | bind_resources) as $targetResources |
+      ([$new.Statement[] | select(.Sid == $replacementSid)]) as
+        $newReplacement |
+      ([$old.Statement[] | select(.Sid == $replacementSid)]) as
+        $oldReplacement |
+      $new.Version == "2012-10-17" and
+      $old.Version == "2012-10-17" and
+      ($new.Statement | type == "array" and length > 0) and
+      ($old.Statement | type == "array" and length > 0) and
+      ($new.Statement | map(.Sid) | length) ==
+        ($new.Statement | map(.Sid) | unique | length) and
+      ($old.Statement | map(.Sid) | length) ==
+        ($old.Statement | map(.Sid) | unique | length) and
+      ($newSids | length) == 5 and
+      ($newSids | unique | length) == 5 and
+      ($replacements | length) == 1 and
+      ($newSids | index($replacementSid)) == null and
+      ($baselineResources | length) ==
+        ($baselineResources | unique | length) and
+      ($targetResources | length) ==
+        ($targetResources | unique | length) and
+      $baselineResources != $targetResources and
+      ($new.Statement | length) ==
+        (($old.Statement | length) + ($newSids | length)) and
+      ($newReplacement | length) == 1 and
+      ($oldReplacement | length) == 1 and
+      $newReplacement[0] == {
+        Sid: $replacementSid,
+        Effect: $replacement.effect,
+        Action: ($replacement.actions | sort),
+        Resource: $targetResources
+      } and
+      $oldReplacement[0] == {
+        Sid: $replacementSid,
+        Effect: $replacement.effect,
+        Action: ($replacement.actions | sort),
+        Resource: $baselineResources
+      } and
+      all($newSids[];
+        . as $sid |
+        ([$new.Statement[] | select(.Sid == $sid)] | length) == 1 and
+        ([$old.Statement[] | select(.Sid == $sid)] | length) == 0) and
+      ([$new.Statement[] |
+        . as $statement |
+        select(
+          ($newSids | index($statement.Sid)) == null and
+          $statement.Sid != $replacementSid
+        )] ==
+        [$old.Statement[] |
+          select(.Sid != $replacementSid)]) and
+      all([$new.Statement[] |
+        . as $statement |
+        select(($newSids | index($statement.Sid)) != null)][];
+        .Effect == "Allow" and
+        ((.Action | if type == "array" then . else [.] end) |
+          all(.[];
+            startswith("iam:") or startswith("cloudformation:"))) and
+        ((.Resource | if type == "array" then . else [.] end) |
+          all(.[]; . != "*"))) and
+      $delta.noOtherStatementChange == true
+    ' "${new_policy}" >/dev/null ||
+      fail "The Core AMI control-policy delta is not exact"
+}
+
 render_policy_documents() {
   NEW_POLICY="${WORK_ROOT}/control-new.json"
   OLD_POLICY="${WORK_ROOT}/control-previous.json"
@@ -257,49 +405,32 @@ render_policy_documents() {
   }
   chmod 0600 "${raw}" "${NEW_POLICY}"
   local old_raw="${WORK_ROOT}/control-previous.raw.json"
-  jq -cS --slurpfile contract "${CONTRACT}" '
-    ($contract[0].policy.exactDeltaSids) as $deltaSids |
-    .Statement |= map(
-      . as $statement |
-      select(($deltaSids | index($statement.Sid)) == null)
-    )
-  ' "${NEW_POLICY}" >"${old_raw}" || {
-    fail "Unable to derive the exact previous control policy"
-    return 1
-  }
+  jq -cS \
+    --arg account "${AWS_ACCOUNT_ID}" \
+    --slurpfile contract "${CONTRACT}" '
+      def bind_resources:
+        map(gsub("\\$\\{aws:PrincipalAccount\\}"; $account)) | sort;
+      ($contract[0].policy.exactDelta.newStatementSids) as $newSids |
+      ($contract[0].policy.exactDelta.resourceReplacements[0]) as
+        $replacement |
+      ($replacement.baselineResources | bind_resources) as
+        $baselineResources |
+      .Statement |= map(
+        . as $statement |
+        select(($newSids | index($statement.Sid)) == null) |
+        if .Sid == $replacement.statementSid then
+          .Resource = $baselineResources
+        else
+          .
+        end
+      )
+    ' "${NEW_POLICY}" >"${old_raw}" || {
+      fail "Unable to derive the exact previous control policy"
+      return 1
+    }
   canonical_iam_policy "${old_raw}" >"${OLD_POLICY}" || return 1
   chmod 0600 "${old_raw}" "${OLD_POLICY}"
-  jq -e \
-    --slurpfile contract "${CONTRACT}" \
-    --slurpfile previous "${OLD_POLICY}" '
-      . as $new |
-      ($contract[0].policy.exactDeltaSids) as $deltaSids |
-      ($previous[0]) as $old |
-      .Version == "2012-10-17" and
-      (.Statement | type == "array" and length > 0) and
-      ($deltaSids | length) == 5 and
-      ($deltaSids | unique | length) == 5 and
-      ($new.Statement | length) ==
-        (($old.Statement | length) + ($deltaSids | length)) and
-      all($deltaSids[];
-        . as $sid |
-        ([$new.Statement[] | select(.Sid == $sid)] | length) == 1 and
-        ([$old.Statement[] | select(.Sid == $sid)] | length) == 0) and
-      ([$new.Statement[] |
-        . as $statement |
-        select(($deltaSids | index($statement.Sid)) == null)] ==
-        $old.Statement) and
-      all([$new.Statement[] |
-        . as $statement |
-        select(($deltaSids | index($statement.Sid)) != null)][];
-        .Effect == "Allow" and
-        ((.Action | if type == "array" then . else [.] end) |
-          all(.[];
-            startswith("iam:") or startswith("cloudformation:"))) and
-        ((.Resource | if type == "array" then . else [.] end) |
-          all(.[]; . != "*")))
-    ' "${NEW_POLICY}" >/dev/null ||
-      fail "The Core AMI control-policy delta is not exact"
+  validate_policy_delta "${NEW_POLICY}" "${OLD_POLICY}"
   NEW_POLICY_SHA="$(iam_policy_sha "${NEW_POLICY}")"
   OLD_POLICY_SHA="$(iam_policy_sha "${OLD_POLICY}")"
   HISTORICAL_POLICY_SHA="$(
@@ -324,8 +455,7 @@ render_policy_documents() {
     fail "The Core AMI control-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered control policy exceeds the managed-policy limit"
-}
-verify_recovery_role_baseline() {
+}verify_recovery_role_baseline() {
   local role="${WORK_ROOT}/recovery-role.json"
   local inline="${WORK_ROOT}/recovery-inline.json"
   local attached="${WORK_ROOT}/recovery-attached.json"
