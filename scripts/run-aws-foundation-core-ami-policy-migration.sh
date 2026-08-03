@@ -42,13 +42,14 @@ classify_rollback_source_state() {
     return 1
   fi
 }
+
 prepare() {
   validate_common
   : "${AUTHORIZATION_MODE:?AUTHORIZATION_MODE is required}"
   : "${EXPIRES_AT:?EXPIRES_AT is required}"
   render_policy_documents
   verify_caller "${FOUNDATION_ROLE_NAME}"
-  local historical_version old_version source_state snapshot
+  local candidate_version historical_version old_version source_state snapshot
   local new_version=""
   if [[ "${AUTHORIZATION_MODE}" == migrate ]]; then
     verify_recovery_role_baseline
@@ -88,6 +89,7 @@ prepare() {
     printf 'temp_policy_sha=%s\n' "${TEMP_POLICY_SHA}"
   } >>"${GITHUB_OUTPUT}"
 }
+
 migrate() {
   validate_common
   : "${EXPECTED_EXPIRES_AT:?EXPECTED_EXPIRES_AT is required}"
@@ -137,7 +139,7 @@ migrate() {
     fail "Unable to perform the single reviewed target default switch"
     return 1
   fi
-  wait_for_state migrated
+  wait_for_state migrated || return 1
   local final
   final="$(require_migrated_state migrate-final)" || return 1
   mapfile -t final_versions <<<"${final}"
@@ -148,6 +150,7 @@ migrate() {
     printf 'old_version_id=v2\n'
   } >>"${GITHUB_OUTPUT}"
 }
+
 rollback() {
   validate_common
   : "${AUTHORIZATION_MODE:?AUTHORIZATION_MODE is required}"
@@ -177,6 +180,7 @@ rollback() {
     printf 'old_version_id=v2\n'
   } >>"${GITHUB_OUTPUT}"
 }
+
 write_receipt() {
   local expected_state="$1"
   local evidence_dir="${WORK_ROOT}/evidence"
@@ -192,14 +196,27 @@ write_receipt() {
       return 1
     fi
   fi
-  local current_version result snapshot target_version=""
+  local current_version result snapshot
+  local target_version="${EXPECTED_NEW_VERSION_ID:-}"
   local -a receipt_versions=()
+  if [[ -n "${target_version}" ]]; then
+    is_target_version_id "${target_version}" || {
+      fail "The expected receipt target version ID is invalid"
+      return 1
+    }
+  fi
   case "${expected_state}" in
     migrated)
       snapshot="$(require_migrated_state receipt-migrated)" || return 1
       mapfile -t receipt_versions <<<"${snapshot}"
-      target_version="${receipt_versions[2]}"
-      is_target_version_id "${target_version}" || return 1
+      local observed_target_version="${receipt_versions[2]}"
+      is_target_version_id "${observed_target_version}" || return 1
+      if [[ -n "${target_version}" &&
+        "${target_version}" != "${observed_target_version}" ]]; then
+        fail "Receipt target version changed after authorization"
+        return 1
+      fi
+      target_version="${observed_target_version}"
       current_version="${target_version}"
       result=reviewed-target-default-v1-v2-retained
       ;;
@@ -238,6 +255,7 @@ write_receipt() {
           name: "archon-aws-foundation-control",
           new: {
             documentSha256: $newPolicySha,
+            present: ($state == "migrated"),
             version:
               (if $targetVersion == "" then null else $targetVersion end),
             versionIdStrategy: "aws-assigned-monotonic"
@@ -292,6 +310,7 @@ write_receipt() {
     printf 'predicate=%s\n' "${evidence_dir}/attestation-predicate.json"
   } >>"${GITHUB_OUTPUT}"
 }
+
 revoke() {
   validate_common
   : "${EXPECTED_STATE:?EXPECTED_STATE is required}"
