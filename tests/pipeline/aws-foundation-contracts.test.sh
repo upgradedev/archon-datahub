@@ -896,6 +896,28 @@ for group in control assets identity attachments; do
   )"
 done
 
+publisher_migration_runtime="${renderer_runtime_dir}/publisher-migration"
+publisher_migration_log="${renderer_runtime_dir}/publisher-migration.log"
+if (
+  export GITHUB_ACTIONS=true
+  export RUNNER_TEMP="${publisher_migration_runtime}"
+  export GITHUB_OUTPUT="${publisher_migration_runtime}/github-output"
+  export AWS_ACCOUNT_ID=123456789012
+  mkdir -p "${RUNNER_TEMP}"
+  : >"${GITHUB_OUTPUT}"
+  # shellcheck source=/dev/null
+  source "${publisher_migration_common}"
+  render_policy_documents
+) >"${publisher_migration_log}" 2>&1; then
+  fail "synthetic publisher policy unexpectedly matched account-bound digests"
+fi
+grep -Fq 'Derived v1 identity-policy digest differs' \
+  "${publisher_migration_log}" ||
+  fail "publisher policy jq validators did not render before digest binding"
+if grep -Eq 'jq: (error|[0-9]+ compile error)' \
+  "${publisher_migration_log}"; then
+  fail "publisher policy jq validator has a compile or runtime error"
+fi
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
   --from-file "${foundation_policy_validator}" \
