@@ -222,6 +222,13 @@ validate_common() {
     .recovery.automaticFollowerOnNonSuccess == true and
     .recovery.manualDispatch == true and
     .recovery.manualDispatchMode == "cleanup-rollback" and
+    .recovery.manualMigratedSeal == {
+      confirmation:
+        "SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY",
+      mode: "cleanup-migrated",
+      installsAuthorization: false,
+      managedPolicyMutationAllowed: false
+    } and
     .recovery.freshRollbackOnlyAuthorization == true and
     .recovery.rollbackToPreviousDefault == true and
     .recovery.deleteOnlyNewNondefaultVersion == true and
