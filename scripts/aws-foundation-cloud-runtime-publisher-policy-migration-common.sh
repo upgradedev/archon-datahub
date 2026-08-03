@@ -378,6 +378,7 @@ render_policy_documents() {
 }
 
 verify_recovery_role_baseline() {
+  local expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
   local role="${WORK_ROOT}/recovery-role.json"
   local inline="${WORK_ROOT}/recovery-inline.json"
   local attached="${WORK_ROOT}/recovery-attached.json"
@@ -386,7 +387,7 @@ verify_recovery_role_baseline() {
     iam get-role --role-name "${RECOVERY_ROLE_NAME}" --output json
   jq -e \
     --arg account "${AWS_ACCOUNT_ID}" \
-    --arg roleArn "${RECOVERY_ROLE_ARN}" '
+    --arg roleArn "${expected_role_arn}" '
       .Role.Arn == $roleArn and
       .Role.RoleName == "archon-datahub-github-governed-canary-recovery" and
       .Role.MaxSessionDuration == 3600 and
