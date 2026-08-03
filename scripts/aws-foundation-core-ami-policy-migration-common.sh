@@ -324,7 +324,6 @@ render_policy_documents() {
     fail "The Core AMI control-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered control policy exceeds the managed-policy limit"
-
 }
 verify_recovery_role_baseline() {
   local role="${WORK_ROOT}/recovery-role.json"
