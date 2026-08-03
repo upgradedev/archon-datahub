@@ -171,7 +171,7 @@ jobs:
               .id == $runId and
               .name == "DataHub companion OCI" and
               .path == ".github/workflows/datahub-companion-image.yml" and
-              .event == "push" and
+              (.event == "push" or .event == "workflow_dispatch") and
               .head_branch == "master" and
               .head_repository.full_name == $repository and
               .head_sha == $sourceSha and
@@ -187,10 +187,14 @@ jobs:
               '
           )"
           test "$(jq 'length' <<<"${artifact_json}")" = "1"
-          echo "artifact_name=${artifact_name}" >>"${GITHUB_OUTPUT}"
+          artifact_id="$(jq -er '
+            .[0].id | select(type == "number" and . > 0)
+          ' <<<"${artifact_json}")"
+          [[ "${artifact_id}" =~ ^[1-9][0-9]*$ ]]
+          echo "artifact_id=${artifact_id}" >>"${GITHUB_OUTPUT}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ steps.companion.outputs.artifact_name }}
+          artifact-ids: ${{ steps.companion.outputs.artifact_id }}
           path: ${{ runner.temp }}/companion
           github-token: ${{ github.token }}
           run-id: ${{ inputs.companion_run_id }}
@@ -475,6 +479,22 @@ jobs:
           set -euo pipefail
           [[ "${ACTIONABLE_TOTAL}" =~ ^[0-9]+$ ]]
           test "${ACTIONABLE_TOTAL}" = "0"
+      - name: Revalidate exact signed master immediately before AWS OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.companion_source_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/master"
+          test "${GITHUB_SHA}" = "${SOURCE_SHA}"
+          test "$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" --jq .object.sha
+          )" = "${SOURCE_SHA}"
+          commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}")"
+          jq --exit-status '
+            .commit.verification.verified == true and
+            .commit.verification.reason == "valid"
+          ' <<<"${commit}" >/dev/null
       - name: Configure staging AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
