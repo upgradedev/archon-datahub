@@ -406,7 +406,8 @@ jobs:
               "ReconcileExactCoreAmiBuilderProfile",
               "AttachExactCoreAmiBuilderSsmPolicy",
               "PassExactCoreAmiBuilderRoleForProfile"
-            ] and            .aws.coreAmiFoundation.policyMigration.replacementSids == [
+            ] and
+            .aws.coreAmiFoundation.policyMigration.replacementSids == [
               "InspectExistingApplicationStackRoles"
             ] and
             .aws.coreAmiFoundation.githubBuildRole.roleName ==
