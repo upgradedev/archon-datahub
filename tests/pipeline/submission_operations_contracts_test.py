@@ -330,6 +330,7 @@ def validate_workflow(source: str) -> None:
         "dt.timedelta(days=7)",
         '"archon-production-control-plane-errors"',
         '"archon-production-runtime-failure-queue-visible"',
+        '"alarmsNotFiring": True',
         '"CloudWatch->SNS(KMS)->SQS(KMS)"',
         '"encryptedRouteBound": True',
         '"externalPagingDeliveryTested": True',
