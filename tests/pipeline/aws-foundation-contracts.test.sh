@@ -132,6 +132,24 @@ for path in \
   test ! -L "${path}" || fail "${path#${repository_root}/} must be a regular file"
 done
 
+foundation_validator_call="$(
+  grep -F -B1 -A4 -- \
+    '            --slurpfile migration \' \
+    "${foundation_workflow}"
+)"
+expected_foundation_validator_call="$(
+  printf '%s\n' \
+    '          jq -e \' \
+    '            --slurpfile migration \' \
+    '              contracts/aws-foundation-policy-migration-v1.json \' \
+    '            --from-file scripts/validate-aws-foundation-policy.jq \' \
+    '            infra/aws/foundation/github-actions-foundation-policy.json \' \
+    '            >/dev/null'
+)"
+test "${foundation_validator_call}" = \
+  "${expected_foundation_validator_call}" ||
+  fail "Foundation workflow policy-validator invocation differs"
+
 node --test \
   "${failure_sanitizer_test}" \
   "${iam_resource_arn_verifier_test}"
