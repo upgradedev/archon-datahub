@@ -2279,7 +2279,7 @@ def validate_facts(
                 "https://github.com/upgradedev/archon-datahub/attestations/"
                 "production-availability/v2"
             ),
-            extra_fields=frozenset({"observedAt", "result"}),
+            extra_fields=frozenset({"observedAt", "result", "observationDigest"}),
         )
         fresh(
             availability["observedAt"],
@@ -2287,6 +2287,10 @@ def validate_facts(
             dt.timedelta(minutes=90),
         )
         exact(availability["result"], "passed", f"{label}.availability.result")
+        sha256_digest(
+            availability["observationDigest"],
+            f"{label}.availability.observationDigest",
+        )
         posture = validate_exact_provenance_binding(
             facts["posture"],
             f"{label}.posture",
@@ -2302,6 +2306,7 @@ def validate_facts(
                     "observedAt",
                     "result",
                     "checks",
+                    "observationDigest",
                     "driftEvidenceDigest",
                     "alarmNames",
                 }
@@ -2321,6 +2326,10 @@ def validate_facts(
             f"{label}.posture.checks",
         )
         sha256_digest(
+            posture["observationDigest"],
+            f"{label}.posture.observationDigest",
+        )
+        sha256_digest(
             posture["driftEvidenceDigest"],
             f"{label}.posture.driftEvidenceDigest",
         )
@@ -2336,8 +2345,8 @@ def validate_facts(
             facts["alerting"],
             {
                 "alarmsActive",
-                "snsSubscriptionConfirmed",
-                "endToEndAlarmDeliveryTested",
+                "encryptedRouteBound",
+                "externalPagingDeliveryTested",
                 "lastPagingTestAt",
                 "pagingDelivery",
             },
@@ -2345,8 +2354,8 @@ def validate_facts(
         )
         for key in (
             "alarmsActive",
-            "snsSubscriptionConfirmed",
-            "endToEndAlarmDeliveryTested",
+            "encryptedRouteBound",
+            "externalPagingDeliveryTested",
         ):
             exact(alerting[key], True, f"{label}.alerting.{key}")
         paging_delivery = validate_exact_provenance_binding(
@@ -3785,6 +3794,7 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
                 ],
                 "observedAt": sq3_observation["availabilityObservedAt"],
                 "result": "passed",
+                "observationDigest": sq10_availability["observationDigest"],
             },
             "SQ3/SQ10 availability source binding",
         )
