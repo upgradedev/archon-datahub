@@ -53,6 +53,7 @@ jobs:
       historical_policy_sha: ${{ steps.prepare.outputs.historical_policy_sha }}
       historical_version_id: ${{ steps.prepare.outputs.historical_version_id }}
       new_policy_sha: ${{ steps.prepare.outputs.new_policy_sha }}
+      new_version_id: ${{ steps.prepare.outputs.new_version_id }}
       old_policy_sha: ${{ steps.prepare.outputs.old_policy_sha }}
       old_version_id: ${{ steps.prepare.outputs.old_version_id }}
       source_state: ${{ steps.prepare.outputs.source_state }}
@@ -138,6 +139,8 @@ jobs:
       contents: read
       deployments: read
       id-token: write
+    outputs:
+      new_version_id: ${{ steps.migrate.outputs.new_version_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -219,6 +222,8 @@ jobs:
       contents: read
       deployments: read
       id-token: write
+    outputs:
+      new_version_id: ${{ steps.rollback.outputs.new_version_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,6 +279,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_CANARY_RECOVERY_ROLE_ARN: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
           CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_NEW_VERSION_ID: ${{ needs.prepare.outputs.new_version_id }}
           EXPECTED_TEMP_POLICY_SHA: ${{ needs.prepare.outputs.temp_policy_sha }}
         run: bash scripts/run-aws-foundation-core-ami-policy-migration.sh rollback
 
@@ -361,6 +367,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
           AWS_FOUNDATION_ROLE_ARN: ${{ vars.AWS_FOUNDATION_ROLE_ARN }}
           CONTROL_PLANE_SHA: ${{ inputs.expected_head_sha }}
+          EXPECTED_NEW_VERSION_ID: ${{ needs.rollback.outputs.new_version_id || needs.migrate.outputs.new_version_id || needs.prepare.outputs.new_version_id }}
           MIGRATE_RESULT: ${{ needs.migrate.result }}
           OPERATION: ${{ inputs.operation }}
         run: |
@@ -437,15 +444,19 @@ jobs:
           done
           (cd "${EVIDENCE_DIR}" && sha256sum --check --strict SHA256SUMS)
           jq -e '
+            def target_version:
+              type == "string" and
+              test("^v[1-9][0-9]*$") and
+              . != "v1" and . != "v2";
             .schemaVersion ==
-              "archon.aws-foundation-core-ami-policy-migration-receipt/v1" and
+              "archon.aws-foundation-core-ami-policy-migration-receipt/v2" and
             .repository == "upgradedev/archon-datahub" and
             .authorization == {absenceReadCount: 3, state: "absent"} and
             (.controlPlaneSha | test("^[0-9a-f]{40}$")) and
             .policy.name == "archon-aws-foundation-control" and
             .policy.historical.version == "v1" and
             .policy.previousDefault.version == "v2" and
-            .policy.new.version == "v3" and
+            .policy.new.versionIdStrategy == "aws-assigned-monotonic" and
             (.policy.historical.documentSha256 |
               test("^sha256:[a-f0-9]{64}$")) and
             (.policy.previousDefault.documentSha256 |
@@ -454,18 +465,22 @@ jobs:
               test("^sha256:[a-f0-9]{64}$")) and
             (
               (.policy.state == "migrated" and
-               .policy.currentDefaultVersion == "v3") or
+               .policy.new.present == true and
+               (.policy.new.version | target_version) and
+               .policy.currentDefaultVersion == .policy.new.version) or
               (.policy.state == "rolled-back" and
+               .policy.new.present == false and
+               (.policy.new.version == null or
+                (.policy.new.version | target_version)) and
                .policy.currentDefaultVersion == "v2")
             )
           ' "${EVIDENCE_DIR}/migration.json" >/dev/null
-
       - name: Attest sanitized migration receipt
         if: steps.evidence.outcome == 'success'
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-checksums: ${{ steps.revoke.outputs.checksums }}
-          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-foundation-core-ami-policy-migration/v1
+          predicate-type: https://github.com/upgradedev/archon-datahub/attestations/aws-foundation-core-ami-policy-migration/v2
           predicate-path: ${{ steps.revoke.outputs.predicate }}
 
       - name: Retain only checksum-sealed sanitized migration evidence

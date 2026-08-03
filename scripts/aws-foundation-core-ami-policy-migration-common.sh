@@ -205,7 +205,8 @@ validate_common() {
     .policy.target == {
       canonicalSha256:
         "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33",
-      expectedVersionId: "v3"
+      minimumVersionOrdinal: 3,
+      versionIdStrategy: "aws-assigned-monotonic"
     } and
     .policy.retainBaselineVersionsForRollback == true and
     .policy.exactDelta == {
@@ -268,7 +269,8 @@ validate_common() {
     .authorization.selfPersistenceAllowed == false and
     .authorization.mandatoryRevocation == true and
     .authorization.absenceReadCount == 3 and
-    .transaction.rollback == "set-v2-default-delete-only-v3" and
+    .transaction.rollback ==
+      "set-v2-default-delete-only-sha-bound-target-version" and
     .transaction.historicalV1Mutation == "forbidden" and
     .transaction.cancellationRecovery == "workflow-run-cleanup" and
     .transaction.manualRecovery == {
@@ -284,7 +286,17 @@ validate_common() {
       validationNotSucceeded: "no-aws"
     } and
     .evidence.schemaVersion ==
-      "archon.aws-foundation-core-ami-policy-migration-receipt/v1" and
+      "archon.aws-foundation-core-ami-policy-migration-receipt/v2" and
+    .evidence.targetVersionSemantics == {
+      migrated: {
+        present: true,
+        version: "required-valid-target-id"
+      },
+      rolledBack: {
+        present: false,
+        version: "valid-target-id-or-null-when-already-absent"
+      }
+    } and
     .evidence.artifactFiles == ["SHA256SUMS", "migration.json"] and
     .evidence.retentionDays == 90 and
     .evidence.canonicalJson == true and
@@ -451,7 +463,7 @@ render_policy_documents() {
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
   if [[ "${OLD_POLICY_SHA}" != "${expected_old}" ||
     "${NEW_POLICY_SHA}" != "${expected_new}" ]]; then
-    fail "Core AMI control-policy digest contract differs: v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old} v3_actual=${NEW_POLICY_SHA} v3_expected=${expected_new}"
+    fail "Core AMI control-policy digest contract differs: v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old} target_actual=${NEW_POLICY_SHA} target_expected=${expected_new}"
   fi
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" ||
     fail "The Core AMI control-policy migration delta is empty"

@@ -158,7 +158,7 @@ Safe dispatch order for one exact signed master SHA is:
 
 1. complete any pending assets-policy migration;
 2. run the identity v1-to-v2 migration above;
-3. run the Core AMI control-policy v2-to-v3 migration;
+3. run the Core AMI control-policy migration using the SHA-bound, AWS-assigned monotonic target version;
 4. run AWS Foundation with `BOOTSTRAP_CDK_FOUNDATION`;
 5. wire the verified staging/production trial-role, production publisher-role,
    and staging Core AMI role/profile outputs;
