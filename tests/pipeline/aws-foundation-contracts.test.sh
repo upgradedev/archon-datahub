@@ -928,26 +928,24 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
   export GITHUB_ACTIONS=true
   export RUNNER_TEMP="${core_migration_runtime}"
   export GITHUB_OUTPUT="${core_migration_runtime}/github-output"
-  export AWS_ACCOUNT_ID=123456789012
+  export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:?CI must provide AWS_ACCOUNT_ID}"
+  [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] ||
+    fail "CI AWS_ACCOUNT_ID must be exactly 12 digits"
   mkdir -p "${RUNNER_TEMP}"
   : >"${GITHUB_OUTPUT}"
   # shellcheck source=/dev/null
   source "${core_migration_common}"
-  # Stub only account-bound digests; execute the real renderer and jq filters.
-  iam_policy_sha() {
-    local policy="$1"
-    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
-      jq -er '.policy.liveBaseline[] |
-        select(.versionId == "v2" and .isDefault == true) |
-        .canonicalSha256' "${CONTRACT}"
-    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
-      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
-    else
-      return 1
-    fi
-  }
   render_policy_documents
 )
+core_migration_render_test_block="$(
+  sed -n '/^core_migration_common=/,/^)/p' "${BASH_SOURCE[0]}"
+)"
+if grep -Fq 'iam_policy_sha()' <<<"${core_migration_render_test_block}"; then
+  fail "Core migration renderer test must use the real iam_policy_sha"
+fi
+test "$(
+  grep -Fc '  render_policy_documents' <<<"${core_migration_render_test_block}"
+)" -eq 1 || fail "Core migration renderer test must execute one real render"
 
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
@@ -1503,7 +1501,11 @@ require_text "${ci_workflow}" \
   '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
   '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
+  'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' \
   'node scripts/verify-aws-runtime-boundary.mjs'
+test "$(
+  grep -Fc 'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' "${ci_workflow}"
+)" -eq 1 || fail "CI must bind the account-aware policy digest test exactly once"
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
   'cancel-in-progress: false' \
