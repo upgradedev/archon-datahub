@@ -1979,6 +1979,29 @@ for migration_runner in \
     fail "${migration_runner} must revoke temporary authority before fallible rendering"
 done
 
+for migration_common in \
+  "${repository_root}/scripts/aws-foundation-policy-migration-common.sh" \
+  "${publisher_migration_common}" \
+  "${core_migration_common}"; do
+  recovery_baseline_block="$(
+    sed -n '/^verify_recovery_role_baseline() {/,/^}/p' "${migration_common}"
+  )"
+  test "$(
+    grep -Fc \
+      '  local expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"' \
+      <<<"${recovery_baseline_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must derive the recovery role ARN before rendering"
+  test "$(
+    grep -Fc '    --arg roleArn "${expected_role_arn}"' \
+      <<<"${recovery_baseline_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must verify the locally derived recovery role ARN"
+  if grep -Fq '${RECOVERY_ROLE_ARN}' <<<"${recovery_baseline_block}"; then
+    fail "${migration_common} recovery baseline must not depend on renderer state"
+  fi
+done
+
 forbid_text "${publisher_migration_common}" \
   'all($addedResources[] as $resource;'
 forbid_text "${core_migration_common}" \
@@ -2094,7 +2117,10 @@ require_text "${publisher_migration_driver}" \
   'archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1'
 require_text "${publisher_migration_cleanup}" \
   'Migrate AWS foundation cloud runtime publisher identity policy' \
-  'cleanup-rollback'
+  'RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION' \
+  'SEAL EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY TERMINAL STATE' \
+  'cleanup-rollback' \
+  'cleanup-revoke'
 require_text "${publisher_migration_common}" \
   '--stdout-group identity' \
   'afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553' \
