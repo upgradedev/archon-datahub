@@ -12,6 +12,10 @@ core_migration_state_test="${repository_root}/tests/pipeline/aws-foundation-core
 contract="${repository_root}/contracts/aws-foundation-v1.json"
 migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
 core_migration_contract="${repository_root}/contracts/aws-foundation-core-ami-policy-migration-v1.json"
+core_migration_driver="${repository_root}/.github/workflows/aws-foundation-core-ami-policy-migration-driver.yml"
+core_migration_state="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-state.sh"
+core_migration_runner="${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
+core_ami_builder_policy_contract="${repository_root}/infra/aws/packer/datahub-core-ami-builder-policy-contract.json"
 publisher_migration_contract="${repository_root}/contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json"
 publisher_migration_entry="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
 publisher_migration_driver="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml"
@@ -84,6 +88,10 @@ for path in \
   "${contract}" \
   "${migration_contract}" \
   "${core_migration_contract}" \
+  "${core_migration_driver}" \
+  "${core_migration_state}" \
+  "${core_migration_runner}" \
+  "${core_ami_builder_policy_contract}" \
   "${publisher_migration_contract}" \
   "${publisher_migration_entry}" \
   "${publisher_migration_driver}" \
@@ -1070,7 +1078,10 @@ jq -e --slurpfile coreMigration "${core_migration_contract}" '
   $summary.policyName == $migration.policy.name and
   $summary.baselineDefaultVersion == $defaults[0].versionId and
   $summary.baselineCanonicalSha256 == $defaults[0].canonicalSha256 and
-  $summary.targetVersion == $migration.policy.target.expectedVersionId and
+  $summary.targetVersionStrategy ==
+    $migration.policy.target.versionIdStrategy and
+  $summary.minimumTargetVersionOrdinal ==
+    $migration.policy.target.minimumVersionOrdinal and
   ($summary.deltaSids | sort) ==
     ($migration.policy.exactDelta.newStatementSids | sort) and
   ($summary.replacementSids | sort) ==
@@ -2362,10 +2373,11 @@ run_isolated_revoke_path core \
   "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
 
 run_isolated_core_migrate_path() (
-  local created_default="$1"
-  local expected_result="$2"
+  local created_version="$1"
+  local created_default="$2"
+  local expected_result="$3"
   local migration_runner="${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
-  local case_runtime="${renderer_runtime_dir}/core-migrate-${created_default}"
+  local case_runtime="${renderer_runtime_dir}/core-migrate-${created_version}-${created_default}"
   local trace_file="${case_runtime}/trace"
   local stderr_file="${case_runtime}/stderr"
   mkdir -p "${case_runtime}"
@@ -2379,11 +2391,12 @@ run_isolated_core_migrate_path() (
   : >"${trace_file}"
   cd "${repository_root}"
 
-  # Exercise the exact migrate() orchestration with a synthetic AWS boundary.
-  # All files live below the CI runner's temporary directory; no network or AWS
-  # mutation is possible from this contract test.
+  # Exercise the exact migrate() orchestration and version-ID validator with a
+  # synthetic AWS boundary. All files remain below the CI runner temp path.
   # shellcheck source=/dev/null
   source "${core_migration_common}"
+  # shellcheck source=/dev/null
+  source <(sed -n '/^is_target_version_id() {/,/^}/p' "${core_migration_state}")
   # shellcheck source=/dev/null
   source <(sed -n '/^migrate() {/,/^}/p' "${migration_runner}")
 
@@ -2421,7 +2434,7 @@ run_isolated_core_migrate_path() (
     test "$1" = migrate-before-switch
     test "$2" = old
     trace_event pending
-    printf 'v1\nv2\nv3\n'
+    printf 'v1\nv2\n%s\n' "${created_version}"
   }
   wait_for_state() {
     test "$1" = migrated
@@ -2430,7 +2443,7 @@ run_isolated_core_migrate_path() (
   require_migrated_state() {
     test "$1" = migrate-final
     trace_event migrated-state
-    printf 'v1\nv2\nv3\n'
+    printf 'v1\nv2\n%s\n' "${created_version}"
   }
   aws() {
     local service="${1:-}"
@@ -2451,12 +2464,13 @@ run_isolated_core_migrate_path() (
         for index in "${!expected[@]}"; do
           test "${actual[${index}]}" = "${expected[${index}]}" || return 97
         done
-        trace_event create-v3
+        trace_event "create-${created_version}"
         jq -cn \
+          --arg version "${created_version}" \
           --argjson isDefault "${created_default}" \
           '{
             PolicyVersion: {
-              VersionId: "v3",
+              VersionId: $version,
               IsDefaultVersion: $isDefault
             }
           }'
@@ -2464,7 +2478,7 @@ run_isolated_core_migrate_path() (
       iam:set-default-policy-version)
         expected=(
           --policy-arn "${TARGET_POLICY_ARN}"
-          --version-id v3
+          --version-id "${created_version}"
         )
         test "${#actual[@]}" -eq "${#expected[@]}" || return 97
         for index in "${!expected[@]}"; do
@@ -2488,17 +2502,23 @@ run_isolated_core_migrate_path() (
   EXPECTED_OLD_VERSION_ID=v2
   EXPECTED_TEMP_POLICY_SHA="$(printf 'd%.0s' {1..64})"
 
+  local expected_trace="validate render caller live-temp baseline live-temp"
+  expected_trace+=" create-${created_version}"
   if [[ "${expected_result}" == success ]]; then
     migrate 2>"${stderr_file}"
     test ! -s "${stderr_file}" ||
       fail "Core migrate success path emitted unexpected stderr"
-    test "$(paste -sd ' ' "${trace_file}")" = \
-      "validate render caller live-temp baseline live-temp create-v3 pending live-temp set-default wait-migrated migrated-state" ||
+    expected_trace+=" pending live-temp set-default wait-migrated migrated-state"
+    test "$(paste -sd ' ' "${trace_file}")" = "${expected_trace}" ||
       fail "Core migrate success trace differs"
-    test "$(cat "${GITHUB_OUTPUT}")" = \
-      $'historical_version_id=v1\nnew_version_id=v3\nold_version_id=v2' ||
+    local expected_outputs
+    expected_outputs="$(
+      printf 'historical_version_id=v1\nnew_version_id=%s\nold_version_id=v2' \
+        "${created_version}"
+    )"
+    test "$(cat "${GITHUB_OUTPUT}")" = "${expected_outputs}" ||
       fail "Core migrate success outputs differ"
-  elif [[ "${expected_result}" == rejected ]]; then
+  else
     local status=0
     set +e
     (
@@ -2508,24 +2528,40 @@ run_isolated_core_migrate_path() (
     status=$?
     set -e
     test "${status}" -ne 0 ||
-      fail "Core migrate accepted a v3 already marked default"
-    require_text "${stderr_file}" \
-      'The reviewed v3 was unexpectedly created as default'
-    if grep -Fq 'unary operator expected' "${stderr_file}"; then
-      fail "Core migrate default-state guard regressed to malformed test syntax"
-    fi
-    test "$(paste -sd ' ' "${trace_file}")" = \
-      "validate render caller live-temp baseline live-temp create-v3" ||
+      fail "Core migrate accepted an invalid create-policy-version response"
+    test "$(paste -sd ' ' "${trace_file}")" = "${expected_trace}" ||
       fail "Core migrate rejection occurred after the safe switch boundary"
     test ! -s "${GITHUB_OUTPUT}" ||
       fail "Rejected Core migration must not publish version outputs"
-  else
-    fail "Unknown isolated Core migrate expectation: ${expected_result}"
+    if [[ "${expected_result}" == rejected-default ]]; then
+      require_text "${stderr_file}" \
+        'The reviewed target was unexpectedly created as default'
+    elif [[ "${expected_result}" == rejected-version ]]; then
+      require_text "${stderr_file}" \
+        'The created target version ID is not a valid AWS-assigned successor'
+    else
+      fail "Unknown isolated Core migrate expectation: ${expected_result}"
+    fi
+    if grep -Fq 'unary operator expected' "${stderr_file}"; then
+      fail "Core migrate guard regressed to malformed test syntax"
+    fi
   fi
 )
 
-run_isolated_core_migrate_path false success
-run_isolated_core_migrate_path true rejected
+run_isolated_core_migrate_path v5 false success
+run_isolated_core_migrate_path v42 true rejected-default
+run_isolated_core_migrate_path v2 false rejected-version
+
+for core_target_path in \
+  "${core_migration_contract}" \
+  "${core_migration_driver}" \
+  "${core_migration_common}" \
+  "${core_migration_state}" \
+  "${core_migration_runner}"; do
+  forbid_text "${core_target_path}" 'v3'
+done
+forbid_text "${core_ami_builder_policy_contract}" \
+  'control policy v2 to v3'
 
 forbid_text "${publisher_migration_common}" \
   'all($addedResources[] as $resource;'
