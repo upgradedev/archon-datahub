@@ -501,83 +501,66 @@
       "schemaVersion": "archon.aws-runtime-boundary/v1",
       "policyNameTemplate": "archon-datahub-runtime-boundary-<stage>",
       "allowedActions": [
-      "autoscaling:UpdateAutoScalingGroup",
-      "bedrock:InvokeModel",
-      "bedrock:InvokeModelWithResponseStream",
-
-
-      "cloudwatch:PutMetricData",
-      "dynamodb:DescribeStream",
-      "dynamodb:DescribeTable",
-      "dynamodb:GetItem",
-      "dynamodb:GetRecords",
-      "dynamodb:GetShardIterator",
-      "dynamodb:ListStreams",
-      "dynamodb:PutItem",
-      "dynamodb:Query",
-      "dynamodb:TransactWriteItems",
-      "dynamodb:UpdateItem",
-      "ec2:AuthorizeSecurityGroupEgress",
-      "ec2:AuthorizeSecurityGroupIngress",
-      "ec2:CreateTags",
-      "ec2:CreateVpcEndpoint",
-      "ec2:DeleteVpcEndpoints",
-      "ec2:DescribeImages",
-      "ec2:DescribeVpcEndpoints",
-      "ec2:RevokeSecurityGroupEgress",
-      "ec2:RevokeSecurityGroupIngress",
-
-
-
-
-      "kms:Decrypt",
-      "kms:DescribeKey",
-      "kms:Encrypt",
-      "kms:GenerateDataKey*",
-      "kms:GetPublicKey",
-      "kms:ReEncrypt*",
-      "kms:Sign",
-      "lambda:InvokeFunction",
-      "logs:CreateLogDelivery",
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:DeleteLogDelivery",
-      "logs:DescribeLogGroups",
-      "logs:DescribeLogStreams",
-
-      "logs:DescribeResourcePolicies",
-      "logs:GetLogDelivery",
-      "logs:ListLogDeliveries",
-      "logs:PutLogEvents",
-      "logs:PutResourcePolicy",
-      "logs:UpdateLogDelivery",
-      "s3:DeleteObjectVersion",
-      "s3:GetBucketVersioning",
-
-
-      "s3:GetObjectVersion",
-      "s3:PutObject",
-
-      "secretsmanager:GetSecretValue",
-
-
-      "sqs:GetQueueAttributes",
-      "sqs:GetQueueUrl",
-
-      "sqs:SendMessage",
-
-
-
-
-      "states:StartExecution",
-      "sts:AssumeRole",
-      "sts:GetCallerIdentity",
-      "xray:GetSamplingRules",
-      "xray:GetSamplingTargets",
-      "xray:PutTelemetryRecords",
-      "xray:PutTraceSegments"
-    ],
-    "approvedAwsManagedPolicies": {
+        "autoscaling:UpdateAutoScalingGroup",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "cloudwatch:PutMetricData",
+        "dynamodb:DescribeStream",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:ListStreams",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:TransactWriteItems",
+        "dynamodb:UpdateItem",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateTags",
+        "ec2:CreateVpcEndpoint",
+        "ec2:DeleteVpcEndpoints",
+        "ec2:DescribeImages",
+        "ec2:DescribeVpcEndpoints",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey*",
+        "kms:GetPublicKey",
+        "kms:ReEncrypt*",
+        "kms:Sign",
+        "lambda:InvokeFunction",
+        "logs:CreateLogDelivery",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:DeleteLogDelivery",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:DescribeResourcePolicies",
+        "logs:GetLogDelivery",
+        "logs:ListLogDeliveries",
+        "logs:PutLogEvents",
+        "logs:PutResourcePolicy",
+        "logs:UpdateLogDelivery",
+        "s3:DeleteObjectVersion",
+        "s3:GetBucketVersioning",
+        "s3:GetObjectVersion",
+        "s3:PutObject",
+        "secretsmanager:GetSecretValue",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "sqs:SendMessage",
+        "states:StartExecution",
+        "sts:AssumeRole",
+        "sts:GetCallerIdentity",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets",
+        "xray:PutTelemetryRecords",
+        "xray:PutTraceSegments"
+      ],
+      "approvedAwsManagedPolicies": {
         "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole": [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
@@ -606,6 +589,9 @@
           "ReconcileExactCoreAmiBuilderProfile",
           "AttachExactCoreAmiBuilderSsmPolicy",
           "PassExactCoreAmiBuilderRoleForProfile"
+        ],
+        "replacementSids": [
+          "InspectExistingApplicationStackRoles"
         ]
       },
       "githubBuildRole": {
