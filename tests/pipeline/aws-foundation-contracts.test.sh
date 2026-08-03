@@ -8,6 +8,7 @@ repository_root="$(
 foundation_workflow="${repository_root}/.github/workflows/aws-foundation.yml"
 deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
+core_migration_state_test="${repository_root}/tests/pipeline/aws-foundation-core-ami-policy-migration-state.test.sh"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
 migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
 core_migration_contract="${repository_root}/contracts/aws-foundation-core-ami-policy-migration-v1.json"
@@ -79,6 +80,7 @@ for path in \
   "${foundation_workflow}" \
   "${deploy_workflow}" \
   "${ci_workflow}" \
+  "${core_migration_state_test}" \
   "${contract}" \
   "${migration_contract}" \
   "${core_migration_contract}" \
@@ -1528,6 +1530,8 @@ require_text "${ci_workflow}" \
   '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
   'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' \
+  'tests/pipeline/aws-foundation-core-ami-policy-migration-state.test.sh \' \
+  'bash tests/pipeline/aws-foundation-core-ami-policy-migration-state.test.sh' \
   'node scripts/verify-aws-runtime-boundary.mjs'
 test "$(
   grep -Fc 'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' "${ci_workflow}"
