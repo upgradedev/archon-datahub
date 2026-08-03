@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION or SEAL EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY TERMINAL STATE
+        description: Type RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION or SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY
         required: true
         type: string
 
@@ -41,7 +41,7 @@ jobs:
            inputs.confirmation ==
              'RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION' ||
            inputs.confirmation ==
-             'SEAL EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY TERMINAL STATE'
+             'SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY'
          ))
       )
     runs-on: ubuntu-24.04
@@ -202,8 +202,8 @@ jobs:
               "RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION")
                 cleanup_operation="cleanup-rollback"
                 ;;
-              "SEAL EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY TERMINAL STATE")
-                cleanup_operation="cleanup-revoke"
+              "SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY")
+                cleanup_operation="cleanup-migrated"
                 ;;
               *)
                 echo "::error::Invalid manual cleanup confirmation" >&2
