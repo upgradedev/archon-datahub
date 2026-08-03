@@ -1843,6 +1843,9 @@ jobs:
 #|         extra={
 #|             "observedAt": availability["observedAt"],
 #|             "result": "passed",
+#|             "observationDigest": file_sha(
+#|                 availability_dir / "observation.json"
+#|             ),
 #|         },
 #|     ),
 #|     "posture": provenance(
@@ -1851,14 +1854,17 @@ jobs:
 #|             "observedAt": posture["observedAt"],
 #|             "result": "passed",
 #|             "checks": posture["checks"],
+#|             "observationDigest": file_sha(
+#|                 posture_dir / "observation.json"
+#|             ),
 #|             "driftEvidenceDigest": posture["driftEvidenceDigest"],
 #|             "alarmNames": alarm_names,
 #|         },
 #|     ),
 #|     "alerting": {
 #|         "alarmsActive": True,
-#|         "snsSubscriptionConfirmed": True,
-#|         "endToEndAlarmDeliveryTested": True,
+#|         "encryptedRouteBound": True,
+#|         "externalPagingDeliveryTested": True,
 #|         "lastPagingTestAt": paging_observed,
 #|         "pagingDelivery": provenance(
 #|             paging_binding,
