@@ -71,8 +71,7 @@ load_policy_state() {
     response_default="$(
       jq -er '.PolicyVersion.IsDefaultVersion | tostring' "${response}"
     )" || return 1
-    test "${response_default}" = \
-      "${POLICY_VERSION_DEFAULTS[${index}]}" || {
+    [[ "${response_default}" == "${POLICY_VERSION_DEFAULTS[${index}]}" ]] || {
       fail "Managed-policy version metadata is inconsistent"
       return 1
     }
