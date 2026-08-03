@@ -137,9 +137,15 @@ test("scheduled production observers bind exact control-plane SHA before AWS tru
     );
     assert.ok(start >= 0 && end > start, startMarker);
     const gate = supplyChainWorkflow.slice(start, end);
+    const binding = gate.indexOf(
+      "CONTROL_PLANE_SHA: ${{ github.sha }}"
+    );
+    const verifier = gate.indexOf(
+      "bash scripts/verify-github-control-plane.sh"
+    );
     assert.ok(
-      gate.includes("CONTROL_PLANE_SHA: ${{ github.sha }}"),
-      startMarker + " must bind the exact checked-out SHA"
+      binding >= 0 && verifier > binding,
+      startMarker + " must bind the exact checked-out SHA before verification"
     );
     assert.equal(
       gate.match(/bash scripts\/verify-github-control-plane\.sh/gu)?.length,
