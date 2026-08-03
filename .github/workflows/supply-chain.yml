@@ -139,7 +139,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
-          OUTPUT_PATH: ${{ runner.temp }}/observer-control-plane-gates.json
+          OUTPUT_PATH: ${{ runner.temp }}/control-plane-security-gates.json
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
@@ -452,7 +452,7 @@ jobs:
             sha256sum "${root}/sealed.stable.json" | awk '{print $1}'
           )"
           gate_digest="sha256:$(
-            sha256sum "${RUNNER_TEMP}/observer-control-plane-gates.json" |
+            sha256sum "${RUNNER_TEMP}/control-plane-security-gates.json" |
               awk '{print $1}'
           )"
           observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1133,7 +1133,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CONTROL_PLANE_SHA: ${{ github.sha }}
-          OUTPUT_PATH: ${{ runner.temp }}/revalidate-control-plane.json
+          OUTPUT_PATH: ${{ runner.temp }}/control-plane-security-gates.json
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
