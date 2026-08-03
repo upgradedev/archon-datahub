@@ -394,7 +394,8 @@ def validate_workflow(source: str) -> None:
         '  (.id | type) == "number" and'
         in collector,
         "monitor state is not bound to the exact active workflow record",
-    )    require(
+    )
+    require(
         "cmp --silent" in attest
         and "submission-operations-retained-facts.json" in attest,
         "attester no longer reconstructs and byte-compares facts",
@@ -601,7 +602,8 @@ mutations = {
         "    if: needs.produce.result == 'success'\n",
         "    if: always()\n",
     ),
-}for label, mutant in mutations.items():
+}
+for label, mutant in mutations.items():
     try:
         validate_workflow(mutant)
     except ContractError:
