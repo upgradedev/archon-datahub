@@ -1843,6 +1843,7 @@ jobs:
 #|         extra={
 #|             "observedAt": availability["observedAt"],
 #|             "result": "passed",
+#|             "profileResponseDigest": availability["profileResponseDigest"],
 #|             "observationDigest": file_sha(
 #|                 availability_dir / "observation.json"
 #|             ),
