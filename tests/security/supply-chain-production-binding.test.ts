@@ -118,6 +118,30 @@ test("supply chain binds only lean production and the exact deployment artifact"
   }
 });
 
+test("supply chain normalizes archive digests before REST binding", () => {
+  const normalized = `"sha256:\${{ steps.upload.outputs['artifact-digest'] }}"`;
+  assert.equal(supplyChainWorkflow.split(normalized).length - 1, 2);
+  for (const output of ["evidence_artifact_digest", "artifact_digest"]) {
+    assert.ok(supplyChainWorkflow.includes(`${output}: ${normalized}`), output);
+    assert.ok(
+      !supplyChainWorkflow.includes(
+        `${output}: \${{ steps.upload.outputs['artifact-digest'] }}`
+      ),
+      `${output} must not expose an unqualified digest`
+    );
+  }
+  assert.ok(
+    supplyChainWorkflow.includes(
+      'test "$(jq -r .digest <<<"${scan_artifact}")" = \\'
+    )
+  );
+  assert.ok(
+    supplyChainWorkflow.includes(
+      'test "$(jq -r .digest <<<"${artifact}")" = \\'
+    )
+  );
+});
+
 test("supply chain verifies and signs only deployed SPA and Lambda subjects", () => {
   for (const required of [
     "web-${release_sha}",

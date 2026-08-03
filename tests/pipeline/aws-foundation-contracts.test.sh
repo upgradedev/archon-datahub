@@ -896,6 +896,59 @@ for group in control assets identity attachments; do
   )"
 done
 
+publisher_migration_runtime="${renderer_runtime_dir}/publisher-migration"
+(
+  export GITHUB_ACTIONS=true
+  export RUNNER_TEMP="${publisher_migration_runtime}"
+  export GITHUB_OUTPUT="${publisher_migration_runtime}/github-output"
+  export AWS_ACCOUNT_ID=123456789012
+  mkdir -p "${RUNNER_TEMP}"
+  : >"${GITHUB_OUTPUT}"
+  # shellcheck source=/dev/null
+  source "${publisher_migration_common}"
+  # Stub only account-bound digests; execute the real renderer and jq filters.
+  iam_policy_sha() {
+    local policy="$1"
+    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
+      jq -er '.policy.liveBaseline.canonicalSha256' "${CONTRACT}"
+    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
+      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
+    else
+      return 1
+    fi
+  }
+  render_policy_documents
+)
+
+core_migration_common="${repository_root}/scripts/aws-foundation-core-ami-policy-migration-common.sh"
+test -f "${core_migration_common}"
+test ! -L "${core_migration_common}"
+core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
+(
+  export GITHUB_ACTIONS=true
+  export RUNNER_TEMP="${core_migration_runtime}"
+  export GITHUB_OUTPUT="${core_migration_runtime}/github-output"
+  export AWS_ACCOUNT_ID=123456789012
+  mkdir -p "${RUNNER_TEMP}"
+  : >"${GITHUB_OUTPUT}"
+  # shellcheck source=/dev/null
+  source "${core_migration_common}"
+  # Stub only account-bound digests; execute the real renderer and jq filters.
+  iam_policy_sha() {
+    local policy="$1"
+    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
+      jq -er '.policy.liveBaseline[] |
+        select(.versionId == "v2" and .isDefault == true) |
+        .canonicalSha256' "${CONTRACT}"
+    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
+      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
+    else
+      return 1
+    fi
+  }
+  render_policy_documents
+)
+
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
   --from-file "${foundation_policy_validator}" \
@@ -1903,6 +1956,34 @@ forbid_text "${reconciler}" \
   'declare -p'
 test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
   fail 'reconciler diagnostic phases must be the 38 reviewed public labels'
+for migration_runner in \
+  "${repository_root}/scripts/run-aws-foundation-policy-migration.sh" \
+  "${repository_root}/scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh" \
+  "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"; do
+  revoke_block="$(
+    sed -n '/^revoke() {/,/^}/p' "${migration_runner}"
+  )"
+  test "$(grep -Fc '  revoke_temp_policy' <<<"${revoke_block}")" -eq 1 ||
+    fail "${migration_runner} must revoke temporary authority exactly once"
+  test "$(grep -Fc '  render_policy_documents' <<<"${revoke_block}")" -eq 1 ||
+    fail "${migration_runner} must render receipt policy state exactly once"
+  revoke_line="$(
+    grep -nF '  revoke_temp_policy' <<<"${revoke_block}" | cut -d: -f1
+  )"
+  render_line="$(
+    grep -nF '  render_policy_documents' <<<"${revoke_block}" | cut -d: -f1
+  )"
+  [[ "${revoke_line}" =~ ^[1-9][0-9]*$ && "${render_line}" =~ ^[1-9][0-9]*$ ]] ||
+    fail "${migration_runner} revoke/render ordering is ambiguous"
+  ((revoke_line < render_line)) ||
+    fail "${migration_runner} must revoke temporary authority before fallible rendering"
+done
+
+forbid_text "${publisher_migration_common}" \
+  'all($addedResources[] as $resource;'
+forbid_text "${core_migration_common}" \
+  'all(.;'
+
 jq -e '
   .aws.foundationPolicies.identityRoleMigration == {
     baselineCanonicalSha256:

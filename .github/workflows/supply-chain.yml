@@ -624,7 +624,7 @@ jobs:
       actions: read
       contents: read
     outputs:
-      evidence_artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
+      evidence_artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
       evidence_artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
       evidence_artifact_name: ${{ steps.subject.outputs.evidence_artifact_name }}
       lambda_subject_digest: ${{ steps.subject.outputs.lambda_subject_digest }}
@@ -1107,7 +1107,7 @@ jobs:
       contents: read
       id-token: write
     outputs:
-      artifact_digest: ${{ steps.upload.outputs['artifact-digest'] }}
+      artifact_digest: "sha256:${{ steps.upload.outputs['artifact-digest'] }}"
       artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
       artifact_name: ${{ steps.revalidate.outputs.artifact_name }}
       revalidation_digest: ${{ steps.revalidate.outputs.revalidation_digest }}

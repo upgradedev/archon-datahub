@@ -292,10 +292,10 @@ render_policy_documents() {
         select(($deltaSids | index($statement.Sid)) != null)][];
         .Effect == "Allow" and
         ((.Action | if type == "array" then . else [.] end) |
-          all(.;
+          all(.[];
             startswith("iam:") or startswith("cloudformation:"))) and
         ((.Resource | if type == "array" then . else [.] end) |
-          all(.; . != "*")))
+          all(.[]; . != "*")))
     ' "${NEW_POLICY}" >/dev/null ||
       fail "The Core AMI control-policy delta is not exact"
   NEW_POLICY_SHA="$(iam_policy_sha "${NEW_POLICY}")"
@@ -312,7 +312,7 @@ render_policy_documents() {
       .canonicalSha256' "${CONTRACT}"
   )"
   expected_new="$(jq -er '.policy.target.canonicalSha256' "${CONTRACT}")"
-  test "${HISTORICAL_POLICY_SHA}" =
+  test "${HISTORICAL_POLICY_SHA}" = \
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
   test "${OLD_POLICY_SHA}" = "${expected_old}" ||
     fail "Derived v2 control-policy digest differs"

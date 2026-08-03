@@ -290,7 +290,8 @@ render_policy_documents() {
       .Version == "2012-10-17" and
       ($targets | length) == 1 and
       ($targets[0].Resource | type) == "array" and
-      all($addedResources[] as $resource;
+      all($addedResources[];
+        . as $resource |
         ([$targets[0].Resource[] | select(. == $resource)] | length) == 1) and
       ($newStatements | length) == 1 and
       ($newStatements[0] | keys | sort) ==
@@ -350,7 +351,8 @@ render_policy_documents() {
       ($newTarget | del(.Resource)) == ($oldTarget | del(.Resource)) and
       (($newTarget.Resource | sort) ==
         (($oldTarget.Resource + $addedResources) | sort)) and
-      all($addedResources[] as $resource;
+      all($addedResources[];
+        . as $resource |
         ([$oldTarget.Resource[] | select(. == $resource)] | length) == 0) and
       ([$new.Statement[] |
         select(.Sid != $newSid and .Sid != $addition.statementSid)] ==
