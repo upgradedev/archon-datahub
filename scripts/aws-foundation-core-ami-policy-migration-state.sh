@@ -113,6 +113,7 @@ is_target_version_id() {
     "${version_id}" != "v1" &&
     "${version_id}" != "v2" ]]
 }
+
 require_baseline_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
@@ -171,6 +172,7 @@ require_migrated_state() {
   test "${new_default}" = "true" || return 1
   printf '%s\n%s\n%s\n' "${historical_id}" "${old_id}" "${new_id}"
 }
+
 require_rollback_pending_state() {
   local prefix="$1"
   local expected_default="$2"
@@ -208,6 +210,7 @@ require_rollback_pending_state() {
   esac
   printf '%s\n%s\n%s\n' "${historical_id}" "${old_id}" "${new_id}"
 }
+
 require_rolled_back_state() {
   require_baseline_state "$1"
 }
