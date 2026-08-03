@@ -942,7 +942,7 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
 core_migration_render_test_block="$(
   sed -n '/^core_migration_common=/,/^)/p' "${BASH_SOURCE[0]}"
 )"
-if grep -Eq '^[[:space:]]*(function[[:space:]]+)?iam_policy_sha[[:space:]]*(())?[[:space:]]*{' <<<"${core_migration_render_test_block}"; then
+if grep -Eq '^[[:space:]]*(function[[:space:]]+)?iam_policy_sha[[:space:]]*(\(\))?[[:space:]]*\{' <<<"${core_migration_render_test_block}"; then
   fail "Core migration renderer test must use the real iam_policy_sha"
 fi
 test "$(
