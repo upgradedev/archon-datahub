@@ -1465,7 +1465,8 @@ rejects_sq10_cross_mutation(
         validThrough="2026-09-01T21:00:00Z"
     ),
     "SQ10 accepted judge-access validity different from its SQ4 evidence",
-)rejects_content_cross_mutation(
+)
+rejects_content_cross_mutation(
     "SQ7",
     lambda value: value.update(
         reviewedAt=iso(NOW - dt.timedelta(minutes=1))
