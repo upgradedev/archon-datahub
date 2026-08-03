@@ -10,6 +10,7 @@ deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
 migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
+core_migration_contract="${repository_root}/contracts/aws-foundation-core-ami-policy-migration-v1.json"
 publisher_migration_contract="${repository_root}/contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json"
 publisher_migration_entry="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
 publisher_migration_driver="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml"
@@ -80,6 +81,7 @@ for path in \
   "${ci_workflow}" \
   "${contract}" \
   "${migration_contract}" \
+  "${core_migration_contract}" \
   "${publisher_migration_contract}" \
   "${publisher_migration_entry}" \
   "${publisher_migration_driver}" \
@@ -946,6 +948,22 @@ fi
 test "$(
   grep -Fc '  render_policy_documents' <<<"${core_migration_render_test_block}"
 )" -eq 1 || fail "Core migration renderer test must execute one real render"
+
+jq -e --slurpfile coreMigration "${core_migration_contract}" '
+  .aws.coreAmiFoundation.policyMigration as $summary |
+  $coreMigration[0] as $migration |
+  [$migration.policy.liveBaseline[] | select(.isDefault == true)] as $defaults |
+  ($defaults | length) == 1 and
+  $summary.contract ==
+    "contracts/aws-foundation-core-ami-policy-migration-v1.json" and
+  $summary.workflow == $migration.workflow.entry and
+  $summary.policyName == $migration.policy.name and
+  $summary.baselineDefaultVersion == $defaults[0].versionId and
+  $summary.baselineCanonicalSha256 == $defaults[0].canonicalSha256 and
+  $summary.targetVersion == $migration.policy.target.expectedVersionId and
+  ($summary.deltaSids | sort) == ($migration.policy.exactDeltaSids | sort)
+' "${contract}" >/dev/null ||
+  fail "Foundation summary and Core policy migration contract differ"
 
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
