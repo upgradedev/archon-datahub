@@ -138,6 +138,7 @@ jobs:
       - name: Seal current observer control-plane gates before AWS trust
         env:
           GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
           OUTPUT_PATH: ${{ runner.temp }}/observer-control-plane-gates.json
         run: |
           set -euo pipefail
@@ -1131,6 +1132,7 @@ jobs:
       - name: Revalidate observer control plane before AWS trust
         env:
           GH_TOKEN: ${{ github.token }}
+          CONTROL_PLANE_SHA: ${{ github.sha }}
           OUTPUT_PATH: ${{ runner.temp }}/revalidate-control-plane.json
         run: |
           set -euo pipefail
