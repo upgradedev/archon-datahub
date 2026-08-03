@@ -16,21 +16,23 @@ done
 classify_rollback_source_state() {
   load_policy_state authorize-rollback-state || return 1
   local count="${#POLICY_VERSION_IDS[@]}"
+  local new_id
   if [[ "${count}" -eq 2 ]]; then
     require_baseline_state authorize-rollback-baseline >/dev/null || return 1
     printf 'baseline\n'
   elif [[ "${count}" -eq 3 ]]; then
     test "$(version_for_sha "${HISTORICAL_POLICY_SHA}")" = v1 || return 1
     test "$(version_for_sha "${OLD_POLICY_SHA}")" = v2 || return 1
-    test "$(version_for_sha "${NEW_POLICY_SHA}")" = v3 || return 1
+    new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
+    is_target_version_id "${new_id}" || return 1
     if [[ "${POLICY_DEFAULT_VERSION}" == v2 ]]; then
       require_rollback_pending_state \
         authorize-rollback-v2-default old >/dev/null || return 1
-      printf 'v2-default-v3-nondefault\n'
-    elif [[ "${POLICY_DEFAULT_VERSION}" == v3 ]]; then
+      printf 'v2-default-target-nondefault\n'
+    elif [[ "${POLICY_DEFAULT_VERSION}" == "${new_id}" ]]; then
       require_rollback_pending_state \
-        authorize-rollback-v3-default new >/dev/null || return 1
-      printf 'v3-default-v2-retained\n'
+        authorize-rollback-target-default new >/dev/null || return 1
+      printf 'target-default-v2-retained\n'
     else
       fail "Historical v1 must never become default"
       return 1
@@ -40,7 +42,6 @@ classify_rollback_source_state() {
     return 1
   fi
 }
-
 prepare() {
   validate_common
   : "${AUTHORIZATION_MODE:?AUTHORIZATION_MODE is required}"
@@ -48,6 +49,7 @@ prepare() {
   render_policy_documents
   verify_caller "${FOUNDATION_ROLE_NAME}"
   local historical_version old_version source_state snapshot
+  local new_version=""
   if [[ "${AUTHORIZATION_MODE}" == migrate ]]; then
     verify_recovery_role_baseline
     snapshot="$(require_baseline_state prepare-baseline)" || return 1
@@ -58,10 +60,14 @@ prepare() {
   elif [[ "${AUTHORIZATION_MODE}" == rollback ]]; then
     revoke_temp_policy
     verify_recovery_role_baseline
-    source_state="$(classify_rollback_source_state)"
-    load_policy_state authorize-rollback-version
+    source_state="$(classify_rollback_source_state)" || return 1
+    load_policy_state authorize-rollback-version || return 1
     historical_version="$(version_for_sha "${HISTORICAL_POLICY_SHA}")"
     old_version="$(version_for_sha "${OLD_POLICY_SHA}")"
+    if candidate_version="$(version_for_sha "${NEW_POLICY_SHA}")"; then
+      is_target_version_id "${candidate_version}" || return 1
+      new_version="${candidate_version}"
+    fi
   else
     fail "Authorization mode is invalid"
     return 1
@@ -75,13 +81,13 @@ prepare() {
     printf 'historical_policy_sha=%s\n' "${HISTORICAL_POLICY_SHA}"
     printf 'historical_version_id=%s\n' "${historical_version}"
     printf 'new_policy_sha=%s\n' "${NEW_POLICY_SHA}"
+    printf 'new_version_id=%s\n' "${new_version}"
     printf 'old_policy_sha=%s\n' "${OLD_POLICY_SHA}"
     printf 'old_version_id=%s\n' "${old_version}"
     printf 'source_state=%s\n' "${source_state}"
     printf 'temp_policy_sha=%s\n' "${TEMP_POLICY_SHA}"
   } >>"${GITHUB_OUTPUT}"
 }
-
 migrate() {
   validate_common
   : "${EXPECTED_EXPIRES_AT:?EXPECTED_EXPIRES_AT is required}"
@@ -106,8 +112,8 @@ migrate() {
   test "${baseline_versions[0]}" = "${EXPECTED_HISTORICAL_VERSION_ID}"
   test "${baseline_versions[1]}" = "${EXPECTED_OLD_VERSION_ID}"
   verify_live_temp_policy migrate "${EXPECTED_TEMP_POLICY_SHA}" || return 1
-  local created="${WORK_ROOT}/create-v3.json"
-  safe_aws "Unable to create the reviewed nondefault v3 policy version" \
+  local created="${WORK_ROOT}/create-target.json"
+  safe_aws "Unable to create the reviewed nondefault target policy version" \
     "${created}" iam create-policy-version \
     --policy-arn "${TARGET_POLICY_ARN}" \
     --policy-document "file://${NEW_POLICY}" \
@@ -115,36 +121,33 @@ migrate() {
   local new_version
   new_version="$(jq -er '.PolicyVersion.VersionId' "${created}")" ||
     fail "The created policy version ID is absent"
-  test "${new_version}" = v3 ||
-    fail "The exact baseline requires the new version to be v3"
+  is_target_version_id "${new_version}" ||
+    fail "The created target version ID is not a valid AWS-assigned successor"
   jq -e '.PolicyVersion.IsDefaultVersion == false' "${created}" >/dev/null ||
-    fail "The reviewed v3 was unexpectedly created as default"
+    fail "The reviewed target was unexpectedly created as default"
   local pending
   pending="$(wait_for_rollback_pending_state migrate-before-switch old)" ||
     return 1
   mapfile -t before_switch <<<"${pending}"
-  test "${before_switch[0]}" = v1
-  test "${before_switch[1]}" = v2
-  test "${before_switch[2]}" = v3
+  test "${before_switch[*]}" = "v1 v2 ${new_version}"
   verify_live_temp_policy migrate "${EXPECTED_TEMP_POLICY_SHA}" || return 1
   if ! aws iam set-default-policy-version \
     --policy-arn "${TARGET_POLICY_ARN}" \
-    --version-id v3 >/dev/null 2>/dev/null; then
-    fail "Unable to perform the single reviewed default switch to v3"
+    --version-id "${new_version}" >/dev/null 2>/dev/null; then
+    fail "Unable to perform the single reviewed target default switch"
     return 1
   fi
   wait_for_state migrated
   local final
   final="$(require_migrated_state migrate-final)" || return 1
   mapfile -t final_versions <<<"${final}"
-  test "${final_versions[*]}" = "v1 v2 v3"
+  test "${final_versions[*]}" = "v1 v2 ${new_version}"
   {
     printf 'historical_version_id=v1\n'
-    printf 'new_version_id=v3\n'
+    printf 'new_version_id=%s\n' "${new_version}"
     printf 'old_version_id=v2\n'
   } >>"${GITHUB_OUTPUT}"
 }
-
 rollback() {
   validate_common
   : "${AUTHORIZATION_MODE:?AUTHORIZATION_MODE is required}"
@@ -158,14 +161,22 @@ rollback() {
     "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA}"
   local snapshot
   snapshot="$(rollback_exact_migration)" || return 1
-  mapfile -t baseline_versions <<<"${snapshot}"
-  test "${baseline_versions[*]}" = "v1 v2"
+  mapfile -t rollback_versions <<<"${snapshot}"
+  [[ "${#rollback_versions[@]}" -eq 2 ||
+    "${#rollback_versions[@]}" -eq 3 ]] || return 1
+  test "${rollback_versions[0]}" = v1
+  test "${rollback_versions[1]}" = v2
+  local new_version=""
+  if [[ "${#rollback_versions[@]}" -eq 3 ]]; then
+    new_version="${rollback_versions[2]}"
+    is_target_version_id "${new_version}" || return 1
+  fi
   {
     printf 'historical_version_id=v1\n'
+    printf 'new_version_id=%s\n' "${new_version}"
     printf 'old_version_id=v2\n'
   } >>"${GITHUB_OUTPUT}"
 }
-
 write_receipt() {
   local expected_state="$1"
   local evidence_dir="${WORK_ROOT}/evidence"
@@ -181,17 +192,21 @@ write_receipt() {
       return 1
     fi
   fi
-  local current_version result
+  local current_version result snapshot target_version=""
+  local -a receipt_versions=()
   case "${expected_state}" in
     migrated)
-      require_migrated_state receipt-migrated >/dev/null
-      current_version=v3
-      result=reviewed-v3-default-v1-v2-retained
+      snapshot="$(require_migrated_state receipt-migrated)" || return 1
+      mapfile -t receipt_versions <<<"${snapshot}"
+      target_version="${receipt_versions[2]}"
+      is_target_version_id "${target_version}" || return 1
+      current_version="${target_version}"
+      result=reviewed-target-default-v1-v2-retained
       ;;
     rolled-back)
-      require_rolled_back_state receipt-rolled-back >/dev/null
+      require_rolled_back_state receipt-rolled-back >/dev/null || return 1
       current_version=v2
-      result=exact-v2-default-v3-absent-v1-unchanged
+      result=exact-v2-default-target-absent-v1-unchanged
       ;;
     *)
       fail "Receipt state is invalid"
@@ -207,10 +222,11 @@ write_receipt() {
     --arg runAttempt "${GITHUB_RUN_ATTEMPT}" \
     --arg runId "${GITHUB_RUN_ID}" \
     --arg state "${expected_state}" \
-    --arg currentVersion "${current_version}" '
+    --arg currentVersion "${current_version}" \
+    --arg targetVersion "${target_version}" '
       {
         schemaVersion:
-          "archon.aws-foundation-core-ami-policy-migration-receipt/v1",
+          "archon.aws-foundation-core-ami-policy-migration-receipt/v2",
         authorization: {absenceReadCount: 3, state: "absent"},
         controlPlaneSha: $controlPlaneSha,
         policy: {
@@ -222,7 +238,9 @@ write_receipt() {
           name: "archon-aws-foundation-control",
           new: {
             documentSha256: $newPolicySha,
-            version: "v3"
+            version:
+              (if $targetVersion == "" then null else $targetVersion end),
+            versionIdStrategy: "aws-assigned-monotonic"
           },
           previousDefault: {
             documentSha256: $oldPolicySha,
@@ -260,7 +278,7 @@ write_receipt() {
     --arg result "${result}" '
       {
         schemaVersion:
-          "archon.aws-foundation-core-ami-policy-migration-attestation/v1",
+          "archon.aws-foundation-core-ami-policy-migration-attestation/v2",
         receiptSha256: $receiptSha256,
         result: $result
       }
@@ -274,7 +292,6 @@ write_receipt() {
     printf 'predicate=%s\n' "${evidence_dir}/attestation-predicate.json"
   } >>"${GITHUB_OUTPUT}"
 }
-
 revoke() {
   validate_common
   : "${EXPECTED_STATE:?EXPECTED_STATE is required}"
