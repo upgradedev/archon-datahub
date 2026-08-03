@@ -2269,171 +2269,85 @@ def validate_facts(
             label,
         )
         public_https_url(facts["applicationUrl"], f"{label}.applicationUrl", origin_only=True)
-        availability = exact_keys(
+        availability = validate_exact_provenance_binding(
             facts["availability"],
-            {
-                "workflowPath",
-                "runId",
-                "runAttempt",
-                "artifactId",
-                "artifactName",
-                "artifactDigest",
-                "predicateType",
-                "predicateDigest",
-                "observedAt",
-                "result",
-            },
             f"{label}.availability",
+            release,
+            workflow_path=".github/workflows/availability.yml",
+            artifact_name_template="production-availability-{releaseSha}-{runId}",
+            predicate_type=(
+                "https://github.com/upgradedev/archon-datahub/attestations/"
+                "production-availability/v2"
+            ),
+            extra_fields=frozenset({"observedAt", "result"}),
         )
-        exact(
-            availability["workflowPath"],
-            ".github/workflows/availability.yml",
-            f"{label}.availability.workflowPath",
-        )
-        availability_run_id = positive_int(
-            availability["runId"],
-            f"{label}.availability.runId",
-        )
-        availability_attempt = positive_int(
-            availability["runAttempt"], f"{label}.availability.runAttempt"
-        )
-        availability_artifact_id = positive_int(
-            availability["artifactId"],
-            f"{label}.availability.artifactId",
-        )
-        if availability_run_id == availability_artifact_id:
-            fail(
-                f"{label}.availability run and artifact IDs must be "
-                "independently bound values"
-            )
-        exact(
-            availability["artifactName"],
-            f"production-availability-{release}-{availability_run_id}",
-            f"{label}.availability.artifactName",
-        )
-        sha256_digest(availability["artifactDigest"], f"{label}.availability.artifactDigest")
-        exact(
-            availability["predicateType"],
-            "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v2",
-            f"{label}.availability.predicateType",
-        )
-        sha256_digest(availability["predicateDigest"], f"{label}.availability.predicateDigest")
         fresh(
             availability["observedAt"],
             f"{label}.availability.observedAt",
-            dt.timedelta(hours=7),
+            dt.timedelta(minutes=90),
         )
         exact(availability["result"], "passed", f"{label}.availability.result")
-        posture = exact_keys(
+        posture = validate_exact_provenance_binding(
             facts["posture"],
-            {
-                "workflowPath",
-                "runId",
-                "runAttempt",
-                "artifactId",
-                "artifactName",
-                "artifactDigest",
-                "predicateType",
-                "predicateDigest",
-                "observedAt",
-                "result",
-                "topicArnSha256",
-                "subscriptionArnSha256",
-                "alarmInventory",
-            },
             f"{label}.posture",
+            release,
+            workflow_path=".github/workflows/production-posture.yml",
+            artifact_name_template="production-posture-{releaseSha}-{runId}",
+            predicate_type=(
+                "https://github.com/upgradedev/archon-datahub/attestations/"
+                "production-posture/v2"
+            ),
+            extra_fields=frozenset(
+                {
+                    "observedAt",
+                    "result",
+                    "checks",
+                    "driftEvidenceDigest",
+                    "alarmNames",
+                }
+            ),
         )
-        exact(
-            posture["workflowPath"],
-            ".github/workflows/production-posture.yml",
-            f"{label}.posture.workflowPath",
-        )
-        posture_run_id = positive_int(
-            posture["runId"],
-            f"{label}.posture.runId",
-        )
-        posture_attempt = positive_int(posture["runAttempt"], f"{label}.posture.runAttempt")
-        posture_artifact_id = positive_int(
-            posture["artifactId"],
-            f"{label}.posture.artifactId",
-        )
-        if posture_run_id == posture_artifact_id:
-            fail(
-                f"{label}.posture run and artifact IDs must be "
-                "independently bound values"
-            )
-        exact(
-            posture["artifactName"],
-            f"production-posture-{release}-{posture_attempt}",
-            f"{label}.posture.artifactName",
-        )
-        sha256_digest(posture["artifactDigest"], f"{label}.posture.artifactDigest")
-        exact(
-            posture["predicateType"],
-            "https://github.com/upgradedev/archon-datahub/attestations/production-posture/v1",
-            f"{label}.posture.predicateType",
-        )
-        sha256_digest(posture["predicateDigest"], f"{label}.posture.predicateDigest")
         fresh(posture["observedAt"], f"{label}.posture.observedAt", dt.timedelta(hours=30))
         exact(posture["result"], "passed", f"{label}.posture.result")
-        sha256_digest(
-            posture["topicArnSha256"],
-            f"{label}.posture.topicArnSha256",
-        )
-        sha256_digest(
-            posture["subscriptionArnSha256"],
-            f"{label}.posture.subscriptionArnSha256",
-        )
-        alarm_inventory = exact_keys(
-            posture["alarmInventory"],
+        exact(
+            posture["checks"],
             {
-                "observedAt",
-                "alarmCount",
-                "allActionsEnabled",
-                "alarmActionsBoundToTopic",
-                "okActionsBoundToTopic",
-                "insufficientDataActionsEmpty",
-                "inventoryDigest",
+                "leanRuntimeControls": True,
+                "zeroIdleCore": True,
+                "cloudFormationDrift": "IN_SYNC",
+                "alarmsNotFiring": True,
+                "legacyAlwaysOnRuntimeAbsent": True,
             },
-            f"{label}.posture.alarmInventory",
+            f"{label}.posture.checks",
         )
-        exact(
-            alarm_inventory["observedAt"],
-            posture["observedAt"],
-            f"{label}.posture.alarmInventory.observedAt",
-        )
-        exact(
-            alarm_inventory["alarmCount"],
-            10,
-            f"{label}.posture.alarmInventory.alarmCount",
-        )
-        for key in (
-            "allActionsEnabled",
-            "alarmActionsBoundToTopic",
-            "okActionsBoundToTopic",
-            "insufficientDataActionsEmpty",
-        ):
-            exact(
-                alarm_inventory[key],
-                True,
-                f"{label}.posture.alarmInventory.{key}",
-            )
         sha256_digest(
-            alarm_inventory["inventoryDigest"],
-            f"{label}.posture.alarmInventory.inventoryDigest",
+            posture["driftEvidenceDigest"],
+            f"{label}.posture.driftEvidenceDigest",
+        )
+        exact(
+            posture["alarmNames"],
+            [
+                "archon-production-control-plane-errors",
+                "archon-production-runtime-failure-queue-visible",
+            ],
+            f"{label}.posture.alarmNames",
         )
         alerting = exact_keys(
             facts["alerting"],
             {
                 "alarmsActive",
                 "snsSubscriptionConfirmed",
-                "externalPagingDeliveryTested",
+                "endToEndAlarmDeliveryTested",
                 "lastPagingTestAt",
                 "pagingDelivery",
             },
             f"{label}.alerting",
         )
-        for key in ("alarmsActive", "snsSubscriptionConfirmed", "externalPagingDeliveryTested"):
+        for key in (
+            "alarmsActive",
+            "snsSubscriptionConfirmed",
+            "endToEndAlarmDeliveryTested",
+        ):
             exact(alerting[key], True, f"{label}.alerting.{key}")
         paging_delivery = validate_exact_provenance_binding(
             alerting["pagingDelivery"],
@@ -2441,45 +2355,47 @@ def validate_facts(
             release,
             workflow_path=".github/workflows/production-paging-test.yml",
             artifact_name_template=(
-                "production-paging-delivery-{releaseSha}-{runAttempt}"
+                "production-alarm-delivery-{releaseSha}-{runId}"
             ),
             predicate_type=(
-                "https://archon.datahub.dev/attestations/"
-                "production-paging-delivery/v1"
+                "https://github.com/upgradedev/archon-datahub/attestations/"
+                "production-alarm-delivery/v2"
             ),
             extra_fields=frozenset(
-                {
-                    "observedAt",
-                    "topicArnSha256",
-                    "subscriptionArnSha256",
-                }
+                {"provedAt", "route", "checks", "deliveryDigest"}
             ),
         )
         fresh(
-            paging_delivery["observedAt"],
-            f"{label}.alerting.pagingDelivery.observedAt",
+            paging_delivery["provedAt"],
+            f"{label}.alerting.pagingDelivery.provedAt",
             dt.timedelta(days=7),
         )
         exact(
             alerting["lastPagingTestAt"],
-            paging_delivery["observedAt"],
+            paging_delivery["provedAt"],
             f"{label}.alerting.lastPagingTestAt",
         )
         exact(
-            paging_delivery["topicArnSha256"],
-            posture["topicArnSha256"],
-            f"{label}.alerting.pagingDelivery.topicArnSha256",
+            paging_delivery["route"],
+            "CloudWatch->SNS(KMS)->SQS(KMS)",
+            f"{label}.alerting.pagingDelivery.route",
         )
         exact(
-            paging_delivery["subscriptionArnSha256"],
-            posture["subscriptionArnSha256"],
-            f"{label}.alerting.pagingDelivery.subscriptionArnSha256",
+            paging_delivery["checks"],
+            {
+                "exactAlarm": True,
+                "alarmTransition": True,
+                "topicBinding": True,
+                "encryptedProofQueue": True,
+                "endToEndDelivery": True,
+                "cleanupRegistered": True,
+            },
+            f"{label}.alerting.pagingDelivery.checks",
         )
-        for key in ("topicArnSha256", "subscriptionArnSha256"):
-            sha256_digest(
-                paging_delivery[key],
-                f"{label}.alerting.pagingDelivery.{key}",
-            )
+        sha256_digest(
+            paging_delivery["deliveryDigest"],
+            f"{label}.alerting.pagingDelivery.deliveryDigest",
+        )
         recovery = exact_keys(
             facts["recovery"],
             {
@@ -2507,7 +2423,7 @@ def validate_facts(
             ),
             predicate_type=(
                 "https://github.com/upgradedev/archon-datahub/"
-                "attestations/governed-canary/v1"
+                "attestations/governed-canary-cloud-v2"
             ),
             extra_fields=frozenset(
                 {
@@ -2591,15 +2507,19 @@ def validate_facts(
         )
         window = exact_keys(
             facts["monitoringWindow"],
-            {"schedule", "active", "through"},
+            {"schedule", "maximumExpectedGapMinutes", "active", "through"},
             f"{label}.monitoringWindow",
         )
-        exact(window["schedule"], "17 */6 * * *", f"{label}.monitoringWindow.schedule")
+        exact(window["schedule"], "*/30 * * * *", f"{label}.monitoringWindow.schedule")
+        exact(
+            window["maximumExpectedGapMinutes"],
+            90,
+            f"{label}.monitoringWindow.maximumExpectedGapMinutes",
+        )
         exact(window["active"], True, f"{label}.monitoringWindow.active")
         if timestamp(window["through"], f"{label}.monitoringWindow.through") < JUDGING_END:
             fail(f"{label}.monitoringWindow.through ends before the judging window")
         return
-
     if proof_id == "SQ11":
         exact_keys(
             facts,
