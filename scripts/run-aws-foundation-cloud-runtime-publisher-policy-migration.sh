@@ -254,10 +254,10 @@ write_receipt() {
 revoke() {
   validate_common
   : "${EXPECTED_STATE:?EXPECTED_STATE is required}"
-  render_policy_documents
   verify_caller "${FOUNDATION_ROLE_NAME}"
   revoke_temp_policy
   verify_recovery_role_baseline
+  render_policy_documents
   write_receipt "${EXPECTED_STATE}"
 }
 
