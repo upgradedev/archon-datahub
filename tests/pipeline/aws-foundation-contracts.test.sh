@@ -1983,23 +1983,31 @@ for migration_common in \
   "${repository_root}/scripts/aws-foundation-policy-migration-common.sh" \
   "${publisher_migration_common}" \
   "${core_migration_common}"; do
+  common_validate_block="$(sed -n '/^validate_common() {/,/^}/p' "${migration_common}")"
+  render_block="$(sed -n '/^render_policy_documents() {/,/^}/p' "${migration_common}")"
   recovery_baseline_block="$(
     sed -n '/^verify_recovery_role_baseline() {/,/^}/p' "${migration_common}"
   )"
   test "$(
     grep -Fc \
-      '  local expected_role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"' \
-      <<<"${recovery_baseline_block}"
+      '  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"' \
+      <<<"${common_validate_block}"
   )" -eq 1 ||
-    fail "${migration_common} must derive the recovery role ARN before rendering"
+    fail "${migration_common} must derive the target policy ARN during validation"
   test "$(
-    grep -Fc '    --arg roleArn "${expected_role_arn}"' \
+    grep -Fc \
+      '  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"' \
+      <<<"${common_validate_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must derive the recovery role ARN during validation"
+  if grep -Eq 'TARGET_POLICY_ARN=|RECOVERY_ROLE_ARN=' <<<"${render_block}"; then
+    fail "${migration_common} rendering must not initialize AWS identity bindings"
+  fi
+  test "$(
+    grep -Fc '    --arg roleArn "${RECOVERY_ROLE_ARN}"' \
       <<<"${recovery_baseline_block}"
   )" -eq 1 ||
-    fail "${migration_common} must verify the locally derived recovery role ARN"
-  if grep -Fq '${RECOVERY_ROLE_ARN}' <<<"${recovery_baseline_block}"; then
-    fail "${migration_common} recovery baseline must not depend on renderer state"
-  fi
+    fail "${migration_common} must verify the validated recovery role ARN"
 done
 
 forbid_text "${publisher_migration_common}" \
@@ -2118,9 +2126,10 @@ require_text "${publisher_migration_driver}" \
 require_text "${publisher_migration_cleanup}" \
   'Migrate AWS foundation cloud runtime publisher identity policy' \
   'RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION' \
-  'SEAL EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY TERMINAL STATE' \
+  'SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY' \
   'cleanup-rollback' \
-  'cleanup-revoke'
+  'cleanup-revoke' \
+  'cleanup-migrated'
 require_text "${publisher_migration_common}" \
   '--stdout-group identity' \
   'afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553' \
