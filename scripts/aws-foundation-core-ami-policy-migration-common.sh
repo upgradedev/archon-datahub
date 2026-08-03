@@ -152,14 +152,14 @@ validate_common() {
       },
       {
         canonicalSha256:
-          "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b",
+          "c04fa232282c099ddf1c311f239ac9f2080f1a0c41e3c5e4420d0c061a707137",
         isDefault: true,
         versionId: "v2"
       }
     ] and
     .policy.target == {
       canonicalSha256:
-        "52e0a5d619c426b8c58b111a8e410e41548522411ff18a9ffbe346d89e6bd3cf",
+        "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33",
       expectedVersionId: "v3"
     } and
     .policy.retainBaselineVersionsForRollback == true and
