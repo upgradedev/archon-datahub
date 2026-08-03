@@ -940,7 +940,10 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
   shopt -s extdebug
   # shellcheck source=/dev/null
   source "${core_migration_common}"
-  for function_name in iam_policy_sha render_policy_documents; do
+  for function_name in \
+    iam_policy_sha \
+    validate_policy_delta \
+    render_policy_documents; do
     function_metadata="$(declare -F "${function_name}")" ||
       fail "Core migration renderer function is missing: ${function_name}"
     read -r resolved_name resolved_line resolved_source <<<"${function_metadata}"
@@ -950,6 +953,103 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
       fail "Core migration renderer function has unexpected provenance: ${function_name}"
   done
   render_policy_documents
+
+  jq -e \
+    --arg account "${AWS_ACCOUNT_ID}" \
+    --slurpfile contract "${CONTRACT}" \
+    --slurpfile current "${NEW_POLICY}" '
+      def bind_resources:
+        map(gsub("\\$\\{aws:PrincipalAccount\\}"; $account)) | sort;
+      . as $old |
+      ($current[0]) as $new |
+      ($contract[0].policy.exactDelta) as $delta |
+      ($delta.resourceReplacements[0]) as $replacement |
+      ($replacement.statementSid) as $sid |
+      ($replacement.baselineResources | bind_resources) as $baseline |
+      ($replacement.targetResources | bind_resources) as $target |
+      ([$old.Statement[] | select(.Sid == $sid)] | length) == 1 and
+      ([$new.Statement[] | select(.Sid == $sid)] | length) == 1 and
+      ([$old.Statement[] | select(.Sid == $sid)][0].Resource | sort) ==
+        $baseline and
+      ([$new.Statement[] | select(.Sid == $sid)][0].Resource | sort) ==
+        $target and
+      all($delta.newStatementSids[];
+        . as $newSid |
+        ([$old.Statement[] | select(.Sid == $newSid)] | length) == 0 and
+        ([$new.Statement[] | select(.Sid == $newSid)] | length) == 1)
+    ' "${OLD_POLICY}" >/dev/null ||
+      fail "Core migration did not reconstruct the exact historical v2"
+
+  assert_core_delta_rejects() {
+    local label="$1"
+    local candidate_new="$2"
+    local candidate_old="$3"
+    if validate_policy_delta \
+      "${candidate_new}" "${candidate_old}" >/dev/null 2>&1; then
+      fail "Core migration delta validator accepted ${label}"
+    fi
+  }
+
+  negative_new="${RUNNER_TEMP}/core-negative-new.json"
+  negative_old="${RUNNER_TEMP}/core-negative-old.json"
+  jq '
+    (.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles") |
+      .Resource[0]) += "-drift"
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "target resource drift" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    (.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles") |
+      .Action) = ["cloudformation:ListStacks"]
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "replacement action drift" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    (.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles") |
+      .Effect) = "Deny"
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "replacement effect drift" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    .Statement |= map(
+      select(.Sid != "ReconcileExactCoreAmiFoundationStack")
+    )
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "missing Core statement" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    .Statement += [{
+      Sid: "UnexpectedCoreAmiPermission",
+      Effect: "Allow",
+      Action: ["iam:GetRole"],
+      Resource: ["arn:aws:iam::123456789012:role/unexpected"]
+    }] |
+    .Statement |= sort_by(.Sid)
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "extra statement" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    (.Statement[] | select(.Sid == "VerifyCaller") | .Action[0]) =
+      "sts:GetFederationToken"
+  ' "${NEW_POLICY}" >"${negative_new}"
+  assert_core_delta_rejects \
+    "unrelated statement drift" "${negative_new}" "${OLD_POLICY}"
+
+  jq '
+    (.Statement[] |
+      select(.Sid == "InspectExistingApplicationStackRoles") |
+      .Resource[0]) += "-drift"
+  ' "${OLD_POLICY}" >"${negative_old}"
+  assert_core_delta_rejects \
+    "baseline resource drift" "${NEW_POLICY}" "${negative_old}"
 )
 core_migration_render_test_block="$(
   sed -n '/^core_migration_common=/,/^)/p' "${BASH_SOURCE[0]}"
@@ -971,7 +1071,11 @@ jq -e --slurpfile coreMigration "${core_migration_contract}" '
   $summary.baselineDefaultVersion == $defaults[0].versionId and
   $summary.baselineCanonicalSha256 == $defaults[0].canonicalSha256 and
   $summary.targetVersion == $migration.policy.target.expectedVersionId and
-  ($summary.deltaSids | sort) == ($migration.policy.exactDeltaSids | sort)
+  ($summary.deltaSids | sort) ==
+    ($migration.policy.exactDelta.newStatementSids | sort) and
+  ($summary.replacementSids | sort) ==
+    ($migration.policy.exactDelta.resourceReplacements |
+      map(.statementSid) | sort)
 ' "${contract}" >/dev/null ||
   fail "Foundation summary and Core policy migration contract differ"
 
