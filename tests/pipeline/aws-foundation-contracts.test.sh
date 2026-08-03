@@ -944,6 +944,7 @@ if grep -Eq 'jq: (error|[0-9]+ compile error)' \
   "${core_migration_log}"; then
   fail "Core policy jq validator has a compile or runtime error"
 fi
+
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
   --from-file "${foundation_policy_validator}" \
