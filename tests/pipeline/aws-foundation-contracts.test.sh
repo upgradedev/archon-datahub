@@ -1925,7 +1925,32 @@ forbid_text "${reconciler}" \
   'declare -p'
 test "$(grep -Ec "^foundation_phase='[^']+'$" "${reconciler}")" -eq 38 ||
   fail 'reconciler diagnostic phases must be the 38 reviewed public labels'
-for migration_runner in \   "${repository_root}/scripts/run-aws-foundation-policy-migration.sh" \   "${repository_root}/scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh" \   "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"; do   revoke_block="$(     sed -n '/^revoke() {/,/^}/p' "${migration_runner}"   )"   test "$(grep -Fc '  revoke_temp_policy' <<<"${revoke_block}")" -eq 1 ||     fail "${migration_runner} must revoke temporary authority exactly once"   test "$(grep -Fc '  render_policy_documents' <<<"${revoke_block}")" -eq 1 ||     fail "${migration_runner} must render receipt policy state exactly once"   revoke_line="$(     grep -nF '  revoke_temp_policy' <<<"${revoke_block}" | cut -d: -f1   )"   render_line="$(     grep -nF '  render_policy_documents' <<<"${revoke_block}" | cut -d: -f1   )"   [[ "${revoke_line}" =~ ^[1-9][0-9]*$ && "${render_line}" =~ ^[1-9][0-9]*$ ]] ||     fail "${migration_runner} revoke/render ordering is ambiguous"   ((revoke_line < render_line)) ||     fail "${migration_runner} must revoke temporary authority before fallible rendering" done  forbid_text "${publisher_migration_common}" \   'all($addedResources[] as $resource;' jq -e '
+for migration_runner in \
+  "${repository_root}/scripts/run-aws-foundation-policy-migration.sh" \
+  "${repository_root}/scripts/run-aws-foundation-cloud-runtime-publisher-policy-migration.sh" \
+  "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"; do
+  revoke_block="$(
+    sed -n '/^revoke() {/,/^}/p' "${migration_runner}"
+  )"
+  test "$(grep -Fc '  revoke_temp_policy' <<<"${revoke_block}")" -eq 1 ||
+    fail "${migration_runner} must revoke temporary authority exactly once"
+  test "$(grep -Fc '  render_policy_documents' <<<"${revoke_block}")" -eq 1 ||
+    fail "${migration_runner} must render receipt policy state exactly once"
+  revoke_line="$(
+    grep -nF '  revoke_temp_policy' <<<"${revoke_block}" | cut -d: -f1
+  )"
+  render_line="$(
+    grep -nF '  render_policy_documents' <<<"${revoke_block}" | cut -d: -f1
+  )"
+  [[ "${revoke_line}" =~ ^[1-9][0-9]*$ && "${render_line}" =~ ^[1-9][0-9]*$ ]] ||
+    fail "${migration_runner} revoke/render ordering is ambiguous"
+  ((revoke_line < render_line)) ||
+    fail "${migration_runner} must revoke temporary authority before fallible rendering"
+done
+
+forbid_text "${publisher_migration_common}" \
+  'all($addedResources[] as $resource;'
+jq -e '
   .aws.foundationPolicies.identityRoleMigration == {
     baselineCanonicalSha256:
       "afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553",
