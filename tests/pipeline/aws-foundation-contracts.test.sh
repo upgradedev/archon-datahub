@@ -935,16 +935,24 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
     fail "CI AWS_ACCOUNT_ID must be exactly 12 digits"
   mkdir -p "${RUNNER_TEMP}"
   : >"${GITHUB_OUTPUT}"
+  shopt -s extdebug
   # shellcheck source=/dev/null
   source "${core_migration_common}"
+  for function_name in iam_policy_sha render_policy_documents; do
+    function_metadata="$(declare -F "${function_name}")" ||
+      fail "Core migration renderer function is missing: ${function_name}"
+    read -r resolved_name resolved_line resolved_source <<<"${function_metadata}"
+    [[ "${resolved_name}" == "${function_name}" &&
+      "${resolved_line}" =~ ^[1-9][0-9]*$ &&
+      "${resolved_source}" == "${core_migration_common}" ]] ||
+      fail "Core migration renderer function has unexpected provenance: ${function_name}"
+  done
   render_policy_documents
 )
 core_migration_render_test_block="$(
   sed -n '/^core_migration_common=/,/^)/p' "${BASH_SOURCE[0]}"
 )"
-if grep -Eq '^[[:space:]]*(function[[:space:]]+)?iam_policy_sha[[:space:]]*(\(\))?[[:space:]]*\{' <<<"${core_migration_render_test_block}"; then
-  fail "Core migration renderer test must use the real iam_policy_sha"
-fi
+
 test "$(
   grep -Ec '^[[:space:]]{2}render_policy_documents$' <<<"${core_migration_render_test_block}"
 )" -eq 1 || fail "Core migration renderer test must execute one real render"
