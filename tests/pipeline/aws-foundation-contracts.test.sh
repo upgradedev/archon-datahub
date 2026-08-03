@@ -906,6 +906,17 @@ publisher_migration_runtime="${renderer_runtime_dir}/publisher-migration"
   : >"${GITHUB_OUTPUT}"
   # shellcheck source=/dev/null
   source "${publisher_migration_common}"
+  # Stub only account-bound digests; execute the real renderer and jq filters.
+  iam_policy_sha() {
+    local policy="$1"
+    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
+      jq -er '.policy.liveBaseline.canonicalSha256' "${CONTRACT}"
+    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
+      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
+    else
+      return 1
+    fi
+  }
   render_policy_documents
 )
 
@@ -922,6 +933,19 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
   : >"${GITHUB_OUTPUT}"
   # shellcheck source=/dev/null
   source "${core_migration_common}"
+  # Stub only account-bound digests; execute the real renderer and jq filters.
+  iam_policy_sha() {
+    local policy="$1"
+    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
+      jq -er '.policy.liveBaseline[] |
+        select(.versionId == "v2" and .isDefault == true) |
+        .canonicalSha256' "${CONTRACT}"
+    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
+      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
+    else
+      return 1
+    fi
+  }
   render_policy_documents
 )
 jq --exit-status \
