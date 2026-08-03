@@ -342,7 +342,7 @@ def validate(sources: dict[str, str]) -> None:
         docs_core,
         (
             "current remote",
-            "refs/heads/master",
+            "source ref `refs/heads/master`",
             "gh attestation verify",
             "denial of self-hosted runners",
         ),
@@ -533,8 +533,8 @@ MUTATIONS = {
     ),
     "Core runbook weakens the signed source ref": (
         "docs_core",
-        "refs/heads/master",
-        "refs/heads/feature",
+        "source ref `refs/heads/master`",
+        "source ref `refs/heads/feature`",
     ),
     "canary runbook restores four environments": (
         "docs_canary",
