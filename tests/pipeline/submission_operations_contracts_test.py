@@ -357,6 +357,14 @@ def validate_workflow(source: str) -> None:
     )
     for marker in required_collector_contracts:
         require(marker in collector, f"collector lost contract: {marker}")
+    require(
+        collector.count("production-alarm-delivery-${RELEASE_SHA}-") == 2,
+        "collector must bind the exact paging prefix in resolve and recheck only",
+    )
+    require(
+        "production-alarm-delivery-candidate-" not in collector,
+        "collector accepted a paging candidate artifact prefix",
+    )
     forbidden_collector_contracts = (
         "rm -rf",
         "eval ",
