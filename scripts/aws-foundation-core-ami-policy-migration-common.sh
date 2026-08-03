@@ -152,14 +152,14 @@ validate_common() {
       },
       {
         canonicalSha256:
-          "a6f2bafdfb0f3e1c9a8de2a71512f57563e85d735fde2421d079e1f9dcd14f1b",
+          "c04fa232282c099ddf1c311f239ac9f2080f1a0c41e3c5e4420d0c061a707137",
         isDefault: true,
         versionId: "v2"
       }
     ] and
     .policy.target == {
       canonicalSha256:
-        "52e0a5d619c426b8c58b111a8e410e41548522411ff18a9ffbe346d89e6bd3cf",
+        "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33",
       expectedVersionId: "v3"
     } and
     .policy.retainBaselineVersionsForRollback == true and
@@ -316,10 +316,10 @@ render_policy_documents() {
   expected_new="$(jq -er '.policy.target.canonicalSha256' "${CONTRACT}")"
   test "${HISTORICAL_POLICY_SHA}" = \
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
-  test "${OLD_POLICY_SHA}" = "${expected_old}" ||
-    fail "Derived v2 control-policy digest differs"
-  test "${NEW_POLICY_SHA}" = "${expected_new}" ||
-    fail "Rendered v3 control-policy digest differs"
+  if [[ "${OLD_POLICY_SHA}" != "${expected_old}" ||
+    "${NEW_POLICY_SHA}" != "${expected_new}" ]]; then
+    fail "Core AMI control-policy digest contract differs: v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old} v3_actual=${NEW_POLICY_SHA} v3_expected=${expected_new}"
+  fi
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" ||
     fail "The Core AMI control-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||

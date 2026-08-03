@@ -10,6 +10,7 @@ deploy_workflow="${repository_root}/.github/workflows/deploy.yml"
 ci_workflow="${repository_root}/.github/workflows/ci.yml"
 contract="${repository_root}/contracts/aws-foundation-v1.json"
 migration_contract="${repository_root}/contracts/aws-foundation-policy-migration-v1.json"
+core_migration_contract="${repository_root}/contracts/aws-foundation-core-ami-policy-migration-v1.json"
 publisher_migration_contract="${repository_root}/contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json"
 publisher_migration_entry="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml"
 publisher_migration_driver="${repository_root}/.github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml"
@@ -80,6 +81,7 @@ for path in \
   "${ci_workflow}" \
   "${contract}" \
   "${migration_contract}" \
+  "${core_migration_contract}" \
   "${publisher_migration_contract}" \
   "${publisher_migration_entry}" \
   "${publisher_migration_driver}" \
@@ -928,26 +930,48 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
   export GITHUB_ACTIONS=true
   export RUNNER_TEMP="${core_migration_runtime}"
   export GITHUB_OUTPUT="${core_migration_runtime}/github-output"
-  export AWS_ACCOUNT_ID=123456789012
+  export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:?CI must provide AWS_ACCOUNT_ID}"
+  [[ "${AWS_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] ||
+    fail "CI AWS_ACCOUNT_ID must be exactly 12 digits"
   mkdir -p "${RUNNER_TEMP}"
   : >"${GITHUB_OUTPUT}"
+  shopt -s extdebug
   # shellcheck source=/dev/null
   source "${core_migration_common}"
-  # Stub only account-bound digests; execute the real renderer and jq filters.
-  iam_policy_sha() {
-    local policy="$1"
-    if [[ "${policy}" == "${OLD_POLICY}" ]]; then
-      jq -er '.policy.liveBaseline[] |
-        select(.versionId == "v2" and .isDefault == true) |
-        .canonicalSha256' "${CONTRACT}"
-    elif [[ "${policy}" == "${NEW_POLICY}" ]]; then
-      jq -er '.policy.target.canonicalSha256' "${CONTRACT}"
-    else
-      return 1
-    fi
-  }
+  for function_name in iam_policy_sha render_policy_documents; do
+    function_metadata="$(declare -F "${function_name}")" ||
+      fail "Core migration renderer function is missing: ${function_name}"
+    read -r resolved_name resolved_line resolved_source <<<"${function_metadata}"
+    [[ "${resolved_name}" == "${function_name}" &&
+      "${resolved_line}" =~ ^[1-9][0-9]*$ &&
+      "${resolved_source}" == "${core_migration_common}" ]] ||
+      fail "Core migration renderer function has unexpected provenance: ${function_name}"
+  done
   render_policy_documents
 )
+core_migration_render_test_block="$(
+  sed -n '/^core_migration_common=/,/^)/p' "${BASH_SOURCE[0]}"
+)"
+
+test "$(
+  grep -Ec '^[[:space:]]{2}render_policy_documents$' <<<"${core_migration_render_test_block}"
+)" -eq 1 || fail "Core migration renderer test must execute one real render"
+
+jq -e --slurpfile coreMigration "${core_migration_contract}" '
+  .aws.coreAmiFoundation.policyMigration as $summary |
+  $coreMigration[0] as $migration |
+  [$migration.policy.liveBaseline[] | select(.isDefault == true)] as $defaults |
+  ($defaults | length) == 1 and
+  $summary.contract ==
+    "contracts/aws-foundation-core-ami-policy-migration-v1.json" and
+  $summary.workflow == $migration.workflow.entry and
+  $summary.policyName == $migration.policy.name and
+  $summary.baselineDefaultVersion == $defaults[0].versionId and
+  $summary.baselineCanonicalSha256 == $defaults[0].canonicalSha256 and
+  $summary.targetVersion == $migration.policy.target.expectedVersionId and
+  ($summary.deltaSids | sort) == ($migration.policy.exactDeltaSids | sort)
+' "${contract}" >/dev/null ||
+  fail "Foundation summary and Core policy migration contract differ"
 
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
@@ -1503,7 +1527,11 @@ require_text "${ci_workflow}" \
   '"${RUNNER_TEMP}/archon-cdk-execution-policy.yaml"' \
   '"${RUNNER_TEMP}/archon-cdk-execution-policy.canonical.json"' \
   'scripts/render-aws-foundation-policy.mjs' \
+  'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' \
   'node scripts/verify-aws-runtime-boundary.mjs'
+test "$(
+  grep -Fc 'AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}' "${ci_workflow}"
+)" -eq 1 || fail "CI must bind the account-aware policy digest test exactly once"
 require_text "${deploy_workflow}" \
   'group: archon-aws-control-plane' \
   'cancel-in-progress: false' \
