@@ -118,6 +118,43 @@ test("supply chain binds only lean production and the exact deployment artifact"
   }
 });
 
+test("scheduled production observers bind exact control-plane SHA before AWS trust", () => {
+  const gates = [
+    [
+      "- name: Seal current observer control-plane gates before AWS trust",
+      "- name: Configure read-only production observer through OIDC",
+    ],
+    [
+      "- name: Revalidate observer control plane before AWS trust",
+      "- name: Configure read-only production observer through OIDC",
+    ],
+  ] as const;
+  for (const [startMarker, endMarker] of gates) {
+    const start = supplyChainWorkflow.indexOf(startMarker);
+    const end = supplyChainWorkflow.indexOf(
+      endMarker,
+      start + startMarker.length
+    );
+    assert.ok(start >= 0 && end > start, startMarker);
+    const gate = supplyChainWorkflow.slice(start, end);
+    assert.ok(
+      gate.includes("CONTROL_PLANE_SHA: ${{ github.sha }}"),
+      startMarker + " must bind the exact checked-out SHA"
+    );
+    assert.equal(
+      gate.match(/bash scripts\/verify-github-control-plane\.sh/gu)?.length,
+      1,
+      startMarker
+    );
+  }
+  assert.equal(
+    supplyChainWorkflow.match(
+      /CONTROL_PLANE_SHA: \$\{\{ github\.sha \}\}/gu
+    )?.length,
+    2
+  );
+});
+
 test("supply chain normalizes archive digests before REST binding", () => {
   const normalized = `"sha256:\${{ steps.upload.outputs['artifact-digest'] }}"`;
   assert.equal(supplyChainWorkflow.split(normalized).length - 1, 2);
