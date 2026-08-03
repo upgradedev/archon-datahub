@@ -140,12 +140,15 @@ test("scheduled production observers bind exact control-plane SHA before AWS tru
     const binding = gate.indexOf(
       "CONTROL_PLANE_SHA: ${{ github.sha }}"
     );
+    const output = gate.indexOf(
+      "OUTPUT_PATH: ${{ runner.temp }}/control-plane-security-gates.json"
+    );
     const verifier = gate.indexOf(
       "bash scripts/verify-github-control-plane.sh"
     );
     assert.ok(
-      binding >= 0 && verifier > binding,
-      startMarker + " must bind the exact checked-out SHA before verification"
+      binding >= 0 && output > binding && verifier > output,
+      startMarker + " must bind exact SHA and canonical output before verification"
     );
     assert.equal(
       gate.match(/bash scripts\/verify-github-control-plane\.sh/gu)?.length,
@@ -158,6 +161,16 @@ test("scheduled production observers bind exact control-plane SHA before AWS tru
       /CONTROL_PLANE_SHA: \$\{\{ github\.sha \}\}/gu
     )?.length,
     2
+  );
+  assert.equal(
+    supplyChainWorkflow.match(
+      /OUTPUT_PATH: \$\{\{ runner\.temp \}\}\/control-plane-security-gates\.json/gu
+    )?.length,
+    2
+  );
+  assert.doesNotMatch(
+    supplyChainWorkflow,
+    /(?:observer-control-plane-gates|revalidate-control-plane)\.json/u
   );
 });
 
