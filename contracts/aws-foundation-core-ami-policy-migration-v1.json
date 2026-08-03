@@ -42,12 +42,6 @@
         "canonicalSha256": "c04fa232282c099ddf1c311f239ac9f2080f1a0c41e3c5e4420d0c061a707137"
       }
     ],
-    "target": {
-      "expectedVersionId": "v3",
-      "canonicalSha256": "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33"
-    },
-    "retainBaselineVersionsForRollback": true,
-    "maximumDocumentBytes": 6144,
     "baselineProvenance": {
       "role": "last-known-good-successful-control-policy-validation",
       "sourceRevision": "270846e6a2acc849e755627e101252b02216d924",
@@ -90,7 +84,11 @@
         "defaultVersionId": "v2",
         "canonicalReadback": true
       }
+    },    "target": {
+      "expectedVersionId": "v3",
+      "canonicalSha256": "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33"
     },
+    "retainBaselineVersionsForRollback": true,
     "exactDelta": {
       "newStatementSids": [
         "ReconcileExactCoreAmiFoundationStack",
@@ -124,7 +122,8 @@
         }
       ],
       "noOtherStatementChange": true
-    }
+    },
+    "maximumDocumentBytes": 6144
   },
   "authorization": {
     "foundationRoleName": "archon-datahub-github-foundation",
