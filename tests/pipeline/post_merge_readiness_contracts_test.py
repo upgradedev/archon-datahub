@@ -15,6 +15,7 @@ PATHS = {
     "live": ".github/workflows/live-datahub-proof.yml",
     "deploy": ".github/workflows/deploy.yml",
     "core": ".github/workflows/datahub-core-ami.yml",
+    "companion": ".github/workflows/datahub-companion-image.yml",
     "canary": ".github/workflows/governed-canary.yml",
     "recovery": ".github/workflows/governed-canary-recovery.yml",
     "credentials": "scripts/load-datahub-cloud-canary-credentials.sh",
@@ -51,6 +52,7 @@ def validate(sources: dict[str, str]) -> None:
     live = sources["live"]
     deploy = sources["deploy"]
     core = sources["core"]
+    companion = sources["companion"]
     canary = sources["canary"]
     recovery = sources["recovery"]
     credentials = sources["credentials"]
@@ -201,6 +203,16 @@ def validate(sources: dict[str, str]) -> None:
     )
 
     require_all(
+        companion,
+        (
+            "github.event_name != 'pull_request' ||",
+            "retention-days: ${{ github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 90 || 1 }}",
+            "if: >-\n      github.ref == 'refs/heads/master' &&\n      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+            "artifact-ids: ${{ needs.candidate.outputs.artifact_id }}",
+        ),
+        "qualifying companion dispatch",
+    )
+    require_all(
         core,
         (
             'test "${GITHUB_REF}" = "refs/heads/master"',
@@ -208,7 +220,7 @@ def validate(sources: dict[str, str]) -> None:
             'git/ref/heads/master" --jq .object.sha',
             '.name == "DataHub companion OCI"',
             '.path == ".github/workflows/datahub-companion-image.yml"',
-            '.event == "push"',
+            '(.event == "push" or .event == "workflow_dispatch") and',
             '.head_branch == "master"',
             ".head_repository.full_name == $repository",
             ".head_sha == $sourceSha",
@@ -222,10 +234,19 @@ def validate(sources: dict[str, str]) -> None:
             "--source-ref refs/heads/master",
             "attestations/datahub-companion-image/v1",
             "--deny-self-hosted-runners",
+            'echo "artifact_id=${artifact_id}" >>"${GITHUB_OUTPUT}"',
+            "artifact-ids: ${{ steps.companion.outputs.artifact_id }}",
+            "Revalidate exact signed master immediately before AWS OIDC",
+            '.commit.verification.verified == true and',
         ),
         "Core companion supply chain",
     )
 
+    require(
+        core.index("Revalidate exact signed master immediately before AWS OIDC")
+        < core.index("Configure staging AWS credentials through OIDC"),
+        "Core master revalidation must immediately precede AWS OIDC",
+    )
     for workflow, label in ((canary, "normal canary"), (recovery, "recovery")):
         require(
             workflow.count("AWS_CANARY_RECOVERY_ROLE_ARN") == 2
@@ -430,10 +451,40 @@ MUTATIONS = {
         ".releaseSha == $sha and .companionSourceSha == $sha and",
         ".releaseSha == $sha and",
     ),
-    "manual companion run accepted": (
+    "pull request companion run accepted": (
         "core",
-        '.event == "push"',
-        '.event == "workflow_dispatch"',
+        '(.event == "push" or .event == "workflow_dispatch") and',
+        '(.event == "push" or .event == "workflow_dispatch" or .event == "pull_request") and',
+    ),
+    "manual companion run rejected": (
+        "core",
+        '(.event == "push" or .event == "workflow_dispatch") and',
+        '.event == "push" and',
+    ),
+    "push companion run rejected": (
+        "core",
+        '(.event == "push" or .event == "workflow_dispatch") and',
+        '.event == "workflow_dispatch" and',
+    ),
+    "manual companion attestation disabled": (
+        "companion",
+        "if: >-\n      github.ref == 'refs/heads/master' &&\n      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+        "if: github.event_name == 'push' && github.ref == 'refs/heads/master'",
+    ),
+    "manual companion retention shortened": (
+        "companion",
+        "retention-days: ${{ github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 90 || 1 }}",
+        "retention-days: ${{ github.event_name == 'push' && 90 || 1 }}",
+    ),
+    "mutable companion name download restored": (
+        "core",
+        "artifact-ids: ${{ steps.companion.outputs.artifact_id }}",
+        "name: ${{ steps.companion.outputs.artifact_name }}",
+    ),
+    "pre-OIDC master revalidation removed": (
+        "core",
+        "Revalidate exact signed master immediately before AWS OIDC",
+        "Skip exact master revalidation before AWS OIDC",
     ),
     "companion source ref changed": (
         "core",
