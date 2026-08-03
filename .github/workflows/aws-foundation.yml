@@ -805,15 +805,6 @@ jobs:
           jq -e \
             --slurpfile migration \
               contracts/aws-foundation-policy-migration-v1.json \
-            contracts/aws-foundation-core-ami-policy-migration-v1.json \
-            contracts/aws-foundation-cloud-runtime-publisher-policy-migration-v1.json \
-            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration.yml \
-            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-driver.yml \
-            .github/workflows/aws-foundation-cloud-runtime-publisher-policy-migration-cleanup.yml \
-            .github/workflows/datahub-cloud-runtime-image.yml \
-            .github/workflows/aws-foundation-core-ami-policy-migration.yml \
-            .github/workflows/aws-foundation-core-ami-policy-migration-driver.yml \
-            .github/workflows/aws-foundation-core-ami-policy-migration-cleanup.yml \
             --from-file scripts/validate-aws-foundation-policy.jq \
             infra/aws/foundation/github-actions-foundation-policy.json \
             >/dev/null
