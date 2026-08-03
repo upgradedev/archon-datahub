@@ -2361,6 +2361,172 @@ run_isolated_revoke_path core \
   "${repository_root}/scripts/aws-foundation-core-ami-policy-migration-authorization.sh" \
   "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
 
+run_isolated_core_migrate_path() (
+  local created_default="$1"
+  local expected_result="$2"
+  local migration_runner="${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
+  local case_runtime="${renderer_runtime_dir}/core-migrate-${created_default}"
+  local trace_file="${case_runtime}/trace"
+  local stderr_file="${case_runtime}/stderr"
+  mkdir -p "${case_runtime}"
+  chmod 0700 "${case_runtime}"
+  export GITHUB_ACTIONS=true
+  export RUNNER_TEMP="${case_runtime}"
+  export GITHUB_OUTPUT="${case_runtime}/github-output"
+  export AWS_ACCOUNT_ID=123456789012
+  export CONTROL_PLANE_SHA=0123456789abcdef0123456789abcdef01234567
+  : >"${GITHUB_OUTPUT}"
+  : >"${trace_file}"
+  cd "${repository_root}"
+
+  # Exercise the exact migrate() orchestration with a synthetic AWS boundary.
+  # All files live below the CI runner's temporary directory; no network or AWS
+  # mutation is possible from this contract test.
+  # shellcheck source=/dev/null
+  source "${core_migration_common}"
+  # shellcheck source=/dev/null
+  source <(sed -n '/^migrate() {/,/^}/p' "${migration_runner}")
+
+  trace_event() {
+    printf '%s\n' "$1" >>"${trace_file}"
+  }
+  validate_common() {
+    TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
+    RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
+    trace_event validate
+  }
+  render_policy_documents() {
+    NEW_POLICY="${WORK_ROOT}/synthetic-new.json"
+    HISTORICAL_POLICY_SHA="${EXPECTED_HISTORICAL_POLICY_SHA}"
+    NEW_POLICY_SHA="${EXPECTED_NEW_POLICY_SHA}"
+    OLD_POLICY_SHA="${EXPECTED_OLD_POLICY_SHA}"
+    trace_event render
+  }
+  verify_caller() {
+    test "$1" = "${RECOVERY_ROLE_NAME}"
+    trace_event caller
+  }
+  verify_live_temp_policy() {
+    test "$1" = migrate
+    test "$2" = "${EXPECTED_TEMP_POLICY_SHA}"
+    LIVE_TEMP_EXPIRES_AT="${EXPECTED_EXPIRES_AT}"
+    trace_event live-temp
+  }
+  require_baseline_state() {
+    test "$1" = migrate-baseline
+    trace_event baseline
+    printf 'v1\nv2\n'
+  }
+  wait_for_rollback_pending_state() {
+    test "$1" = migrate-before-switch
+    test "$2" = old
+    trace_event pending
+    printf 'v1\nv2\nv3\n'
+  }
+  wait_for_state() {
+    test "$1" = migrated
+    trace_event wait-migrated
+  }
+  require_migrated_state() {
+    test "$1" = migrate-final
+    trace_event migrated-state
+    printf 'v1\nv2\nv3\n'
+  }
+  aws() {
+    local service="${1:-}"
+    local operation="${2:-}"
+    shift 2 || return 97
+    local -a actual=("$@")
+    local -a expected=()
+    local index
+    case "${service}:${operation}" in
+      iam:create-policy-version)
+        expected=(
+          --policy-arn "${TARGET_POLICY_ARN}"
+          --policy-document "file://${NEW_POLICY}"
+          --no-set-as-default
+          --output json
+        )
+        test "${#actual[@]}" -eq "${#expected[@]}" || return 97
+        for index in "${!expected[@]}"; do
+          test "${actual[${index}]}" = "${expected[${index}]}" || return 97
+        done
+        trace_event create-v3
+        jq -cn \
+          --argjson isDefault "${created_default}" \
+          '{
+            PolicyVersion: {
+              VersionId: "v3",
+              IsDefaultVersion: $isDefault
+            }
+          }'
+        ;;
+      iam:set-default-policy-version)
+        expected=(
+          --policy-arn "${TARGET_POLICY_ARN}"
+          --version-id v3
+        )
+        test "${#actual[@]}" -eq "${#expected[@]}" || return 97
+        for index in "${!expected[@]}"; do
+          test "${actual[${index}]}" = "${expected[${index}]}" || return 97
+        done
+        trace_event set-default
+        ;;
+      *)
+        printf '::error::Unexpected fake AWS call: %s:%s\n' \
+          "${service}" "${operation}" >&2
+        return 97
+        ;;
+    esac
+  }
+
+  EXPECTED_EXPIRES_AT=2026-08-03T12:30:00Z
+  EXPECTED_HISTORICAL_POLICY_SHA="$(printf 'c%.0s' {1..64})"
+  EXPECTED_HISTORICAL_VERSION_ID=v1
+  EXPECTED_NEW_POLICY_SHA="$(printf 'a%.0s' {1..64})"
+  EXPECTED_OLD_POLICY_SHA="$(printf 'b%.0s' {1..64})"
+  EXPECTED_OLD_VERSION_ID=v2
+  EXPECTED_TEMP_POLICY_SHA="$(printf 'd%.0s' {1..64})"
+
+  if [[ "${expected_result}" == success ]]; then
+    migrate 2>"${stderr_file}"
+    test ! -s "${stderr_file}" ||
+      fail "Core migrate success path emitted unexpected stderr"
+    test "$(paste -sd ' ' "${trace_file}")" = \
+      "validate render caller live-temp baseline live-temp create-v3 pending live-temp set-default wait-migrated migrated-state" ||
+      fail "Core migrate success trace differs"
+    test "$(cat "${GITHUB_OUTPUT}")" = \
+      $'historical_version_id=v1\nnew_version_id=v3\nold_version_id=v2' ||
+      fail "Core migrate success outputs differ"
+  elif [[ "${expected_result}" == rejected ]]; then
+    local status=0
+    set +e
+    (
+      set -e
+      migrate
+    ) 2>"${stderr_file}"
+    status=$?
+    set -e
+    test "${status}" -ne 0 ||
+      fail "Core migrate accepted a v3 already marked default"
+    require_text "${stderr_file}" \
+      'The reviewed v3 was unexpectedly created as default'
+    if grep -Fq 'unary operator expected' "${stderr_file}"; then
+      fail "Core migrate default-state guard regressed to malformed test syntax"
+    fi
+    test "$(paste -sd ' ' "${trace_file}")" = \
+      "validate render caller live-temp baseline live-temp create-v3" ||
+      fail "Core migrate rejection occurred after the safe switch boundary"
+    test ! -s "${GITHUB_OUTPUT}" ||
+      fail "Rejected Core migration must not publish version outputs"
+  else
+    fail "Unknown isolated Core migrate expectation: ${expected_result}"
+  fi
+)
+
+run_isolated_core_migrate_path false success
+run_isolated_core_migrate_path true rejected
+
 forbid_text "${publisher_migration_common}" \
   'all($addedResources[] as $resource;'
 forbid_text "${core_migration_common}" \
