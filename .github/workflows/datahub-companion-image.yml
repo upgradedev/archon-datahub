@@ -307,7 +307,7 @@ jobs:
 
       - name: Upload trusted companion image SARIF
         if: >-
-          github.event_name == 'push' ||
+          github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
@@ -452,7 +452,7 @@ jobs:
           name: datahub-companion-image-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/datahub-companion-artifact/
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'push' && 90 || 1 }}
+          retention-days: ${{ github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 90 || 1 }}
           overwrite: true
 
       - name: Enforce the companion image policy after evidence retention
@@ -463,7 +463,9 @@ jobs:
 
   attest:
     name: Attest exact companion candidate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: >-
+      github.ref == 'refs/heads/master' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
