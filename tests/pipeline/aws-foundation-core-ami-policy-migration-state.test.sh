@@ -54,7 +54,10 @@ jq -nS --arg resource "${TARGET_POLICY_ARN}" '
 ' >"${fixture_v2}"
 HISTORICAL_POLICY_SHA="$(iam_policy_sha "${fixture_v1}")"
 OLD_POLICY_SHA="$(iam_policy_sha "${fixture_v2}")"
-inconsistent_version_metadata=false
+metadata_mode=consistent
+policy_read_attempts=0
+sleep_calls=0
+mutation_calls=0
 
 safe_aws() {
   local label="$1"
@@ -68,6 +71,7 @@ safe_aws() {
   }
   case "${operation}" in
     get-policy)
+      ((policy_read_attempts += 1))
       jq -n --arg arn "${TARGET_POLICY_ARN}" '
         {
           Policy: {
@@ -114,7 +118,9 @@ safe_aws() {
         v1)
           fixture="${fixture_v1}"
           is_default=false
-          if [[ "${inconsistent_version_metadata}" == "true" ]]; then
+          if [[ "${metadata_mode}" == "inconsistent" ||
+            ( "${metadata_mode}" == "transient" &&
+              "${policy_read_attempts}" -eq 1 ) ]]; then
             is_default=true
           fi
           ;;
@@ -156,7 +162,8 @@ expected_snapshot="$(printf 'v1\nv2')"
 [[ "${baseline_snapshot}" == "${expected_snapshot}" ]] ||
   fail "Consistent false/true default-version metadata was rejected"
 
-inconsistent_version_metadata=true
+metadata_mode=inconsistent
+policy_read_attempts=0
 inconsistent_stderr="${test_root}/inconsistent.stderr"
 if require_baseline_state inconsistent >/dev/null 2>"${inconsistent_stderr}"; then
   fail "Inconsistent version metadata must fail closed"
@@ -167,5 +174,24 @@ grep -Fq "Managed-policy version metadata is inconsistent" \
 if grep -Fq "unary operator expected" "${inconsistent_stderr}"; then
   fail "Metadata comparison regressed to a split test expression"
 fi
+
+metadata_mode=transient
+policy_read_attempts=0
+sleep_calls=0
+mutation_calls=0
+sleep() {
+  ((sleep_calls += 1))
+}
+aws() {
+  ((mutation_calls += 1))
+  return 1
+}
+wait_for_state rolled-back
+[[ "${policy_read_attempts}" -eq 2 ]] ||
+  fail "Transient metadata retry must take exactly two full snapshots"
+[[ "${sleep_calls}" -eq 1 ]] ||
+  fail "Transient metadata retry must use exactly one bounded delay"
+[[ "${mutation_calls}" -eq 0 ]] ||
+  fail "State reads and retries must not mutate AWS"
 
 printf 'Core AMI policy state metadata regression tests passed\n'
