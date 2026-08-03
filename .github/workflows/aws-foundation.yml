@@ -399,7 +399,10 @@ jobs:
               "archon-aws-foundation-control" and
             .aws.coreAmiFoundation.policyMigration.baselineDefaultVersion ==
               "v2" and
-            .aws.coreAmiFoundation.policyMigration.targetVersion == "v3" and
+            .aws.coreAmiFoundation.policyMigration.targetVersionStrategy ==
+              "aws-assigned-monotonic" and
+            .aws.coreAmiFoundation.policyMigration.minimumTargetVersionOrdinal ==
+              3 and
             .aws.coreAmiFoundation.policyMigration.deltaSids == [
               "ReconcileExactCoreAmiFoundationStack",
               "ReconcileExactCoreAmiFoundationRoles",

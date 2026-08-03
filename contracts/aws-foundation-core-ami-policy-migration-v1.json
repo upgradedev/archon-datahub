@@ -86,7 +86,8 @@
       }
     },
     "target": {
-      "expectedVersionId": "v3",
+      "versionIdStrategy": "aws-assigned-monotonic",
+      "minimumVersionOrdinal": 3,
       "canonicalSha256": "aeba32d9bd4c33021762f708a970db5bd20d5c950c8ca2d430f98e88e8fc8c33"
     },
     "retainBaselineVersionsForRollback": true,
@@ -165,12 +166,12 @@
     "phases": [
       "validate-protected-exact-master",
       "authorize-bounded-recovery-role",
-      "create-and-canonically-verify-v3",
+      "create-and-canonically-verify-aws-assigned-target-version",
       "switch-default-once",
       "postverify",
       "revoke-temporary-authorization"
     ],
-    "rollback": "set-v2-default-delete-only-v3",
+    "rollback": "set-v2-default-delete-only-sha-bound-target-version",
     "historicalV1Mutation": "forbidden",
     "cancellationRecovery": "workflow-run-cleanup",
     "manualRecovery": {
@@ -186,7 +187,7 @@
     }
   },
   "evidence": {
-    "schemaVersion": "archon.aws-foundation-core-ami-policy-migration-receipt/v1",
+    "schemaVersion": "archon.aws-foundation-core-ami-policy-migration-receipt/v2",
     "artifactFiles": [
       "SHA256SUMS",
       "migration.json"
