@@ -287,6 +287,16 @@ validate_common() {
     } and
     .evidence.schemaVersion ==
       "archon.aws-foundation-core-ami-policy-migration-receipt/v2" and
+    .evidence.targetVersionSemantics == {
+      migrated: {
+        present: true,
+        version: "required-valid-target-id"
+      },
+      rolledBack: {
+        present: false,
+        version: "valid-target-id-or-null-when-already-absent"
+      }
+    } and
     .evidence.artifactFiles == ["SHA256SUMS", "migration.json"] and
     .evidence.retentionDays == 90 and
     .evidence.canonicalJson == true and
