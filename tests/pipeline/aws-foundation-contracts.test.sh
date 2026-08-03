@@ -2552,6 +2552,17 @@ run_isolated_core_migrate_path v5 false success
 run_isolated_core_migrate_path v42 true rejected-default
 run_isolated_core_migrate_path v2 false rejected-version
 
+require_text "${core_migration_driver}" \
+  'new_version_id: ${{ steps.prepare.outputs.new_version_id }}' \
+  'new_version_id: ${{ steps.migrate.outputs.new_version_id }}' \
+  'new_version_id: ${{ steps.rollback.outputs.new_version_id }}' \
+  'EXPECTED_NEW_VERSION_ID: ${{ needs.prepare.outputs.new_version_id }}' \
+  'EXPECTED_NEW_VERSION_ID: ${{ needs.rollback.outputs.new_version_id || needs.migrate.outputs.new_version_id || needs.prepare.outputs.new_version_id }}' \
+  '.policy.new.present == true' \
+  '.policy.new.present == false' \
+  'archon.aws-foundation-core-ami-policy-migration-receipt/v2' \
+  'attestations/aws-foundation-core-ami-policy-migration/v2'
+
 for core_target_path in \
   "${core_migration_contract}" \
   "${core_migration_driver}" \
