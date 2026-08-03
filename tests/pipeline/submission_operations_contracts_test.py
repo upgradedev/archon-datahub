@@ -289,13 +289,24 @@ def validate_workflow(source: str) -> None:
         "--source-digest",
         "--source-ref refs/heads/master",
         "unique |",
-        "latest-retained",
+        "exact-run-id",
         "exact-current",
-        "availability-subject.sha256",
-        "posture-subject.sha256",
-        "paging-subject.sha256",
+        "latest-retained",
+        "attested-subjects.sha256",
         "recovery-evidence.sha256",
+        "evidence.json,observation.json",
+        "drift.json,evidence.json,observation.json",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-availability/v2",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-posture/v2",
+        "https://github.com/upgradedev/archon-datahub/attestations/production-alarm-delivery/v2",
         "https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2",
+        'exact(availability_predicate, availability, "availability attestation predicate/evidence")',
+        'exact(posture_predicate, posture, "posture attestation predicate/evidence")',
+        'exact(paging_predicate, paging, "paging attestation predicate/evidence")',
+        '"archon.production-availability/v2"',
+        '"archon.production-posture/v2"',
+        '"archon.production-alarm-delivery/v2"',
+        '"archon.lean-runtime-observation/v1"',
         '"archon.governed-canary-recovery-evidence/v2"',
         '"archon.governed-canary-recovery/v4"',
         'exact(recovery["runtimeProfile"], "cloud", "canary runtime profile")',
@@ -304,17 +315,24 @@ def validate_workflow(source: str) -> None:
         'exact(canary_predicate, recovery, "canary attestation predicate/evidence")',
         'canonical_digest(recovery, "canary recovery evidence")',
         'canonical_digest(manifest, "canary recovery manifest")',
-        "production-paging-delivery-${RELEASE_SHA}-",
+        "production-alarm-delivery-${RELEASE_SHA}-",
         "governed-canary-rollback-${GOVERNED_CANARY_RUN_ID}-",
         "availabilityObservedAt",
-        "dt.timedelta(hours=7)",
+        '"observationDigest": file_sha(\n'
+        '                availability_dir / "observation.json"\n'
+        '            )',
+        '"observationDigest": file_sha(\n'
+        '                posture_dir / "observation.json"\n'
+        '            )',
+        "dt.timedelta(minutes=90)",
         "dt.timedelta(hours=30)",
         "dt.timedelta(days=7)",
-        '"alarmCount": 10',
-        '"allActionsEnabled": True',
-        '"alarmActionsBoundToTopic": True',
-        '"okActionsBoundToTopic": True',
-        '"insufficientDataActionsEmpty": True',
+        '"archon-production-control-plane-errors"',
+        '"archon-production-runtime-failure-queue-visible"',
+        '"CloudWatch->SNS(KMS)->SQS(KMS)"',
+        '"encryptedRouteBound": True',
+        '"externalPagingDeliveryTested": True',
+        '"endToEndDelivery": True',
         'canary_dir.parent / "verification" / "recovery-evidence.json.json"',
         'recovery["deploymentEvidenceSha256"]',
         (
@@ -327,7 +345,8 @@ def validate_workflow(source: str) -> None:
         'positive_decimal(source["runId"]',
         '"canary source runAttempt exceeds ten digits"',
         "dt.timedelta(hours=2)",
-        '"17 */6 * * *"',
+        '"*/30 * * * *"',
+        '"maximumExpectedGapMinutes": 90',
         '"2026-08-31T21:00:00Z"',
         '.state == "active"',
         "recheck_native",
@@ -344,9 +363,26 @@ def validate_workflow(source: str) -> None:
         "wget ",
         "secrets.",
         "production-paging-delivery-candidate-",
+        "availability-subject.sha256",
+        "posture-subject.sha256",
+        "paging-subject.sha256",
+        "attestations/production-availability/v1",
+        "attestations/production-posture/v1",
+        "attestations/production-paging-delivery/v1",
+        '"17 */6 * * *"',
+        '"alarmCount": 10',
     )
     for marker in forbidden_collector_contracts:
         require(marker not in collector, f"collector contains forbidden token: {marker}")
+    require(
+        count(collector, "selection_policy=exact-run-id") == 3,
+        "the three lean-v2 producers must use run-ID artifact selection",
+    )
+    require(
+        count(collector, "selection_policy=latest-retained") == 1
+        and 'artifact_prefix="submission-project-access-${RELEASE_SHA}-"' in collector,
+        "only project-access may retain attempt-based artifact selection",
+    )
     require(
         'observation["availabilityObservedAt"],\n'
         '    availability["observedAt"],'
@@ -358,8 +394,7 @@ def validate_workflow(source: str) -> None:
         '  (.id | type) == "number" and'
         in collector,
         "monitor state is not bound to the exact active workflow record",
-    )
-    require(
+    )    require(
         "cmp --silent" in attest
         and "submission-operations-retained-facts.json" in attest,
         "attester no longer reconstructs and byte-compares facts",
@@ -425,8 +460,59 @@ mutations = {
     ),
     "paging candidate accepted": replace_once(
         workflow,
-        '#|   "production-paging-delivery-${RELEASE_SHA}-" \\\n',
-        '#|   "production-paging-delivery-candidate-${RELEASE_SHA}-" \\\n',
+        '#|   "production-alarm-delivery-${RELEASE_SHA}-" \\\n',
+        '#|   "production-alarm-delivery-candidate-${RELEASE_SHA}-" \\\n',
+    ),
+    "availability selector weakened to attempt policy": replace_once(
+        workflow,
+        '#|   "production-availability-${RELEASE_SHA}-" \\\n'
+        "#|   exact-run-id \\\n",
+        '#|   "production-availability-${RELEASE_SHA}-" \\\n'
+        "#|   latest-retained \\\n",
+    ),
+    "availability predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-availability/v2",
+        "attestations/production-availability/v1",
+    ),
+    "posture predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-posture/v2",
+        "attestations/production-posture/v1",
+    ),
+    "paging predicate downgraded": replace_once(
+        workflow,
+        "attestations/production-alarm-delivery/v2",
+        "attestations/production-alarm-delivery/v1",
+    ),
+    "canary predicate downgraded": replace_once(
+        workflow,
+        "attestations/governed-canary-cloud-v2",
+        "attestations/governed-canary/v1",
+    ),
+    "availability cadence weakened": replace_once(
+        workflow,
+        '#|   grep -Fxc \'    - cron: "*/30 * * * *"\' \\\n',
+        '#|   grep -Fxc \'    - cron: "17 */6 * * *"\' \\\n',
+    ),
+    "availability maximum gap widened": replace_once(
+        workflow,
+        '#|         "maximumExpectedGapMinutes": 90,\n',
+        '#|         "maximumExpectedGapMinutes": 420,\n',
+    ),
+    "availability observation detached": replace_once(
+        workflow,
+        '#|             "observationDigest": file_sha(\n'
+        '#|                 availability_dir / "observation.json"\n'
+        '#|             ),\n',
+        '#|             "observationDigest": availability_binding["artifact"]["digest"],\n',
+    ),
+    "posture observation detached": replace_once(
+        workflow,
+        '#|             "observationDigest": file_sha(\n'
+        '#|                 posture_dir / "observation.json"\n'
+        '#|             ),\n',
+        '#|             "observationDigest": posture_binding["artifact"]["digest"],\n',
     ),
     "public probe relabeled availability": replace_once(
         workflow,
@@ -466,10 +552,15 @@ mutations = {
         '#|     fail("canary sealed recovery capability is stale")\n',
         "",
     ),
-    "alarm inventory weakened": replace_once(
+    "lean alarm inventory weakened": replace_once(
         workflow,
-        '#|         "alarmCount": 10,\n',
-        '#|         "alarmCount": alarm_inventory["alarmCount"],\n',
+        '#|     "archon-production-runtime-failure-queue-visible",\n',
+        '#|     "archon-production-legacy-runtime-errors",\n',
+    ),
+    "posture alarm state check weakened": replace_once(
+        workflow,
+        '#|         "alarmsNotFiring": True,\n',
+        '#|         "alarmsNotFiring": posture["checks"]["alarmsNotFiring"],\n',
     ),
     "monitor no longer active": replace_once(
         workflow,
@@ -510,8 +601,7 @@ mutations = {
         "    if: needs.produce.result == 'success'\n",
         "    if: always()\n",
     ),
-}
-for label, mutant in mutations.items():
+}for label, mutant in mutations.items():
     try:
         validate_workflow(mutant)
     except ContractError:
