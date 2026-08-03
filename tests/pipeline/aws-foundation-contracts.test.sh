@@ -1979,6 +1979,252 @@ for migration_runner in \
     fail "${migration_runner} must revoke temporary authority before fallible rendering"
 done
 
+for migration_common in \
+  "${repository_root}/scripts/aws-foundation-policy-migration-common.sh" \
+  "${publisher_migration_common}" \
+  "${core_migration_common}"; do
+  common_validate_block="$(sed -n '/^validate_common() {/,/^}/p' "${migration_common}")"
+  render_block="$(sed -n '/^render_policy_documents() {/,/^}/p' "${migration_common}")"
+  recovery_baseline_block="$(
+    sed -n '/^verify_recovery_role_baseline() {/,/^}/p' "${migration_common}"
+  )"
+  test "$(
+    grep -Fc \
+      '  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"' \
+      <<<"${common_validate_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must derive the target policy ARN during validation"
+  test "$(
+    grep -Fc \
+      '  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"' \
+      <<<"${common_validate_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must derive the recovery role ARN during validation"
+  if grep -Eq 'TARGET_POLICY_ARN=|RECOVERY_ROLE_ARN=' <<<"${render_block}"; then
+    fail "${migration_common} rendering must not initialize AWS identity bindings"
+  fi
+  test "$(
+    grep -Fc '    --arg roleArn "${RECOVERY_ROLE_ARN}"' \
+      <<<"${recovery_baseline_block}"
+  )" -eq 1 ||
+    fail "${migration_common} must verify the validated recovery role ARN"
+done
+
+run_isolated_revoke_path() (
+  local label="$1"
+  local migration_common="$2"
+  local migration_authorization="$3"
+  local migration_runner="$4"
+  local case_runtime="${renderer_runtime_dir}/revoke-${label}"
+  mkdir -p "${case_runtime}"
+  chmod 0700 "${case_runtime}"
+  export GITHUB_ACTIONS=true
+  export RUNNER_TEMP="${case_runtime}"
+  export GITHUB_OUTPUT="${case_runtime}/github-output"
+  export AWS_ACCOUNT_ID=123456789012
+  export CONTROL_PLANE_SHA=0123456789abcdef0123456789abcdef01234567
+  export GITHUB_RUN_ATTEMPT=1
+  export GITHUB_RUN_ID=1
+  : >"${GITHUB_OUTPUT}"
+  cd "${repository_root}"
+
+  # Exercise the real common/authorization functions and the exact runner
+  # revoke() orchestration. Only AWS, rendering, receipt output, and sleeps are
+  # replaced, so the test cannot reach a network or mutate AWS.
+  # shellcheck source=/dev/null
+  source "${migration_common}"
+  # shellcheck source=/dev/null
+  source "${migration_authorization}"
+  # shellcheck source=/dev/null
+  source <(sed -n '/^revoke() {/,/^}/p' "${migration_runner}")
+
+  local -a trace=()
+  local temp_present=true
+  local delete_calls=0
+  local base_only_reads=0
+  eval "$(
+    declare -f validate_common |
+      sed '1s/^validate_common /validate_common_real /'
+  )"
+  validate_common() {
+    validate_common_real
+    test "${TARGET_POLICY_ARN}" = \
+      "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
+    test "${RECOVERY_ROLE_ARN}" = \
+      "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
+    trace+=(validate)
+  }
+
+  sleep() { :; }
+  aws() {
+    local service="${1:-}"
+    local operation="${2:-}"
+    shift 2 || return 97
+    case "${service}:${operation}" in
+      sts:get-caller-identity)
+        trace+=(caller)
+        jq -cn \
+          --arg account "${AWS_ACCOUNT_ID}" \
+          --arg role "${FOUNDATION_ROLE_NAME}" '
+            {
+              Account: $account,
+              Arn: ("arn:aws:sts::" + $account + ":assumed-role/" +
+                $role + "/ci-revoke-test"),
+              UserId: "synthetic"
+            }
+          '
+        ;;
+      iam:list-role-policies)
+        [[ " $* " == *" --role-name ${RECOVERY_ROLE_NAME} "* ]]
+        if [[ "${temp_present}" == true ]]; then
+          trace+=(list-with-temp)
+          jq -cn \
+            --arg base "${BASE_POLICY_NAME}" \
+            --arg temp "${TEMP_POLICY_NAME}" \
+            '{PolicyNames: [$base, $temp]}'
+        else
+          base_only_reads=$((base_only_reads + 1))
+          trace+=("list-base-${base_only_reads}")
+          jq -cn --arg base "${BASE_POLICY_NAME}" \
+            '{PolicyNames: [$base]}'
+        fi
+        ;;
+      iam:delete-role-policy)
+        [[ " $* " == *" --role-name ${RECOVERY_ROLE_NAME} "* ]]
+        [[ " $* " == *" --policy-name ${TEMP_POLICY_NAME} "* ]]
+        test "${temp_present}" == true
+        temp_present=false
+        delete_calls=$((delete_calls + 1))
+        trace+=(delete-temp)
+        ;;
+      iam:get-role)
+        [[ " $* " == *" --role-name ${RECOVERY_ROLE_NAME} "* ]]
+        trace+=(get-role)
+        jq -cn \
+          --arg account "${AWS_ACCOUNT_ID}" \
+          --arg roleArn "${RECOVERY_ROLE_ARN}" '
+            {
+              Role: {
+                Arn: $roleArn,
+                RoleName:
+                  "archon-datahub-github-governed-canary-recovery",
+                MaxSessionDuration: 3600,
+                Tags: [
+                  {Key: "Application", Value: "archon-datahub"},
+                  {Key: "Environment", Value: "governed-canary-recovery"},
+                  {Key: "ManagedBy", Value: "github-actions"}
+                ],
+                AssumeRolePolicyDocument: {
+                  Version: "2012-10-17",
+                  Statement: [{
+                    Sid: "GitHubEnvironmentOidcOnly",
+                    Effect: "Allow",
+                    Action: "sts:AssumeRoleWithWebIdentity",
+                    Principal: {
+                      Federated: ("arn:aws:iam::" + $account +
+                        ":oidc-provider/token.actions.githubusercontent.com")
+                    },
+                    Condition: {
+                      StringEquals: {
+                        "token.actions.githubusercontent.com:aud":
+                          "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:sub":
+                          "repo:upgradedev/archon-datahub:environment:governed-canary-recovery"
+                      }
+                    }
+                  }]
+                }
+              }
+            }
+          '
+        ;;
+      iam:list-attached-role-policies)
+        [[ " $* " == *" --role-name ${RECOVERY_ROLE_NAME} "* ]]
+        trace+=(list-attached)
+        jq -cn '{AttachedPolicies: []}'
+        ;;
+      iam:get-role-policy)
+        [[ " $* " == *" --role-name ${RECOVERY_ROLE_NAME} "* ]]
+        [[ " $* " == *" --policy-name ${BASE_POLICY_NAME} "* ]]
+        trace+=(get-base-policy)
+        jq -cn \
+          --arg account "${AWS_ACCOUNT_ID}" \
+          --arg base "${BASE_POLICY_NAME}" '
+            {
+              RoleName:
+                "archon-datahub-github-governed-canary-recovery",
+              PolicyName: $base,
+              PolicyDocument: {
+                Version: "2012-10-17",
+                Statement: [{
+                  Sid: "ReadExactStagingStack",
+                  Effect: "Allow",
+                  Action: "cloudformation:DescribeStacks",
+                  Resource: ("arn:aws:cloudformation:eu-west-1:" +
+                    $account + ":stack/Archon-staging/*")
+                }]
+              }
+            }
+          '
+        ;;
+      *)
+        printf '::error::Unexpected fake AWS call in %s: %s:%s\n' \
+          "${label}" "${service}" "${operation}" >&2
+        return 97
+        ;;
+    esac
+  }
+
+  render_policy_documents() {
+    test "${TARGET_POLICY_ARN}" = \
+      "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
+    test "${RECOVERY_ROLE_ARN}" = \
+      "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
+    NEW_POLICY="${WORK_ROOT}/synthetic-new.json"
+    OLD_POLICY="${WORK_ROOT}/synthetic-old.json"
+    NEW_POLICY_SHA="$(printf 'a%.0s' {1..64})"
+    OLD_POLICY_SHA="$(printf 'b%.0s' {1..64})"
+    HISTORICAL_POLICY_SHA="$(printf 'c%.0s' {1..64})"
+    trace+=(render)
+  }
+  write_receipt() {
+    test "$1" = terminal
+    [[ "${NEW_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
+    [[ "${OLD_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
+    if [[ "${label}" == core ]]; then
+      [[ "${HISTORICAL_POLICY_SHA}" =~ ^[a-f0-9]{64}$ ]]
+    fi
+    trace+=(receipt)
+  }
+
+  EXPECTED_STATE=terminal
+  export EXPECTED_STATE
+  revoke
+
+  test "${temp_present}" == false
+  test "${delete_calls}" -eq 1
+  test "${base_only_reads}" -eq 4
+  local expected_trace="validate caller list-with-temp delete-temp"
+  expected_trace+=" list-base-1 list-base-2 list-base-3"
+  expected_trace+=" get-role list-base-4 list-attached get-base-policy"
+  expected_trace+=" render receipt"
+  test "${trace[*]}" = "${expected_trace}" ||
+    fail "${label} revoke preamble trace differs: ${trace[*]}"
+)
+
+run_isolated_revoke_path assets \
+  "${repository_root}/scripts/aws-foundation-policy-migration-common.sh" \
+  "${repository_root}/scripts/aws-foundation-policy-migration-authorization.sh" \
+  "${repository_root}/scripts/run-aws-foundation-policy-migration.sh"
+run_isolated_revoke_path publisher \
+  "${publisher_migration_common}" \
+  "${publisher_migration_authorization}" \
+  "${publisher_migration_runner}"
+run_isolated_revoke_path core \
+  "${core_migration_common}" \
+  "${repository_root}/scripts/aws-foundation-core-ami-policy-migration-authorization.sh" \
+  "${repository_root}/scripts/run-aws-foundation-core-ami-policy-migration.sh"
+
 forbid_text "${publisher_migration_common}" \
   'all($addedResources[] as $resource;'
 forbid_text "${core_migration_common}" \
@@ -2094,7 +2340,11 @@ require_text "${publisher_migration_driver}" \
   'archon.aws-foundation-cloud-runtime-publisher-policy-migration-receipt/v1'
 require_text "${publisher_migration_cleanup}" \
   'Migrate AWS foundation cloud runtime publisher identity policy' \
-  'cleanup-rollback'
+  'RECOVER EXACT CLOUD RUNTIME PUBLISHER IDENTITY POLICY MIGRATION' \
+  'SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY' \
+  'cleanup-rollback' \
+  'cleanup-revoke' \
+  'cleanup-migrated'
 require_text "${publisher_migration_common}" \
   '--stdout-group identity' \
   'afda76cf8cfddd34c876147a4b228dd51b63edc4fd810f6793eb22d462beb553' \

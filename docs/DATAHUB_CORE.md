@@ -71,8 +71,9 @@ The deterministic answer is `enterprise`, `1,850,000` net-revenue cents. `custom
 2. dispatch ref, workflow SHA, companion source SHA, and the current remote
    `master` SHA all resolving to the same exact commit;
 3. one completed-success `DataHub companion OCI` run from
-   `.github/workflows/datahub-companion-image.yml`, produced by a `push` on
-   `master` in this same repository at that exact SHA;
+   `.github/workflows/datahub-companion-image.yml`, produced by either a `push`
+   or `workflow_dispatch` on `refs/heads/master` in this same repository at that
+   exact SHA, retained for 90 days and signed by the exact workflow digest;
 4. protected `staging` environment approval.
 
 Before any billable work, the downloaded companion archive checksums are

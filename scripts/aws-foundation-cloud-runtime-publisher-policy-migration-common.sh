@@ -85,6 +85,8 @@ validate_common() {
     fail "AWS account binding is invalid"
   [[ "${CONTROL_PLANE_SHA}" =~ ^[0-9a-f]{40}$ ]] ||
     fail "Control-plane SHA is invalid"
+  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
+  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
   for path in "${CONTRACT}" "${SOURCE_POLICY}" "${RENDERER}"; do
     test -f "${path}"
     test ! -L "${path}"
@@ -220,6 +222,13 @@ validate_common() {
     .recovery.automaticFollowerOnNonSuccess == true and
     .recovery.manualDispatch == true and
     .recovery.manualDispatchMode == "cleanup-rollback" and
+    .recovery.manualMigratedSeal == {
+      confirmation:
+        "SEAL EXACT MIGRATED CLOUD RUNTIME PUBLISHER IDENTITY POLICY",
+      mode: "cleanup-migrated",
+      installsAuthorization: false,
+      managedPolicyMutationAllowed: false
+    } and
     .recovery.freshRollbackOnlyAuthorization == true and
     .recovery.rollbackToPreviousDefault == true and
     .recovery.deleteOnlyNewNondefaultVersion == true and
@@ -373,8 +382,6 @@ render_policy_documents() {
     fail "The publisher identity-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
     fail "The rendered identity policy exceeds the managed-policy limit"
-  TARGET_POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${TARGET_POLICY_NAME}"
-  RECOVERY_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${RECOVERY_ROLE_NAME}"
 }
 
 verify_recovery_role_baseline() {
