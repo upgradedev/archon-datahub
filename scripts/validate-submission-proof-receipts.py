@@ -2279,7 +2279,9 @@ def validate_facts(
                 "https://github.com/upgradedev/archon-datahub/attestations/"
                 "production-availability/v2"
             ),
-            extra_fields=frozenset({"observedAt", "result", "observationDigest"}),
+            extra_fields=frozenset(
+                {"observedAt", "result", "profileResponseDigest", "observationDigest"}
+            ),
         )
         fresh(
             availability["observedAt"],
@@ -2287,6 +2289,10 @@ def validate_facts(
             dt.timedelta(minutes=90),
         )
         exact(availability["result"], "passed", f"{label}.availability.result")
+        sha256_digest(
+            availability["profileResponseDigest"],
+            f"{label}.availability.profileResponseDigest",
+        )
         sha256_digest(
             availability["observationDigest"],
             f"{label}.availability.observationDigest",
@@ -3794,6 +3800,7 @@ def cross_validate(receipts: dict[str, dict[str, Any]]) -> None:
                 ],
                 "observedAt": sq3_observation["availabilityObservedAt"],
                 "result": "passed",
+                "profileResponseDigest": sq10_availability["profileResponseDigest"],
                 "observationDigest": sq10_availability["observationDigest"],
             },
             "SQ3/SQ10 availability source binding",
