@@ -392,7 +392,7 @@ run_dynamic_receipt_case() (
   case "${expected_result}" in
     migrated)
       jq -e \
-        --arg version "${expected_id}" '
+        --arg version "${observed_id}" '
           .policy.state == "migrated" and
           .policy.new.present == true and
           .policy.new.version == $version and
@@ -426,8 +426,10 @@ run_dynamic_receipt_case() (
 )
 
 run_dynamic_receipt_case migrated v42 v42 migrated
+run_dynamic_receipt_case migrated v42 '' migrated
 run_dynamic_receipt_case migrated v42 v5 mismatch
 run_dynamic_receipt_case rolled-back '' v4 rolled-back-known
 run_dynamic_receipt_case rolled-back '' '' rolled-back-absent
+run_dynamic_receipt_case terminal '' '' rolled-back-absent
 
 printf 'Core AMI policy state metadata and dynamic-version regression tests passed\n'
