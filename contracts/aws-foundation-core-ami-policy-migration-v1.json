@@ -188,6 +188,16 @@
   },
   "evidence": {
     "schemaVersion": "archon.aws-foundation-core-ami-policy-migration-receipt/v2",
+    "targetVersionSemantics": {
+      "migrated": {
+        "present": true,
+        "version": "required-valid-target-id"
+      },
+      "rolledBack": {
+        "present": false,
+        "version": "valid-target-id-or-null-when-already-absent"
+      }
+    },
     "artifactFiles": [
       "SHA256SUMS",
       "migration.json"
