@@ -312,7 +312,7 @@ render_policy_documents() {
       .canonicalSha256' "${CONTRACT}"
   )"
   expected_new="$(jq -er '.policy.target.canonicalSha256' "${CONTRACT}")"
-  test "${HISTORICAL_POLICY_SHA}" =
+  test "${HISTORICAL_POLICY_SHA}" = \
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
   test "${OLD_POLICY_SHA}" = "${expected_old}" ||
     fail "Derived v2 control-policy digest differs"
