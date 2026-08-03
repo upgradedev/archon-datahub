@@ -107,6 +107,12 @@ version_default_flag() {
   return 1
 }
 
+is_target_version_id() {
+  local version_id="$1"
+  [[ "${version_id}" =~ ^v[1-9][0-9]*$ &&
+    "${version_id}" != "v1" &&
+    "${version_id}" != "v2" ]]
+}
 require_baseline_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
@@ -140,7 +146,7 @@ require_migrated_state() {
   local prefix="$1"
   load_policy_state "${prefix}" || return 1
   test "${#POLICY_VERSION_IDS[@]}" -eq 3 || {
-    fail "Migrated control policy must contain exactly v1, v2, and v3"
+    fail "Migrated control policy must contain v1, v2, and one target version"
     return 1
   }
   local historical_id old_id new_id historical_default old_default new_default
@@ -149,26 +155,28 @@ require_migrated_state() {
   new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
   test "${historical_id}" = "v1" || return 1
   test "${old_id}" = "v2" || return 1
-  test "${new_id}" = "v3" || return 1
-  test "${POLICY_DEFAULT_VERSION}" = "v3" || {
-    fail "The reviewed v3 control policy is not default"
+  is_target_version_id "${new_id}" || {
+    fail "The reviewed target has an invalid AWS-assigned version ID"
+    return 1
+  }
+  test "${POLICY_DEFAULT_VERSION}" = "${new_id}" || {
+    fail "The reviewed target control policy is not default"
     return 1
   }
   historical_default="$(version_default_flag v1)" || return 1
   old_default="$(version_default_flag v2)" || return 1
-  new_default="$(version_default_flag v3)" || return 1
+  new_default="$(version_default_flag "${new_id}")" || return 1
   test "${historical_default}" = "false" || return 1
   test "${old_default}" = "false" || return 1
   test "${new_default}" = "true" || return 1
   printf '%s\n%s\n%s\n' "${historical_id}" "${old_id}" "${new_id}"
 }
-
 require_rollback_pending_state() {
   local prefix="$1"
   local expected_default="$2"
   load_policy_state "${prefix}" || return 1
   test "${#POLICY_VERSION_IDS[@]}" -eq 3 || {
-    fail "Rollback-pending state must contain exactly v1, v2, and v3"
+    fail "Rollback-pending state must contain v1, v2, and one target version"
     return 1
   }
   local historical_id old_id new_id
@@ -177,18 +185,21 @@ require_rollback_pending_state() {
   new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
   test "${historical_id}" = "v1" || return 1
   test "${old_id}" = "v2" || return 1
-  test "${new_id}" = "v3" || return 1
+  is_target_version_id "${new_id}" || {
+    fail "Rollback target has an invalid AWS-assigned version ID"
+    return 1
+  }
   test "$(version_default_flag v1)" = "false" || return 1
   case "${expected_default}" in
     old)
       test "${POLICY_DEFAULT_VERSION}" = "v2" || return 1
       test "$(version_default_flag v2)" = "true" || return 1
-      test "$(version_default_flag v3)" = "false" || return 1
+      test "$(version_default_flag "${new_id}")" = "false" || return 1
       ;;
     new)
-      test "${POLICY_DEFAULT_VERSION}" = "v3" || return 1
+      test "${POLICY_DEFAULT_VERSION}" = "${new_id}" || return 1
       test "$(version_default_flag v2)" = "false" || return 1
-      test "$(version_default_flag v3)" = "true" || return 1
+      test "$(version_default_flag "${new_id}")" = "true" || return 1
       ;;
     *)
       fail "Rollback-pending state selector is invalid"
@@ -197,7 +208,6 @@ require_rollback_pending_state() {
   esac
   printf '%s\n%s\n%s\n' "${historical_id}" "${old_id}" "${new_id}"
 }
-
 require_rolled_back_state() {
   require_baseline_state "$1"
 }
@@ -250,17 +260,20 @@ wait_for_rollback_pending_state() {
 rollback_exact_migration() {
   load_policy_state rollback-inspect || return 1
   local count="${#POLICY_VERSION_IDS[@]}"
-  local pending
+  local new_id=""
   if [[ "${count}" -eq 2 ]]; then
     require_baseline_state rollback-already-baseline >/dev/null || return 1
   elif [[ "${count}" -eq 3 ]]; then
     test "$(version_for_sha "${HISTORICAL_POLICY_SHA}")" = "v1" || return 1
     test "$(version_for_sha "${OLD_POLICY_SHA}")" = "v2" || return 1
-    test "$(version_for_sha "${NEW_POLICY_SHA}")" = "v3" || return 1
-    if [[ "${POLICY_DEFAULT_VERSION}" == "v3" ]]; then
-      pending="$(
-        wait_for_rollback_pending_state rollback-before-switch new
-      )" || return 1
+    new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
+    is_target_version_id "${new_id}" || {
+      fail "Rollback target has an invalid AWS-assigned version ID"
+      return 1
+    }
+    if [[ "${POLICY_DEFAULT_VERSION}" == "${new_id}" ]]; then
+      wait_for_rollback_pending_state \
+        rollback-before-switch new >/dev/null || return 1
       verify_live_temp_policy \
         "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
       if ! aws iam set-default-policy-version \
@@ -296,8 +309,8 @@ rollback_exact_migration() {
       "${AUTHORIZATION_MODE}" "${EXPECTED_TEMP_POLICY_SHA:-}" || return 1
     if ! aws iam delete-policy-version \
       --policy-arn "${TARGET_POLICY_ARN}" \
-      --version-id v3 >/dev/null 2>/dev/null; then
-      fail "Unable to delete only the reviewed nondefault v3"
+      --version-id "${new_id}" >/dev/null 2>/dev/null; then
+      fail "Unable to delete only the reviewed nondefault target version"
       return 1
     fi
   else
@@ -305,5 +318,9 @@ rollback_exact_migration() {
     return 1
   fi
   wait_for_state rolled-back || return 1
-  require_rolled_back_state rollback-final
+  require_rolled_back_state rollback-final >/dev/null || return 1
+  printf 'v1\nv2\n'
+  if [[ -n "${new_id}" ]]; then
+    printf '%s\n' "${new_id}"
+  fi
 }
