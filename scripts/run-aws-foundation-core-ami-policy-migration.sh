@@ -117,8 +117,8 @@ migrate() {
     fail "The created policy version ID is absent"
   test "${new_version}" = v3 ||
     fail "The exact baseline requires the new version to be v3"
-  test "$(jq -r '.PolicyVersion.IsDefaultVersion | tostring' "${created}")" =
-    false || fail "The reviewed v3 was unexpectedly created as default"
+  jq -e '.PolicyVersion.IsDefaultVersion == false' "${created}" >/dev/null ||
+    fail "The reviewed v3 was unexpectedly created as default"
   local pending
   pending="$(wait_for_rollback_pending_state migrate-before-switch old)" ||
     return 1
