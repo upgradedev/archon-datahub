@@ -948,6 +948,7 @@ core_migration_runtime="${renderer_runtime_dir}/core-policy-migration"
   }
   render_policy_documents
 )
+
 jq --exit-status \
   --slurpfile migration "${migration_contract}" \
   --from-file "${foundation_policy_validator}" \
