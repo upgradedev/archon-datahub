@@ -2436,18 +2436,21 @@ run_isolated_core_migrate_path() (
     local service="${1:-}"
     local operation="${2:-}"
     shift 2 || return 97
+    local -a actual=("$@")
+    local -a expected=()
+    local index
     case "${service}:${operation}" in
       iam:create-policy-version)
-        [[ " $* " == *" --policy-arn ${TARGET_POLICY_ARN} "* ]] ||
-          return 97
-        [[ " $* " == *" --policy-document file://${NEW_POLICY} "* ]] ||
-          return 97
-        [[ " $* " == *" --no-set-as-default "* ]] ||
-          return 97
-        [[ " $* " != *" --set-as-default "* ]] ||
-          return 97
-        [[ " $* " == *" --output json "* ]] ||
-          return 97
+        expected=(
+          --policy-arn "${TARGET_POLICY_ARN}"
+          --policy-document "file://${NEW_POLICY}"
+          --no-set-as-default
+          --output json
+        )
+        test "${#actual[@]}" -eq "${#expected[@]}" || return 97
+        for index in "${!expected[@]}"; do
+          test "${actual[${index}]}" = "${expected[${index}]}" || return 97
+        done
         trace_event create-v3
         jq -cn \
           --argjson isDefault "${created_default}" \
@@ -2459,10 +2462,14 @@ run_isolated_core_migrate_path() (
           }'
         ;;
       iam:set-default-policy-version)
-        [[ " $* " == *" --policy-arn ${TARGET_POLICY_ARN} "* ]] ||
-          return 97
-        [[ " $* " == *" --version-id v3 "* ]] ||
-          return 97
+        expected=(
+          --policy-arn "${TARGET_POLICY_ARN}"
+          --version-id v3
+        )
+        test "${#actual[@]}" -eq "${#expected[@]}" || return 97
+        for index in "${!expected[@]}"; do
+          test "${actual[${index}]}" = "${expected[${index}]}" || return 97
+        done
         trace_event set-default
         ;;
       *)
