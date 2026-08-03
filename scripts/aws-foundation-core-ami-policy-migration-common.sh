@@ -316,10 +316,12 @@ render_policy_documents() {
   expected_new="$(jq -er '.policy.target.canonicalSha256' "${CONTRACT}")"
   test "${HISTORICAL_POLICY_SHA}" = \
     "136a339e44e464a2fff7401c3e4ea8c13bc8640ea953b0eab2e100656b4492f5"
-  test "${OLD_POLICY_SHA}" = "${expected_old}" ||
-    fail "Derived v2 control-policy digest differs"
-  test "${NEW_POLICY_SHA}" = "${expected_new}" ||
-    fail "Rendered v3 control-policy digest differs"
+  if [[ "${OLD_POLICY_SHA}" != "${expected_old}" ||
+    "${NEW_POLICY_SHA}" != "${expected_new}" ]]; then
+    fail "Core AMI control-policy digest contract differs:" \
+      "v2_actual=${OLD_POLICY_SHA} v2_expected=${expected_old}" \
+      "v3_actual=${NEW_POLICY_SHA} v3_expected=${expected_new}"
+  fi
   test "${NEW_POLICY_SHA}" != "${OLD_POLICY_SHA}" ||
     fail "The Core AMI control-policy migration delta is empty"
   test "$(wc -c <"${NEW_POLICY}" | awk '{print $1}')" -le 6144 ||
