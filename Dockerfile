@@ -5,7 +5,7 @@ ARG RUNTIME_NODE_IMAGE=gcr.io/distroless/nodejs22-debian13:nonroot@sha256:a2723a
 FROM ${BUILD_NODE_IMAGE} AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
+RUN --mount=type=cache,id=archon-npm-dev,target=/root/.npm,sharing=locked npm ci --ignore-scripts
 
 FROM dependencies AS build
 COPY tsconfig.json tsconfig.build.json ./
@@ -15,7 +15,7 @@ RUN npm run build
 FROM ${BUILD_NODE_IMAGE} AS production-dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts \
+RUN --mount=type=cache,id=archon-npm-production,target=/root/.npm,sharing=locked npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
 FROM ${RUNTIME_NODE_IMAGE} AS runtime
