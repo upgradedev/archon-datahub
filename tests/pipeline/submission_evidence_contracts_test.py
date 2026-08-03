@@ -465,6 +465,7 @@ def valid_facts() -> dict[str, dict]:
                 "predicateDigest": DIGEST,
                 "observedAt": availability_observed_at,
                 "result": "passed",
+                "profileResponseDigest": DIGEST,
                 "observationDigest": DIGEST,
             },
             "posture": {
@@ -586,7 +587,8 @@ def valid_facts() -> dict[str, dict]:
                 "active": True,
                 "through": "2026-08-31T21:00:00Z",
             },
-        },        "SQ11": {
+        },
+        "SQ11": {
             "rules": {
                 **copy.deepcopy(rules),
                 "judgingStart": "2026-08-17T14:00:00Z",
@@ -1310,6 +1312,13 @@ rejects_mutation(
         alarmNames=["archon-production-control-plane-errors"]
     ),
     "SQ10 accepted an incomplete lean alarm inventory",
+)
+rejects_mutation(
+    "SQ10",
+    lambda value: value["availability"].update(
+        profileResponseDigest="sha256:not-a-digest"
+    ),
+    "SQ10 accepted an invalid runtime-profile response digest",
 )
 rejects_mutation(
     "SQ10",
