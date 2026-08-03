@@ -263,17 +263,29 @@ wait_for_rollback_pending_state() {
 rollback_exact_migration() {
   load_policy_state rollback-inspect || return 1
   local count="${#POLICY_VERSION_IDS[@]}"
-  local new_id=""
+  local new_id="${EXPECTED_NEW_VERSION_ID:-}"
+  if [[ -n "${new_id}" ]]; then
+    is_target_version_id "${new_id}" || {
+      fail "The authorized rollback target version ID is invalid"
+      return 1
+    }
+  fi
   if [[ "${count}" -eq 2 ]]; then
     require_baseline_state rollback-already-baseline >/dev/null || return 1
   elif [[ "${count}" -eq 3 ]]; then
     test "$(version_for_sha "${HISTORICAL_POLICY_SHA}")" = "v1" || return 1
     test "$(version_for_sha "${OLD_POLICY_SHA}")" = "v2" || return 1
-    new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
-    is_target_version_id "${new_id}" || {
+    local observed_new_id
+    observed_new_id="$(version_for_sha "${NEW_POLICY_SHA}")" || return 1
+    is_target_version_id "${observed_new_id}" || {
       fail "Rollback target has an invalid AWS-assigned version ID"
       return 1
     }
+    if [[ -n "${new_id}" && "${new_id}" != "${observed_new_id}" ]]; then
+      fail "Rollback target version changed after authorization"
+      return 1
+    fi
+    new_id="${observed_new_id}"
     if [[ "${POLICY_DEFAULT_VERSION}" == "${new_id}" ]]; then
       wait_for_rollback_pending_state \
         rollback-before-switch new >/dev/null || return 1
