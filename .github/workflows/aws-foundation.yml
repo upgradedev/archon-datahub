@@ -406,6 +406,8 @@ jobs:
               "ReconcileExactCoreAmiBuilderProfile",
               "AttachExactCoreAmiBuilderSsmPolicy",
               "PassExactCoreAmiBuilderRoleForProfile"
+            ] and            .aws.coreAmiFoundation.policyMigration.replacementSids == [
+              "InspectExistingApplicationStackRoles"
             ] and
             .aws.coreAmiFoundation.githubBuildRole.roleName ==
               "archon-datahub-core-ami-build-staging" and
