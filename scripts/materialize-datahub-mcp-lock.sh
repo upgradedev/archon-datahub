@@ -85,7 +85,7 @@ jq --exit-status '
       .registry == "https://pypi.org/simple" and
       .strategy == "highest" and
       .upgrade == "all" and
-      .excludeNewer == "2026-07-23T03:00:00Z" and
+      .excludeNewer == "2026-08-04T12:00:00Z" and
       .constraints == [
         "acryl-datahub==1.6.0.15",
         "setuptools==81.0.0"

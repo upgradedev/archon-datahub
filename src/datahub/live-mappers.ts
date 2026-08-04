@@ -429,8 +429,8 @@ export function mapSearchPageStrict(
     (count as number) < 0 ||
     (total as number) < 0 ||
     !Array.isArray(results) ||
-    count !== results.length ||
-    expectedOffset + (count as number) > (total as number)
+    (count as number) < results.length ||
+    expectedOffset + results.length > (total as number)
   ) {
     throw new DataHubHarvestError(
       "SEARCH_RESPONSE_INCOMPLETE",
@@ -615,7 +615,9 @@ export function mapEntities(
   res: DhCleanedEntity[] | { entities?: DhCleanedEntity[] } | null | undefined,
   source: string
 ): CatalogEntity[] {
-  const raw: DhCleanedEntity[] = Array.isArray(res) ? res : (res?.entities ?? []);
+  const raw: DhCleanedEntity[] = Array.isArray(res)
+    ? res
+    : (res?.entities ?? (res as { result?: DhCleanedEntity[] })?.result ?? []);
   return raw.filter((e) => e && !e.error && e.urn).map((e) => mapEntity(e, source));
 }
 
@@ -647,7 +649,9 @@ export function orderedEntitiesStrict(
     );
   }
 
-  const raw: DhCleanedEntity[] = Array.isArray(res) ? res : (res?.entities ?? []);
+  const raw: DhCleanedEntity[] = Array.isArray(res)
+    ? res
+    : (res?.entities ?? (res as { result?: DhCleanedEntity[] })?.result ?? []);
   const byUrn = new Map<Urn, DhCleanedEntity>();
   for (const item of raw) {
     const urn = item?.urn;
