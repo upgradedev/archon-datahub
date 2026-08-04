@@ -2079,7 +2079,7 @@ jobs:
         with:
           fail-on-severity: moderate
           # aws-cdk-lib@2.262.1 immutably bundles the first affected path; the
-          # infra job replaces it with integrity-pinned 5.0.8.
+          # infra job replaces it with integrity-pinned 5.0.9.
           # ACK pins setuptools<82; its sdist-only macOS finding is governed by
           # the expiring Linux wheel-only OpenVEX gate in datahub-agent-stack.
           # No advisory outside these exact two identifiers is accepted.

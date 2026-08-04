@@ -140,7 +140,7 @@ const exactBundledException = {
   package: "brace-expansion",
   path: "node_modules/aws-cdk-lib/node_modules/brace-expansion",
   lockedVersion: "5.0.7",
-  replacementVersion: "5.0.8",
+  replacementVersion: "5.0.9",
 };
 
 const verified = [];
