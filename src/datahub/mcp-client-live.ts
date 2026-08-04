@@ -242,6 +242,71 @@ export class LiveDataHubMcpClient implements DataHubClient {
   // a cloud VM (user-gated) — version-enumeration semantics are instance/version-dependent,
   // so this transport is deliberately outside the coverage gate; the PURE mapping + audit it
   // feeds (version-history.ts) is fully unit-tested.
+  // Resolve runId -> stable ingestion source from DataHub's own registry.
+  //
+  // `systemMetadata.pipelineName` is sticky per aspect: two independent ingestion
+  // runs leave the FIRST pipeline name on every retained version, which merges two
+  // real sources into one. The registry does not have that defect -- each run is a
+  // `dataHubExecutionRequest` whose id equals the aspect's runId, under the
+  // `dataHubIngestionSource` that produced it. Failure is non-fatal: an empty map
+  // simply falls back to pipelineName and then to `unknown-source`.
+  private async resolveSourceIdentities(): Promise<Record<string, string>> {
+    const override = process.env.ARCHON_SOURCE_MAP;
+    if (override) {
+      try {
+        const parsed = JSON.parse(override) as Record<string, string>;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch {
+        // An unparseable override is ignored rather than trusted.
+      }
+    }
+
+    const base = process.env.DATAHUB_GMS_URL;
+    if (!base) return {};
+    const query =
+      "{ listIngestionSources(input:{start:0,count:100}) { ingestionSources " +
+      "{ name executions(start:0,count:100){ executionRequests { id } } } } }";
+    try {
+      const response = await fetch(`${base.replace(/\/+$/, "")}/api/graphql`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(process.env.DATAHUB_GMS_TOKEN
+            ? { Authorization: `Bearer ${process.env.DATAHUB_GMS_TOKEN}` }
+            : {}),
+        },
+        body: JSON.stringify({ query }),
+      });
+      if (!response.ok) return {};
+      const payload = (await response.json()) as {
+        data?: {
+          listIngestionSources?: {
+            ingestionSources?: Array<{
+              name?: string;
+              executions?: { executionRequests?: Array<{ id?: string }> };
+            }>;
+          };
+        };
+      };
+      const sources =
+        payload.data?.listIngestionSources?.ingestionSources ?? [];
+      const map: Record<string, string> = {};
+      for (const source of sources) {
+        const name = typeof source?.name === "string" ? source.name.trim() : "";
+        if (!name) continue;
+        for (const execution of source.executions?.executionRequests ?? []) {
+          const id = typeof execution?.id === "string" ? execution.id.trim() : "";
+          if (id) map[id] = name;
+        }
+      }
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
   async harvestVersionHistories(query?: string): Promise<AspectVersionHistory[]> {
     return (
       await this.harvestAudit(query, { profile: "async-worker" })
@@ -697,6 +762,11 @@ export class LiveDataHubMcpClient implements DataHubClient {
         "DataHub direct-aspect harvest omitted an audited root."
       );
     }
-    return { declaredUpstreamsByRoot, versionHistories };
+    const sourceIdentityByRunId = await this.resolveSourceIdentities();
+    const resolvedHistories = versionHistories.map((history) => ({
+      ...history,
+      sourceIdentityByRunId,
+    }));
+    return { declaredUpstreamsByRoot, versionHistories: resolvedHistories };
   }
 }
