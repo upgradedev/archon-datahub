@@ -682,12 +682,6 @@ test("strict search mapping rejects malformed counts, missing URNs, and duplicat
     },
     {
       start: 0,
-      count: 2,
-      total: 2,
-      searchResults: [{ entity: { urn: SALES } }],
-    },
-    {
-      start: 0,
       count: 1,
       total: 1,
       searchResults: [{ entity: {} }],
@@ -1406,4 +1400,63 @@ test("live search rejects truncated pages and totals that change mid-harvest", a
     assert.deepEqual(mocked.offsets, [0, 1], scenario.label);
     assert.equal(mocked.remaining(), 0, scenario.label);
   }
+});
+
+// Pinned from a real DataHub Core v1.6.0 response through the official MCP server:
+// `count` echoes the REQUESTED page size (50), while `searchResults` carries only
+// what exists (7). Asserting equality rejected every live page, which is why the
+// live path had never worked.
+test("strict search mapping accepts a real partial page from DataHub", () => {
+  const page = mapSearchPageStrict(
+    {
+      start: 0,
+      count: 50,
+      total: 7,
+      searchResults: [{ entity: { urn: SALES } }, { entity: { urn: RAW } }],
+    } as DhSearchResponse,
+    0,
+    50
+  );
+  assert.deepEqual(page.urns, [SALES, RAW]);
+  assert.equal(page.total, 7);
+});
+
+test("strict search mapping still fails closed on impossible pages", () => {
+  // The server returned MORE than the page size it was asked for.
+  assert.throws(
+    () =>
+      mapSearchPageStrict(
+        {
+          start: 0,
+          count: 1,
+          total: 5,
+          searchResults: [
+            { entity: { urn: SALES } },
+            { entity: { urn: RAW } },
+          ],
+        } as DhSearchResponse,
+        0,
+        50
+      ),
+    (error: unknown) => error instanceof DataHubHarvestError
+  );
+
+  // This page claims to run past the declared total.
+  assert.throws(
+    () =>
+      mapSearchPageStrict(
+        {
+          start: 0,
+          count: 50,
+          total: 1,
+          searchResults: [
+            { entity: { urn: SALES } },
+            { entity: { urn: RAW } },
+          ],
+        } as DhSearchResponse,
+        0,
+        50
+      ),
+    (error: unknown) => error instanceof DataHubHarvestError
+  );
 });

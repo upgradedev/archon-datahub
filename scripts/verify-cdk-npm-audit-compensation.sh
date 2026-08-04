@@ -27,15 +27,18 @@ if [[ "${infra_dir}" != "${expected_infra_dir}" ]]; then
   exit 65
 fi
 
+# The immutable bundled lock entry (5.0.7) matches two published advisories.
+# Both are compensated by the same on-disk repair to the patched release.
 readonly advisory="GHSA-mh99-v99m-4gvg"
+readonly advisory_secondary="GHSA-rgw5-rvv9-x895"
 readonly expected_cdk_version="2.262.1"
 readonly expected_cdk_url="https://registry.npmjs.org/aws-cdk-lib/-/aws-cdk-lib-2.262.1.tgz"
 readonly expected_cdk_integrity="sha512-B6YP4r6ojUZCDhl+qBu/CrWzcipR8sIgshcqYvgw013sghPXmVkYdJ3yuI9+DKML3YLSjQrHy1nGJs+Nqq7JCg=="
 readonly vulnerable_version="5.0.7"
-readonly patched_version="5.0.8"
+readonly patched_version="5.0.9"
 readonly bundled_path="node_modules/aws-cdk-lib/node_modules/brace-expansion"
-readonly tarball_url="https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.8.tgz"
-readonly tarball_integrity="sha512-JZyDyq3D4AUifKTPOB7DELf6XsB3WdPuNxCtob1vFXPsSXhdAiHBWJ/tJ8HAc9aH84BK+5JFZLNkJKx3G9kzQg=="
+readonly tarball_url="https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz"
+readonly tarball_integrity="sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg=="
 readonly lock_file="${infra_dir}/package-lock.json"
 readonly target="${infra_dir}/${bundled_path}"
 readonly evidence_dir="${RUNNER_TEMP}/cdk-brace-expansion-compensation"
@@ -103,6 +106,7 @@ for (( attempt = 1; attempt <= attempts; attempt += 1 )); do
   TARGET="${target}" \
   TREE_DIGEST="${tree_digest}" \
   ADVISORY="${advisory}" \
+  ADVISORY_SECONDARY="${advisory_secondary}" \
   EXPECTED_CDK_VERSION="${expected_cdk_version}" \
   EXPECTED_CDK_URL="${expected_cdk_url}" \
   EXPECTED_CDK_INTEGRITY="${expected_cdk_integrity}" \
@@ -120,7 +124,6 @@ const lock = require(process.env.LOCK_FILE);
 const installed = require(`${process.env.TARGET}/package.json`);
 const vulnerabilities = report.metadata?.vulnerabilities;
 const finding = report.vulnerabilities?.["brace-expansion"];
-const via = finding?.via?.[0];
 const cdk = lock.packages?.["node_modules/aws-cdk-lib"];
 const vulnerable =
   lock.packages?.[
@@ -146,18 +149,36 @@ assert.deepEqual(
 assert.equal(finding.name, "brace-expansion");
 assert.equal(finding.severity, "high");
 assert.equal(finding.isDirect, false);
-assert.ok(["<=5.0.7", "4.0.0 - 5.0.7"].includes(finding.range), `unexpected finding range: ${finding.range}`);
 assert.deepEqual(finding.effects, []);
 assert.deepEqual(finding.nodes, [process.env.BUNDLED_PATH]);
-assert.equal(finding.via.length, 1);
-assert.equal(via.name, "brace-expansion");
-assert.equal(via.dependency, "brace-expansion");
-assert.equal(via.severity, "high");
-assert.ok(["<=5.0.7", ">=4.0.0 <5.0.8"].includes(via.range), `unexpected advisory range: ${via.range}`);
-assert.equal(
-  via.url,
-  `https://github.com/advisories/${process.env.ADVISORY}`
+
+// One immutable lock entry can match several published advisories over time, so
+// the gate checks membership rather than a fixed count: EVERY advisory reported
+// on the bundled path must be one we have reviewed and compensated, and an
+// unknown one still fails closed. npm's human-readable range prose is
+// deliberately not asserted -- it is presentation, not a security property, and
+// pinning it made a newly published advisory look like a contract breach.
+const reviewed = new Set(
+  [process.env.ADVISORY, process.env.ADVISORY_SECONDARY]
+    .filter(Boolean)
+    .map((id) => `https://github.com/advisories/${id}`)
 );
+assert.ok(
+  Array.isArray(finding.via) && finding.via.length >= 1,
+  "expected at least one advisory on the bundled path"
+);
+const seen = new Set();
+for (const entry of finding.via) {
+  assert.equal(entry.name, "brace-expansion");
+  assert.equal(entry.dependency, "brace-expansion");
+  assert.equal(entry.severity, "high");
+  assert.ok(
+    reviewed.has(entry.url),
+    `uncompensated advisory on the bundled path: ${entry.url}`
+  );
+  seen.add(entry.url);
+}
+assert.equal(seen.size, finding.via.length, "duplicate advisory entries");
 
 assert.equal(cdk.version, process.env.EXPECTED_CDK_VERSION);
 assert.equal(cdk.resolved, process.env.EXPECTED_CDK_URL);
