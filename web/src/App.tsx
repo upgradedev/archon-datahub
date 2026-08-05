@@ -62,6 +62,9 @@ type IconName =
   | "spark"
   | "warning";
 
+const RUN_DISABLED_HINT =
+  "It starts a live, credentialed run against a real DataHub tenant with a real write credential, so it requires an authenticated steward session.";
+
 const iconPaths: Record<IconName, string[]> = {
   arrow: ["M5 12h14", "m13 6 6 6-6 6"],
   check: ["m5 12 4 4L19 6"],
@@ -1748,6 +1751,7 @@ export function App() {
               }
               id="judge-tour-run-audit"
               onClick={() => void runAudit()}
+              title={RUN_DISABLED_HINT}
               type="button"
             >
               <Icon
@@ -1940,12 +1944,23 @@ export function App() {
                   auth.status !== "authenticated"
                 }
                 onClick={() => void runAudit()}
+                title={RUN_DISABLED_HINT}
                 type="button"
               >
                 <Icon className={loading ? "size-4 animate-spin" : "size-4"} name={loading ? "refresh" : runtimeRun ? "refresh" : "play"} />
                 {loading ? "Running…" : runtimeRun ? "Run again" : "Run Agent Stack"}
               </button>
             </div>
+            <p className="mt-4 border-t border-white/[0.06] pt-3 text-[11px] leading-5 text-slate-400">
+              <span className="font-semibold text-slate-300">
+                Run Agent Stack stays disabled on this public demo by design, not by failure.
+              </span>{" "}
+              {RUN_DISABLED_HINT} Everything on this page is already the output of a completed
+              pass: open the findings, prepare and verify the evidence pack, then reject the
+              proposal at the human authority boundary. The demo video shows the live path
+              executing against DataHub Core v1.6.0, and the README documents how to run it
+              against your own instance.
+            </p>
           </section>
 
           <AgentStackPanel
