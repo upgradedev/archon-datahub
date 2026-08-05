@@ -1,3 +1,5 @@
+min-severity: high
+
 rules:
   excessive-permissions:
     ignore: true
