@@ -1,0 +1,194 @@
+name: Hosted demo deploy
+
+# Deploys the public demo: the audit API on Cloud Run and the SPA on Firebase
+# Hosting, with /api/** rewritten to Cloud Run so the browser stays same-origin
+# (the API deliberately sends no CORS headers).
+#
+# The DataHub instance is NOT exposed to the internet: its port 8080 has no
+# ingress rule. Cloud Run reaches it over Direct VPC egress, so DATAHUB_GMS_URL
+# is a private RFC1918 address and the GMS token never crosses the internet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_api:
+        description: Build and deploy the Cloud Run audit API
+        required: false
+        default: true
+        type: boolean
+      deploy_web:
+        description: Build and deploy the Firebase Hosting bundle
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: hosted-demo-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy audit API and hosted SPA
+    if: github.repository == 'upgradedev/archon-datahub'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DEPLOY_API: ${{ inputs.deploy_api }}
+      DEPLOY_WEB: ${{ inputs.deploy_web }}
+      GCP_PROJECT: upgradegr-challenges
+      GCP_REGION: europe-west1
+      HOSTING_SITE: archon-datahub
+      SERVICE_NAME: archon-datahub-api
+      ARTIFACT_REPOSITORY: archon
+      RELEASE_SHA: ${{ github.sha }}
+      GCP_VPC_NETWORK: default
+      GCP_VPC_SUBNET: default
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Require deploy configuration
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
+          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT DATAHUB_GMS_URL ARCHON_DEMO_QUERY; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::repository variable for ${name} is not set"
+              missing=1
+            fi
+          done
+          test "${missing}" -eq 0
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: upgradegr-challenges
+
+      - name: Ensure the container repository exists
+        if: inputs.deploy_api
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" \
+            --project "${GCP_PROJECT}" --location "${GCP_REGION}" >/dev/null 2>&1 \
+          || gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
+            --project "${GCP_PROJECT}" --location "${GCP_REGION}" \
+            --repository-format docker \
+            --description "Archon hosted demo images"
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Resolve image reference
+        id: image
+        if: inputs.deploy_api
+        run: |
+          set -euo pipefail
+          ref="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}/${SERVICE_NAME}:${RELEASE_SHA}"
+          echo "ref=${ref}" >>"${GITHUB_OUTPUT}"
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        if: inputs.deploy_api
+
+      - name: Build and push the MCP-capable audit image
+        if: inputs.deploy_api
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: services/datahub-hosted-api/Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ steps.image.outputs.ref }}
+          build-args: ARCHON_RELEASE_SHA=${{ github.sha }}
+
+      - name: Deploy the audit API to Cloud Run
+        id: run_deploy
+        if: inputs.deploy_api
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
+          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
+        run: |
+          set -euo pipefail
+          # --no-cpu-throttling keeps the spawned MCP server alive between requests.
+          # Direct VPC egress is what makes DATAHUB_GMS_URL a private address
+          # reachable at all; without it the deploy proof below fails closed.
+          gcloud run deploy "${SERVICE_NAME}" \
+            --project "${GCP_PROJECT}" \
+            --region "${GCP_REGION}" \
+            --image "${IMAGE_REF}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --cpu 1 \
+            --memory 1Gi \
+            --no-cpu-throttling \
+            --min-instances 1 \
+            --max-instances 3 \
+            --concurrency 4 \
+            --timeout 120 \
+            --network "${GCP_VPC_NETWORK}" \
+            --subnet "${GCP_VPC_SUBNET}" \
+            --vpc-egress private-ranges-only \
+            --set-env-vars "ARCHON_RELEASE_SHA=${RELEASE_SHA},DATAHUB_GMS_URL=${DATAHUB_GMS_URL},ARCHON_DEMO_QUERY=${ARCHON_DEMO_QUERY}" \
+            --set-secrets "DATAHUB_GMS_TOKEN=datahub-gms-token:latest"
+          url="$(gcloud run services describe "${SERVICE_NAME}" \
+            --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format 'value(status.url)')"
+          echo "url=${url}" >>"${GITHUB_OUTPUT}"
+
+      - name: Prove the Cloud Run service is bound to a live DataHub
+        if: inputs.deploy_api
+        env:
+          SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
+        run: |
+          set -euo pipefail
+          ready="$(curl -fsS --max-time 30 "${SERVICE_URL}/readyz")"
+          echo "${ready}"
+          test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
+          test "$(printf '%s' "${ready}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: inputs.deploy_web
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the hosted SPA
+        if: inputs.deploy_web
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Deploy Firebase Hosting
+        if: inputs.deploy_web
+        run: |
+          set -euo pipefail
+          npx --yes firebase-tools@15.25.1 deploy \
+            --only "hosting:${HOSTING_SITE}" \
+            --project "${GCP_PROJECT}" \
+            --non-interactive
+
+      - name: Prove the hosted origin reaches the audit API
+        if: inputs.deploy_web && inputs.deploy_api
+        run: |
+          set -euo pipefail
+          ready="$(curl -fsS --max-time 30 "https://${HOSTING_SITE}.web.app/readyz")"
+          echo "${ready}"
+          test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
