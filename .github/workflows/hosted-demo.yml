@@ -16,9 +16,10 @@ on:
         required: false
         default: manual
         type: string
-
-
-
+# zizmor: ignore[excessive-permissions]
+permissions:
+  contents: read
+  id-token: write
 concurrency:
   group: hosted-demo-deploy
   cancel-in-progress: false
