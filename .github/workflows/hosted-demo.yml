@@ -22,7 +22,9 @@ on:
         default: true
         type: boolean
 
-permissions: {}
+permissions:
+  contents: read
+  id-token: write
 
 concurrency:
   group: hosted-demo-deploy
