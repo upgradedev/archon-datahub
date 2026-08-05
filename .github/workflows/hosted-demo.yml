@@ -22,8 +22,6 @@ on:
         default: true
         type: boolean
 
-permissions: read-all
-
 concurrency:
   group: hosted-demo-deploy
   cancel-in-progress: false
