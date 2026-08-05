@@ -22,6 +22,11 @@ on:
         default: true
         type: boolean
 
+# zizmor: ignore[overly-broad-permissions]
+permissions:
+  contents: read
+  id-token: write
+
 
 
 
