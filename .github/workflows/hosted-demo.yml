@@ -19,7 +19,11 @@ on:
       deploy_web:
         description: Build and deploy the Firebase Hosting bundle
         required: false
-permissions: {}
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
 
 
 concurrency:
