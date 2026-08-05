@@ -149,14 +149,21 @@ function sourceOf(
   history: AspectVersionHistory,
   sm: DhSystemMetadata | null | undefined
 ): string {
-  const pipeline = meaningfulIdentity(sm?.pipelineName);
-  if (pipeline) return pipeline;
-
+  // A resolved mapping outranks `pipelineName`. DataHub keeps that field sticky on
+  // an aspect: two independent ingestion runs leave the FIRST pipeline name on every
+  // retained version, so trusting it merges two real sources into one. The mapping is
+  // derived from DataHub's own ingestion registry (runId -> execution request ->
+  // ingestion source), which is authoritative for who wrote a version.
   const runId = runOf(sm);
   const resolved = runId
     ? meaningfulIdentity(history.sourceIdentityByRunId?.[runId])
     : null;
-  return resolved ?? "unknown-source";
+  if (resolved) return resolved;
+
+  const pipeline = meaningfulIdentity(sm?.pipelineName);
+  if (pipeline) return pipeline;
+
+  return "unknown-source";
 }
 
 // ── History → neutral AuditFact stream ─────────────────────────────────────────

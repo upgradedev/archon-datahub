@@ -148,6 +148,82 @@ test("trusted runId resolution supports histories without pipelineName", () => {
   assert.equal(auditVersionHistory([history]).contradictions.length, 1);
 });
 
+// Measured against DataHub Core v1.6.0: `pipelineName` is STICKY per aspect. Two
+// independent ingestion runs, each declaring its own pipeline_name, leave BOTH
+// retained versions carrying the FIRST name; only runId differs. Trusting that
+// field therefore merges two genuine sources into one and silently disables
+// cross-source contradiction detection on every real catalog.
+test("a resolved run-id mapping outranks a sticky pipelineName", () => {
+  const history: AspectVersionHistory = {
+    urn: URN,
+    aspect: "ownership",
+    // Resolved from DataHub's own ingestion registry:
+    // runId -> dataHubExecutionRequest -> dataHubIngestionSource.
+    sourceIdentityByRunId: {
+      "run-warehouse": "warehouse-catalog-sync",
+      "run-finance": "finance-governance-feed",
+    },
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:a" }] },
+        systemMetadata: {
+          version: "1",
+          lastObserved: 1,
+          runId: "run-warehouse",
+          // Both versions report the SAME sticky name, as DataHub really does.
+          pipelineName: "warehouse-catalog-sync",
+        },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:b" }] },
+        systemMetadata: {
+          version: "2",
+          lastObserved: 2,
+          runId: "run-finance",
+          pipelineName: "warehouse-catalog-sync",
+        },
+      },
+    ],
+  };
+  const report = auditVersionHistory([history]);
+  assert.equal(report.contradictions.length, 1);
+  assert.equal(report.contradictions[0]?.attribute, "owner");
+  assert.deepEqual(
+    report.contradictions[0]?.values.map((v) => v.source).sort(),
+    ["finance-governance-feed", "warehouse-catalog-sync"]
+  );
+});
+
+test("without a mapping a sticky pipelineName still collapses to one source", () => {
+  // The regression this guards: the same two writes, unresolved, must NOT be
+  // reported as a cross-source contradiction. Same-source change is drift.
+  const history: AspectVersionHistory = {
+    urn: URN,
+    aspect: "ownership",
+    versions: [
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:a" }] },
+        systemMetadata: {
+          version: "1",
+          lastObserved: 1,
+          runId: "run-warehouse",
+          pipelineName: "warehouse-catalog-sync",
+        },
+      },
+      {
+        value: { owners: [{ owner: "urn:li:corpGroup:b" }] },
+        systemMetadata: {
+          version: "2",
+          lastObserved: 2,
+          runId: "run-finance",
+          pipelineName: "warehouse-catalog-sync",
+        },
+      },
+    ],
+  };
+  assert.equal(auditVersionHistory([history]).contradictions.length, 0);
+});
+
 test("shipped fixture history recovers owner + field-type conflicts and ignores same-pipeline drift", () => {
   const report = auditVersionHistory(FIXTURE_VERSION_HISTORY);
   const attrs = report.contradictions.map((c) => c.attribute).sort();
