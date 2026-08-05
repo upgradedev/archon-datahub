@@ -1,4 +1,3 @@
-# zizmor: ignore[excessive-permissions]
 name: Hosted demo deploy
 
 # Deploys the public demo: the audit API on Cloud Run and the SPA on Firebase
@@ -18,10 +17,7 @@ on:
         default: manual
         type: string
 
-# zizmor: ignore[excessive-permissions]
-permissions:
-  contents: read
-  id-token: write
+
 
 concurrency:
   group: hosted-demo-deploy
