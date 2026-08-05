@@ -150,7 +150,7 @@ export class LiveDataHubMcpClient implements DataHubClient {
       // stdio: the standard OSS path — run the published server against the local/remote GMS.
       const transport = new StdioClientTransport({
         command: process.env.DATAHUB_MCP_COMMAND ?? "uvx",
-        args: (process.env.DATAHUB_MCP_ARGS ?? "mcp-server-datahub@0.6.0").split(/\s+/),
+        args: (process.env.DATAHUB_MCP_ARGS ?? "mcp-server-datahub@0.6.0").split(/\s+/).filter((arg) => arg.length > 0),
         env: {
           ...process.env,
           DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
