@@ -7,6 +7,9 @@
 
 Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
+- **Live Demo**: [https://archon-datahub.web.app](https://archon-datahub.web.app) (login-free hosted showcase)
+- **Upstream Contribution**: [acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183) (OPEN)
+
 ## Live demo
 
 **https://archon-datahub.web.app**
@@ -306,8 +309,10 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
-**This section is a design, not a deployment.** None of the resources below exist. The CDK
-that would create them is in `infra/aws/` and is built, tested and synthesised in CI, but no
+> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)** (Firebase + Cloud Run live adapter). The AWS infrastructure described below in [infra/aws](infra/aws) is a production-grade reference architecture for enterprise multi-tenant deployments.
+
+[infra/aws](infra/aws) contains the deployment-grade reference design. The CDK
+that creates it is in `infra/aws/` and is built, tested and synthesised in CI, but no
 stack has been deployed to any AWS account. There is no hosted endpoint, no Cognito user
 pool and no judge credential. Read the present tense here as "would", not "does".
 
