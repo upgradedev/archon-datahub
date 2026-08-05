@@ -3,6 +3,10 @@ name: Hosted demo deploy
 # Deploys the public demo: the audit API on Cloud Run and the SPA on Firebase
 # Hosting, with /api/** rewritten to Cloud Run so the browser stays same-origin
 # (the API deliberately sends no CORS headers).
+#
+# The DataHub instance is NOT exposed to the internet: its port 8080 has no
+# ingress rule. Cloud Run reaches it over Direct VPC egress, so DATAHUB_GMS_URL
+# is a private RFC1918 address and the GMS token never crosses the internet.
 
 on:
   workflow_dispatch:
@@ -42,6 +46,8 @@ jobs:
       SERVICE_NAME: archon-datahub-api
       ARTIFACT_REPOSITORY: archon
       RELEASE_SHA: ${{ github.sha }}
+      GCP_VPC_NETWORK: default
+      GCP_VPC_SUBNET: default
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +125,8 @@ jobs:
         run: |
           set -euo pipefail
           # --no-cpu-throttling keeps the spawned MCP server alive between requests.
+          # Direct VPC egress is what makes DATAHUB_GMS_URL a private address
+          # reachable at all; without it the deploy proof below fails closed.
           gcloud run deploy "${SERVICE_NAME}" \
             --project "${GCP_PROJECT}" \
             --region "${GCP_REGION}" \
@@ -133,6 +141,9 @@ jobs:
             --max-instances 3 \
             --concurrency 4 \
             --timeout 120 \
+            --network "${GCP_VPC_NETWORK}" \
+            --subnet "${GCP_VPC_SUBNET}" \
+            --vpc-egress private-ranges-only \
             --set-env-vars "ARCHON_RELEASE_SHA=${RELEASE_SHA},DATAHUB_GMS_URL=${DATAHUB_GMS_URL},ARCHON_DEMO_QUERY=${ARCHON_DEMO_QUERY}" \
             --set-secrets "DATAHUB_GMS_TOKEN=datahub-gms-token:latest"
           url="$(gcloud run services describe "${SERVICE_NAME}" \
