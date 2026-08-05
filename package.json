@@ -32,11 +32,11 @@
   },
   "dependencies": {
     "@aws/bedrock-token-generator": "1.1.0",
-    "@aws-sdk/credential-providers": "3.1094.0",
-    "@aws-sdk/client-dynamodb": "3.1094.0",
-    "@aws-sdk/client-s3": "3.1094.0",
-    "@aws-sdk/client-sfn": "3.1094.0",
-    "@aws-sdk/client-sqs": "3.1094.0",
+    "@aws-sdk/credential-providers": "3.1096.0",
+    "@aws-sdk/client-dynamodb": "3.1096.0",
+    "@aws-sdk/client-s3": "3.1096.0",
+    "@aws-sdk/client-sfn": "3.1096.0",
+    "@aws-sdk/client-sqs": "3.1096.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "openai": "^4.77.0"
   },
