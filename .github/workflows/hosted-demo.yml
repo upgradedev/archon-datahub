@@ -22,7 +22,10 @@ on:
         default: true
         type: boolean
 
-permissions: read-all
+# zizmor: ignore[overly-broad-permissions]
+permissions:
+  contents: read
+  id-token: write
 
 concurrency:
   group: hosted-demo-deploy
