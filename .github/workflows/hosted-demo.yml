@@ -22,7 +22,7 @@ on:
         default: true
         type: boolean
 
-# zizmor: ignore[top-level-write-permissions]
+# zizmor: ignore[overly-broad-permissions]
 permissions:
   contents: read
   id-token: write
