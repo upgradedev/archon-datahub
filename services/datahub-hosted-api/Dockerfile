@@ -31,9 +31,13 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_NO_PROGRESS=1 \
     UV_PYTHON_INSTALL_DIR=/opt/archon/python
 COPY --from=uv /uv /uvx /bin/
+# python3 is a build-time tool only: the lock script validates the upstream
+# pyproject/uv.lock with tomllib before uv is allowed to resolve anything. It is
+# never copied into the runtime stage, which runs uv's own pinned CPython.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl git jq \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install --yes --no-install-recommends ca-certificates curl git jq python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -c 'import tomllib'
 WORKDIR /workspace
 COPY .github/locks/datahub-mcp-v0.6.0.json .github/locks/datahub-mcp-v0.6.0.json
 COPY .github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json .github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json
