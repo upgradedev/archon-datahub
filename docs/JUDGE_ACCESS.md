@@ -1,5 +1,12 @@
 # Protected judge access
 
+> **This is an operator runbook for the AWS reference architecture, and that architecture is
+> not deployed.** No Cognito user pool exists, no hosted judge login exists, and no judge
+> credential was ever issued. Judges do not need this document. The live demo is
+> https://archon-datahub.web.app and it needs no account: see
+> [JUDGE_TESTING.md](JUDGE_TESTING.md). What follows is the lifecycle the workflow would
+> enforce if the stack were deployed.
+
 Judge access is an explicit CI/CD operation. Cognito self-sign-up remains disabled in
 `infra/aws/lib/archon-stack.ts`; operators must not create, rotate, reactivate, or disable
 hosted users from a laptop or with long-lived AWS keys.

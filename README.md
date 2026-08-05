@@ -7,15 +7,41 @@
 
 Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
+## Live demo
+
+**https://archon-datahub.web.app**
+
+No login, no account, no credential, no setup. The page loads straight into a completed
+integrity pass. The step-by-step judge route is in
+[docs/JUDGE_TESTING.md](docs/JUDGE_TESTING.md).
+
+> ### What is deployed, and what is not
+>
+> **Deployed:** the URL above. It is a Firebase-hosted single-page app running a
+> deterministic showcase fixture. It talks to no backend and mutates nothing.
+>
+> **Not deployed:** the AWS design described later in this README, under
+> [Hosted AWS reference architecture](#hosted-aws-reference-architecture). Route 53,
+> CloudFront, Cognito, WAF, API Gateway, the Lambdas, Step Functions and the Core sandbox
+> are a **reference architecture**. They describe how this would be operated, and the CDK
+> for them is in `infra/aws/`, but no AWS environment is running and there is nothing to
+> sign in to. Wherever this README describes that stack in the present tense, read it as
+> design intent rather than a live system.
+>
+> **Real, and reproducible by you:** the live DataHub path. It is not hosted, but it works.
+> Run it on your own machine against your own instance with
+> [Run locally](#run-locally-without-external-services) and
+> [Connect a real DataHub](#connect-a-real-datahub).
+
 ## What Archon does
 
 Most catalog assistants retrieve metadata. Archon tests whether the catalog is internally
 consistent:
 
 - **Cross-source contradictions** — retained aspect versions disagree about ownership,
-  schema, domain, or deprecation. Archon distinguishes a stable ingestion source
-  (`pipelineName`) from an execution (`runId`), so two runs of one pipeline never become a
-  fabricated conflict.
+  schema, domain, or deprecation. Archon resolves stable ingestion-source identity from
+  DataHub's own ingestion registry and separates it from execution identity (`runId`), so
+  two runs of one pipeline never become a fabricated conflict.
 - **Lineage gaps and blast radius** — declared current `upstreamLineage` is reconciled
   against resolved MCP topology, and a missing upstream or risky asset is expanded into a
   bounded, cycle-safe downstream impact graph without treating query scope as absence.
@@ -38,10 +64,19 @@ A contradiction cannot fire from the MCP read tools alone: those tools ground th
 catalog view, but do not by themselves prove that independent retained sources disagreed.
 For this differentiator, live mode directly reads a bounded set of DataHub GMS
 `GenericAspectV3` version 0/history records and preserves their system-metadata
-provenance. It treats `pipelineName` as stable source identity and `runId` as execution
-identity: changes from one pipeline are drift; only independent retained sources can form a
-contradiction. Missing, unauthorized, malformed, or truncated history fails closed to an
-unknown/manual result and can never become an actionable remediation.
+provenance. DataHub keeps `systemMetadata.pipelineName` sticky across runs: two independent
+ingestion runs, each declaring its own pipeline name, leave both retained versions carrying
+the first one, and only `runId` differs. So that field alone cannot establish source
+identity. Archon resolves the true source for each `runId` from DataHub's own ingestion
+registry, where every `dataHubExecutionRequest` id equals the `runId` stamped on the aspect,
+and a resolved mapping outranks `pipelineName`. `pipelineName` stays as a fallback for
+history that predates it. Changes from one source are drift; only independent retained
+sources can form a contradiction. Missing, unauthorized, malformed, truncated, or
+unresolved history fails closed to an unknown/manual result and can never become an
+actionable remediation.
+
+The rest of this section describes the AWS reference architecture, not the live demo. It is
+the designed hosting boundary, and it is not deployed.
 
 The judge-facing audit APIs are publicly usable only through CloudFront. A generated,
 KMS-encrypted origin credential is never delivered to the browser: CloudFront overwrites
@@ -86,6 +121,10 @@ The concise positioning is: **DataHub catalogs the data estate; Archon audits th
 catalog itself.**
 
 ## System design
+
+The diagram below is the **target AWS architecture**, not the running demo. It is not
+deployed. The live demo at https://archon-datahub.web.app is the SPA alone, hosted on
+Firebase, replaying a deterministic fixture with no backend behind it.
 
 ```mermaid
 flowchart LR
@@ -267,6 +306,11 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
+**This section is a design, not a deployment.** None of the resources below exist. The CDK
+that would create them is in `infra/aws/` and is built, tested and synthesised in CI, but no
+stack has been deployed to any AWS account. There is no hosted endpoint, no Cognito user
+pool and no judge credential. Read the present tense here as "would", not "does".
+
 The AWS judge runtime is intentionally lean. It does not require an always-on container
 cluster, load balancer, NAT gateway, or Kubernetes control plane.
 
@@ -339,14 +383,25 @@ artifacts.
 
 ## Current delivery status
 
+**What is actually running today:** one thing, https://archon-datahub.web.app. It is the
+React SPA built from this repository, hosted on Firebase, serving a deterministic showcase
+fixture with no backend and no login. That is the whole live footprint.
+
+**What is real but not hosted:** the live DataHub path. Archon has been run against a real
+DataHub Core v1.6.0 instance, and cross-source contradiction detection fires on a real
+catalog. Reproduce it locally with [Connect a real DataHub](#connect-a-real-datahub). It
+needs DataHub 1.6 specifically, because `mcp-server-datahub@0.6.0` is not compatible with
+1.5.
+
+**What is not deployed:** the entire AWS stack. No CloudFront distribution, no Cognito user
+pool, no API Gateway, no Lambdas, no Step Functions, no EC2 sandbox, no DNS. The CDK is
+built, tested and synthesised in CI, and that is as far as it has gone. DataHub Cloud trial
+credentials, protected-environment variables, the AMI build and production promotion are all
+untaken operational steps.
+
 The repository contains the complete dual-runtime source contracts, CI/CD workflows,
 zero-idle Core lifecycle, DataHub Cloud image runtime, four-component agent path, judge
 identity and explicit/automatic runtime-selection UI contract.
-
-A public deployment, DataHub Cloud trial credentials, DNS values, protected-environment
-variables, AMI build and production promotion are external operational steps. They are not
-claimed complete until their exact GitHub and AWS receipts exist. The OSS Core path remains
-the reproducible fallback if the 21-day Cloud trial is unavailable during judging.
 
 ## Prior-work disclosure
 
