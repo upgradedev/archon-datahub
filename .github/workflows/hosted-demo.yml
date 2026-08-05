@@ -11,10 +11,17 @@ name: Hosted demo deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: Dispatch reason
+        required: false
+        default: manual
+        type: string
 
-
-
-concurrency:
+# zizmor: ignore[overly-broad-permissions]
+permissions:
+  contents: read
+  id-token: write
   group: hosted-demo-deploy
   cancel-in-progress: false
 
