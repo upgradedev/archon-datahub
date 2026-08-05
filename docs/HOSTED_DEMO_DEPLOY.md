@@ -27,9 +27,17 @@ Two properties are deliberate:
 - **The API sends no CORS headers.** Firebase rewrites make the API same-origin,
   so no other site can drive it from a browser.
 - **DataHub has no public ingress on 8080.** Cloud Run reaches it on a private
-  address through Direct VPC egress, so the GMS token never crosses the
-  internet. `default-allow-internal` on the `default` network already permits
-  this; no new firewall rule is needed, and none should be added.
+  address through Direct VPC egress, so nothing about the metadata service is
+  exposed to the internet. `default-allow-internal` on the `default` network
+  already permits this; no new firewall rule is needed, and none should be added.
+
+That second property is what carries the authentication weight here. The
+`datahub-core` instance runs the quickstart with
+`METADATA_SERVICE_AUTH_ENABLED=false`, so it issues no personal access tokens and
+accepts unauthenticated reads from anything that can route to it — which is only
+this Cloud Run service, over a private address. If you point the workflow at a
+DataHub that does enforce metadata service auth, set the optional
+`DATAHUB_GMS_TOKEN_SECRET` variable (section 2) and the bearer token is mounted.
 
 ## 1. Workload Identity Federation
 
@@ -73,20 +81,31 @@ Roles the deploy identity needs:
 | `roles/iam.serviceAccountUser` on the Cloud Run runtime service account | act as the runtime identity |
 | `roles/compute.networkUser` on the `default` subnet in `europe-west1` | Direct VPC egress |
 | `roles/firebasehosting.admin` | release the SPA |
-| `roles/secretmanager.secretAccessor` on `datahub-gms-token` | mount the token |
+| `roles/secretmanager.secretAccessor` on the token secret | only when section 2 applies |
 
-## 2. The DataHub token
+## 2. The DataHub token — optional, and not used today
 
-Create a personal access token in the DataHub UI on `datahub-core`
-(Settings → Access Tokens), then store it. It is never entered into GitHub.
+The demo instance has metadata service auth disabled, so there is no token to
+create and the deploy binds none. Nothing further is required for the hosted
+demo to run live.
+
+Against a DataHub that *does* enforce auth, create a personal access token in its
+UI (Settings → Access Tokens) and store it without it ever passing through
+GitHub or a chat window:
 
 ```bash
 printf '%s' '<paste-the-token>' | gcloud secrets create datahub-gms-token \
   --project upgradegr-challenges --replication-policy automatic --data-file=-
+
+gcloud secrets add-iam-policy-binding datahub-gms-token \
+  --project upgradegr-challenges \
+  --role roles/secretmanager.secretAccessor \
+  --member "serviceAccount:<project-number>-compute@developer.gserviceaccount.com"
 ```
 
-The Cloud Run runtime service account needs
-`roles/secretmanager.secretAccessor` on that secret.
+Then set the repository variable `DATAHUB_GMS_TOKEN_SECRET` to
+`datahub-gms-token`. Leaving that variable unset is what keeps the deploy from
+demanding a secret that does not exist.
 
 ## 3. Repository variables
 
@@ -99,6 +118,7 @@ non-secret; the token is not among them.
 | `GCP_DEPLOY_SERVICE_ACCOUNT` | `archon-datahub-deploy@upgradegr-challenges.iam.gserviceaccount.com` |
 | `DATAHUB_GMS_URL` | `http://10.132.0.10:8080` |
 | `ARCHON_DEMO_QUERY` | `urn:li:dataset:(urn:li:dataPlatform:snowflake,omega_ledger_audit_target,PROD)` |
+| `DATAHUB_GMS_TOKEN_SECRET` | optional; unset for this instance (see section 2) |
 
 `ARCHON_DEMO_QUERY` pins the public endpoint to exactly one query. Any other
 input is rejected with 400, so the unauthenticated surface is a single
