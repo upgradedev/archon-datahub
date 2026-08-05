@@ -80,7 +80,7 @@ jobs:
           project_id: upgradegr-challenges
 
       - name: Ensure the container repository exists
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         run: |
           set -euo pipefail
           gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" \
@@ -93,17 +93,17 @@ jobs:
 
       - name: Resolve image reference
         id: image
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         run: |
           set -euo pipefail
           ref="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}/${SERVICE_NAME}:${RELEASE_SHA}"
           echo "ref=${ref}" >>"${GITHUB_OUTPUT}"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
 
       - name: Build and push the MCP-capable audit image
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -115,7 +115,7 @@ jobs:
 
       - name: Deploy the audit API to Cloud Run
         id: run_deploy
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
@@ -159,7 +159,7 @@ jobs:
           echo "url=${url}" >>"${GITHUB_OUTPUT}"
 
       - name: Prove the Cloud Run service is bound to a live DataHub
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         env:
           SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
         run: |
@@ -170,7 +170,7 @@ jobs:
           test "$(printf '%s' "${ready}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
 
       - name: Prove the deployed service completes a real audit
-        if: ${{ inputs.deploy_api != false }}
+        if: inputs.deploy_api
         env:
           SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
           ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
@@ -192,14 +192,14 @@ jobs:
             "$(printf '%s' "${audit}" | jq -er '.report.trace | length')"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ inputs.deploy_web != false }}
+        if: inputs.deploy_web
         with:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Build the hosted SPA
-        if: ${{ inputs.deploy_web != false }}
+        if: inputs.deploy_web
         working-directory: web
         run: |
           set -euo pipefail
@@ -207,7 +207,7 @@ jobs:
           npm run build
 
       - name: Deploy Firebase Hosting
-        if: ${{ inputs.deploy_web != false }}
+        if: inputs.deploy_web
         run: |
           set -euo pipefail
           npx --yes firebase-tools@15.25.1 deploy \
@@ -216,7 +216,7 @@ jobs:
             --non-interactive
 
       - name: Prove the hosted origin reaches the audit API
-        if: ${{ inputs.deploy_web != false && inputs.deploy_api != false }}
+        if: inputs.deploy_web && inputs.deploy_api
         run: |
           set -euo pipefail
           ready="$(curl -fsS --max-time 30 "https://${HOSTING_SITE}.web.app/readyz")"
