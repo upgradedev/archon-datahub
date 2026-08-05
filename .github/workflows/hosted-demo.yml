@@ -118,7 +118,6 @@ jobs:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
           ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
-          DATAHUB_GMS_TOKEN_SECRET: ${{ vars.DATAHUB_GMS_TOKEN_SECRET }}
         run: |
           set -euo pipefail
           # --no-cpu-throttling keeps the spawned MCP server alive between requests.
