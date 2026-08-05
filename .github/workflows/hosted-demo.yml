@@ -1,5 +1,13 @@
 name: Hosted demo deploy
 
+# Deploys the public demo: the audit API on Cloud Run and the SPA on Firebase
+# Hosting, with /api/** rewritten to Cloud Run so the browser stays same-origin
+# (the API deliberately sends no CORS headers).
+#
+# The DataHub instance is NOT exposed to the internet: its port 8080 has no
+# ingress rule. Cloud Run reaches it over Direct VPC egress, so DATAHUB_GMS_URL
+# is a private RFC1918 address and the GMS token never crosses the internet.
+
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +41,62 @@ jobs:
       DEPLOY_API: ${{ inputs.deploy_api }}
       DEPLOY_WEB: ${{ inputs.deploy_web }}
       GCP_PROJECT: upgradegr-challenges
+      GCP_REGION: europe-west1
+      HOSTING_SITE: archon-datahub
+      SERVICE_NAME: archon-datahub-api
+      ARTIFACT_REPOSITORY: archon
+      RELEASE_SHA: ${{ github.sha }}
+      GCP_VPC_NETWORK: default
+      GCP_VPC_SUBNET: default
     steps:
-      - name: Probe startup
-        run: echo "ok ${DEPLOY_API} ${DEPLOY_WEB}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Require deploy configuration
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
+          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT DATAHUB_GMS_URL ARCHON_DEMO_QUERY; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::repository variable for ${name} is not set"
+              missing=1
+            fi
+          done
+          test "${missing}" -eq 0
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: upgradegr-challenges
+
+      - name: Ensure the container repository exists
+        if: inputs.deploy_api
+        run: |
+          set -euo pipefail
+          gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" \
+            --project "${GCP_PROJECT}" --location "${GCP_REGION}" >/dev/null 2>&1 \
+          || gcloud artifacts repositories create "${ARTIFACT_REPOSITORY}" \
+            --project "${GCP_PROJECT}" --location "${GCP_REGION}" \
+            --repository-format docker \
+            --description "Archon hosted demo images"
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Resolve image reference
+        id: image
+        if: inputs.deploy_api
+        run: |
+          set -euo pipefail
+          ref="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}/${SERVICE_NAME}:${RELEASE_SHA}"
+          echo "ref=${ref}" >>"${GITHUB_OUTPUT}"
