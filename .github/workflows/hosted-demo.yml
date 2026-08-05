@@ -10,25 +10,11 @@ name: Hosted demo deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      deploy_api:
-        description: Build and deploy the Cloud Run audit API
-        required: false
-        default: true
-        type: boolean
-      deploy_web:
-        description: Build and deploy the Firebase Hosting bundle
-        required: false
-        default: true
-        type: boolean
 
 # zizmor: ignore[overly-broad-permissions]
 permissions:
   contents: read
   id-token: write
-
-
-
 
 concurrency:
   group: hosted-demo-deploy
@@ -85,7 +71,6 @@ jobs:
           project_id: upgradegr-challenges
 
       - name: Ensure the container repository exists
-        if: inputs.deploy_api
         run: |
           set -euo pipefail
           gcloud artifacts repositories describe "${ARTIFACT_REPOSITORY}" \
@@ -98,17 +83,14 @@ jobs:
 
       - name: Resolve image reference
         id: image
-        if: inputs.deploy_api
         run: |
           set -euo pipefail
           ref="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}/${SERVICE_NAME}:${RELEASE_SHA}"
           echo "ref=${ref}" >>"${GITHUB_OUTPUT}"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-        if: inputs.deploy_api
 
       - name: Build and push the MCP-capable audit image
-        if: inputs.deploy_api
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -120,19 +102,10 @@ jobs:
 
       - name: Deploy the audit API to Cloud Run
         id: run_deploy
-        if: inputs.deploy_api
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
         run: |
           set -euo pipefail
-          # --no-cpu-throttling keeps the spawned MCP server alive between requests.
-          # Direct VPC egress is what makes DATAHUB_GMS_URL a private address
-          # reachable at all; without it the deploy proof below fails closed.
-          # A DataHub deployment that runs with METADATA_SERVICE_AUTH_ENABLED=false
-          # issues no tokens, so the bearer credential is opt-in rather than required:
-          # set the DATAHUB_GMS_TOKEN_SECRET variable to a Secret Manager secret name
-          # to bind one. Reachability is enforced by the private network above, not by
-          # the presence of this flag.
           secret_flags=()
           if [ -n "${DATAHUB_GMS_TOKEN_SECRET:-}" ]; then
             secret_flags+=(--set-secrets "DATAHUB_GMS_TOKEN=${DATAHUB_GMS_TOKEN_SECRET}:latest")
@@ -161,7 +134,6 @@ jobs:
           echo "url=${url}" >>"${GITHUB_OUTPUT}"
 
       - name: Prove the Cloud Run service is bound to a live DataHub
-        if: inputs.deploy_api
         env:
           SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
         run: |
@@ -172,15 +144,10 @@ jobs:
           test "$(printf '%s' "${ready}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
 
       - name: Prove the deployed service completes a real audit
-        if: inputs.deploy_api
         env:
           SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
         run: |
           set -euo pipefail
-          # /readyz only reports how the process is configured. This drives the whole
-          # pipeline through the stdio MCP server into the private DataHub, so a
-          # deploy that cannot actually reach it fails here rather than in a judge's
-          # browser. The first request also pays the MCP cold start.
           body="$(jq -nc --arg q "${ARCHON_DEMO_QUERY}" '{query: $q}')"
           audit="$(curl -fsS --max-time 180 \
             -H 'content-type: application/json' \
@@ -193,14 +160,12 @@ jobs:
             "$(printf '%s' "${audit}" | jq -er '.report.trace | length')"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: inputs.deploy_web
         with:
           node-version: 22.23.1
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Build the hosted SPA
-        if: inputs.deploy_web
         working-directory: web
         run: |
           set -euo pipefail
@@ -208,7 +173,6 @@ jobs:
           npm run build
 
       - name: Deploy Firebase Hosting
-        if: inputs.deploy_web
         run: |
           set -euo pipefail
           npx --yes firebase-tools@15.25.1 deploy \
@@ -217,7 +181,6 @@ jobs:
             --non-interactive
 
       - name: Prove the hosted origin reaches the audit API
-        if: inputs.deploy_web && inputs.deploy_api
         run: |
           set -euo pipefail
           ready="$(curl -fsS --max-time 30 "https://${HOSTING_SITE}.web.app/readyz")"
