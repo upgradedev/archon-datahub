@@ -16,6 +16,7 @@ import type {
 
 const AUDIT_PATH = "/api/audits";
 const CONTROL_LOOP_PATH = "/api/control-loops";
+const READINESS_PATH = "/readyz";
 const AUDIT_ID_PATTERN = /^[a-f0-9]{64}$/;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u;
@@ -635,6 +636,36 @@ async function jsonResponse(response: Response): Promise<unknown> {
     );
   }
   return value;
+}
+
+export interface RuntimeReadiness {
+  releaseSha: string;
+  datahubMode: "live" | "fixture";
+}
+
+// Static hosting answers this path with the SPA shell when no audit API is
+// deployed, so anything that is not a well-formed readiness body means "absent".
+export async function probeRuntimeReadiness(
+  signal?: AbortSignal,
+): Promise<RuntimeReadiness | undefined> {
+  try {
+    const response = await fetch(READINESS_PATH, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!response.ok) return undefined;
+    const value: unknown = await response.json();
+    if (!isRecord(value)) return undefined;
+    const releaseSha = value.releaseSha;
+    const datahubMode = value.datahubMode;
+    if (typeof releaseSha !== "string" || releaseSha.length === 0) return undefined;
+    if (datahubMode !== "live" && datahubMode !== "fixture") return undefined;
+    return { releaseSha, datahubMode };
+  } catch {
+    return undefined;
+  }
 }
 
 export async function requestAudit(query = "", signal?: AbortSignal): Promise<AuditEnvelope> {

@@ -6,7 +6,12 @@ import {
   useSyncExternalStore,
   type FormEvent,
 } from "react";
-import { submitApprovalDecision } from "./api";
+import {
+  probeRuntimeReadiness,
+  requestAudit,
+  submitApprovalDecision,
+  type RuntimeReadiness,
+} from "./api";
 import { EvidencePack } from "./EvidencePack";
 import { GuidedTour } from "./GuidedTour";
 import { RuntimeControl } from "./RuntimeControl";
@@ -1442,7 +1447,7 @@ function AgentStackPanel({
 
 export function App() {
   const auth = useSyncExternalStore(subscribeToAuth, getAuthSnapshot, getAuthSnapshot);
-  const [audit] = useState<LoadedAudit>({
+  const [audit, setAudit] = useState<LoadedAudit>({
     envelope: previewAudit,
     source: "fixture",
     fallbackReason:
@@ -1464,6 +1469,9 @@ export function App() {
     findingIdentity(previewAudit.report.findings[0]!),
   );
   const controller = useRef<AbortController | null>(null);
+  const [readiness, setReadiness] = useState<RuntimeReadiness>();
+  const [liveRunning, setLiveRunning] = useState(false);
+  const [liveError, setLiveError] = useState<string>();
 
   useEffect(() => {
     void initializeAuthentication();
@@ -1475,6 +1483,31 @@ export function App() {
     },
     [],
   );
+
+  useEffect(() => {
+    const probe = new AbortController();
+    void probeRuntimeReadiness(probe.signal).then(setReadiness);
+    return () => probe.abort();
+  }, []);
+
+  const runLiveAudit = async () => {
+    setLiveRunning(true);
+    setLiveError(undefined);
+    try {
+      const envelope = await requestAudit(query);
+      setAudit({ envelope, source: "live" });
+      const first = envelope.report.findings[0];
+      if (first) setSelectedId(findingIdentity(first));
+    } catch (error) {
+      setLiveError(
+        error instanceof Error
+          ? error.message
+          : "The live audit could not be completed.",
+      );
+    } finally {
+      setLiveRunning(false);
+    }
+  };
 
   const report = audit.envelope.report;
   const filtered = useMemo(
@@ -1961,6 +1994,35 @@ export function App() {
               executing against DataHub Core v1.6.0, and the README documents how to run it
               against your own instance.
             </p>
+            {readiness?.datahubMode === "live" && (
+              <div className="mt-4 rounded-xl border border-emerald-300/20 bg-emerald-300/[0.04] p-3">
+                <p className="text-[11px] leading-5 text-slate-300">
+                  <span className="font-semibold text-emerald-200">
+                    This origin is bound to a live DataHub.
+                  </span>{" "}
+                  Running the read-only audit replaces the fixture below with the report it
+                  produces. It needs no sign-in because the endpoint accepts one pinned query
+                  and exposes no write route.
+                </p>
+                <button
+                  aria-label="Run the live read-only audit"
+                  className="run-button mt-3"
+                  disabled={liveRunning}
+                  id="public-live-audit"
+                  onClick={() => void runLiveAudit()}
+                  type="button"
+                >
+                  <Icon
+                    className={liveRunning ? "size-4 animate-spin" : "size-4"}
+                    name={liveRunning ? "refresh" : "play"}
+                  />
+                  {liveRunning ? "Auditing…" : "Run live audit"}
+                </button>
+                {liveError && (
+                  <p className="mt-2 text-[11px] leading-5 text-rose-300">{liveError}</p>
+                )}
+              </div>
+            )}
           </section>
 
           <AgentStackPanel

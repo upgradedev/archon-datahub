@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getControlLoopStatus,
   loadAudit,
+  probeRuntimeReadiness,
   requestAudit,
   startControlLoop,
   submitApprovalDecision,
@@ -608,5 +609,66 @@ describe("approval API trust boundary", () => {
       }),
     ).rejects.toMatchObject({ status: 401 });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("probeRuntimeReadiness", () => {
+  it("reports the live binding advertised by the hosted API", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({ status: "ready", releaseSha: "6d1f0ac", datahubMode: "live" }),
+      ),
+    );
+    await expect(probeRuntimeReadiness()).resolves.toEqual({
+      releaseSha: "6d1f0ac",
+      datahubMode: "live",
+    });
+  });
+
+  it("reports fixture mode when the API has no DataHub credentials", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({ status: "ready", releaseSha: "6d1f0ac", datahubMode: "fixture" }),
+      ),
+    );
+    await expect(probeRuntimeReadiness()).resolves.toEqual({
+      releaseSha: "6d1f0ac",
+      datahubMode: "fixture",
+    });
+  });
+
+  it("treats the static SPA shell as no audit API", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          ({
+            status: 200,
+            ok: true,
+            headers: { get: () => "text/html" },
+            json: async () => {
+              throw new SyntaxError("Unexpected token <");
+            },
+          }) as unknown as Response,
+      ),
+    );
+    await expect(probeRuntimeReadiness()).resolves.toBeUndefined();
+  });
+
+  it("rejects a readiness body that is missing its release binding", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ datahubMode: "live" })));
+    await expect(probeRuntimeReadiness()).resolves.toBeUndefined();
+  });
+
+  it("stays silent when the probe cannot reach the origin", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    await expect(probeRuntimeReadiness()).resolves.toBeUndefined();
   });
 });
