@@ -44,6 +44,10 @@ jobs:
       RELEASE_SHA: ${{ github.sha }}
       GCP_VPC_NETWORK: default
       GCP_VPC_SUBNET: default
+      WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
+      ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,11 +55,6 @@ jobs:
           persist-credentials: false
 
       - name: Require deploy configuration
-        env:
-          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
-          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
         run: |
           set -euo pipefail
           missing=0
@@ -70,8 +69,8 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
@@ -116,8 +115,6 @@ jobs:
         if: inputs.deploy_api
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
-          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
-          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
         run: |
           set -euo pipefail
           # --no-cpu-throttling keeps the spawned MCP server alive between requests.
@@ -170,7 +167,6 @@ jobs:
         if: inputs.deploy_api
         env:
           SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
-          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
         run: |
           set -euo pipefail
           # /readyz only reports how the process is configured. This drives the whole
