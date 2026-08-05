@@ -22,6 +22,8 @@ on:
 permissions:
   contents: read
   id-token: write
+
+concurrency:
   group: hosted-demo-deploy
   cancel-in-progress: false
 
