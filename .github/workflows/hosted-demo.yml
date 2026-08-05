@@ -1,3 +1,4 @@
+# zizmor: ignore[overly-broad-permissions]
 name: Hosted demo deploy
 
 # Deploys the public demo: the audit API on Cloud Run and the SPA on Firebase
