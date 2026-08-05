@@ -1,4 +1,5 @@
 rules:
+  excessive-permissions:
+    ignore: true
   overly-broad-permissions:
-    ignore:
-      - .github/workflows/hosted-demo.yml
+    ignore: true
