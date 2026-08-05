@@ -171,6 +171,28 @@ jobs:
           test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
           test "$(printf '%s' "${ready}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
 
+      - name: Prove the deployed service completes a real audit
+        if: inputs.deploy_api
+        env:
+          SERVICE_URL: ${{ steps.run_deploy.outputs.url }}
+          ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
+        run: |
+          set -euo pipefail
+          # /readyz only reports how the process is configured. This drives the whole
+          # pipeline through the stdio MCP server into the private DataHub, so a
+          # deploy that cannot actually reach it fails here rather than in a judge's
+          # browser. The first request also pays the MCP cold start.
+          body="$(jq -nc --arg q "${ARCHON_DEMO_QUERY}" '{query: $q}')"
+          audit="$(curl -fsS --max-time 180 \
+            -H 'content-type: application/json' \
+            -d "${body}" "${SERVICE_URL}/api/audits")"
+          test "$(printf '%s' "${audit}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
+          test "$(printf '%s' "${audit}" | jq -er '.report.findings | type')" = "array"
+          printf '%s' "${audit}" | jq -e '.report.trace | length >= 1' >/dev/null
+          printf 'audit findings=%s trace=%s\n' \
+            "$(printf '%s' "${audit}" | jq -er '.report.findings | length')" \
+            "$(printf '%s' "${audit}" | jq -er '.report.trace | length')"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: inputs.deploy_web
         with:
