@@ -11,8 +11,14 @@ name: Hosted demo deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: Dispatch reason
+        required: false
+        default: manual
+        type: string
 
-
+permissions: {}
 
 concurrency:
   group: hosted-demo-deploy
