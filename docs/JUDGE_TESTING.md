@@ -53,8 +53,8 @@ DataHub access.
 **Run Agent Stack** and **Launch pinned session** stay disabled on the public
 URL, by design. They start a credentialed run against a real DataHub tenant
 with a real write credential, so they need an authenticated steward session
-that the public demo deliberately does not have. The demo video shows that
-path running against DataHub Core v1.6.0. To run it yourself, follow
+that the public demo deliberately does not have. That path is not dead code:
+it has been run against DataHub Core v1.6.0. To run it yourself, follow
 "Connect a real DataHub" in the README.
 
 ## Optional governed-write journey
