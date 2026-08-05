@@ -70,7 +70,22 @@ vi.mock("./RuntimeControl", async () => {
   };
 });
 
+const apiMocks = vi.hoisted(() => ({
+  probeRuntimeReadiness: vi.fn(),
+  requestAudit: vi.fn(),
+}));
+
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return {
+    ...actual,
+    probeRuntimeReadiness: apiMocks.probeRuntimeReadiness,
+    requestAudit: apiMocks.requestAudit,
+  };
+});
+
 import { App } from "./App";
+import { previewAudit } from "./fixtures";
 
 beforeEach(() => {
   authMocks.snapshot = { status: "anonymous" };
@@ -78,6 +93,9 @@ beforeEach(() => {
   runtimeMocks.requestRuntimeImproveContext.mockReset();
   runtimeMocks.resumeRuntimeAgentStack.mockReset();
   runtimeMocks.submitRuntimeApproval.mockReset();
+  apiMocks.probeRuntimeReadiness.mockReset();
+  apiMocks.probeRuntimeReadiness.mockResolvedValue(undefined);
+  apiMocks.requestAudit.mockReset();
 });
 
 afterEach(() => {
@@ -518,5 +536,84 @@ describe("Archon control plane", () => {
       ),
     ).toBeInTheDocument();
     expect(runtimeMocks.loadRuntimeAgentStack).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("public live audit", () => {
+  const LIVE_RUN = "Run the live read-only audit";
+
+  const bindLiveOrigin = () => {
+    apiMocks.probeRuntimeReadiness.mockResolvedValue({
+      releaseSha: "6d1f0ac",
+      datahubMode: "live",
+    });
+  };
+
+  it("stays hidden when the origin serves no audit API", async () => {
+    render(<App />);
+
+    expect(
+      await screen.findByLabelText("Canonical DataHub dataset URN"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: LIVE_RUN })).not.toBeInTheDocument();
+  });
+
+  it("stays hidden when the origin is bound to a fixture runtime", async () => {
+    apiMocks.probeRuntimeReadiness.mockResolvedValue({
+      releaseSha: "6d1f0ac",
+      datahubMode: "fixture",
+    });
+
+    render(<App />);
+
+    expect(
+      await screen.findByLabelText("Canonical DataHub dataset URN"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: LIVE_RUN })).not.toBeInTheDocument();
+  });
+
+  it("runs a real read-only audit with no sign-in and relabels the source", async () => {
+    bindLiveOrigin();
+    apiMocks.requestAudit.mockResolvedValue(previewAudit);
+
+    render(<App />);
+
+    const run = await screen.findByRole("button", { name: LIVE_RUN });
+    expect(run).toBeEnabled();
+    fireEvent.click(run);
+
+    await waitFor(() => {
+      expect(apiMocks.requestAudit).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(screen.getAllByLabelText("Live DataHub").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("reports why a live audit failed and keeps the visible report labelled", async () => {
+    bindLiveOrigin();
+    apiMocks.requestAudit.mockRejectedValue(new Error("DataHub GMS is unreachable"));
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: LIVE_RUN }));
+
+    expect(
+      await screen.findByText("DataHub GMS is unreachable"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Fixture preview")).toBeInTheDocument();
+  });
+
+  it("falls back to a plain message when the failure is not an Error", async () => {
+    bindLiveOrigin();
+    apiMocks.requestAudit.mockRejectedValue("socket hang up");
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: LIVE_RUN }));
+
+    expect(
+      await screen.findByText("The live audit could not be completed."),
+    ).toBeInTheDocument();
   });
 });
