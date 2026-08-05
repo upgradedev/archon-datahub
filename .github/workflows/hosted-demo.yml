@@ -18,7 +18,9 @@ on:
         default: manual
         type: string
 
-permissions: {}
+permissions:
+  contents: read
+  id-token: write # zizmor: ignore[overly-broad-permissions]
 
 concurrency:
   group: hosted-demo-deploy
