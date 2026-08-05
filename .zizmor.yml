@@ -1,0 +1,4 @@
+rules:
+  overly-broad-permissions:
+    ignore:
+      - ".github/workflows/hosted-demo.yml"
