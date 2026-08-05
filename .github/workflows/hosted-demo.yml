@@ -17,6 +17,7 @@ on:
         default: manual
         type: string
 # zizmor: ignore[excessive-permissions]
+# zizmor: ignore[overly-broad-permissions]
 permissions:
   contents: read
   id-token: write
