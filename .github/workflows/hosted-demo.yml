@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: read
+  # zizmor: ignore[overly-broad-permissions]
+  id-token: write
 
 concurrency:
   group: hosted-demo-deploy
