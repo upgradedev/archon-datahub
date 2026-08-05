@@ -11,10 +11,7 @@ name: Hosted demo deploy
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  # zizmor: ignore[overly-broad-permissions]
-  id-token: write
+permissions: {}
 
 concurrency:
   group: hosted-demo-deploy
