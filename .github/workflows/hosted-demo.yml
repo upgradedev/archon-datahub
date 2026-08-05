@@ -12,9 +12,7 @@ name: Hosted demo deploy
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
+
 
 concurrency:
   group: hosted-demo-deploy
