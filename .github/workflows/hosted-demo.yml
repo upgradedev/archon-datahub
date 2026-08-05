@@ -19,9 +19,9 @@ on:
       deploy_web:
         description: Build and deploy the Firebase Hosting bundle
         required: false
-# zizmor: ignore[overly-broad-permissions]
 permissions:
   contents: read
+  # zizmor: ignore[overly-broad-permissions]
   id-token: write
 
 
