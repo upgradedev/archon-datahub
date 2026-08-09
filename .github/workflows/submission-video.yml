@@ -19,7 +19,6 @@ on:
 permissions:
   actions: read
   contents: read
-  id-token: write
 
 concurrency:
   group: submission-video-${{ inputs.release_sha }}
@@ -28,6 +27,10 @@ concurrency:
 jobs:
   video:
     name: Capture, compose and verify the judge video
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     if: github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
