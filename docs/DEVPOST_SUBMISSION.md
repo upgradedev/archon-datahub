@@ -1,8 +1,8 @@
 # Devpost submission source
 
-This is the canonical English copy for Devpost submission `1125619`. The video URL is entered
-only after the release-bound CI video is public. Recheck every saved field because Devpost text
-inputs have previously lost unsaved values when focus changed.
+This is the canonical English copy for submitted Devpost project `1125619`. Its public video,
+thumbnail, five-image gallery, links and saved fields were rechecked after publication. The
+release-bound video is https://youtu.be/6iHvBr4Qr1s.
 
 ## Project name
 
@@ -10,12 +10,34 @@ Archon for DataHub
 
 ## Elevator pitch
 
-An evidence-first agent that audits your DataHub catalog against itself, shows where two
-sources disagree and what breaks downstream, then hands a steward one exact reversible fix.
+An evidence-first agent that audits your DataHub catalog against itself: it finds where two
+sources disagree, traces what breaks downstream, and hands a steward one exact governed fix.
 
 ## Category
 
 Agents That Do Real Work
+
+## Judge proof strip
+
+**Track: Agents That Do Real Work**
+
+> **Proof strip:** 1 live OSS DataHub Core · 4 evidence-linked findings · 1 governed fix · verified
+> read-back and rollback · upstream PR #183**
+
+**The wedge:** Others trust the catalog; Archon proves it can be trusted before allowing one
+reversible action.
+
+**Judge shortcuts:** [live app](https://archon-datahub.web.app) ·
+[exact 2:41 demo](https://youtu.be/6iHvBr4Qr1s) ·
+[judge testing](https://github.com/upgradedev/archon-datahub/blob/master/docs/JUDGE_TESTING.md) ·
+[sample outputs](https://github.com/upgradedev/archon-datahub/tree/master/examples) ·
+[exact release](https://github.com/upgradedev/archon-datahub/releases/tag/datahub-hackathon-2026-final) ·
+[upstream PR #183](https://github.com/acryldata/mcp-server-datahub/pull/183).
+
+**Real DataHub write-back:** the public UI is deliberately read-only. Protected CI binds
+separate human approvals to the exact G6 `add_tags` plan, read-back, rollback and verified
+restoration. [Governed-proof run 31325511840](https://github.com/upgradedev/archon-datahub/actions/runs/31325511840)
+demonstrates the mutation without exposing a public write credential.
 
 ## Inspiration
 
@@ -71,9 +93,9 @@ Security and quality evidence is pipeline-only: unit, integration, functional, a
 prompt-injection, component and Playwright user-journey tests; measured combined coverage ≥85%;
 Gitleaks, CodeQL, dependency review, npm/Python SCA, OpenVEX, CycloneDX SBOM, container and IaC
 scans; and strict OWASP ZAP DAST against the final Firebase origin. The final application
-release, hosted proof, governed receipts and refreshed 2:41 video package are bound to one exact
-Git SHA. The existing public 2:41 video remains the earlier valid submission capture until an
-owner-authorized replacement upload.
+release, hosted proof, governed receipts and public 2:41 demo are bound to exact application SHA
+`7cf2ab063312c2bf06fd2d65c798e802f7070a37`. CI verifies the public video's 161.48-second
+duration, 1920×1080 dimensions, eight-scene structure and content hash.
 
 ## Challenges we ran into
 
@@ -126,7 +148,11 @@ Cloud, GitHub Actions, Playwright, OWASP ZAP, CodeQL, CycloneDX, OpenVEX and Doc
 ## Links
 
 - Application: https://archon-datahub.web.app
+- Exact public video: https://youtu.be/6iHvBr4Qr1s
 - Public repository: https://github.com/upgradedev/archon-datahub
+- Judge testing: https://github.com/upgradedev/archon-datahub/blob/master/docs/JUDGE_TESTING.md
+- Sample outputs: https://github.com/upgradedev/archon-datahub/tree/master/examples
+- Exact release: https://github.com/upgradedev/archon-datahub/releases/tag/datahub-hackathon-2026-final
 - Upstream contribution: https://github.com/acryldata/mcp-server-datahub/pull/183
 
 ## Testing instructions
@@ -159,11 +185,18 @@ open-source licences; the repository includes Apache-2.0 at the top level. No th
 or stock footage is used in the video; application capture, captions and narration are generated
 for this submission.
 
+## Published gallery
+
+The Devpost gallery contains the public video plus five captioned images: the Archon cover,
+live OSS DataHub findings, bounded blast radius, the governed write/read-back/rollback workflow,
+and upstream PR #183. The cover is also the project thumbnail.
+
 ## Final form checklist
 
 - Public application and repository links open in a logged-out browser.
 - The repository About section visibly detects Apache-2.0.
 - Public YouTube/Vimeo/Youku video is under three minutes and shows the functioning product.
+- Custom 3:2 thumbnail and five captioned gallery images are publicly visible (six carousel slides including the video).
 - Description, testing instructions, built-with list, category and prior-work disclosure match
   this file.
 - Additional-info feedback answers remain saved.
