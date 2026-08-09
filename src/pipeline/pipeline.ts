@@ -271,7 +271,10 @@ export class AuditPipeline {
       narrative: narration.narrative,
       modelProvenance: narration.modelProvenance,
       trace: [
-        { agent: "classifier", produced: `${classification.totalEntities} entities classified` },
+        {
+          agent: "classifier",
+          produced: `${formatCount(classification.totalEntities, "entity")} classified`,
+        },
         {
           agent: "lineage-analyzer",
           produced:

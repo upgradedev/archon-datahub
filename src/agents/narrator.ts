@@ -15,6 +15,7 @@ import {
   type ModelRuntimeProvenance,
 } from "../llm/provenance.js";
 import type { Finding } from "../types.js";
+import { formatCount } from "../text/format-count.js";
 import type { Classification } from "./classifier.js";
 
 const SYSTEM_PROMPT =
@@ -64,7 +65,7 @@ export class NarratorAgent {
       .join("\n");
 
     const user = [
-      `CATALOG CLASSIFICATION: ${classification.totalEntities} entities, ` +
+      `CATALOG CLASSIFICATION: ${formatCount(classification.totalEntities, "entity")}, ` +
         `${classification.withLineage} with lineage, ${classification.sensitiveEntities} with sensitive fields.`,
       evidence,
       `TOP FINDINGS:`,

@@ -268,6 +268,7 @@ test("AuditPipeline derives snapshot, facts, and history from one fresh harvest 
   const report = await fakePipeline().run(client, "sales");
   assert.equal(client.bundleCalls, 1);
   assert.equal(report.classification.totalEntities, 1);
+  assert.equal(report.trace[0]!.produced, "1 entity classified");
   assert.match(
     report.trace[1]!.produced,
     /recovered from aspect version history/

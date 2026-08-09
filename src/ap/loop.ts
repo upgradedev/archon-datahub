@@ -204,7 +204,7 @@ export class AuditLoop {
         (state as LoopState & { snapshot?: unknown }).snapshot = snapshot;
         (state as LoopState & { facts?: unknown }).facts = harvest.facts;
         state.harvested = true;
-        return `harvested ${snapshot.entities.length} entities (${this.classifier.classify(snapshot).withLineage} with lineage)`;
+        return `harvested ${formatCount(snapshot.entities.length, "entity")} (${formatCount(this.classifier.classify(snapshot).withLineage, "lineage-bearing entity")})`;
       }
       case "run_consistency_audit": {
         if (!state.harvested) return "cannot audit before harvest_catalog";
