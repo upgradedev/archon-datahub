@@ -2819,6 +2819,7 @@ def validate_facts(
     if proof_id == "BONUS-OSS":
         expected_paths = [
             "src/mcp_server_datahub/mcp_server.py",
+            "src/mcp_server_datahub/openapi_client.py",
             "src/mcp_server_datahub/tools/__init__.py",
             "src/mcp_server_datahub/tools/aspect_history.py",
             "tests/test_mcp/test_get_aspect_history.py",

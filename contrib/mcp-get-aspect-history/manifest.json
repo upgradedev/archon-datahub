@@ -10,6 +10,11 @@
   },
   "artifacts": [
     {
+      "source": "upstream/src/mcp_server_datahub/openapi_client.py",
+      "destination": "src/mcp_server_datahub/openapi_client.py",
+      "kind": "source"
+    },
+    {
       "source": "upstream/src/mcp_server_datahub/tools/aspect_history.py",
       "destination": "src/mcp_server_datahub/tools/aspect_history.py",
       "kind": "source"
@@ -43,9 +48,12 @@
     ]
   },
   "status": {
-    "state": "staged-not-submitted",
-    "pullRequestOpened": false,
+    "state": "public-pull-request-open",
+    "pullRequestOpened": true,
     "appliedToUpstream": false,
+    "pullRequestNumber": 183,
+    "url": "https://github.com/acryldata/mcp-server-datahub/pull/183",
+    "headSha": "69b96128b59b939812def0617b03b6136e15c704",
     "localBuildRun": false,
     "localTestsRun": false,
     "localSecurityScanRun": false
@@ -60,13 +68,13 @@
       "id": "candidate-lint",
       "kind": "lint",
       "scope": "candidate",
-      "command": "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py"
+      "command": "uv run --frozen ruff check src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py"
     },
     {
       "id": "candidate-typecheck",
       "kind": "typecheck",
       "scope": "candidate",
-      "command": "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py"
+      "command": "uv run --frozen mypy src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py"
     },
     {
       "id": "candidate-tests",

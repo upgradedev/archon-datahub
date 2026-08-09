@@ -72,6 +72,7 @@ const aspectHistoryRequiredFiles = [
   "integration.patch",
   "scripts/render-validation-receipt.mjs",
   "tests/validation-receipt.test.mjs",
+  "upstream/src/mcp_server_datahub/openapi_client.py",
   "upstream/src/mcp_server_datahub/tools/aspect_history.py",
   "upstream/tests/test_mcp/test_get_aspect_history.py",
 ];
@@ -107,6 +108,10 @@ if (
 }
 
 const expectedArtifacts = new Map([
+  [
+    "upstream/src/mcp_server_datahub/openapi_client.py",
+    "src/mcp_server_datahub/openapi_client.py",
+  ],
   [
     "upstream/src/mcp_server_datahub/tools/aspect_history.py",
     "src/mcp_server_datahub/tools/aspect_history.py",
@@ -163,14 +168,14 @@ const expectedRequiredCi = [
     kind: "lint",
     scope: "candidate",
     command:
-      "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
+      "uv run --frozen ruff check src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
   },
   {
     id: "candidate-typecheck",
     kind: "typecheck",
     scope: "candidate",
     command:
-      "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py",
+      "uv run --frozen mypy src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py",
   },
   {
     id: "candidate-tests",
@@ -221,6 +226,17 @@ const stagedStatus = {
   localTestsRun: false,
   localSecurityScanRun: false,
 };
+const openStatusKeys = [
+  "appliedToUpstream",
+  "headSha",
+  "localBuildRun",
+  "localSecurityScanRun",
+  "localTestsRun",
+  "pullRequestNumber",
+  "pullRequestOpened",
+  "state",
+  "url",
+];
 const mergedStatusKeys = [
   "appliedToUpstream",
   "headSha",
@@ -249,6 +265,15 @@ const stagedStatusValid =
   status?.pullRequestOpened === stagedStatus.pullRequestOpened &&
   status?.appliedToUpstream === stagedStatus.appliedToUpstream &&
   localExecutionAbsent;
+const openStatusValid =
+  JSON.stringify(statusKeys) === JSON.stringify(openStatusKeys) &&
+  status?.state === "public-pull-request-open" &&
+  status?.pullRequestOpened === true &&
+  status?.appliedToUpstream === false &&
+  status?.pullRequestNumber === 183 &&
+  status?.url === "https://github.com/acryldata/mcp-server-datahub/pull/183" &&
+  status?.headSha === "69b96128b59b939812def0617b03b6136e15c704" &&
+  localExecutionAbsent;
 const mergedAtPattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const mergedAtMilliseconds =
@@ -276,9 +301,9 @@ const mergedStatusValid =
   mergedAtMilliseconds >= Date.parse("2026-07-06T13:00:00Z") &&
   mergedAtMilliseconds <= Date.parse("2026-08-10T21:00:00Z") &&
   localExecutionAbsent;
-if (!stagedStatusValid && !mergedStatusValid) {
+if (!stagedStatusValid && !openStatusValid && !mergedStatusValid) {
   throw new Error(
-    "get-aspect-history manifest must use the exact staged or merged-upstream status contract."
+    "get-aspect-history manifest must use the exact staged, public-open, or merged-upstream status contract."
   );
 }
 if (
@@ -305,27 +330,47 @@ const aspectHistorySource = await readFile(
   "utf8"
 );
 for (const contract of [
-  "@read_only\ndef get_aspect_history(",
+  "@read_only\n@min_version(cloud=\"0.3.16\", oss=\"1.4.0\")\ndef get_aspect_history(",
   "ASPECT_HISTORY_ALLOWLIST = frozenset(",
   "MAX_ASPECT_HISTORY_LIMIT = 20",
   "MAX_ASPECT_HISTORY_START_VERSION = 1_000_000",
   "MAX_ASPECT_HISTORY_URN_CHARS = 2_048",
+  "MAX_ASPECT_HISTORY_URNS = 10",
+  "MAX_ASPECT_HISTORY_ASPECTS = 8",
+  "MAX_ASPECT_HISTORY_PAIRS = 40",
   "MAX_ASPECT_VALUE_CHARS = 12_000",
   "MAX_ASPECT_HISTORY_RESPONSE_CHARS = 60_000",
-  '"If-Version-Match"',
-  '"?systemMetadata=true"',
-  "response.raise_for_status()",
-  "if body == []:",
-  "graph.exists(normalized_urn)",
+  "VersionedOpenApiClient(graph)",
+  '"boundedBy"',
   '"truncatedByResponseBudget"',
-  '"systemMetadataFields"',
-  '"auditStampFields"',
   '"dataHandling"',
   "untrusted catalog data",
 ]) {
   if (!aspectHistorySource.includes(contract)) {
     throw new Error(
       `get-aspect-history source is missing required contract: ${contract}`
+    );
+  }
+}
+
+const openApiSource = await readFile(
+  resolve(
+    aspectHistoryRoot,
+    "upstream/src/mcp_server_datahub/openapi_client.py"
+  ),
+  "utf8"
+);
+for (const contract of [
+  "class VersionedOpenApiClient:",
+  '"If-Version-Match"',
+  'f"{entity_name}/batchGet"',
+  "self._graph._session.post(",
+  'params={"systemMetadata": str(with_system_metadata).lower()}',
+  "response.raise_for_status()",
+]) {
+  if (!openApiSource.includes(contract)) {
+    throw new Error(
+      `version-aware OpenAPI seam is missing required contract: ${contract}`
     );
   }
 }
@@ -374,12 +419,12 @@ const patchedFiles = [
 ].map((match) => [match[1], match[2]]);
 const expectedPatchedFiles = [
   [
-    "src/mcp_server_datahub/tools/__init__.py",
-    "src/mcp_server_datahub/tools/__init__.py",
+    "src/mcp_server_datahub/mcp_server.py",
+    "src/mcp_server_datahub/mcp_server.py",
   ],
   [
-    "src/mcp_server_datahub/mcp_server.py",
-    "src/mcp_server_datahub/mcp_server.py",
+    "src/mcp_server_datahub/tools/__init__.py",
+    "src/mcp_server_datahub/tools/__init__.py",
   ],
 ];
 if (
@@ -409,16 +454,18 @@ const aspectHistoryTests = await readFile(
 );
 const testCount = (aspectHistoryTests.match(/^def test_/gm) || []).length;
 for (const testContract of [
-  "test_is_marked_read_only",
-  "test_returns_current_history_pagination_and_bounded_provenance",
-  "test_lookahead_produces_honest_next_start_version",
+  "test_is_read_only_and_version_gated",
+  "test_cross_product_batches_pairs_once_per_version_and_orders_results",
+  "test_accepts_single_or_json_stringified_lists",
+  "test_limit_and_start_version_are_per_pair_with_honest_lookahead",
+  "test_pair_local_validation_and_missing_entity_do_not_abort_batch",
+  "test_transport_failure_is_pair_local_across_entity_types",
+  "test_provenance_is_allowlisted_and_values_are_bounded",
+  "test_oversized_value_returns_preview_instead_of_raw_value",
+  "test_global_budget_reports_dropped_pairs",
   "test_rejects_unbounded_or_ambiguous_arguments",
-  "test_rejects_aspects_outside_governance_allowlist",
-  "test_http_and_authorization_errors_are_not_silenced",
-  "test_missing_openapi_capability_fails_explicitly",
-  "test_malformed_success_responses_fail_closed",
-  "test_oversized_single_value_becomes_an_explicit_preview",
-  "test_total_response_budget_stops_with_resumable_cursor",
+  "test_response_explains_retention_and_untrusted_data",
+  "test_404_at_versioned_seam_is_stable_pair_error",
 ]) {
   if (!aspectHistoryTests.includes(testContract)) {
     throw new Error(
@@ -426,9 +473,9 @@ for (const testContract of [
     );
   }
 }
-if (testCount < 12) {
+if (testCount < 11) {
   throw new Error(
-    `get-aspect-history must stage at least 12 focused tests; found ${testCount}.`
+    `get-aspect-history must stage at least 11 focused tests; found ${testCount}.`
   );
 }
 
@@ -460,6 +507,10 @@ const mergedReadmeStatus =
   `was merged by an independent upstream maintainer at \`${status.mergedAt}\`. ` +
   `Head commit: \`${status.headSha}\`. Merge commit: \`${status.mergeCommitSha}\`. ` +
   "No local build, test suite, or security scan was run; all validation and security evidence was produced by CI/CD.";
+const openReadmeStatus =
+  `**Public pull request open.** Pull request [#${status.pullRequestNumber}](${status.url}) ` +
+  `contains head commit \`${status.headSha}\` and is not merged. ` +
+  "No accepted-contribution bonus is claimed. No local build, test suite, or security scan was run; all validation and security evidence is produced by CI/CD.";
 const stagedReadmeStatusValid =
   normalizedAspectHistoryReadme.includes(stagedReadmeStatus) &&
   !normalizedAspectHistoryReadme.includes("**Merged upstream.**");
@@ -467,6 +518,10 @@ const mergedReadmeStatusValid =
   normalizedAspectHistoryReadme.includes(mergedReadmeStatus) &&
   !normalizedAspectHistoryReadme.includes("**Staged, not submitted.**") &&
   !normalizedAspectHistoryReadme.includes("No pull request was opened");
+const openReadmeStatusValid =
+  normalizedAspectHistoryReadme.includes(openReadmeStatus) &&
+  !normalizedAspectHistoryReadme.includes("**Staged, not submitted.**") &&
+  !normalizedAspectHistoryReadme.includes("**Merged upstream.**");
 if (stagedStatusValid && !stagedReadmeStatusValid) {
   throw new Error(
     "get-aspect-history README must preserve the exact truthful staged status."
@@ -475,6 +530,11 @@ if (stagedStatusValid && !stagedReadmeStatusValid) {
 if (mergedStatusValid && !mergedReadmeStatusValid) {
   throw new Error(
     "get-aspect-history README must record the exact truthful merged status."
+  );
+}
+if (openStatusValid && !openReadmeStatusValid) {
+  throw new Error(
+    "get-aspect-history README must record the exact truthful public-open status."
   );
 }
 for (const { command } of expectedRequiredCi) {

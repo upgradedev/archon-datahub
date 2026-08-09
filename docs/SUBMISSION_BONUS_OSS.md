@@ -2,33 +2,34 @@
 
 ## Current state
 
-The BONUS-OSS producer is source-complete and intentionally blocked. No pull
-request has been opened or changed in `acryldata/mcp-server-datahub`, and no
-public merged upstream pull request currently exists for the staged
-`get_aspect_history` contribution.
+The BONUS-OSS producer is source-complete and intentionally fail-closed until
+upstream acceptance. Public pull request
+[`acryldata/mcp-server-datahub#183`](https://github.com/acryldata/mcp-server-datahub/pull/183)
+contains the exact five-path `get_aspect_history` candidate. A maintainer gave
+strong positive feedback and requested the batch/OpenAPI-seam refinements now
+present at head `69b96128b59b939812def0617b03b6136e15c704`; the pull request is still
+open, so no accepted-contribution bonus is claimed.
 
-`contrib/mcp-get-aspect-history/manifest.json` therefore remains truthful:
-`state` is `staged-not-submitted`, `pullRequestOpened` and
-`appliedToUpstream` are `false`, and all three local execution flags are
-`false`. An open pull request is not sufficient evidence. The bonus is emitted
+`contrib/mcp-get-aspect-history/manifest.json` therefore records
+`public-pull-request-open`, PR #183, its exact head SHA, `pullRequestOpened: true`,
+`appliedToUpstream: false`, and all three local execution flags as `false`.
+An open pull request is not sufficient evidence. The bonus is emitted
 only after an independent upstream maintainer has merged the exact candidate.
 
 ## External activation sequence
 
-1. Open one public pull request against
-   `https://github.com/acryldata/mcp-server-datahub`, with base branch `main`,
-   from the exact staged candidate based on
-   `9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9`.
-2. Keep the pull request limited to these four paths:
+1. Keep public pull request #183 based on
+   `9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9` limited to these five paths:
    `src/mcp_server_datahub/mcp_server.py`,
+   `src/mcp_server_datahub/openapi_client.py`,
    `src/mcp_server_datahub/tools/__init__.py`,
    `src/mcp_server_datahub/tools/aspect_history.py`, and
    `tests/test_mcp/test_get_aspect_history.py`.
-3. Obtain merge acceptance from an upstream identity different from the pull
+2. Obtain merge acceptance from an upstream identity different from the pull
    request author during the official submission period. A draft, open,
    closed-unmerged, self-merged, private, renamed-path, or extra-path pull
    request remains ineligible.
-4. In a normal repository change after the merge, replace the manifest status
+3. In a normal repository change after the merge, replace the manifest status
    with the exact `merged-upstream` variant:
    `state`, `pullRequestOpened`, `appliedToUpstream`, `pullRequestNumber`,
    `url`, `headSha`, `mergeCommitSha`, `mergedAt`, `localBuildRun`,
@@ -42,11 +43,11 @@ only after an independent upstream maintainer has merged the exact candidate.
 
    Remove the staged/no-pull-request wording. The phase-aware verifier rejects
    a merged manifest paired with a stale staged README, or the reverse.
-5. Let the ordinary `master` CI pipeline validate the merged-status release
+4. Let the ordinary `master` CI pipeline validate the merged-status release
    and produce the signed OSS validation receipt. Do not substitute a local
    build, local test result, local security scan, workstation JSON, or
    caller-supplied artifact.
-6. Dispatch `.github/workflows/submission-bonus-oss.yml` with exactly
+5. Dispatch `.github/workflows/submission-bonus-oss.yml` with exactly
    `release_sha`, `ci_run_id`, and `upstream_pull_request_number`.
 
 If upstream `main` advances in a way that prevents the exact pinned candidate
@@ -68,13 +69,13 @@ first from the CI `applied.diff`, then from the staged source files plus
 Public upstream observations are credentialless and reject redirects. The
 collector requires the canonical public Apache-2.0 repository, base branch
 `main`, a merged non-draft pull request, an independent author and merger, and
-the exact four changed paths. Credentialless Git then proves:
+the exact five changed paths. Credentialless Git then proves:
 
 - the receipt diff reconstructs one exact candidate tree;
 - the staged files and integration patch reconstruct the same diff and tree;
 - the public pull-request head has that complete tree, with no unrelated
-  commits or files hidden outside the four-path API inventory; and
-- the merged commit contains identical modes and bytes for all four paths.
+  commits or files hidden outside the five-path API inventory; and
+- the merged commit contains identical modes and bytes for all five paths.
 
 The canonical candidate manifest binds the pinned base commit, applied-diff
 digest, reconstructed tree, and each path's mode, Git blob ID, and SHA-256

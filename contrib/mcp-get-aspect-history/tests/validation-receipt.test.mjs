@@ -25,14 +25,14 @@ const sourceHeadSha = "a".repeat(40);
 const expectedCommands = [
   {
     command:
-      "uv run --frozen ruff check src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
+      "uv run --frozen ruff check src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py tests/test_mcp/test_get_aspect_history.py",
     id: "candidate-lint",
     kind: "lint",
     scope: "candidate",
   },
   {
     command:
-      "uv run --frozen mypy src/mcp_server_datahub/tools/aspect_history.py",
+      "uv run --frozen mypy src/mcp_server_datahub/openapi_client.py src/mcp_server_datahub/tools/aspect_history.py",
     id: "candidate-typecheck",
     kind: "typecheck",
     scope: "candidate",
@@ -120,7 +120,7 @@ test("validation receipt is canonical, deterministic, and source-bound", async (
     repository: "upgradedev/archon-datahub",
   });
   assert.equal(first.target.baseCommit, "9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9");
-  assert.equal(first.candidate.files.length, 2);
+  assert.equal(first.candidate.files.length, 3);
   assert.equal(
     first.candidate.appliedDiff.sha256,
     createHash("sha256").update(appliedDiff).digest("hex")

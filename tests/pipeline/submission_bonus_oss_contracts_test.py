@@ -48,6 +48,7 @@ EXPECTED_STANDARD_FILES = (
 )
 EXPECTED_UPSTREAM_PATHS = (
     "src/mcp_server_datahub/mcp_server.py",
+    "src/mcp_server_datahub/openapi_client.py",
     "src/mcp_server_datahub/tools/__init__.py",
     "src/mcp_server_datahub/tools/aspect_history.py",
     "tests/test_mcp/test_get_aspect_history.py",
@@ -649,20 +650,25 @@ def validate_collector(collector: str) -> None:
         literal_assignments.get("EXPECTED_FILE_STATUS")
         == {
             EXPECTED_UPSTREAM_PATHS[0]: "modified",
-            EXPECTED_UPSTREAM_PATHS[1]: "modified",
-            EXPECTED_UPSTREAM_PATHS[2]: "added",
+            EXPECTED_UPSTREAM_PATHS[1]: "added",
+            EXPECTED_UPSTREAM_PATHS[2]: "modified",
             EXPECTED_UPSTREAM_PATHS[3]: "added",
+            EXPECTED_UPSTREAM_PATHS[4]: "added",
         },
         "collector upstream path status map is not exact",
     )
     require(
         literal_assignments.get("STAGED_SOURCE_BY_DESTINATION")
         == {
-            EXPECTED_UPSTREAM_PATHS[2]: (
+            EXPECTED_UPSTREAM_PATHS[1]: (
+                "contrib/mcp-get-aspect-history/upstream/"
+                "src/mcp_server_datahub/openapi_client.py"
+            ),
+            EXPECTED_UPSTREAM_PATHS[3]: (
                 "contrib/mcp-get-aspect-history/upstream/"
                 "src/mcp_server_datahub/tools/aspect_history.py"
             ),
-            EXPECTED_UPSTREAM_PATHS[3]: (
+            EXPECTED_UPSTREAM_PATHS[4]: (
                 "contrib/mcp-get-aspect-history/upstream/"
                 "tests/test_mcp/test_get_aspect_history.py"
             ),
@@ -999,6 +1005,11 @@ def validate_contrib_verifier(verifier: str) -> None:
             "localBuildRun: false",
             "localTestsRun: false",
             "localSecurityScanRun: false",
+            "const openStatusKeys = [",
+            'status?.state === "public-pull-request-open"',
+            "status?.pullRequestNumber === 183",
+            'status?.url === "https://github.com/acryldata/mcp-server-datahub/pull/183"',
+            'status?.headSha === "69b96128b59b939812def0617b03b6136e15c704"',
             "const mergedStatusKeys = [",
             '"pullRequestNumber"',
             '"headSha"',
@@ -1017,10 +1028,13 @@ def validate_contrib_verifier(verifier: str) -> None:
             'Date.parse("2026-07-06T13:00:00Z")',
             'Date.parse("2026-08-10T21:00:00Z")',
             "localExecutionAbsent",
-            "if (!stagedStatusValid && !mergedStatusValid)",
+            "if (!stagedStatusValid && !openStatusValid && !mergedStatusValid)",
             "const stagedReadmeStatus =",
             "**Staged, not submitted.** No pull request was opened",
             "const mergedReadmeStatus =",
+            "const openReadmeStatus =",
+            "**Public pull request open.** Pull request ",
+            "No accepted-contribution bonus is claimed",
             "**Merged upstream.** Pull request "
             "[#${status.pullRequestNumber}](${status.url})",
             "${status.mergedAt}",
@@ -1029,11 +1043,13 @@ def validate_contrib_verifier(verifier: str) -> None:
             "all validation and security evidence was produced by CI/CD",
             "const stagedReadmeStatusValid =",
             "const mergedReadmeStatusValid =",
+            "const openReadmeStatusValid =",
             'includes("**Merged upstream.**")',
             'includes("**Staged, not submitted.**")',
             'includes("No pull request was opened")',
             "if (stagedStatusValid && !stagedReadmeStatusValid)",
             "if (mergedStatusValid && !mergedReadmeStatusValid)",
+            "if (openStatusValid && !openReadmeStatusValid)",
         ),
     )
     require(
@@ -1050,16 +1066,17 @@ def validate_documentation(documentation: str) -> None:
         normalized,
         "BONUS-OSS operational documentation",
         (
-            "source-complete and intentionally blocked",
-            "No pull request has been opened or changed",
-            "`staged-not-submitted`",
+            "source-complete and intentionally fail-closed",
+            "acryldata/mcp-server-datahub#183",
+            "69b96128b59b939812def0617b03b6136e15c704",
+            "`public-pull-request-open`",
             "An open pull request is not sufficient evidence",
             "`merged-upstream`",
             "contribution README's",
             "phase-aware verifier rejects",
             "`release_sha`, `ci_run_id`, and `upstream_pull_request_number`",
             "independent upstream maintainer",
-            "exact four changed paths",
+            "exact five changed paths",
             "local security scan",
             "All security and integrity enforcement is inside CI/CD",
             "does not use Codex Security",
@@ -1576,10 +1593,10 @@ for tamper_label, tampered_verifier in verifier_tamper_cases.items():
     )
 
 documentation_tamper_cases = {
-    "claims PR exists": replace_all(
+    "claims PR merged": replace_all(
         documentation_text,
-        "No pull\nrequest has been opened or changed",
-        "A pull\nrequest has been opened",
+        "the pull request is still\nopen",
+        "the pull request is already\nmerged",
     ),
     "allows open PR": replace_all(
         documentation_text,

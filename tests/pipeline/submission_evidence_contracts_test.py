@@ -68,6 +68,7 @@ def valid_facts() -> dict[str, dict]:
     feedback_review_job_started_at = BONUS_EVENT + dt.timedelta(seconds=20)
     bonus_oss_paths = [
         "src/mcp_server_datahub/mcp_server.py",
+        "src/mcp_server_datahub/openapi_client.py",
         "src/mcp_server_datahub/tools/__init__.py",
         "src/mcp_server_datahub/tools/aspect_history.py",
         "tests/test_mcp/test_get_aspect_history.py",
