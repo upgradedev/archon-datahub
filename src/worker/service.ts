@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { DataHubClient } from "../datahub/mcp-client.js";
+import type { AuditExecutionProfile } from "../datahub/harvest-policy.js";
 import type { DataHubMutationClient } from "../datahub/mutation-client.js";
 import { AuditPipeline, isAuditReport } from "../pipeline/pipeline.js";
 import type {
@@ -80,6 +81,7 @@ export interface AuditWorkerServiceOptions {
   evidence: ImmutableEvidenceWriter;
   auditCheckpoint?: AuditResultCheckpoint;
   pipeline?: AuditPipeline;
+  executionProfile?: AuditExecutionProfile;
   releaseSha: string;
   clock?: () => string;
   nonce?: () => string;
@@ -271,7 +273,7 @@ export class AuditWorkerService {
     const report = await this.#pipeline.run(
       this.options.dataHub,
       message.request.query,
-      { executionProfile: "async-worker" }
+      { executionProfile: this.options.executionProfile ?? "async-worker" }
     );
     const createdAt = this.#clock();
     const candidate =

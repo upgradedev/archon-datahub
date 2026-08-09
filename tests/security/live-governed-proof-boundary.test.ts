@@ -66,6 +66,7 @@ test("privileged jobs fail closed on protection, reviewer evidence, and proof id
 
   assert.equal(workflow.match(/service_account: \$\{\{ vars\.GCP_PROOF_SERVICE_ACCOUNT \}\}/gu)?.length, 3);
   assert.equal(workflow.match(/name: Require a dedicated proof identity/gu)?.length, 3);
+  assert.match(proof, /executionProfile: "synchronous-preview"/u);
   assert.doesNotMatch(workflow, /service_account: \$\{\{ vars\.GCP_DEPLOY_SERVICE_ACCOUNT \}\}/u);
   for (const job of [execute, rollback]) {
     assert.match(job, /^      deployments: read$/mu);
