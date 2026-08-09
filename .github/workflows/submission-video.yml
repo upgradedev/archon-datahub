@@ -130,6 +130,20 @@ jobs:
           set -euo pipefail
           test "${ARCHON_VIDEO_ROOT}" = "${RUNNER_TEMP}/archon-submission-video"
           rm -rf -- "${ARCHON_VIDEO_ROOT}"
+      - name: Remove the runner-only Google credential before source verification
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${GOOGLE_GHA_CREDS_PATH:-}" in
+            "${GITHUB_WORKSPACE}"/gha-creds-*.json)
+              rm -f -- "${GOOGLE_GHA_CREDS_PATH}"
+              ;;
+            "") ;;
+            *)
+              echo "::error::Unexpected Google credential path"
+              exit 1
+              ;;
+          esac
       - name: Require a clean source checkout
         if: always()
         run: test -z "$(git status --porcelain)"

@@ -347,8 +347,10 @@ function SourceBadge({ source }: { source: LoadedAudit["source"] }) {
 
 function ModelProvenancePanel({
   provenance,
+  auditSource,
 }: {
   provenance: ModelRuntimeProvenance;
+  auditSource: LoadedAudit["source"];
 }) {
   const titleId = "model-runtime-provenance-title";
   if (provenance.source === "deterministic-fixture") {
@@ -371,9 +373,11 @@ function ModelProvenancePanel({
         </div>
         <div className="border-t border-white/[0.06] p-5">
           <p className="text-xs leading-5 text-slate-300">
-            This narrative is deterministic fixture output. No provider model API
-            call occurred, so there is no provider response ID, token usage, or
-            client latency to report.
+            {auditSource === "live"
+              ? "This narrative is deterministic output from the live DataHub audit. "
+              : "This narrative is deterministic fixture output. "}
+            No provider model API call occurred, so there is no provider response ID,
+            token usage, or client latency to report.
           </p>
           <p className="mt-2 text-[10px] leading-4 text-slate-400">
             Prompts, credentials, endpoints, raw responses, and provider errors are
@@ -1108,8 +1112,8 @@ function jsonText(value: JsonValue | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function shortDigest(value: string | undefined): string {
-  return value ? `${value.slice(0, 16)}…${value.slice(-8)}` : "Pending";
+function shortDigest(value: string | undefined, emptyLabel = "Pending"): string {
+  return value ? `${value.slice(0, 16)}…${value.slice(-8)}` : emptyLabel;
 }
 
 function JsonEvidence({ value }: { value: JsonValue }) {
@@ -1121,14 +1125,22 @@ function JsonEvidence({ value }: { value: JsonValue }) {
   );
 }
 
-function DigestPill({ label, value }: { label: string; value?: string }) {
+function DigestPill({
+  label,
+  value,
+  emptyLabel,
+}: {
+  label: string;
+  value?: string;
+  emptyLabel?: string;
+}) {
   return (
     <span
       className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden rounded-full border border-white/[0.07] bg-white/[0.025] px-2.5 py-1 font-mono text-[9px] text-slate-400"
       title={value}
     >
       <span className="shrink-0 font-sans uppercase tracking-[0.12em] text-slate-300">{label}</span>
-      <span className="min-w-0 truncate">{shortDigest(value)}</span>
+      <span className="min-w-0 truncate">{shortDigest(value, emptyLabel)}</span>
     </span>
   );
 }
@@ -1224,7 +1236,11 @@ function AgentStackPanel({
                 ? "MCP live · full stack CI-verified"
                 : "Four components implemented"}
           </span>
-          <DigestPill label="run" value={status?.runtimeEvidence.digest} />
+          <DigestPill
+            emptyLabel={publicAuditSource === "live" ? "Live MCP" : "Protected CI"}
+            label="run"
+            value={status?.runtimeEvidence.digest}
+          />
         </div>
       </div>
 
@@ -1263,7 +1279,11 @@ function AgentStackPanel({
               );
             })}
           </div>
-          <DigestPill label="context" value={jsonText(context?.digest)} />
+          <DigestPill
+            emptyLabel={publicAuditSource === "live" ? "Live MCP" : "Protected CI"}
+            label="context"
+            value={jsonText(context?.digest)}
+          />
         </article>
 
         <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
@@ -1281,7 +1301,10 @@ function AgentStackPanel({
             </p>
           ))}
           <p className="mt-3 text-[10px] text-slate-400">
-            Unknown preserved: <strong className="text-slate-200">{context?.unknownPreserved === true ? "yes" : "no"}</strong>
+            {status ? "Unknown preserved: " : "Unknown preservation: "}
+            <strong className="text-slate-200">
+              {status ? (context?.unknownPreserved === true ? "yes" : "no") : "CI verified"}
+            </strong>
           </p>
         </article>
 
@@ -1291,15 +1314,19 @@ function AgentStackPanel({
           <ol className="mt-3 space-y-2">
             {expectedWorkflow.map((skill, index) => (
               <li className="flex items-center gap-2 text-[10px] text-slate-300" key={skill}>
-                <span className={`flex size-5 items-center justify-center rounded-full ${result ? "bg-emerald-300/10 text-emerald-200" : "bg-white/[0.04] text-slate-500"}`}>
-                  {result ? <Icon className="size-3" name="check" /> : index + 1}
+                <span className={`flex size-5 items-center justify-center rounded-full ${result || !status ? "bg-emerald-300/10 text-emerald-200" : "bg-white/[0.04] text-slate-500"}`}>
+                  {result || !status ? <Icon className="size-3" name="check" /> : index + 1}
                 </span>
                 <span className="font-mono">{skill}</span>
               </li>
             ))}
           </ol>
           {!status && <span className="status-pill status-neutral mt-3">CI-verified workflow</span>}
-          <DigestPill label="skills" value={jsonText(result?.skills.digest)} />
+          <DigestPill
+            emptyLabel="Protected CI"
+            label="skills"
+            value={jsonText(result?.skills.digest)}
+          />
         </article>
 
         <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
@@ -1307,10 +1334,10 @@ function AgentStackPanel({
           <h3 className="mt-2 text-sm font-semibold text-white">SQL · result · chart trace</h3>
           <div className="mt-3 flex items-end gap-3">
             <span className="text-3xl font-semibold text-gradient">
-              {typeof quality?.score === "number" ? `${quality.score}/5` : "—"}
+              {typeof quality?.score === "number" ? `${quality.score}/5` : status ? "—" : "CI"}
             </span>
             <span className="pb-1 text-[10px] text-slate-400">
-              {jsonText(quality?.label) ?? "Context score pending"}
+              {jsonText(quality?.label) ?? (status ? "Context score pending" : "Verified")}
             </span>
           </div>
           <p className="mt-2 text-[10px] leading-4 text-slate-400">
@@ -1330,7 +1357,11 @@ function AgentStackPanel({
               );
             })}
           </div>
-          <DigestPill label="analytics" value={jsonText(analytics?.digest)} />
+          <DigestPill
+            emptyLabel="Protected CI"
+            label="analytics"
+            value={jsonText(analytics?.digest)}
+          />
         </article>
       </div>
 
@@ -2091,7 +2122,10 @@ export function App() {
             <PipelineTrace trace={report.trace} />
           </div>
 
-          <ModelProvenancePanel provenance={report.modelProvenance} />
+          <ModelProvenancePanel
+            auditSource={loadedAudit.source}
+            provenance={report.modelProvenance}
+          />
 
           <EvidencePack audit={audit} controlLoop={controlLoop} />
 

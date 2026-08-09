@@ -21,6 +21,8 @@ class SubmissionVideoContracts(unittest.TestCase):
             ".github/workflows/live-governed-proof.yml",
             "durationSeconds < 179",
             'rm -rf -- "${ARCHON_VIDEO_ROOT}"',
+            'case "${GOOGLE_GHA_CREDS_PATH:-}" in',
+            '"${GITHUB_WORKSPACE}"/gha-creds-*.json)',
             'test -z "$(git status --porcelain)"',
         ):
             self.assertIn(required, workflow)
