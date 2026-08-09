@@ -13,7 +13,7 @@ concurrency:
 
 env:
   ARCHON_ORIGIN: https://archon-datahub.web.app
-  ARCHON_SUBMISSION_RELEASE: f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1
+  ARCHON_SUBMISSION_RELEASE: 7cf2ab063312c2bf06fd2d65c798e802f7070a37
 
 jobs:
   probe:

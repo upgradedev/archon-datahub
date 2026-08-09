@@ -332,7 +332,7 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
-> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. The original submitted release `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1` remains frozen with its exact evidence chain; the active hosted release is reported by `/readyz` and verified by the hourly availability workflow. Firebase serves the immutable SPA, the read-only Cloud Run adapter reports `ready/live`, and retained CI evidence covers the private DataHub audit, browser journey, and OWASP ZAP DAST. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
+> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. The final judge application release is `7cf2ab063312c2bf06fd2d65c798e802f7070a37`; `/readyz` reports that exact SHA and the hourly availability workflow verifies it. The original `datahub-hackathon-2026-submission` tag remains frozen as historical provenance. Firebase serves the immutable SPA, the read-only Cloud Run adapter reports `ready/live`, and retained CI evidence covers the private DataHub audit, browser journey, and OWASP ZAP DAST. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
 
 [infra/aws](infra/aws) contains the deployment-grade reference design. The CDK
 that creates it is in `infra/aws/` and is built, tested and synthesised in CI, but no

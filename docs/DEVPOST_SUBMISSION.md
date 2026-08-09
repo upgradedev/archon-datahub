@@ -70,8 +70,10 @@ All four DataHub agent components have separate responsibilities:
 Security and quality evidence is pipeline-only: unit, integration, functional, authorization,
 prompt-injection, component and Playwright user-journey tests; measured combined coverage ≥85%;
 Gitleaks, CodeQL, dependency review, npm/Python SCA, OpenVEX, CycloneDX SBOM, container and IaC
-scans; and strict OWASP ZAP DAST against the final Firebase origin. Release, hosted proof,
-governed receipts and video are all bound to one exact Git SHA.
+scans; and strict OWASP ZAP DAST against the final Firebase origin. The final application
+release, hosted proof, governed receipts and refreshed 2:41 video package are bound to one exact
+Git SHA. The existing public 2:41 video remains the earlier valid submission capture until an
+owner-authorized replacement upload.
 
 ## Challenges we ran into
 
