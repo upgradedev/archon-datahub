@@ -272,7 +272,7 @@ const openStatusValid =
   status?.appliedToUpstream === false &&
   status?.pullRequestNumber === 183 &&
   status?.url === "https://github.com/acryldata/mcp-server-datahub/pull/183" &&
-  status?.headSha === "75e5cf25a1b3d4decb8717c8b962a1bc277ed603" &&
+  status?.headSha === "16d53a580001ca02fa0ba96c45f3f58ecfacdd71" &&
   localExecutionAbsent;
 const mergedAtPattern =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
