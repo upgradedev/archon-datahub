@@ -28,15 +28,19 @@ const hostedWorkflowPath = new URL(
 );
 const firebaseConfigPath = new URL("../../firebase.json", import.meta.url);
 
-test("live governed proof keeps public HTTP read-only and requires two human gates", async () => {
+test("live governed proof keeps public HTTP read-only and requires three human gates", async () => {
   const [workflow, server, tunnel] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(serverPath, "utf8"),
     readFile(tunnelPath, "utf8"),
   ]);
 
+  assert.match(workflow, /environment: datahub-demo-seed\s/u);
   assert.match(workflow, /environment: governed-canary\s/u);
   assert.match(workflow, /environment: governed-canary-recovery\s/u);
+  assert.match(workflow, /PII_TAG_URN: urn:li:tag:PII/u);
+  assert.match(workflow, /if before is None:/u);
+  assert.match(workflow, /PII tag read-after-write verification failed/u);
   assert.match(workflow, /APPROVE SYNTHETIC G6 WRITE/u);
   assert.match(workflow, /APPROVE SYNTHETIC G6 ROLLBACK/u);
   assert.match(workflow, /127\.0\.0\.1:18080/u);
@@ -64,8 +68,8 @@ test("privileged jobs fail closed on protection, reviewer evidence, and proof id
   const execute = workflow.slice(executeStart, rollbackStart);
   const rollback = workflow.slice(rollbackStart);
 
-  assert.equal(workflow.match(/service_account: \$\{\{ vars\.GCP_PROOF_SERVICE_ACCOUNT \}\}/gu)?.length, 3);
-  assert.equal(workflow.match(/name: Require a dedicated proof identity/gu)?.length, 3);
+  assert.equal(workflow.match(/service_account: \$\{\{ vars\.GCP_PROOF_SERVICE_ACCOUNT \}\}/gu)?.length, 4);
+  assert.equal(workflow.match(/name: Require a dedicated proof identity/gu)?.length, 4);
   assert.match(proof, /executionProfile: "synchronous-preview"/u);
   assert.doesNotMatch(workflow, /service_account: \$\{\{ vars\.GCP_DEPLOY_SERVICE_ACCOUNT \}\}/u);
   for (const job of [execute, rollback]) {
@@ -193,8 +197,8 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
 test("governed proof pins one exact uv runtime without cross-job caches", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 
-  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 3);
-  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 3);
+  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 4);
+  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 4);
 });
 
 test("governed proof uses the reviewed DataHub MCP lock in every phase", async () => {
@@ -205,7 +209,7 @@ test("governed proof uses the reviewed DataHub MCP lock in every phase", async (
   );
   assert.equal(
     [...workflow.matchAll(/scripts\/materialize-datahub-mcp-lock\.sh/gu)].length,
-    3
+    4
   );
   assert.equal([...workflow.matchAll(/DATAHUB_MCP_COMMAND=uv/gu)].length, 3);
   assert.equal([...workflow.matchAll(/--frozen --no-sync --no-dev mcp-server-datahub/gu)].length, 3);
