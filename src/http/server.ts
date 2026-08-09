@@ -98,6 +98,9 @@ function queryFrom(
   body: Record<string, unknown>,
   allowedDemoQuery: string | undefined
 ): string {
+  if (body.query === undefined && allowedDemoQuery !== undefined) {
+    return allowedDemoQuery;
+  }
   if (body.query === undefined || body.query === null || body.query === "") {
     throw new HttpInputError(400, "a narrow dataset query is required");
   }

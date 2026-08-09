@@ -8,7 +8,7 @@ import {
 } from "react";
 import {
   probeRuntimeReadiness,
-  requestAudit,
+  requestConfiguredDemoAudit,
   submitApprovalDecision,
   type RuntimeReadiness,
 } from "./api";
@@ -1495,7 +1495,7 @@ export function App() {
     setLiveRunning(true);
     setLiveError(undefined);
     try {
-      const envelope = await requestAudit(query);
+      const envelope = await requestConfiguredDemoAudit();
       setAudit({ envelope, source: "live" });
       const first = envelope.report.findings[0];
       if (first) setSelectedId(findingIdentity(first));

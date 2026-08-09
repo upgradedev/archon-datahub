@@ -72,7 +72,7 @@ vi.mock("./RuntimeControl", async () => {
 
 const apiMocks = vi.hoisted(() => ({
   probeRuntimeReadiness: vi.fn(),
-  requestAudit: vi.fn(),
+  requestConfiguredDemoAudit: vi.fn(),
 }));
 
 vi.mock("./api", async (importOriginal) => {
@@ -80,7 +80,7 @@ vi.mock("./api", async (importOriginal) => {
   return {
     ...actual,
     probeRuntimeReadiness: apiMocks.probeRuntimeReadiness,
-    requestAudit: apiMocks.requestAudit,
+    requestConfiguredDemoAudit: apiMocks.requestConfiguredDemoAudit,
   };
 });
 
@@ -95,7 +95,7 @@ beforeEach(() => {
   runtimeMocks.submitRuntimeApproval.mockReset();
   apiMocks.probeRuntimeReadiness.mockReset();
   apiMocks.probeRuntimeReadiness.mockResolvedValue(undefined);
-  apiMocks.requestAudit.mockReset();
+  apiMocks.requestConfiguredDemoAudit.mockReset();
 });
 
 afterEach(() => {
@@ -577,7 +577,7 @@ describe("public live audit", () => {
 
   it("runs a real read-only audit with no sign-in and relabels the source", async () => {
     bindLiveOrigin();
-    apiMocks.requestAudit.mockResolvedValue(previewAudit);
+    apiMocks.requestConfiguredDemoAudit.mockResolvedValue(previewAudit);
 
     render(<App />);
 
@@ -593,7 +593,7 @@ describe("public live audit", () => {
     fireEvent.click(run);
 
     await waitFor(() => {
-      expect(apiMocks.requestAudit).toHaveBeenCalledTimes(1);
+      expect(apiMocks.requestConfiguredDemoAudit).toHaveBeenCalledTimes(1);
     });
     await waitFor(() => {
       expect(screen.getAllByLabelText("Live DataHub").length).toBeGreaterThan(0);
@@ -602,7 +602,9 @@ describe("public live audit", () => {
 
   it("reports why a live audit failed and keeps the visible report labelled", async () => {
     bindLiveOrigin();
-    apiMocks.requestAudit.mockRejectedValue(new Error("DataHub GMS is unreachable"));
+    apiMocks.requestConfiguredDemoAudit.mockRejectedValue(
+      new Error("DataHub GMS is unreachable"),
+    );
 
     render(<App />);
 
@@ -616,7 +618,7 @@ describe("public live audit", () => {
 
   it("falls back to a plain message when the failure is not an Error", async () => {
     bindLiveOrigin();
-    apiMocks.requestAudit.mockRejectedValue("socket hang up");
+    apiMocks.requestConfiguredDemoAudit.mockRejectedValue("socket hang up");
 
     render(<App />);
 

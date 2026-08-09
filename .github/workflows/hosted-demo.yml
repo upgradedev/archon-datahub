@@ -236,6 +236,16 @@ jobs:
           echo "${ready}"
           test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
 
+      - name: Prove the browser CTA contract through the hosted origin
+        run: |
+          set -euo pipefail
+          audit="$(curl -fsS --max-time 180 \
+            -H 'content-type: application/json' \
+            -d '{}' "https://${HOSTING_SITE}.web.app/api/audits")"
+          test "$(printf '%s' "${audit}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
+          printf '%s' "${audit}" | jq -e '.report.findings | type == "array"' >/dev/null
+          printf '%s' "${audit}" | jq -e '.report.trace | length >= 1' >/dev/null
+
       - name: OWASP ZAP passive DAST against the deployed origin
         id: dast
         env:
@@ -245,6 +255,7 @@ jobs:
           report_dir="${RUNNER_TEMP}/owasp-zap"
           mkdir -p "${report_dir}"
           chmod 777 "${report_dir}"
+          zap_status=0
           docker run --rm \
             --volume "${report_dir}:/zap/wrk/:rw" \
             "${ZAP_IMAGE}" zap-baseline.py \
@@ -253,7 +264,9 @@ jobs:
             -J zap-report.json \
             -r zap-report.html \
             -w zap-report.md \
-            -I
+            -I || zap_status=$?
+          test "${zap_status}" -le 1
+          test -s "${report_dir}/zap-report.json"
           high_or_medium="$(jq '[.site[]?.alerts[]? | select((.riskcode | tonumber) >= 2)] | length' \
             "${report_dir}/zap-report.json")"
           test "${high_or_medium}" -eq 0

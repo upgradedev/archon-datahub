@@ -4,6 +4,7 @@ import {
   loadAudit,
   probeRuntimeReadiness,
   requestAudit,
+  requestConfiguredDemoAudit,
   startControlLoop,
   submitApprovalDecision,
 } from "./api";
@@ -118,6 +119,23 @@ describe("audit API", () => {
         method: "POST",
         credentials: "same-origin",
         body: JSON.stringify({ query: "domain:Commerce" }),
+      }),
+    );
+  });
+
+  it("asks the server to use its pinned public demo scope", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json(previewAudit));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestConfiguredDemoAudit()).resolves.toMatchObject({
+      report: { scanId: previewAudit.report.scanId },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/audits",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        body: JSON.stringify({}),
       }),
     );
   });
