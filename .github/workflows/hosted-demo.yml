@@ -137,6 +137,16 @@ jobs:
           RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
+          env_file="${RUNNER_TEMP}/cloud-run-env.json"
+          jq -n \
+            --arg releaseSha "${RELEASE_SHA}" \
+            --arg datahubGmsUrl "${DATAHUB_GMS_URL}" \
+            --arg demoQuery "${ARCHON_DEMO_QUERY}" \
+            '{
+              ARCHON_RELEASE_SHA: $releaseSha,
+              DATAHUB_GMS_URL: $datahubGmsUrl,
+              ARCHON_DEMO_QUERY: $demoQuery
+            }' >"${env_file}"
           secret_flags=()
           if [ -n "${DATAHUB_GMS_TOKEN_SECRET}" ]; then
             gcloud secrets describe "${DATAHUB_GMS_TOKEN_SECRET}" \
@@ -165,7 +175,7 @@ jobs:
             --network "${GCP_VPC_NETWORK}" \
             --subnet "${GCP_VPC_SUBNET}" \
             --vpc-egress private-ranges-only \
-            --set-env-vars "ARCHON_RELEASE_SHA=${RELEASE_SHA},DATAHUB_GMS_URL=${DATAHUB_GMS_URL},ARCHON_DEMO_QUERY=${ARCHON_DEMO_QUERY}" \
+            --env-vars-file "${env_file}" \
             "${secret_flags[@]}"
           url="$(gcloud run services describe "${SERVICE_NAME}" \
             --project "${GCP_PROJECT}" --region "${GCP_REGION}" --format 'value(status.url)')"
@@ -227,6 +237,7 @@ jobs:
           test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
 
       - name: OWASP ZAP passive DAST against the deployed origin
+        id: dast
         env:
           ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
         run: |
@@ -248,7 +259,7 @@ jobs:
           test "${high_or_medium}" -eq 0
 
       - name: Upload OWASP ZAP DAST evidence
-        if: always()
+        if: always() && steps.dast.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hosted-demo-dast-${{ github.sha }}
