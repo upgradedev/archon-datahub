@@ -19,13 +19,151 @@ env:
   GCP_ZONE: europe-west1-b
   DATAHUB_VM: datahub-core
   DATAHUB_GMS_URL: http://127.0.0.1:18080
+  PII_TAG_URN: urn:li:tag:PII
   ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
   NODE_VERSION: 22.23.1
 
 jobs:
+  bootstrap:
+    name: Solo-owner-approved synthetic tag prerequisite
+    if: github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: datahub-demo-seed
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Require exact dispatch confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: test "${CONFIRMATION}" = "RUN SYNTHETIC GOVERNED PROOF"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require a dedicated proof identity
+        env:
+          PROOF_IDENTITY: ${{ vars.GCP_PROOF_SERVICE_ACCOUNT }}
+          DEPLOY_IDENTITY: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          RUNTIME_IDENTITY: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          test -n "${PROOF_IDENTITY}"
+          test -n "${DEPLOY_IDENTITY}"
+          test -n "${RUNTIME_IDENTITY}"
+          test "${PROOF_IDENTITY}" != "${DEPLOY_IDENTITY}"
+          test "${PROOF_IDENTITY}" != "${RUNTIME_IDENTITY}"
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PROOF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: upgradegr-challenges
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+      - name: Materialize the exact locked DataHub SDK
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-core-prerequisite/runtime
+        run: bash scripts/materialize-datahub-mcp-lock.sh "${RUNTIME}"
+      - name: Open a bounded IAP tunnel
+        run: bash scripts/open-datahub-iap-tunnel.sh
+      - name: Create only the missing synthetic PII tag and verify it
+        env:
+          RUNTIME: ${{ runner.temp }}/datahub-core-prerequisite/runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/datahub-core-prerequisite-receipt.json"
+          "${RUNTIME}/.venv/bin/python" - "${receipt}" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          from datahub.emitter.mcp import MetadataChangeProposalWrapper
+          from datahub.emitter.rest_emitter import DatahubRestEmitter
+          from datahub.metadata.schema_classes import TagPropertiesClass
+
+          urn = os.environ["PII_TAG_URN"]
+          gms = os.environ["DATAHUB_GMS_URL"]
+          if gms != "http://127.0.0.1:18080" or urn != "urn:li:tag:PII":
+              raise SystemExit("prerequisite allowlist changed")
+          url = (
+              f"{gms}/openapi/v3/entity/tag/"
+              f"{urllib.parse.quote(urn, safe='')}/tagProperties"
+              "?systemMetadata=true&version=0"
+          )
+
+          def read_value():
+              request = urllib.request.Request(url, headers={"Accept": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      raw = response.read(1_048_577)
+                      if len(raw) > 1_048_576:
+                          raise SystemExit("DataHub response exceeded the safety bound")
+                      envelope = json.loads(raw)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise
+              value = envelope.get("value") if isinstance(envelope, dict) else None
+              return value if isinstance(value, dict) else None
+
+          before = read_value()
+          outcome = "already-present"
+          if before is None:
+              proposal = MetadataChangeProposalWrapper(
+                  entityUrn=urn,
+                  aspect=TagPropertiesClass(
+                      name="Personally Identifiable Information",
+                      description=(
+                          "Synthetic classification prerequisite for Archon's governed "
+                          "write-and-rollback proof."
+                      ),
+                      colorHex="#B42318",
+                  ),
+              )
+              if not proposal.validate() or not proposal.make_mcp().validate():
+                  raise SystemExit("PII tag proposal failed local DataHub validation")
+              DatahubRestEmitter(gms_server=gms, timeout_sec=15).emit_mcp(proposal)
+              outcome = "created"
+          after = read_value()
+          if after is None or not isinstance(after.get("name"), str) or not after["name"]:
+              raise SystemExit("PII tag read-after-write verification failed")
+          receipt = {
+              "schemaVersion": "archon.datahub-core-prerequisite-receipt/v1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "releaseSha": os.environ["GITHUB_SHA"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "targetUrn": urn,
+              "outcome": outcome,
+              "verified": True,
+          }
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+          )
+          PY
+          test -s "${receipt}"
+          echo "RECEIPT=${receipt}" >>"${GITHUB_ENV}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: datahub-core-prerequisite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RECEIPT }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Close IAP tunnel
+        if: always()
+        run: test -z "${IAP_PID:-}" || kill "${IAP_PID}" 2>/dev/null || true
+
   prepare:
     name: Prepare exact live audit evidence
-    if: github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
+    needs: bootstrap
+    if: ${{ needs.bootstrap.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
