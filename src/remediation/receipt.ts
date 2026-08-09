@@ -328,6 +328,20 @@ function rollbackPayload(
   return payload;
 }
 
+export function verifyRollbackProposal(proposal: RollbackProposalV1): boolean {
+  try {
+    return (
+      proposal.schemaVersion === "archon.rollback-proposal/v1" &&
+      proposal.requiresFreshApproval === true &&
+      verifyDigest(rollbackPayload(proposal), proposal.digest) &&
+      proposal.rollbackId ===
+        `rollback-${proposal.digest.slice("sha256:".length, "sha256:".length + 24)}`
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function createRollbackProposal(
   receipt: ExecutionReceiptV1,
   current: TagProjection
@@ -361,11 +375,7 @@ export function createRollbackProposal(
     rollbackId: `rollback-${proposalDigest.slice("sha256:".length, "sha256:".length + 24)}`,
     digest: proposalDigest,
   };
-  if (
-    !verifyDigest(rollbackPayload(proposal), proposal.digest) ||
-    proposal.rollbackId !==
-      `rollback-${proposal.digest.slice("sha256:".length, "sha256:".length + 24)}`
-  ) {
+  if (!verifyRollbackProposal(proposal)) {
     throw new Error("Failed to bind rollback proposal.");
   }
   return proposal;

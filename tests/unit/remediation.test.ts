@@ -24,6 +24,7 @@ import {
   createExecutionReceipt,
   createRollbackProposal,
   verifyExecutionReceipt,
+  verifyRollbackProposal,
 } from "../../src/remediation/receipt.js";
 
 const ENTITY = "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)";
@@ -392,6 +393,18 @@ test("receipt tampering is detected and rollback is a fresh conditional proposal
   assert.equal(rollback.requiresFreshApproval, true);
   assert.equal(rollback.inverseAction.tool, "remove_tags");
   assert.equal(rollback.originalReceiptDigest, receipt.digest);
+  assert.equal(verifyRollbackProposal(rollback), true);
+  assert.equal(
+    verifyRollbackProposal({ ...rollback, rollbackId: "rollback-forged" }),
+    false
+  );
+  assert.equal(
+    verifyRollbackProposal({
+      ...rollback,
+      restoreStateDigest: `sha256:${"f".repeat(64)}`,
+    }),
+    false
+  );
 
   const changedAgain = createTagProjection({
     entityUrn: ENTITY,

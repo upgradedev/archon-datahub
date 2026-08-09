@@ -3,9 +3,29 @@ name: Live governed G6 proof
 on:
   workflow_dispatch:
     inputs:
-      confirmation:
-        description: Type RUN SYNTHETIC GOVERNED PROOF
+      mode:
+        description: Run a fresh proof or recover a prior verified write
         required: true
+        default: proof
+        type: choice
+        options:
+          - proof
+          - recover
+      confirmation:
+        description: Type the exact confirmation required by the selected mode
+        required: true
+        type: string
+      source_run_id:
+        description: Failed proof run containing the verified write (recovery only)
+        required: false
+        type: string
+      source_run_attempt:
+        description: Exact source run attempt (recovery only)
+        required: false
+        type: string
+      plan_digest:
+        description: Exact sha256 plan digest from the source evidence (recovery only)
+        required: false
         type: string
 
 permissions: {}
@@ -26,7 +46,7 @@ env:
 jobs:
   bootstrap:
     name: Solo-owner-approved synthetic tag prerequisite
-    if: github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
+    if: inputs.mode == 'proof' && github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: datahub-demo-seed
@@ -163,7 +183,7 @@ jobs:
   prepare:
     name: Prepare exact live audit evidence
     needs: bootstrap
-    if: ${{ needs.bootstrap.result == 'success' }}
+    if: ${{ inputs.mode == 'proof' && needs.bootstrap.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -323,7 +343,7 @@ jobs:
   rollback:
     name: Human-approved verified rollback
     needs: [prepare, execute]
-    if: ${{ always() && needs.prepare.result == 'success' }}
+    if: ${{ inputs.mode == 'proof' && always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: governed-canary-recovery
@@ -408,6 +428,141 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: live-proof-restored-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/live-proof
+          if-no-files-found: error
+          retention-days: 90
+      - name: Close IAP tunnel
+        if: always()
+        run: test -z "${IAP_PID:-}" || kill "${IAP_PID}" 2>/dev/null || true
+
+  recover:
+    name: Human-approved recovery of one verified write
+    if: inputs.mode == 'recover' && github.repository == 'upgradedev/archon-datahub' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: governed-canary-recovery
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bind recovery to one failed run and exact plan
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          EXPECTED_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${CONFIRMATION}" = "RECOVER SYNTHETIC GOVERNED PROOF"
+          [[ "${SOURCE_RUN_ID}" =~ ^[0-9]+$ ]]
+          [[ "${SOURCE_RUN_ATTEMPT}" =~ ^[0-9]+$ ]]
+          [[ "${EXPECTED_PLAN_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]
+          source_run="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg run_id "${SOURCE_RUN_ID}" \
+            --arg run_attempt "${SOURCE_RUN_ATTEMPT}" '
+              .id == ($run_id | tonumber) and
+              .run_attempt == ($run_attempt | tonumber) and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "failure" and
+              .head_branch == "master" and
+              .path == ".github/workflows/live-governed-proof.yml" and
+              .head_repository.full_name == $repository and
+              (.head_sha | test("^[a-f0-9]{40}$"))
+            ' <<<"${source_run}" >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: live-proof-prepared-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}
+          path: ${{ runner.temp }}/live-proof
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: live-proof-executed-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}
+          path: ${{ runner.temp }}/live-proof
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Verify source evidence and bind the exact human approval
+        env:
+          ARCHON_PROOF_DIR: ${{ runner.temp }}/live-proof
+          EXPECTED_PLAN_DIGEST: ${{ inputs.plan_digest }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/verify-github-environment-protection.sh governed-canary-recovery
+          actual_plan_digest="$(jq -er '.remediation.plan.digest | select(test("^sha256:[a-f0-9]{64}$"))' "${ARCHON_PROOF_DIR}/audit-evidence.json")"
+          test "${actual_plan_digest}" = "${EXPECTED_PLAN_DIGEST}"
+          test "$(jq -er '.schemaVersion' "${ARCHON_PROOF_DIR}/execution-evidence.json")" = "archon.execution-evidence/v1"
+          test "$(jq -er '.schemaVersion' "${ARCHON_PROOF_DIR}/rollback-proposal.json")" = "archon.rollback-proposal/v1"
+          bash scripts/capture-github-environment-approval.sh \
+            governed-canary-recovery rollback "${actual_plan_digest}" \
+            "${ARCHON_PROOF_DIR}/approval-rollback.json"
+      - name: Require a dedicated proof identity
+        env:
+          PROOF_IDENTITY: ${{ vars.GCP_PROOF_SERVICE_ACCOUNT }}
+          DEPLOY_IDENTITY: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          RUNTIME_IDENTITY: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+        run: |
+          test -n "${PROOF_IDENTITY}"
+          test -n "${DEPLOY_IDENTITY}"
+          test -n "${RUNTIME_IDENTITY}"
+          test "${PROOF_IDENTITY}" != "${DEPLOY_IDENTITY}"
+          test "${PROOF_IDENTITY}" != "${RUNTIME_IDENTITY}"
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PROOF_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: upgradegr-challenges
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+          enable-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Materialize the exact locked DataHub MCP runtime
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/governed-proof/datahub-mcp-v0.6.0"
+          bash scripts/materialize-datahub-mcp-lock.sh "${project}"
+          python_version="$(jq -er '.runtime.pythonVersion' .github/locks/datahub-mcp-v0.6.0.json)"
+          server="${project}/.venv/bin/mcp-server-datahub"
+          test -x "${server}"
+          test "$("${server}" --version)" = "mcp-server-datahub, version 0.6.0"
+          {
+            echo "DATAHUB_MCP_COMMAND=uv"
+            echo "DATAHUB_MCP_ARGS=run --project ${project} --python ${python_version} --frozen --no-sync --no-dev mcp-server-datahub"
+          } >>"${GITHUB_ENV}"
+      - name: Open a bounded IAP tunnel
+        run: bash scripts/open-datahub-iap-tunnel.sh
+      - name: Restore and verify the exact recorded baseline
+        env:
+          ARCHON_APPROVAL_ENVIRONMENT: governed-canary-recovery
+          ARCHON_PROOF_CONFIRMATION: APPROVE SYNTHETIC G6 ROLLBACK
+          ARCHON_PROOF_DIR: ${{ runner.temp }}/live-proof
+        run: node --import tsx scripts/live-governed-proof.ts rollback
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-proof-recovered-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/live-proof
           if-no-files-found: error
           retention-days: 90
