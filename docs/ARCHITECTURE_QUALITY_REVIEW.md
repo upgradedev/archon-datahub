@@ -1,7 +1,8 @@
 # Clean architecture quality review
 
-Review date: 2026-08-06. Target: active DataHub product path at `8740431`, including the
-uncommitted SOTA candidate. Verification is static until required CI runs.
+Final review date: 2026-08-09. Target: the exact submitted application release
+`f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1`. Verification is observed in required CI,
+the hosted private-DataHub/browser/DAST run, and the protected write/rollback run.
 
 ## Verdict
 
@@ -72,7 +73,9 @@ Rejected:
 
 ## Quality gate
 
-The architecture can support a **9/10 hackathon claim** after required CI, hosted live audit,
-and live write/rollback evidence pass. It cannot support a **9/10 customer-production claim**
-until AQ-1/AQ-2/AQ-4 plus the P1 items in `WELL_ARCHITECTED_REVIEW.md` close. This distinction
-prevents submission polish from being mistaken for production maturity.
+Required CI, the hosted live audit, and the protected write/read-back/rollback proof all
+passed for the submitted application release, so the architecture supports the documented
+**9/10 hackathon-readiness assessment**. It does not support a blanket **9/10 customer-
+production claim** until AQ-1/AQ-2/AQ-4 plus the deployment-specific P1 items in
+`WELL_ARCHITECTED_REVIEW.md` close. This distinction prevents submission polish from being
+mistaken for production maturity.
