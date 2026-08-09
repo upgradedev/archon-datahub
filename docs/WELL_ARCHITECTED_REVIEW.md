@@ -1,190 +1,156 @@
-# Active workload Well-Architected review
+# Active workload Well-Architected and Agentic AI Lens review
 
-Review date: 2026-08-06. Scope: the active Firebase Hosting → Cloud Run read API →
-private DataHub Core path, the customer Compose path, and the separately approved G6
-write/rollback proof. The non-deployed AWS CDK experiment is out of scope.
+Review date: 2026-08-09. Scope: Firebase Hosting → a bounded Cloud Run read API →
+private DataHub Core 1.6, the customer Compose quickstart, and the separately protected G6
+write/rollback proof. The repository's undeployed AWS reference architecture is not counted as
+runtime evidence.
 
-This is an engineering review against the six AWS Well-Architected pillars, applied
-cloud-neutrally to the active GCP workload. It is not an AWS certification or a claim that
-an unexecuted control is effective. Repository evidence is distinguished from observed
-deployment evidence throughout.
+This is an engineering review against all six AWS Well-Architected pillars, applied
+cloud-neutrally to the active GCP workload, plus the relevant Agentic AI Lens concerns. It is
+not an AWS certification. `implemented` means repository evidence exists; `observed` means a
+hosted or protected pipeline exercised the control.
 
 ## Executive decision
 
-The product boundary is clean and intentionally small: one exact dataset audit, one
-read-only public API, and one separately authorized G6 repair. The dependency direction,
-failure behavior, and human-authority boundary are strong. The workload is not yet
-production-ready because its active deployment and recovery controls have not been
-observed end to end.
+The active slice is intentionally small: audit one exact dataset, reconcile retained DataHub
+evidence, compute deterministic findings and prepare one reversible G6 action. Public access is
+read-only. Mutation exists only in protected CI with a distinct identity and two content-bound
+human approvals.
 
-| Pillar | Current state | Strongest evidence | Material open risk |
+| Pillar | State | Strongest evidence | Residual risk |
 | --- | --- | --- | --- |
-| Operational excellence | Partial | SHA-bound deploy, runbook, truthful readiness, request IDs | no active GCP monitor, alert, or exercised rollback runbook |
-| Security | Strong design; owner-gated runtime | private GMS, exact query, no public write route, WIF, non-root image, dedicated runtime identity | public API has no edge rate limiter; runtime IAM and hosted secret binding remain unexecuted |
-| Reliability | Partial | provider-aware `/readyz`, bounded deadlines, read-after-write and rollback verification | single-zone DataHub VM, no proven reseed/restore, no progressive Cloud Run promotion |
-| Performance efficiency | Partial | bounded one-entity preview, operation deadlines, readiness cache, autoscaling ceiling | only offline load evidence; no live p95/p99 or saturation measurement |
-| Cost optimization | Good for a demo | Firebase, bounded Cloud Run, explicit VM cost and teardown | one warm Cloud Run instance plus always-on GCE; no budget alert or measured utilization |
-| Sustainability | Partial | one region, direct private path, bounded scale, no live multi-cloud chain | always-on VM and warm CPU chosen for judge availability without utilization evidence |
-
-No pillar is marked complete until the required CI and live observations exist.
+| Operational excellence | Strong demo posture | SHA-bound CI/deploy, readiness, runbooks, request IDs, retained artifacts | no customer-specific on-call/SLO |
+| Security | Strong | private GMS, no public mutation route, WIF/OIDC, distinct identities, SAST/SCA/SBOM/DAST | anonymous edge has bounded scope but no dedicated rate limiter |
+| Reliability | Strong for judging | fail-closed readiness, deadlines, exact read-back, automatic recovery path | one single-zone demo VM |
+| Performance efficiency | Good | one-entity scope, bounded history/concurrency, Cloud Run max-one, offline SLO gate | no broad catalog-scale benchmark claim |
+| Cost optimization | Strong | static Firebase, scale-to-zero Cloud Run, no EKS, temporary low-cost GCE host | VM cost persists during judging |
+| Sustainability | Good | one region, private regional path, bounded compute, teardown plan | availability requires the demo VM to remain on |
 
 ## 1. Operational excellence
 
-Implemented in code:
+Implemented and observed:
 
-- `.github/workflows/hosted-demo.yml` builds one release-SHA image, deploys it, proves
-  `/readyz`, executes an audit, deploys the SPA, and proves the hosted origin.
-- `docs/HOSTED_DEMO_DEPLOY.md` is the single active deployment runbook.
-- `src/http/server.ts` emits bounded request IDs and never serializes provider errors.
-- `compose.yaml` and `src/onboarding/doctor.ts` give customers a two-command, fail-closed
-  start and smoke path.
+- Required GitHub checks build and test one immutable candidate; no local build is accepted as
+  release evidence.
+- `hosted-demo.yml` deploys the exact image and SPA candidates, proves `/readyz`, executes the
+  live audit, runs production browser journeys and seals DAST artifacts.
+- `live-governed-proof.yml` separates read/plan, write and rollback into three bounded jobs and
+  retains content-addressed receipts.
+- `docs/HOSTED_DEMO_DEPLOY.md`, `docs/QUICKSTART.md` and `docs/JUDGE_TESTING.md` are the
+  operator, customer and judge paths.
+- Request IDs, release SHA and source/model provenance make failures attributable.
 
-Open controls:
+Residual deployment-owner controls:
 
-- **WA-OE-1 (P0):** run the required CI on the exact candidate; local tests are prohibited
-  and Docker is unavailable in the authoring environment.
-- **WA-OE-2 (P0):** observe one hosted deployment and retain the SHA-bound readiness/audit
-  output. The Cloud Run service does not yet exist.
-- **WA-OE-3 (P1):** add a GCP-specific availability probe and alert only after the live
-  backend exists. The historical `availability.yml` observes the frozen AWS experiment and
-  is not evidence for this workload.
-- **WA-OE-4 (P1):** document and exercise promotion/rollback for a bad Cloud Run revision.
-  The current workflow tests after deployment but does not keep the prior revision serving
-  until candidate verification completes.
+- **WA-OE-1 (P1):** define a customer-specific SLO, paging owner and escalation path before
+  production use. The judging monitor is not a substitute for customer operations.
+- **WA-OE-2 (P1):** rehearse customer-specific rollback and DataHub recovery; the public demo
+  uses synthetic data and a replaceable host.
 
 ## 2. Security
 
-Implemented in code:
+Implemented and observed:
 
-- DataHub has no public ingress. Cloud Run uses Direct VPC egress to a private IP.
-- The public process has no mutation route and receives no write credential.
-- `ARCHON_DEMO_QUERY` is an exact allowlist; wildcards, padded equivalents, alternate
-  queries, and a zero/multiple match readiness result fail closed.
-- GitHub uses OIDC/WIF rather than a service-account key. All actions are full-SHA pinned.
-- The workflows require distinct deploy, runtime, and governed-proof identities. Every proof
-  job fails before OIDC if `GCP_PROOF_SERVICE_ACCOUNT` is empty or aliases deploy/runtime.
-- The write and rollback jobs revalidate the exact reviewer/master-only environment policy,
-  then bind exactly one content-bound GitHub approval event and configured reviewer before
-  requesting a cloud credential. Environment names alone are not treated as human identity.
-- The runtime image is digest-pinned, runs as UID 65532, and carries the sealed DataHub MCP
-  environment. The Compose path drops all capabilities, is read-only, uses
-  `no-new-privileges`, and binds only to loopback.
-- Gitleaks, CodeQL, SCA, boundary tests, public-output projection, size limits, security
-  headers, and opaque provider failures reduce common application and supply-chain risks.
+- DataHub GMS has no public ingress. Cloud Run reaches it through regional private networking.
+- The anonymous process receives no write credential and exposes only health, readiness and one
+  exact allowlisted audit. Zero/multiple matches, padded or alternate queries and provider
+  failures fail closed.
+- GitHub obtains short-lived GCP credentials through workload identity federation. Deploy,
+  runtime, proof and video identities are distinct and constrained to exact repository/ref/
+  workflow conditions.
+- The write path exposes only typed `add_tags`/`remove_tags` operations for one entity/column/
+  tag. The transport is one-shot and each action is bound to the approved plan digest.
+- Write and rollback jobs revalidate the environment configuration, exact reviewer identity,
+  exact approval comment, master SHA and run attempt before requesting cloud credentials.
+- Gitleaks, CodeQL, dependency review, npm/Python SCA, OpenVEX, CycloneDX SBOM, pinned actions,
+  non-root container checks, Trivy, CloudFormation Guard, SARIF and OWASP ZAP run in CI.
+- The final hosted origin uses strict CSP without `unsafe-inline`, anti-framing, MIME,
+  referrer, permissions and cross-origin isolation headers; DAST rejects every medium/high alert.
 
-Open controls:
+Residual controls:
 
-- **WA-SEC-1 (P0, owner):** create the dedicated runtime and proof service accounts. Bind the
-  runtime only to the optional read-token secret; bind proof only to the configured VM's
-  describe/IAP-tunnel path; set both repository variables and prove they differ from deploy.
-  The WIF provider must accept only `master` tokens from `hosted-demo.yml` or
-  `live-governed-proof.yml`, never repository-wide PR workflow tokens.
-- **WA-SEC-2 (P0, owner):** retain the explicit synthetic-demo exception only while the GMS
-  contains no customer data and remains private. Customer deployments require HTTPS,
-  DataHub authentication, and a least-privilege read token.
-- **WA-SEC-3 (P1):** add edge abuse controls or an authenticated ingress for customer use.
-  Query scoping, four-request concurrency, three-instance maximum, and deadlines bound
-  impact but are not a substitute for rate limiting.
-- **WA-SEC-4 (P1):** produce SBOM, vulnerability scan, and provenance for the MCP-capable
-  hosted image. Its Docker build is tested, but `provenance: false` is not a production
-  supply-chain posture.
-- **WA-SEC-5 (P1):** narrow `.c8rc.json`; the live adapters remain excluded from coverage.
+- **WA-SEC-1 (P1):** add authenticated ingress and/or dedicated rate limiting for a customer
+  deployment. The demo is bounded to one query, four in-process requests and one Cloud Run
+  instance, but this is not a general abuse-control layer.
+- **WA-SEC-2 (P1):** customer deployments must use HTTPS, a least-privilege DataHub token,
+  secrets management and deployment-specific retention/redaction policy. The anonymous demo is
+  synthetic and uses a private loopback exception only inside the protected proof tunnel.
 
 ## 3. Reliability
 
-Implemented in code:
+Implemented and observed:
 
-- `/healthz` means process liveness; `/readyz` means the configured query reached exactly
-  one live DataHub dataset. Provider failure returns 503 without provider details.
-- Audit search, entity hydration, schema, lineage, aspect history, concurrency, and total
-  execution have explicit bounds and deadlines.
-- Cloud Run has a three-instance ceiling and four-request concurrency. The workflow proves
-  both the service URL and Firebase rewrite.
-- G6 mutation requires exact pre-state, read-after-write verification, a content-addressed
-  receipt, a second approval for rollback, and exact restoration verification.
+- `/healthz` proves process liveness; `/readyz` proves the allowlisted query reaches exactly one
+  live DataHub dataset. Opaque 503 responses do not leak provider details.
+- Search, hydration, schema, lineage, retained history, concurrency and total execution have
+  explicit limits and deadlines. Unknown evidence never becomes a pass.
+- Cloud Run scales to zero, caps at one instance, and the hosted workflow proves both direct
+  service and Firebase-rewrite paths.
+- The governed action checks the exact pre-state, verifies write read-back, creates a rollback
+  proposal, requires a separate recovery approval and verifies byte-equivalent logical state.
+- If the forward job cannot publish its receipt, recovery can restore from prepared evidence
+  after confirming the current state is exactly either the pre-state or approved post-state.
 
-Open controls:
+Residual controls:
 
-- **WA-REL-1 (P0):** execute the write and rollback workflow once through both protected
-  environments; code and synthetic tests are not live recovery evidence.
-- **WA-REL-2 (P1):** create a reproducible seed/restore procedure for the flagship DataHub
-  dataset. The current single GCE VM is a single-zone, manually curated demo dependency.
-- **WA-REL-3 (P1):** use no-traffic candidate deployment and explicit promotion, or document
-  an equivalent automated Cloud Run rollback.
-- **WA-REL-4 (P1):** define a modest demo SLO and alert on readiness plus audit completion.
+- **WA-REL-1 (P1):** the single-zone synthetic DataHub host is a judging dependency. A customer
+  deployment must use its own DataHub availability, backups and restore objectives.
+- **WA-REL-2 (P1):** progressive Cloud Run traffic promotion is unnecessary at max-one demo
+  scale but recommended for a customer production rollout.
 
 ## 4. Performance efficiency
 
-Implemented in code:
+- The public profile resolves one entity, hydrates only required aspects and two retained
+  versions, and bounds lineage hops, result size and concurrency.
+- Readiness requests are coalesced and cached for ten seconds; provider calls have deadlines.
+- Direct VPC egress avoids a public proxy and all active components are colocated in
+  `europe-west1`.
+- The offline load gate requires zero errors and a p95 threshold. No unsupported enterprise-
+  scale or multi-million-entity throughput claim is made.
 
-- The public profile permits one entity and two retained versions, uses bounded parallelism,
-  and rejects incomplete or over-broad results instead of degrading silently.
-- The readiness probe coalesces concurrent checks and caches successful or failed results
-  for ten seconds.
-- Direct VPC egress avoids an internet proxy between Cloud Run and DataHub.
-- `load/audit.js` has a zero-error and p95 threshold, but it measures deterministic
-  in-process execution rather than live DataHub.
-
-Open controls:
-
-- **WA-PERF-1 (P1):** capture live p50/p95/p99 for readiness and audit at concurrency 1 and
-  4; record DataHub saturation and timeout rate.
-- **WA-PERF-2 (P1):** tune CPU, memory, minimum instances, and concurrency from those
-  measurements rather than from assumptions.
+**WA-PERF-1 (P1):** customers should establish live p50/p95/p99 and tune CPU, concurrency and
+catalog query policy against their own graph. This is intentionally not a submission blocker.
 
 ## 5. Cost optimization
 
-Implemented in code:
+- The active design deliberately avoids EKS/Kubernetes. Firebase serves immutable static assets;
+  Cloud Run uses CPU throttling, minimum zero and maximum one instance.
+- The private DataHub Core VM is the only material judging-window cost, previously measured at
+  roughly USD 3.40/day. It is synthetic, replaceable and scheduled for teardown after judging.
+- The exact query and bounded execution prevent unbounded per-request graph work.
+- CI artifacts have explicit retention; no release artifact is built or retained on the owner's
+  low-disk workstation.
 
-- The active route avoids the unused AWS estate and Kubernetes. Firebase is static, Cloud
-  Run is capped, and the DataHub VM cost is explicitly documented at roughly $3.40/day.
-- The public query and execution ceilings bound per-request work and denial-of-wallet
-  exposure. A teardown command is documented.
-
-Open controls:
-
-- **WA-COST-1 (P1, owner):** set a project budget alert and Artifact Registry retention.
-- **WA-COST-3 (P1):** stop the GCE instance immediately after the required judging window.
-
-Closed controls:
-
-- **WA-COST-2:** the hosted API scales to zero, throttles CPU while idle, and is capped at
-  one instance. The private DataHub VM remains the only meaningful judging-window cost.
-- **WA-SEC-5:** every hosted release runs an image-digest-pinned OWASP ZAP passive DAST
-  scan against the final Firebase origin and fails on medium/high alerts. JSON, HTML, and
-  Markdown reports are retained as CI evidence.
+**WA-COST-1 (P1, owner):** retain a modest cloud budget alert and repository/package retention,
+then stop the VM immediately after the required judging window.
 
 ## 6. Sustainability
 
-Implemented in code:
+- Static delivery, scale-to-zero compute, regional private traffic and maximum-one runtime bound
+  idle and peak consumption.
+- Immutable caching avoids repeated SPA transfer and build work.
+- The demo VM trades temporary idle energy for judge availability; automated teardown is the
+  compensating control. Customer sizing should follow measured utilization, not copy the demo.
 
-- Application, registry, Cloud Run, and DataHub are colocated in `europe-west1`; private
-  traffic stays regional.
-- The active workload avoids the non-deployed multi-cloud reference chain and bounds maximum
-  compute. Immutable static assets receive long cache lifetimes.
+## Agentic AI Lens alignment
 
-Open controls:
-
-- **WA-SUS-2 (P1):** stop the always-on demo VM after judging and publish a customer sizing
-  baseline instead of copying the demo shape.
-
-## AWS Agentic AI Lens alignment
-
-The relevant agentic-AI concerns are satisfied by reducing autonomy, not by adding another
-agent framework.
+Archon improves agent safety by limiting autonomy rather than adding an unconstrained planner.
 
 | Concern | Implemented control | Residual gap |
 | --- | --- | --- |
-| Task and autonomy boundary | audit one query; deterministic findings; public path is read-only | none for the supported path |
-| Tool authority | one G6 action catalog; exact target; separate writer; no browser-selected tool arguments | live protected-environment proof pending |
-| Human oversight | authenticated DataSteward approval; expiry; replay defense; separate rollback approval | operational reviewer availability is owner-managed |
-| Model risk | only narration can call a model; findings and action eligibility are deterministic; strict model provenance | optional live-provider prompts need customer data-governance review |
-| Memory and data | no conversational memory; bounded DataHub metadata; public projection strips sensitive detail | no automated redaction before optional external narration |
-| Observability and evidence | trace, request ID, release SHA, model provenance, write and rollback receipts | no active GCP alert/SLO yet |
-| Failure containment | exact scope, deadlines, fail-closed parsing, stale-state rejection, verified rollback | single demo DataHub host and deploy promotion gap |
+| business objective | one narrow job: find DataHub integrity risk and prepare one governed repair | no general autonomous administration claim |
+| context quality | DataHub is authoritative context; ACK preserves provenance and unknowns; five pinned Skills shape analysis | customer source quality remains the customer's responsibility |
+| tool authority | public read-only; one typed G6 action; exact target and plan digest; one-shot privileged transport | customer role mapping is deployment-specific |
+| human oversight | authenticated DataSteward write approval and separate rollback approval | reviewer availability is an operator concern |
+| model risk | findings, severity, action and rollback are deterministic; optional model can narrate only | external narration needs customer DPA/redaction review |
+| memory/data | no conversational memory; bounded metadata; public projection removes private operational detail | no generic PII detector before optional external narration |
+| observability | request ID, release SHA, source/model provenance, audit/write/rollback receipts | customer alerting remains deployment-specific |
+| failure containment | fail-closed parsing, deadlines, exact scope, stale-state rejection and verified recovery | single demo DataHub host |
 
-## Release gates
+## Release decision
 
-Before claiming **hackathon 9/10 readiness**, close WA-OE-1, WA-OE-2, WA-SEC-1, and
-WA-REL-1. Before claiming **customer production readiness**, also close every P1 item or
-publish a deployment-specific risk acceptance signed by the workload owner.
+Hackathon release readiness requires one exact SHA to pass CI, hosted live audit, strict DAST,
+browser journeys, governed write/read-back/rollback and submission-video generation. Customer
+production readiness is a separate decision and additionally requires closing the deployment-
+specific P1 items above. This separation prevents the demo's strong evidence from becoming an
+unsupported blanket production claim.

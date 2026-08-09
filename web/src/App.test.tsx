@@ -113,7 +113,7 @@ describe("Archon control plane", () => {
     expect(screen.getByText("Prioritise the real risk")).toBeInTheDocument();
     expect(screen.getByText("See downstream exposure")).toBeInTheDocument();
     expect(screen.getByText("Approve one exact fix")).toBeInTheDocument();
-    expect(screen.getByText("Fixture preview")).toBeInTheDocument();
+    expect(screen.getAllByText("Fixture preview")).toHaveLength(2);
     expect(screen.getByRole("heading", { name: "Integrity findings" })).toBeInTheDocument();
     expect(screen.getByText("5 results")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Blast radius" })).toBeInTheDocument();
@@ -598,6 +598,14 @@ describe("public live audit", () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText("Live DataHub").length).toBeGreaterThan(0);
     });
+    expect(screen.getByTestId("agent-stack-evidence-mode")).toHaveTextContent(
+      "the browser just completed the bounded DataHub MCP audit",
+    );
+    expect(screen.getByText("Live public proof")).toBeInTheDocument();
+    expect(screen.getAllByText("CI-verified boundary")).toHaveLength(1);
+    expect(
+      screen.queryByText("Deterministic fixture evidence"),
+    ).not.toBeInTheDocument();
   });
 
   it("reports why a live audit failed and keeps the visible report labelled", async () => {
@@ -613,7 +621,7 @@ describe("public live audit", () => {
     expect(
       await screen.findByText("DataHub GMS is unreachable"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Fixture preview")).toBeInTheDocument();
+    expect(screen.getAllByText("Fixture preview")).toHaveLength(2);
   });
 
   it("falls back to a plain message when the failure is not an Error", async () => {

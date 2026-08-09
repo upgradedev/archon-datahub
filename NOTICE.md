@@ -113,11 +113,12 @@ projects.
   and `docs/AVAILABILITY.md` — **NEW.** The credentialless scheduled production read-path
   observation, exact deployment/runtime-byte provenance, bounded archive handling,
   TOCTOU revalidation, and checksum-sealed availability evidence.
-- `contrib/mcp-get-aspect-history/` — **NEW.** A staged, project-authored contribution
-  candidate for `acryldata/mcp-server-datahub`, pinned to upstream commit
-  `9a6946daa7d30eb481c82dd8ee5e15ae6526a3c9`. It contains the bounded read-only tool,
-  focused tests, machine-readable manifest, and a minimal registration patch; it is not
-  part of the Archon runtime and is not represented as submitted or accepted upstream.
+- `contrib/mcp-get-aspect-history/` — **NEW.** The project-authored source package for
+  public upstream pull request
+  [`acryldata/mcp-server-datahub#183`](https://github.com/acryldata/mcp-server-datahub/pull/183),
+  pinned to its reviewed upstream base. It contains the bounded read-only tool, focused
+  tests, machine-readable manifest, and registration patch. It is not part of the Archon
+  runtime and remains accurately represented as open, not accepted upstream.
 - `tests/security/*.test.ts` — **NEW.** The application-security pen-test suite (AuthZ /
   tool-boundary, prompt-injection, governance/contradiction-engine injection, sensitive-
   data-exposure), driving the real pipeline / loop / MCP surface offline.
