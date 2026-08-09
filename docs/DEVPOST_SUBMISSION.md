@@ -45,10 +45,11 @@ Archon runs a bounded evidence, reason and propose loop over DataHub.
   plan. The anonymous app cannot write. Protected CI binds a human approval to the exact plan,
   verifies read-after-write, requires a separate rollback approval and verifies restoration.
 
-The public demo is not a mock. One click executes a read-only audit against a private DataHub
-Core 1.6 catalog and returns four live findings: G6, a retained-history owner contradiction, G2
-and a dangling lineage edge. A visibly labelled deterministic preview keeps the story available
-if the live dependency is temporarily unavailable.
+The public demo's catalog evidence is not a mock. One click executes a read-only audit against a
+private DataHub Core 1.6 catalog and returns four live findings: G6, a retained-history owner
+contradiction, G2 and a dangling lineage edge. Narrative generation is deterministic and explicitly
+reports that no provider model call occurred. A visibly labelled deterministic preview keeps the
+story available if the live dependency is temporarily unavailable.
 
 ## How we built it
 
@@ -61,7 +62,7 @@ All four DataHub agent components have separate responsibilities:
 
 | Component | Material use |
 | --- | --- |
-| DataHub MCP Server | bounded live search/entity/schema/lineage/quality/history reads and the protected exact tag mutation |
+| DataHub MCP Server | bounded live search/entity/schema/lineage/quality reads and the protected exact tag mutation; retained history uses bounded direct GMS until upstream PR #183 lands |
 | Agent Context Kit | provenance-bearing context envelope with explicit unknown preservation |
 | DataHub Skills | pinned search → lineage → quality → audit → enrich workflow with receipts |
 | Analytics Agent | grounded SQL/chart trace, context-quality output and proposal-only context improvement |
@@ -137,8 +138,9 @@ No account, credential, installation or payment is required.
    and which ACK, Skills, Analytics Agent and governed-action evidence is protected in CI.
 5. Under **Judge evidence pack**, select **Prepare & verify pack**. All nine WebCrypto integrity
    and privacy checks must report PASS for the JSON, Markdown and SARIF projections.
-6. At the human-authority boundary select **Reject proposal**. Rejection performs no mutation
-   and still produces a content-addressed decision receipt.
+6. Select **Return to fixture preview**. At the human-authority boundary select
+   **Reject proposal**. Rejection performs no mutation and still produces a
+   content-addressed decision receipt.
 
 The full write is intentionally not anonymous. The repository's protected governed-proof run
 shows exact approval → `add_tags` → read-back → separate rollback approval → restoration on the

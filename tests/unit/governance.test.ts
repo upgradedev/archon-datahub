@@ -176,7 +176,7 @@ test("G5 flags an untyped schema field", () => {
   const e: CatalogEntity = { ...clean, urn: "urn:ds:untyped", fields: [{ path: "mystery", type: null }] };
   const g5 = validateEntity(e, snapshot([e])).find((r) => r.ruleId === "G5")!;
   assert.equal(g5.passed, false);
-  assert.match(g5.message, /mystery/);
+  assert.equal(g5.message, "1 field missing a type: mystery.");
 });
 
 test("G6 flags an unclassified sensitive field", () => {
@@ -187,7 +187,10 @@ test("G6 flags an unclassified sensitive field", () => {
   };
   const g6 = validateEntity(e, snapshot([e])).find((r) => r.ruleId === "G6")!;
   assert.equal(g6.passed, false);
-  assert.match(g6.message, /email/);
+  assert.equal(
+    g6.message,
+    "1 sensitive field lacks an accepted classification tag/term: email.",
+  );
   assert.deepEqual(g6.evidence?.["unclassifiedFields"], ["email"]);
 });
 

@@ -10,6 +10,7 @@ import { LineageAnalyzerAgent } from "../agents/lineage-analyzer.js";
 import { GovernanceAuditorAgent } from "../agents/governance-auditor.js";
 import { NarratorAgent } from "../agents/narrator.js";
 import type { Finding } from "../types.js";
+import { formatCount } from "../text/format-count.js";
 import {
   isModelRuntimeProvenance,
   type ModelRuntimeProvenance,
@@ -274,10 +275,13 @@ export class AuditPipeline {
         {
           agent: "lineage-analyzer",
           produced:
-            `${lineageFindings.length} contradiction/lineage finding(s)` +
+            `${formatCount(lineageFindings.length, "contradiction/lineage finding")}` +
             ` (${versionHistoryContradictions} recovered from aspect version history)`,
         },
-        { agent: "governance-auditor", produced: `${governanceFindings.length} governance finding(s)` },
+        {
+          agent: "governance-auditor",
+          produced: formatCount(governanceFindings.length, "governance finding"),
+        },
         { agent: "narrator", produced: "executive summary" },
       ],
     };

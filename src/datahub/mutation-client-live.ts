@@ -15,6 +15,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { digest } from "../remediation/integrity.js";
+import { formatCount } from "../text/format-count.js";
 import type {
   DataHubMutationClient,
   MutationCallOptions,
@@ -402,7 +403,7 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
       if (!this.#suppliedClient) await closeConnection(client, transport);
       fail(
         "REQUIRED_TOOLS_MISSING",
-        `DataHub mutation endpoint is missing required tool(s): ${missing.join(", ")}.`
+        `DataHub mutation endpoint is missing ${formatCount(missing.length, "required tool")}: ${missing.join(", ")}.`
       );
     }
     this.#client = client;

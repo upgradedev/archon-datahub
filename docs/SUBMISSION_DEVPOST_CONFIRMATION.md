@@ -1,5 +1,10 @@
 # Devpost submission confirmation (SQ11)
 
+> **Status (2026-08-09): optional, not executed, and not submission authority.**
+> The public Devpost entry is already submitted. No SQ11 receipt is claimed.
+> This document retains a privacy-safe procedure that may be run later if a
+> separate private attestation is useful.
+
 This is the post-submit evidence procedure for the DataHub Agent
 Hackathon. It does not submit the project to Devpost. It turns a real,
 privately verified Devpost submission into a privacy-safe, explicitly
@@ -222,19 +227,15 @@ phases. The workflow compares stable URL and rules semantics while keeping
 each raw response digest phase-local. It never treats differing dynamic
 response bytes as proof of tampering.
 
-## Remaining external blockers
+## Optional procedure prerequisites
 
-This source is complete before submission, but `SQ11` cannot exist until
-all external actions below have happened:
+The public application, repository, video and Devpost submission now exist.
+An `SQ11` receipt still does not exist because this optional private
+attestation procedure has not been dispatched and approved. If it is used
+later, the operator must supply the exact private confirmation inputs, the
+protected solo owner must approve the exact binding, and the workflow must
+persist verification of all six subjects.
 
-- the final public application, repository, and under-three-minute public
-  video are available;
-- the pre-submit readiness seal is successful;
-- the real Devpost entry is submitted rather than saved as a draft;
-- the operator supplies the exact private confirmation inputs;
-- the protected solo owner approves the exact binding; and
-- the workflow completes with persisted verification of all six subjects.
-
-Only after that successful run may the reporting aggregate include
-`SQ11`. Video production, any optional public post, and the actual Devpost
-form remain end-of-process operator actions.
+Only that successful workflow may cause an aggregate to include `SQ11`.
+The live links and submitted Devpost page are independently verifiable public
+facts; this optional procedure must not be cited as their authority.

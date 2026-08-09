@@ -20,6 +20,7 @@ import {
   verifyTagProjection,
 } from "./planner.js";
 import { createExecutionReceipt } from "./receipt.js";
+import { formatCount } from "../text/format-count.js";
 
 export type RemediationErrorCode =
   | "INVALID_ARTIFACT"
@@ -236,7 +237,7 @@ export function verifyPostcondition(input: {
     {
       checkId: "PREEXISTING_TAGS_PRESERVED",
       passed: preserved,
-      evidence: `${before.tags.length} pre-existing tag(s) remain present.`,
+      evidence: `${formatCount(before.tags.length, "pre-existing tag")} ${before.tags.length === 1 ? "remains" : "remain"} present.`,
     },
     {
       checkId: "POLICY_TAG_PRESENT",

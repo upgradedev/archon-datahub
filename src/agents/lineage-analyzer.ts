@@ -6,6 +6,7 @@
 
 import { auditConsistency, type Contradiction, type ConsistencyReport } from "../audit/consistency.js";
 import { auditVersionHistory, type AspectVersionHistory } from "../datahub/version-history.js";
+import { formatCount } from "../text/format-count.js";
 import type { AuditFact, Finding } from "../types.js";
 
 // Map one consistency-engine contradiction onto the agent's Finding vocabulary. Shared by
@@ -55,7 +56,7 @@ export class LineageAnalyzerAgent {
         type: "lineage_gap",
         severity: "medium",
         subject: a.subject,
-        summary: `Declared upstream ${a.subject} is not catalogued — a dangling lineage edge (schema-break risk to ${a.referencedBy.length} downstream consumer(s)).`,
+        summary: `Declared upstream ${a.subject} is not catalogued — a dangling lineage edge (schema-break risk to ${formatCount(a.referencedBy.length, "downstream consumer")}).`,
         detail: { referencedBy: a.referencedBy },
         recommendation: `Ingest ${a.subject} or correct the lineage declaration. Read-only — a steward decides.`,
       });

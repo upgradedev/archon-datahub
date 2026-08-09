@@ -83,8 +83,8 @@ layers. New infrastructure is rejected unless it is required by an acceptance ga
 
 - Firebase Hosting serves the immutable SPA and proxies only `/healthz`, `/readyz`, and the
   bounded audit API to Cloud Run.
-- Cloud Run has no write credential and reaches the private DataHub Core VM through the
-  serverless VPC connector.
+- Cloud Run has no write credential and reaches the private DataHub Core VM through
+  Direct VPC egress on an allowlisted private subnet.
 - The public audit proves the DataHub MCP-backed read path. Agent Context Kit, five DataHub
   Skills, Analytics Agent, and `/improve-context` are implemented in the protected governed
   path; the anonymous UI labels that distinction explicitly.

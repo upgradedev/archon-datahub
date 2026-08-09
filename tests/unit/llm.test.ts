@@ -208,7 +208,12 @@ test("Fake LLM narrates deterministically from the evidence line (no key, offlin
     ],
   });
   const text = res.choices[0]!.message.content!;
-  assert.match(text, /6 finding/); // 2 + 1 + 3
+  assert.match(text, /6 findings/); // 2 + 1 + 3
+  assert.match(
+    text,
+    /2 cross-source contradictions, 1 lineage gap, and 3 governance-policy violations/,
+  );
+  assert.doesNotMatch(text, /\(s\)/);
 });
 
 test("Fake LLM returns a tool_call when the request carries tools (ReAct path)", async () => {

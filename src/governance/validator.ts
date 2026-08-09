@@ -24,6 +24,7 @@ import {
   looksSensitive,
 } from "../datahub/models.js";
 import { DataHubHarvestError } from "../datahub/harvest-policy.js";
+import { formatCount } from "../text/format-count.js";
 import type { Severity } from "../types.js";
 
 // Classification identifiers are exact, provider-normalized values. G6 must not
@@ -206,7 +207,7 @@ function g4(e: CatalogEntity, snapshot: CatalogSnapshot): GovernanceResult {
     severity: passed ? "low" : "high",
     message: passed
       ? "Deprecated with no active downstream consumers."
-      : `Deprecated but still feeds ${consumers.length} active consumer(s): ${consumers.join(", ")}.`,
+      : `Deprecated but still feeds ${formatCount(consumers.length, "active consumer")}: ${consumers.join(", ")}.`,
   };
 }
 
@@ -232,8 +233,8 @@ function g5(e: CatalogEntity): GovernanceResult {
     passed,
     severity: passed ? "low" : "medium",
     message: passed
-      ? `All ${fields.length} fields typed.`
-      : `${untyped.length} field(s) missing a type: ${untyped.join(", ")}.`,
+      ? `All ${formatCount(fields.length, "field")} typed.`
+      : `${formatCount(untyped.length, "field")} missing a type: ${untyped.join(", ")}.`,
   };
 }
 
@@ -272,8 +273,8 @@ function g6(e: CatalogEntity, policy: CompiledGovernancePolicy): GovernanceResul
     passed,
     severity: passed ? "low" : "high",
     message: passed
-      ? `All ${sensitive.length} sensitive field(s) classified.`
-      : `${unclassified.length} sensitive field(s) lack an accepted classification tag/term: ${unclassified.join(", ")}.`,
+      ? `All ${formatCount(sensitive.length, "sensitive field")} classified.`
+      : `${formatCount(unclassified.length, "sensitive field")} ${unclassified.length === 1 ? "lacks" : "lack"} an accepted classification tag/term: ${unclassified.join(", ")}.`,
     evidence: {
       sensitiveFields: sensitive.map((field) => field.path).sort(),
       unclassifiedFields: unclassified.sort(),

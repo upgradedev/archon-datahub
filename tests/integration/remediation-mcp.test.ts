@@ -158,7 +158,10 @@ test("tag write adapter discovers both required tools before making any mutation
       (error: unknown) => {
         assert.ok(error instanceof DataHubMutationError);
         assert.equal(error.code, "REQUIRED_TOOLS_MISSING");
-        assert.match(error.message, /remove_tags/u);
+        assert.equal(
+          error.message,
+          "DataHub mutation endpoint is missing 1 required tool: remove_tags.",
+        );
         return true;
       }
     );

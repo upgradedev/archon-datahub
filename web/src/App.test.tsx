@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const authMocks = vi.hoisted(() => ({
   snapshot: { status: "anonymous" } as
     | { status: "anonymous" }
-    | { status: "authenticated"; expiresAt: number },
+    | { status: "authenticated"; expiresAt: number }
+    | { status: "error"; message: string; recoverable: boolean },
   beginSignIn: vi.fn(async () => undefined),
   signOut: vi.fn(),
 }));
@@ -544,6 +545,8 @@ describe("Archon control plane", () => {
 
 describe("public live audit", () => {
   const LIVE_RUN = "Run the live read-only audit";
+  const LIVE_URN =
+    "urn:li:dataset:(urn:li:dataPlatform:snowflake,omega_ledger_audit_target,PROD)";
 
   const bindLiveOrigin = () => {
     apiMocks.probeRuntimeReadiness.mockResolvedValue({
@@ -575,9 +578,40 @@ describe("public live audit", () => {
     expect(screen.queryByRole("button", { name: LIVE_RUN })).not.toBeInTheDocument();
   });
 
-  it("runs a real read-only audit with no sign-in and relabels the source", async () => {
+  it("keeps the public live scope, status and return path internally consistent", async () => {
     bindLiveOrigin();
-    apiMocks.requestConfiguredDemoAudit.mockResolvedValue(previewAudit);
+    authMocks.snapshot = {
+      status: "error",
+      message: "Approval authentication is unavailable: runtime config was rejected.",
+      recoverable: false,
+    };
+    const liveAudit = structuredClone(previewAudit);
+    liveAudit.report.classification = {
+      totalEntities: 1,
+      withLineage: 1,
+      sensitiveEntities: 1,
+      domains: { "(none)": 1 },
+      platforms: { snowflake: 1 },
+    };
+    const first = liveAudit.report.findings[0]!;
+    liveAudit.report.findings = [
+      {
+        ...first,
+        severity: "high",
+        subject: LIVE_URN,
+        detail: {
+          ...first.detail,
+          blastRadius: {
+            rootUrn: LIVE_URN,
+            downstream: [],
+            maxHops: 3,
+            truncated: false,
+            impact: "none",
+          },
+        },
+      },
+    ];
+    apiMocks.requestConfiguredDemoAudit.mockResolvedValue(liveAudit);
 
     render(<App />);
 
@@ -590,6 +624,14 @@ describe("public live audit", () => {
     expect(
       screen.queryByRole("heading", { name: "Run the canonical Agent Stack journey" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Approval authentication is fail-closed/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Approval authentication unavailable",
+      }),
+    ).not.toBeInTheDocument();
     fireEvent.click(run);
 
     await waitFor(() => {
@@ -598,10 +640,23 @@ describe("public live audit", () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText("Live DataHub").length).toBeGreaterThan(0);
     });
+    const auditedScope = screen.getByLabelText("Audited DataHub dataset URN");
+    expect(auditedScope).toHaveValue(LIVE_URN);
+    expect(auditedScope).toHaveAttribute("readonly");
+    expect(
+      screen.getByText("1 high-priority control needs review"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 connected platform")).toBeInTheDocument();
+    expect(screen.getByText("Audited assets")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 asset with a lineage aspect"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Lineage metadata")).toBeInTheDocument();
     expect(screen.getByTestId("agent-stack-evidence-mode")).toHaveTextContent(
-      "the browser just completed the bounded DataHub MCP audit",
+      "the browser just completed the bounded live catalog audit",
     );
     const agentStack = screen.getByTestId("agent-stack-panel");
+    expect(within(agentStack).getByText(/bounded GMS adapter/)).toBeInTheDocument();
     expect(within(agentStack).getByText("Live public proof")).toBeInTheDocument();
     expect(within(agentStack).getByText("CI-verified boundary")).toBeInTheDocument();
     expect(within(agentStack).getAllByText("Protected CI")).toHaveLength(2);
@@ -612,6 +667,14 @@ describe("public live audit", () => {
     expect(
       screen.queryByText("Deterministic fixture evidence"),
     ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Return to fixture preview" }),
+    );
+    expect(screen.getAllByText("Fixture preview")).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "Reject proposal" }),
+    ).toBeInTheDocument();
   });
 
   it("reports why a live audit failed and keeps the visible report labelled", async () => {
