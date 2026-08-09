@@ -155,6 +155,9 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
     /ghcr\.io\/zaproxy\/zaproxy@sha256:[a-f0-9]{64}/u
   );
   assert.match(workflow, /zap-baseline\.py/u);
+  assert.match(workflow, /zap_status=0/u);
+  assert.match(workflow, /test "\$\{zap_status\}" -le 1/u);
+  assert.match(workflow, /test -s "\$\{report_dir\}\/zap-report\.json"/u);
   assert.match(workflow, /select\(\(\.riskcode \| tonumber\) >= 2\)/u);
   assert.match(workflow, /hosted-demo-dast-\$\{\{ github\.sha \}\}/u);
   assert.match(workflow, /id: dast/u);
