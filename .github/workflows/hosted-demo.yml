@@ -236,6 +236,16 @@ jobs:
           echo "${ready}"
           test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
 
+      - name: Prove the browser CTA contract through the hosted origin
+        run: |
+          set -euo pipefail
+          audit="$(curl -fsS --max-time 180 \
+            -H 'content-type: application/json' \
+            -d '{}' "https://${HOSTING_SITE}.web.app/api/audits")"
+          test "$(printf '%s' "${audit}" | jq -er '.releaseSha')" = "${RELEASE_SHA}"
+          printf '%s' "${audit}" | jq -e '.report.findings | type == "array"' >/dev/null
+          printf '%s' "${audit}" | jq -e '.report.trace | length >= 1' >/dev/null
+
       - name: OWASP ZAP passive DAST against the deployed origin
         id: dast
         env:

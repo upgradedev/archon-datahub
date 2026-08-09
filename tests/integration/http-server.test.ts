@@ -191,6 +191,13 @@ test("hosted HTTP audit permits only the exact configured public demo query", as
       });
       assert.equal(accepted.status, 200);
 
+      const pinned = await fetch(`${baseUrl}/api/audits`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      assert.equal(pinned.status, 200);
+
       const padded = await fetch(`${baseUrl}/api/audits`, {
         method: "POST",
         headers: { "content-type": "application/json" },
