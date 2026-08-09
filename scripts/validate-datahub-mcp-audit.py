@@ -25,6 +25,7 @@ from typing import Any, Callable, NoReturn
 CONTRACT_SCHEMA = "archon.datahub-mcp-lock/v5"
 POLICY_SCHEMA = "archon.openvex-policy/v1"
 OPENVEX_CONTEXT = "https://openvex.dev/ns/v0.2.0"
+OPENVEX_DOCUMENT_VERSION = 2
 SMOKE_SCHEMA = "archon.datahub-mcp-runtime-smoke/v1"
 RECEIPT_SCHEMA = "archon.datahub-mcp-audit-disposition/v1"
 SELF_TEST_SCHEMA = "archon.datahub-mcp-audit-validator-self-test/v1"
@@ -393,7 +394,10 @@ def validate_openvex(
     require_string(vex.get("author"), "OpenVEX author")
     require(vex.get("role") == "Document Creator", "OpenVEX role changed")
     require(vex.get("timestamp") == policy["vex"]["issuedAt"], "VEX timestamp drift")
-    require(vex.get("version") == 1, "OpenVEX version changed")
+    require(
+        vex.get("version") == OPENVEX_DOCUMENT_VERSION,
+        "OpenVEX version changed",
+    )
 
     statements = require_list(vex.get("statements"), "OpenVEX statements")
     require(len(statements) == 1, "OpenVEX must contain exactly one statement")
@@ -999,7 +1003,7 @@ def build_self_test_fixture() -> dict[str, Any]:
         "author": "https://github.com/upgradedev/archon-datahub",
         "role": "Document Creator",
         "timestamp": issued,
-        "version": 1,
+        "version": OPENVEX_DOCUMENT_VERSION,
         "statements": [
             {
                 "vulnerability": {
