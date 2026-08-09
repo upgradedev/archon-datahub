@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "archon.submission-video/v1",
+  "languageCode": "en-GB",
+  "voice": "en-GB-Neural2-B",
+  "speakingRate": 0.98,
+  "segments": [
+    {
+      "id": "hook",
+      "captionText": "A catalog can look healthy while disagreeing with itself. Archon turns DataHub's context graph into an integrity control plane: it finds the conflict, traces who is exposed, and prepares one exact, reversible repair before bad context reaches another human or agent.",
+      "speechText": "A catalog can look healthy while disagreeing with itself. Archon turns Data Hub's context graph into an integrity control plane. It finds the conflict, traces who is exposed, and prepares one exact, reversible repair before bad context reaches another human or agent."
+    },
+    {
+      "id": "live",
+      "captionText": "This button is querying a private DataHub Core 1.6 catalog now. The public service has no write credential and accepts only one pinned dataset. A successful response replaces the fixture with the live integrity score, findings, lineage coverage, and release-bound evidence.",
+      "speechText": "This button is querying a private Data Hub Core one point six catalog now. The public service has no write credential and accepts only one pinned dataset. A successful response replaces the fixture with the live integrity score, findings, lineage coverage, and release-bound evidence."
+    },
+    {
+      "id": "findings",
+      "captionText": "The headline is not another missing tag. Two independent ingestion sources disagree about the owner, and a dangling upstream edge exposes a downstream consumer. Archon reconciles current MCP reads with retained aspect history, preserves uncertainty, and shows the bounded blast radius and provenance for every conclusion.",
+      "speechText": "The headline is not another missing tag. Two independent ingestion sources disagree about the owner, and a dangling upstream edge exposes a downstream consumer. Archon reconciles current M C P reads with retained aspect history, preserves uncertainty, and shows the bounded blast radius and provenance for every conclusion."
+    },
+    {
+      "id": "stack",
+      "captionText": "The solution covers the full DataHub agent stack. The MCP Server supplies bounded graph reads. Agent Context Kit carries provenance. Five pinned DataHub Skills ground the workflow. The Analytics Agent produces a traceable query, result, and chart, while improve-context remains a separate proposal instead of an autonomous write.",
+      "speechText": "The solution covers the full Data Hub agent stack. The M C P Server supplies bounded graph reads. Agent Context Kit carries provenance. Five pinned Data Hub Skills ground the workflow. The Analytics Agent produces a traceable query, result, and chart, while improve context remains a separate proposal instead of an autonomous write."
+    },
+    {
+      "id": "governance",
+      "captionText": "Real work still needs human authority. GitHub protects the exact G6 write and the recovery as two distinct approvals. A dedicated identity writes only the planned PII tag, verifies the new state, rolls it back, verifies exact restoration, and retains sanitized receipts. The public app never receives that capability.",
+      "speechText": "Real work still needs human authority. Git Hub protects the exact G six write and the recovery as two distinct approvals. A dedicated identity writes only the planned P I I tag, verifies the new state, rolls it back, verifies exact restoration, and retains sanitized receipts. The public app never receives that capability."
+    },
+    {
+      "id": "evidence",
+      "captionText": "Judges can export JSON, steward Markdown, and SARIF. The browser verifies the allowlisted files, digests, projections, and privacy boundary before enabling downloads. CI independently covers unit, integration, browser journeys, SAST, SCA, secrets, IaC, container scanning, OWASP DAST, coverage, provenance, SBOM, and live readiness.",
+      "speechText": "Judges can export J S O N, steward Markdown, and S A R I F. The browser verifies the allowlisted files, digests, projections, and privacy boundary before enabling downloads. C I independently covers unit, integration, browser journeys, static analysis, dependencies, secrets, infrastructure, containers, O W A S P dynamic testing, coverage, provenance, S B O M, and live readiness."
+    },
+    {
+      "id": "oss",
+      "captionText": "The missing capability became an upstream contribution, not private glue. Pull request 183 adds version-aware, batched aspect history to DataHub's official MCP server with repository-wide formatting, type checking, regression coverage, and the focused tests shown here.",
+      "speechText": "The missing capability became an upstream contribution, not private glue. Pull request one eighty three adds version-aware, batched aspect history to Data Hub's official M C P server, with repository-wide formatting, type checking, regression coverage, and the focused tests shown here."
+    },
+    {
+      "id": "close",
+      "captionText": "Archon makes DataHub safer for every decision that inherits its context: live, open source, low-cost when idle, evidence-first, human-gated, and reproducible from one public repository.",
+      "speechText": "Archon makes Data Hub safer for every decision that inherits its context. Live, open source, low-cost when idle, evidence-first, human-gated, and reproducible from one public repository."
+    }
+  ]
+}
