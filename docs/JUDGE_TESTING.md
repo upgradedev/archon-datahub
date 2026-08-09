@@ -35,7 +35,7 @@ there is no judge credential and the anonymous route cannot mutate DataHub.
    `TERMINAL_PROJECTION_VALID`, `SUMMARY_CONSISTENT`,
    `SOURCE_FIELDS_CONSISTENT` and `PRIVACY_SCAN_VALID`. All nine report PASS.
 6. Select **Return to fixture preview**, then scroll to the human authority
-   boundary and select **Reject proposal**. This is the recommended path. It
+   boundary. Select **Reject proposal**. This is the recommended path. It
    shows that a proposed remediation closes with no mutation and still seals a
    content-addressed receipt.
 7. Optional: **Start judge tour** walks the same route with narration.
