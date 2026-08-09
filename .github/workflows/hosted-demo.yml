@@ -265,7 +265,10 @@ jobs:
             -r zap-report.html \
             -w zap-report.md \
             -I || zap_status=$?
-          test "${zap_status}" -le 1
+          # ZAP baseline exits 2 when warnings exist. The parsed report below is
+          # the authoritative fail-closed gate for medium/high alerts; codes
+          # above 2 still mean a scanner/runtime failure.
+          test "${zap_status}" -le 2
           test -s "${report_dir}/zap-report.json"
           high_or_medium="$(jq '[.site[]?.alerts[]? | select((.riskcode | tonumber) >= 2)] | length' \
             "${report_dir}/zap-report.json")"

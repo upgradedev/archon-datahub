@@ -160,7 +160,7 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   );
   assert.match(workflow, /zap-baseline\.py/u);
   assert.match(workflow, /zap_status=0/u);
-  assert.match(workflow, /test "\$\{zap_status\}" -le 1/u);
+  assert.match(workflow, /test "\$\{zap_status\}" -le 2/u);
   assert.match(workflow, /test -s "\$\{report_dir\}\/zap-report\.json"/u);
   assert.match(workflow, /select\(\(\.riskcode \| tonumber\) >= 2\)/u);
   assert.match(workflow, /hosted-demo-dast-\$\{\{ github\.sha \}\}/u);
@@ -186,6 +186,13 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   }
   assert.match(firebaseConfig, /frame-ancestors 'none'/u);
   assert.match(firebaseConfig, /object-src 'none'/u);
+});
+
+test("governed proof pins one exact uv runtime without cross-job caches", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+
+  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 3);
+  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 3);
 });
 
 test("governed proof uses the reviewed DataHub MCP lock in every phase", async () => {
