@@ -34,9 +34,9 @@ there is no judge credential and the anonymous route cannot mutate DataHub.
    `FILE_DIGESTS_VALID`, `PUBLIC_PROJECTION_VALID`,
    `TERMINAL_PROJECTION_VALID`, `SUMMARY_CONSISTENT`,
    `SOURCE_FIELDS_CONSISTENT` and `PRIVACY_SCAN_VALID`. All nine report PASS.
-6. In fixture preview, scroll to the human authority boundary.
-   Select **Reject proposal**. This is the recommended path. It shows that a
-   proposed remediation closes with no mutation and still seals a
+6. Select **Return to fixture preview**, then scroll to the human authority
+   boundary. Select **Reject proposal**. This is the recommended path. It
+   shows that a proposed remediation closes with no mutation and still seals a
    content-addressed receipt.
 7. Optional: **Start judge tour** walks the same route with narration.
 
@@ -78,8 +78,9 @@ short-lived workload identity and two GitHub protected environments.
 
 Archon does not mutate autonomously: the write cannot start without explicit
 steward approval of the exact plan, and the inverse uses distinct, separately approved authority.
-On the public URL the only available decision is
-**Reject proposal**.
+In fixture preview on the public URL, the only available decision is
+**Reject proposal**. The live result remains strictly read-only and offers an
+explicit **Return to fixture preview** control.
 
 ## What the recommended path demonstrates
 
@@ -104,8 +105,10 @@ Devpost entry and include the UTC time of the attempt.
 
 ## Optional repository review
 
-The public repository link in the Devpost entry is pinned to the submitted
-release. Reviewers can inspect the architecture, tests, infrastructure as
-code, CI/CD security gates, and the clearly labelled synthetic judge-evidence
-pack. The upstream contribution to the official DataHub MCP server is in
+The public repository link in the Devpost entry opens the maintained default
+branch. The exact submitted application snapshot remains available in the
+[datahub-hackathon-2026-submission release](https://github.com/upgradedev/archon-datahub/releases/tag/datahub-hackathon-2026-submission).
+Reviewers can inspect the architecture, tests, infrastructure as code, CI/CD
+security gates, and the clearly labelled synthetic judge-evidence pack. The
+upstream contribution to the official DataHub MCP server is in
 [`contrib/mcp-get-aspect-history/`](../contrib/mcp-get-aspect-history/).

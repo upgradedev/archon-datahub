@@ -45,7 +45,12 @@ test("LineageAnalyzerAgent turns the self-audit into contradiction + lineage_gap
   const facts = await new FakeDataHubMcpClient().harvestFacts();
   const findings = new LineageAnalyzerAgent().analyze(facts);
   assert.ok(findings.some((f) => f.type === "contradiction" && f.subject === SALES));
-  assert.ok(findings.some((f) => f.type === "lineage_gap" && f.subject === UNCATALOGUED_UPSTREAM));
+  const lineageGap = findings.find(
+    (f) => f.type === "lineage_gap" && f.subject === UNCATALOGUED_UPSTREAM,
+  );
+  assert.ok(lineageGap);
+  assert.match(lineageGap.summary, /1 downstream consumer/);
+  assert.doesNotMatch(lineageGap.summary, /\(s\)/);
   // a field-type contradiction is high severity (schema-break risk)
   assert.ok(findings.some((f) => f.type === "contradiction" && f.severity === "high"));
 });

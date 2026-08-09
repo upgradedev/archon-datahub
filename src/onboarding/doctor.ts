@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { formatCount } from "../text/format-count.js";
 
 const MAX_QUERY_CHARS = 256;
 const MAX_RESPONSE_CHARS = 1_000_000;
@@ -140,7 +141,7 @@ export async function runOnboardingDoctor(
     traceSteps: report["trace"].length,
   };
   (options.write ?? ((message) => process.stdout.write(`${message}\n`)))(
-    `Archon doctor passed: ready/live release ${summary.releaseSha}; scoped audit returned ${summary.findings} finding(s) across ${summary.traceSteps} trace step(s).`
+    `Archon doctor passed: ready/live release ${summary.releaseSha}; scoped audit returned ${formatCount(summary.findings, "finding")} across ${formatCount(summary.traceSteps, "trace step")}.`
   );
   return summary;
 }

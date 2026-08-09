@@ -13,6 +13,7 @@ import {
   executeApprovedRemediation,
   InMemoryExecutionJournal,
   RemediationError,
+  verifyPostcondition,
 } from "../../src/remediation/control-loop.js";
 import { canonicalize, digest } from "../../src/remediation/integrity.js";
 import {
@@ -30,6 +31,25 @@ import {
 const ENTITY = "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)";
 const FIELD = "email";
 const TAG = "urn:li:tag:PII";
+
+test("postcondition evidence uses singular and plural verbs", () => {
+  const evidenceFor = (tags: string[]) => {
+    const planned = proposal(
+      createTagProjection({ entityUrn: ENTITY, columnPath: FIELD, tags }),
+    );
+    return verifyPostcondition({
+      plan: planned.plan,
+      approvalValid: false,
+      after: planned.plan.expectedAfter,
+    }).find((check) => check.checkId === "PREEXISTING_TAGS_PRESERVED")?.evidence;
+  };
+
+  assert.equal(evidenceFor(["urn:li:tag:Existing"]), "1 pre-existing tag remains present.");
+  assert.equal(
+    evidenceFor(["urn:li:tag:Existing", "urn:li:tag:Retained"]),
+    "2 pre-existing tags remain present.",
+  );
+});
 
 const FINDING: G6FindingEvidence = {
   type: "governance_violation",

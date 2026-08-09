@@ -9,6 +9,7 @@ Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
 - **Live Demo**: [https://archon-datahub.web.app](https://archon-datahub.web.app) (login-free hosted showcase)
 - **Upstream Contribution**: [acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183) (OPEN)
+- **Examples & evidence**: [examples/](examples/) (committed evaluation cases and exact reproduction routes)
 
 ## Customer quickstart
 
@@ -39,8 +40,9 @@ integrity pass. The step-by-step judge route is in
 >
 > **Deployed:** Firebase Hosting serves the React application and proxies its
 > allowlisted read routes to `archon-datahub-api` on Cloud Run. The API has no
-> write credential and reaches one private DataHub Core 1.6 catalog through a
-> serverless VPC connector. Judges can run the bounded live audit without an
+> write credential and reaches one private DataHub Core 1.6 catalog through
+> Cloud Run Direct VPC egress on an allowlisted private subnet. Judges can run the
+> bounded live audit without an
 > account; the deterministic fixture remains an explicitly labelled fallback.
 >
 > **Protected proof:** a separate GitHub OIDC identity can execute only the exact
@@ -156,7 +158,7 @@ use different identities and execution paths; neither path requires Kubernetes o
 flowchart LR
   J["Judge browser"] --> FB["Firebase Hosting · immutable SPA"]
   FB --> API["Cloud Run · read-only adapter"]
-  API --> VPC["Serverless VPC connector"]
+  API --> VPC["Direct VPC egress · private subnet"]
   VPC --> DH["Private DataHub Core 1.6"]
   CI["GitHub Actions · exact release"] --> G1["Approval 1 · exact write digest"]
   G1 --> WR["Dedicated writer · one G6 tag"]
@@ -330,7 +332,7 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
-> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. The exact submitted application release `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1` is deployed: Firebase serves the immutable SPA, the read-only Cloud Run adapter reports `ready/live`, and retained CI evidence covers the private DataHub audit, browser journey, and OWASP ZAP DAST. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
+> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. The original submitted release `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1` remains frozen with its exact evidence chain; the active hosted release is reported by `/readyz` and verified by the hourly availability workflow. Firebase serves the immutable SPA, the read-only Cloud Run adapter reports `ready/live`, and retained CI evidence covers the private DataHub audit, browser journey, and OWASP ZAP DAST. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
 
 [infra/aws](infra/aws) contains the deployment-grade reference design. The CDK
 that creates it is in `infra/aws/` and is built, tested and synthesised in CI, but no

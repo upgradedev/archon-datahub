@@ -1,11 +1,15 @@
 # Submission content review
 
-The final Devpost copy, public demo video, prior-work disclosures, repository
-history, and cross-medium consistency are sealed by CI/CD. Local review output
-and workstation security scans are not accepted as submission evidence.
+> **Status (2026-08-09): optional legacy evidence chain, not executed.**
+> `docs/SUBMISSION_CONTENT.json` is intentionally absent, so no SQ6–SQ8
+> content-review receipt is claimed. Current submission authority is the exact
+> release plus the successful CI, hosted, governed-proof and video receipts in
+> [READINESS.md](READINESS.md).
 
-The workflow is intentionally installed before the final media exists. It fails
-closed until all three external prerequisites are real:
+This workflow can seal Devpost copy, public demo video, prior-work disclosures,
+repository history, and cross-medium consistency through CI/CD. Local review
+output and workstation security scans are not accepted as submission evidence.
+It fails closed until all three external prerequisites are real:
 
 1. `docs/SUBMISSION_CONTENT.json` exists at the exact release and has
    `status: "final"`;
@@ -154,9 +158,9 @@ signed by that producer. The candidate attempt must not be later than the
 review-producer attempt. A future, ambiguous, expired, wrong-run, wrong-release,
 wrong-attempt, or digest-changed artifact is rejected.
 
-## Evidence and current blockers
+## Optional evidence status
 
-SQ6 proves complete English written fields, exact judge instructions, and
+If executed, SQ6 proves complete English written fields, exact judge instructions, and
 submission-claim digests. SQ7 proves logged-out public access, provider identity,
 the under-three-minute duration, functioning footage, English accessibility,
 media rights, application-origin consistency, and video claims. SQ8 proves the
@@ -164,17 +168,9 @@ official rules window, complete repository chronology, prior-work and
 third-party inventories, `NOTICE.md`, cross-medium consistency, and the
 explicit solo-owner approval provenance.
 
-All three proofs use one identical `reviewedAt`. Every opaque digest is derived
-from exact observed or reviewed bytes. SQ7 separately binds the prepare and
-review provider-response digests. SQ8 additionally binds the workflow path, run
-ID, review-producer attempt, environment ID, actor/reviewer IDs, exact candidate
-attempt/artifact provenance, candidate digest, exact approval-comment digest,
-and full approval-receipt digest.
-
-Until the final `docs/SUBMISSION_CONTENT.json`, public video, and protected
-environment/reviewer exist, a successful content-review artifact cannot be
-produced. That is an explicit external prerequisite, not a green or deployed
-claim. Workflow syntax, permissions, action pinning, artifact selection,
-mutation resistance, and the approval boundary are enforced by the remote CI
-contract test in
+No successful SQ6–SQ8 artifact is claimed today. The workflow and its fail-closed
+contract tests remain useful optional infrastructure, but the missing final
+`docs/SUBMISSION_CONTENT.json` is not a current project or Devpost blocker.
+Workflow syntax, permissions, action pinning, artifact selection, mutation
+resistance and the approval boundary are enforced by
 `tests/pipeline/submission_content_review_contracts_test.py`.

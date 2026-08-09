@@ -70,6 +70,13 @@ type IconName =
 const RUN_DISABLED_HINT =
   "It starts a live, credentialed run against a real DataHub tenant with a real write credential, so it requires an authenticated steward session.";
 
+const FIXTURE_AUDIT: LoadedAudit = {
+  envelope: previewAudit,
+  source: "fixture",
+  fallbackReason:
+    "Deterministic showcase mode: this non-mutating regression fixture remains visible until a bounded live audit is run.",
+};
+
 const iconPaths: Record<IconName, string[]> = {
   arrow: ["M5 12h14", "m13 6 6 6-6 6"],
   check: ["m5 12 4 4L19 6"],
@@ -144,6 +151,14 @@ function shortUrn(urn: string): string {
   const simple = base.match(/\([^,]+,\s*([^)]+)\)$/);
   if (simple?.[1]) return `${simple[1]}${field}`;
   return `${base.split(":").at(-1) ?? base}${field}`;
+}
+
+function formatCount(
+  count: number,
+  singular: string,
+  plural = `${singular}s`,
+): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? singular : plural}`;
 }
 
 function formatDate(iso: string): string {
@@ -1250,7 +1265,7 @@ function AgentStackPanel({
           data-testid="agent-stack-evidence-mode"
         >
           {publicAuditSource === "live"
-            ? "Public proof: the browser just completed the bounded DataHub MCP audit shown on this page. Agent Context Kit, the five DataHub Skills, Analytics Agent, and the human-approved write/rollback path are implemented and exercised by protected CI; they are not exposed with write credentials on this anonymous route."
+            ? "Public proof: the browser just completed the bounded live catalog audit shown on this page. Official DataHub MCP reads supply current graph evidence; bounded direct GMS supplies retained history until upstream PR #183 lands. Agent Context Kit, the five DataHub Skills, Analytics Agent, and the human-approved write/rollback path are implemented and exercised by protected CI; they are not exposed with write credentials on this anonymous route."
             : "The anonymous preview is non-mutating. The repository and protected CI exercise MCP, Agent Context Kit, five DataHub Skills, Analytics Agent, and the separately approved write/rollback path."}
         </p>
       )}
@@ -1263,7 +1278,7 @@ function AgentStackPanel({
             {contextReceipts.length > 0
               ? `${contextReceipts.length} sanitized tool receipts returned by the ACK SDK.`
               : publicAuditSource === "live"
-                ? "Live bounded search, entity, lineage, quality and retained-history reads produced the audit below."
+                ? "Live bounded search, entity, schema, lineage and quality reads supplied current graph evidence. Retained history came through the bounded GMS adapter until upstream PR #183 lands."
                 : "Search, entities, schema, lineage and quality receipts will appear here."}
           </p>
           {!status && publicAuditSource === "live" && (
@@ -1506,12 +1521,7 @@ function AgentStackPanel({
 
 export function App() {
   const auth = useSyncExternalStore(subscribeToAuth, getAuthSnapshot, getAuthSnapshot);
-  const [audit, setAudit] = useState<LoadedAudit>({
-    envelope: previewAudit,
-    source: "fixture",
-    fallbackReason:
-      "Deterministic showcase mode: this non-mutating regression fixture remains visible until a bounded live audit is run.",
-  });
+  const [audit, setAudit] = useState<LoadedAudit>(FIXTURE_AUDIT);
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [type, setType] = useState<FindingType | "all">("all");
   const [query, setQuery] = useState(AGENT_STACK_DATASET_URN);
@@ -1569,7 +1579,20 @@ export function App() {
     }
   };
 
+  const restoreFixturePreview = () => {
+    setAudit(FIXTURE_AUDIT);
+    setSelectedId(findingIdentity(previewAudit.report.findings[0]!));
+    setLiveError(undefined);
+  };
+
   const report = audit.envelope.report;
+  const auditedDatasetUrn =
+    audit.source === "live"
+      ? report.findings.find((finding) => finding.detail.blastRadius)?.detail
+          .blastRadius?.rootUrn ??
+        report.findings[0]?.subject ??
+        query
+      : query;
   const filtered = useMemo(
     () =>
       report.findings.filter(
@@ -1809,10 +1832,19 @@ export function App() {
         <header className="topbar flex-wrap sm:flex-nowrap">
           <form
             className="relative order-2 min-w-0 basis-full sm:order-1 sm:basis-auto sm:max-w-md sm:flex-1"
-            onSubmit={(event) => void runAudit(event)}
+            onSubmit={(event) => {
+              if (liveOrigin) {
+                event.preventDefault();
+                void runLiveAudit();
+                return;
+              }
+              void runAudit(event);
+            }}
           >
             <label className="sr-only" htmlFor="catalog-scope">
-              Canonical DataHub dataset URN
+              {audit.source === "live"
+                ? "Audited DataHub dataset URN"
+                : "Canonical DataHub dataset URN"}
             </label>
             <Icon
               className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
@@ -1822,14 +1854,21 @@ export function App() {
               className="w-full rounded-xl border border-white/[0.07] bg-white/[0.025] py-2.5 pl-10 pr-3 text-xs text-slate-200 outline-none transition placeholder:text-slate-400 focus:border-emerald-300/30 focus:bg-white/[0.04] focus:ring-2 focus:ring-emerald-300/[0.07]"
               id="catalog-scope"
               maxLength={256}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Scope by asset, domain, or platform"
+              onChange={(event) => {
+                if (!liveOrigin) setQuery(event.target.value);
+              }}
+              placeholder={
+                liveOrigin
+                  ? "Server-pinned read-only scope"
+                  : "Scope by asset, domain, or platform"
+              }
+              readOnly={liveOrigin}
               type="search"
-              value={query}
+              value={liveOrigin ? auditedDatasetUrn : query}
             />
           </form>
           <div className="order-1 flex w-full min-w-0 items-center justify-end gap-2 sm:order-2 sm:w-auto sm:shrink-0 sm:gap-3">
-            <AuthControl auth={auth} />
+            {!liveOrigin && <AuthControl auth={auth} />}
             <SourceBadge source={runtimeRun ? "live" : audit.source} />
             {!liveOrigin && (
               <button
@@ -1919,7 +1958,9 @@ export function App() {
                 <div>
                   <p className="text-xs font-semibold text-slate-100">Integrity posture</p>
                   <p className="mt-1 text-[11px] text-slate-400">
-                    {high > 0 ? `${high} high-priority controls need review` : "No high-priority controls"}
+                    {high > 0
+                      ? `${formatCount(high, "high-priority control")} ${high === 1 ? "needs" : "need"} review`
+                      : "No high-priority controls"}
                   </p>
                 </div>
               </div>
@@ -1942,20 +1983,31 @@ export function App() {
                       route. The report below is replaced only after the live source answers.
                     </p>
                   </div>
-                  <button
-                    aria-label="Run the live read-only audit"
-                    className="run-button shrink-0"
-                    disabled={liveRunning}
-                    id="public-live-audit"
-                    onClick={() => void runLiveAudit()}
-                    type="button"
-                  >
-                    <Icon
-                      className={liveRunning ? "size-4 animate-spin" : "size-4"}
-                      name={liveRunning ? "refresh" : "play"}
-                    />
-                    {liveRunning ? "Auditing…" : "Run live audit"}
-                  </button>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    {audit.source === "live" && (
+                      <button
+                        className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-semibold text-slate-300 transition hover:border-white/20 hover:text-white"
+                        onClick={restoreFixturePreview}
+                        type="button"
+                      >
+                        Return to fixture preview
+                      </button>
+                    )}
+                    <button
+                      aria-label="Run the live read-only audit"
+                      className="run-button shrink-0"
+                      disabled={liveRunning}
+                      id="public-live-audit"
+                      onClick={() => void runLiveAudit()}
+                      type="button"
+                    >
+                      <Icon
+                        className={liveRunning ? "size-4 animate-spin" : "size-4"}
+                        name={liveRunning ? "refresh" : "play"}
+                      />
+                      {liveRunning ? "Auditing…" : "Run live audit"}
+                    </button>
+                  </div>
                 </div>
                 {liveError && (
                   <p className="mt-3 text-[11px] leading-5 text-rose-300">{liveError}</p>
@@ -1964,7 +2016,7 @@ export function App() {
             )}
 
             <div aria-live="polite" className="mt-5">
-              {auth.status === "error" && (
+              {!liveOrigin && auth.status === "error" && (
                 <div className="mb-2 flex items-start gap-2 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.04] px-3 py-2 text-[11px] leading-5 text-cyan-100/80">
                   <Icon className="mt-0.5 size-3.5 shrink-0" name="shield" />
                   Approval authentication is fail-closed: {auth.message}
@@ -2012,9 +2064,12 @@ export function App() {
 
             <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <Metric
-                detail={`${Object.keys(report.classification.platforms).length} connected platforms`}
+                detail={formatCount(
+                  Object.keys(report.classification.platforms).length,
+                  "connected platform",
+                )}
                 icon="database"
-                label="Catalogued assets"
+                label={audit.source === "live" ? "Audited assets" : "Catalogued assets"}
                 value={report.classification.totalEntities.toLocaleString("en-US")}
               />
               <Metric
@@ -2031,9 +2086,12 @@ export function App() {
                 value={String(impacted).padStart(2, "0")}
               />
               <Metric
-                detail={`${report.classification.withLineage.toLocaleString("en-US")} assets with lineage`}
+                detail={`${formatCount(
+                  report.classification.withLineage,
+                  "asset",
+                )} with a lineage aspect`}
                 icon="graph"
-                label="Lineage mapped"
+                label="Lineage metadata"
                 value={`${lineageRate}%`}
               />
             </div>

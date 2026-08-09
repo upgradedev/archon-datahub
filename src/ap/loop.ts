@@ -38,6 +38,7 @@ import { ClassifierAgent } from "../agents/classifier.js";
 import { LineageAnalyzerAgent } from "../agents/lineage-analyzer.js";
 import { GovernanceAuditorAgent } from "../agents/governance-auditor.js";
 import type { Finding } from "../types.js";
+import { formatCount } from "../text/format-count.js";
 
 export type LoopStopReason = "emitted_findings" | "no_progress_fallback" | "max_steps_fallback";
 
@@ -211,7 +212,7 @@ export class AuditLoop {
         const found = this.lineage.analyze(facts);
         state.findings.push(...found);
         state.consistencyDone = true;
-        return `self-audit found ${found.length} contradiction/lineage finding(s)`;
+        return `self-audit found ${formatCount(found.length, "contradiction/lineage finding")}`;
       }
       case "run_governance_audit": {
         if (!state.harvested) return "cannot audit before harvest_catalog";
@@ -219,7 +220,7 @@ export class AuditLoop {
         const found = snapshot ? this.governance.audit(snapshot) : [];
         state.findings.push(...found);
         state.governanceDone = true;
-        return `governance audit found ${found.length} violation(s)`;
+        return `governance audit found ${formatCount(found.length, "violation")}`;
       }
       default:
         return `unknown tool ${name}`;

@@ -12,6 +12,7 @@
 // interface changes.
 
 import type { ChatCreateArgs, ChatResponse, LlmClient, ToolCall } from "./client.js";
+import { formatCount } from "../text/format-count.js";
 
 export const DETERMINISTIC_FIXTURE_MODEL =
   "archon-deterministic-fixture-narrator-v1";
@@ -66,9 +67,9 @@ function narrate(prompt: string): string {
     return "Metadata governance summary: the audited catalog is internally consistent — no cross-source contradictions, no dangling lineage edges, and no governance-policy violations were found. Read-only audit; no action required.";
   }
   return (
-    `Metadata governance summary: the self-audit surfaced ${total} finding(s) for steward review — ` +
-    `${contradictions} cross-source contradiction(s), ${gaps} lineage gap(s), and ${violations} ` +
-    `governance-policy violation(s). Contradictions indicate two metadata sources disagree on the ` +
+    `Metadata governance summary: the self-audit surfaced ${formatCount(total, "finding")} for steward review — ` +
+    `${formatCount(contradictions, "cross-source contradiction")}, ${formatCount(gaps, "lineage gap")}, and ` +
+    `${formatCount(violations, "governance-policy violation")}. Contradictions indicate two metadata sources disagree on the ` +
     `same entity and should be reconciled at the system of record; lineage gaps are declared upstreams ` +
     `that are not catalogued and risk silent schema breaks downstream; governance violations are ` +
     `ungoverned or unclassified assets. All findings are read-only recommendations — a steward decides.`
