@@ -601,8 +601,14 @@ describe("public live audit", () => {
     expect(screen.getByTestId("agent-stack-evidence-mode")).toHaveTextContent(
       "the browser just completed the bounded DataHub MCP audit",
     );
-    expect(screen.getByText("Live public proof")).toBeInTheDocument();
-    expect(screen.getAllByText("CI-verified boundary")).toHaveLength(1);
+    const agentStack = screen.getByTestId("agent-stack-panel");
+    expect(within(agentStack).getByText("Live public proof")).toBeInTheDocument();
+    expect(within(agentStack).getByText("CI-verified boundary")).toBeInTheDocument();
+    expect(within(agentStack).getAllByText("Protected CI")).toHaveLength(2);
+    expect(within(agentStack).queryByText("Pending")).not.toBeInTheDocument();
+    const modelProvenance = screen.getByTestId("model-provenance");
+    expect(modelProvenance).toHaveTextContent("live DataHub audit");
+    expect(modelProvenance).not.toHaveTextContent("fixture output");
     expect(
       screen.queryByText("Deterministic fixture evidence"),
     ).not.toBeInTheDocument();

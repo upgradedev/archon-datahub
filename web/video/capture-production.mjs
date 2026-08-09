@@ -75,7 +75,10 @@ await holdScene("hook", async () => {
 
 await holdScene("live", async () => {
   await page.getByRole("button", { name: "Run the live read-only audit" }).click();
-  await page.getByRole("status", { name: "Live DataHub" }).waitFor({ timeout: 60_000 });
+  await page
+    .getByRole("banner")
+    .getByRole("status", { name: "Live DataHub" })
+    .waitFor({ timeout: 60_000 });
   if (await page.getByText(/fixture preview/iu).isVisible().catch(() => false)) {
     throw new Error("The production audit remained in fixture mode.");
   }
