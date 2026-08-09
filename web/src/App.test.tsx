@@ -113,7 +113,7 @@ describe("Archon control plane", () => {
     expect(screen.getByText("Prioritise the real risk")).toBeInTheDocument();
     expect(screen.getByText("See downstream exposure")).toBeInTheDocument();
     expect(screen.getByText("Approve one exact fix")).toBeInTheDocument();
-    expect(screen.getByText("Fixture preview")).toBeInTheDocument();
+    expect(screen.getAllByText("Fixture preview")).toHaveLength(2);
     expect(screen.getByRole("heading", { name: "Integrity findings" })).toBeInTheDocument();
     expect(screen.getByText("5 results")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Blast radius" })).toBeInTheDocument();
@@ -621,7 +621,7 @@ describe("public live audit", () => {
     expect(
       await screen.findByText("DataHub GMS is unreachable"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Fixture preview")).toBeInTheDocument();
+    expect(screen.getAllByText("Fixture preview")).toHaveLength(2);
   });
 
   it("falls back to a plain message when the failure is not an Error", async () => {

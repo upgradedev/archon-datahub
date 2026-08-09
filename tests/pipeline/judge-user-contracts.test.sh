@@ -48,17 +48,15 @@ access_required = (
 testing_required = (
     "## Recommended quick path",
     "Select **Reject proposal**",
-    "## Optional governed-write journey",
-    "urn:li:dataset:(urn:li:dataPlatform:sqlite,archon_demo.customers,PROD)",
-    "field: `customer_email`",
-    "proposed tag: `urn:li:tag:PII`",
-    "Select **Approve exact plan**",
-    "Official DataHub MCP add_tags + post-write ACK and Analytics rerun verified.",
-    "ACK context · changed",
-    "Analytics result · changed",
+    "## Protected governed-write evidence",
+    "urn:li:dataset:(urn:li:dataPlatform:snowflake,omega_ledger_audit_target,PROD)",
+    "`customer_email` → `urn:li:tag:PII`",
+    "`governed-canary` binds exactly one reviewer event",
+    "official DataHub MCP `add_tags` tool",
+    "A direct, bounded read-back",
     "`governed-canary-recovery`",
-    "requires a fresh human approval",
-    "workflow automatically enters the rollback job",
+    "requires a fresh reviewer event",
+    "recovery uses the prepared evidence",
     "Archon does not mutate autonomously",
     "distinct, separately approved",
 )
@@ -99,10 +97,10 @@ except AssertionError as error:
 negative_cases = (
     ("single-group regression", access.replace(access_required[1], "authorization membership is exactly the approver group", 1), testing),
     ("numeric membership regression", access + "\nA zero-group proof is sufficient.\n", testing),
-    ("synthetic tag target removed", access, testing.replace("proposed tag: `urn:li:tag:PII`", "proposed tag: any", 1)),
+    ("synthetic tag target removed", access, testing.replace("`customer_email` → `urn:li:tag:PII`", "`customer_email` → any tag", 1)),
     ("autonomous mutation overclaim", access, testing.replace("Archon does not mutate autonomously", "Archon mutates without approval", 1)),
-    ("rollback approval removed", access, testing.replace("requires a fresh human approval", "automatically approves", 1)),
-    ("automatic rollback scheduling removed", access, testing.replace("workflow automatically enters the rollback job", "workflow may eventually consider cleanup", 1)),
+    ("rollback approval removed", access, testing.replace("requires a fresh reviewer event", "automatically approves", 1)),
+    ("prepared recovery removed", access, testing.replace("recovery uses the prepared evidence", "workflow may eventually consider cleanup", 1)),
 )
 for name, drifted_access, drifted_testing in negative_cases:
     if drifted_access == access and drifted_testing == testing:
