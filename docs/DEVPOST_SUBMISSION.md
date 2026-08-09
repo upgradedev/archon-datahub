@@ -19,11 +19,13 @@ Agents That Do Real Work
 
 ## Judge proof strip
 
-> **1 live OSS DataHub Core · 4 evidence-linked findings · 1 governed fix · verified
+**Track: Agents That Do Real Work**
+
+> **Proof strip:** 1 live OSS DataHub Core · 4 evidence-linked findings · 1 governed fix · verified
 > read-back and rollback · upstream PR #183**
 
-The wedge is simple: most agents trust the catalog; Archon proves the catalog can be trusted
-before allowing one reversible action.
+**The wedge:** Others trust the catalog; Archon proves it can be trusted before allowing one
+reversible action.
 
 **Judge shortcuts:** [live app](https://archon-datahub.web.app) ·
 [exact 2:41 demo](https://youtu.be/6iHvBr4Qr1s) ·
@@ -34,8 +36,8 @@ before allowing one reversible action.
 
 **Real DataHub write-back:** the public UI is deliberately read-only. Protected CI binds
 separate human approvals to the exact G6 `add_tags` plan, read-back, rollback and verified
-restoration. The linked governed-proof receipt demonstrates the mutation without exposing a
-public write credential.
+restoration. [Governed-proof run 31325511840](https://github.com/upgradedev/archon-datahub/actions/runs/31325511840)
+demonstrates the mutation without exposing a public write credential.
 
 ## Inspiration
 
@@ -194,6 +196,7 @@ and upstream PR #183. The cover is also the project thumbnail.
 - Public application and repository links open in a logged-out browser.
 - The repository About section visibly detects Apache-2.0.
 - Public YouTube/Vimeo/Youku video is under three minutes and shows the functioning product.
+- Custom 3:2 thumbnail and five captioned gallery images are publicly visible (six carousel slides including the video).
 - Description, testing instructions, built-with list, category and prior-work disclosure match
   this file.
 - Additional-info feedback answers remain saved.
