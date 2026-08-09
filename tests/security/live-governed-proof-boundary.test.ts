@@ -148,6 +148,8 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   assert.match(workflow, /--min-instances 0/u);
   assert.match(workflow, /--max-instances 1/u);
   assert.doesNotMatch(workflow, /--no-cpu-throttling/u);
+  assert.match(workflow, /--env-vars-file "\$\{env_file\}"/u);
+  assert.doesNotMatch(workflow, /--set-env-vars/u);
   assert.match(
     workflow,
     /ghcr\.io\/zaproxy\/zaproxy@sha256:[a-f0-9]{64}/u
@@ -155,4 +157,9 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   assert.match(workflow, /zap-baseline\.py/u);
   assert.match(workflow, /select\(\(\.riskcode \| tonumber\) >= 2\)/u);
   assert.match(workflow, /hosted-demo-dast-\$\{\{ github\.sha \}\}/u);
+  assert.match(workflow, /id: dast/u);
+  assert.match(
+    workflow,
+    /if: always\(\) && steps\.dast\.outcome != 'skipped'/u
+  );
 });
