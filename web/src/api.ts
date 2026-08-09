@@ -683,6 +683,23 @@ export async function requestAudit(query = "", signal?: AbortSignal): Promise<Au
   return parseAuditEnvelope(await jsonResponse(response));
 }
 
+/** Run the server-pinned public demo scope without accepting a browser-supplied target. */
+export async function requestConfiguredDemoAudit(
+  signal?: AbortSignal,
+): Promise<AuditEnvelope> {
+  const response = await fetch(AUDIT_PATH, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+    signal,
+  });
+  return parseAuditEnvelope(await jsonResponse(response));
+}
+
 export async function startControlLoop(
   query = "",
   signal?: AbortSignal,

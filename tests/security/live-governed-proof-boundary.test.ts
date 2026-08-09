@@ -26,6 +26,7 @@ const hostedWorkflowPath = new URL(
   "../../.github/workflows/hosted-demo.yml",
   import.meta.url
 );
+const firebaseConfigPath = new URL("../../firebase.json", import.meta.url);
 
 test("live governed proof keeps public HTTP read-only and requires two human gates", async () => {
   const [workflow, server, tunnel] = await Promise.all([
@@ -142,7 +143,10 @@ test("approval parsing binds the exact run, operation, plan, environment, and re
 });
 
 test("hosted release is cost bounded and sealed by post-deploy DAST", async () => {
-  const workflow = await readFile(hostedWorkflowPath, "utf8");
+  const [workflow, firebaseConfig] = await Promise.all([
+    readFile(hostedWorkflowPath, "utf8"),
+    readFile(firebaseConfigPath, "utf8"),
+  ]);
 
   assert.match(workflow, /--cpu-throttling/u);
   assert.match(workflow, /--min-instances 0/u);
@@ -155,6 +159,9 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
     /ghcr\.io\/zaproxy\/zaproxy@sha256:[a-f0-9]{64}/u
   );
   assert.match(workflow, /zap-baseline\.py/u);
+  assert.match(workflow, /zap_status=0/u);
+  assert.match(workflow, /test "\$\{zap_status\}" -le 2/u);
+  assert.match(workflow, /test -s "\$\{report_dir\}\/zap-report\.json"/u);
   assert.match(workflow, /select\(\(\.riskcode \| tonumber\) >= 2\)/u);
   assert.match(workflow, /hosted-demo-dast-\$\{\{ github\.sha \}\}/u);
   assert.match(workflow, /id: dast/u);
@@ -162,4 +169,43 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
     workflow,
     /if: always\(\) && steps\.dast\.outcome != 'skipped'/u
   );
+  for (const header of [
+    "Content-Security-Policy",
+    "Cross-Origin-Embedder-Policy",
+    "Cross-Origin-Opener-Policy",
+    "Cross-Origin-Resource-Policy",
+    "Permissions-Policy",
+    "Referrer-Policy",
+    "X-Content-Type-Options",
+    "X-Frame-Options",
+  ]) {
+    assert.ok(
+      firebaseConfig.includes(`"key": "${header}"`),
+      `Firebase hosting must emit ${header}`
+    );
+  }
+  assert.match(firebaseConfig, /frame-ancestors 'none'/u);
+  assert.match(firebaseConfig, /object-src 'none'/u);
+  assert.doesNotMatch(firebaseConfig, /unsafe-inline/u);
+});
+
+test("governed proof pins one exact uv runtime without cross-job caches", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+
+  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 3);
+  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 3);
+});
+
+test("governed proof uses the reviewed DataHub MCP lock in every phase", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  assert.equal(
+    [...workflow.matchAll(/name: Materialize the exact locked DataHub MCP runtime/gu)].length,
+    3
+  );
+  assert.equal(
+    [...workflow.matchAll(/scripts\/materialize-datahub-mcp-lock\.sh/gu)].length,
+    3
+  );
+  assert.equal([...workflow.matchAll(/DATAHUB_MCP_COMMAND=uv/gu)].length, 3);
+  assert.equal([...workflow.matchAll(/--frozen --no-sync --no-dev mcp-server-datahub/gu)].length, 3);
 });
