@@ -26,6 +26,7 @@ const hostedWorkflowPath = new URL(
   "../../.github/workflows/hosted-demo.yml",
   import.meta.url
 );
+const firebaseConfigPath = new URL("../../firebase.json", import.meta.url);
 
 test("live governed proof keeps public HTTP read-only and requires two human gates", async () => {
   const [workflow, server, tunnel] = await Promise.all([
@@ -142,7 +143,10 @@ test("approval parsing binds the exact run, operation, plan, environment, and re
 });
 
 test("hosted release is cost bounded and sealed by post-deploy DAST", async () => {
-  const workflow = await readFile(hostedWorkflowPath, "utf8");
+  const [workflow, firebaseConfig] = await Promise.all([
+    readFile(hostedWorkflowPath, "utf8"),
+    readFile(firebaseConfigPath, "utf8"),
+  ]);
 
   assert.match(workflow, /--cpu-throttling/u);
   assert.match(workflow, /--min-instances 0/u);
@@ -165,4 +169,18 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
     workflow,
     /if: always\(\) && steps\.dast\.outcome != 'skipped'/u
   );
+  for (const header of [
+    "Content-Security-Policy",
+    "Cross-Origin-Embedder-Policy",
+    "Cross-Origin-Opener-Policy",
+    "Cross-Origin-Resource-Policy",
+    "Permissions-Policy",
+    "Referrer-Policy",
+    "X-Content-Type-Options",
+    "X-Frame-Options",
+  ]) {
+    assert.match(firebaseConfig, new RegExp(`\\"key\\": \\"${header}\\"`, "u"));
+  }
+  assert.match(firebaseConfig, /frame-ancestors 'none'/u);
+  assert.match(firebaseConfig, /object-src 'none'/u);
 });
