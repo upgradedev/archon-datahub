@@ -2,8 +2,9 @@
 
 Final evidence review: 2026-08-09. This scorecard counts only evidence that a judge can
 reproduce from the public application, repository, or retained GitHub Actions runs. The
-submitted application is frozen at `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1`; the later
-default-branch commit adds only the hourly availability monitor. Scores are readiness
+submitted application is frozen at `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1`; later
+default-branch commits add only the hourly availability monitor and documentation truth
+alignment. Scores are readiness
 assessments against the published criteria, not predictions of judge discretion.
 
 ## Executive score
