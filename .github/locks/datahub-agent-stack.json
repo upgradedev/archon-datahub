@@ -14,8 +14,8 @@
       "version": "0.6.0",
       "delegatedLock": {
         "path": ".github/locks/datahub-mcp-v0.6.0.json",
-        "size": 6145,
-        "sha256": "2e71959e6430e1d62ddfe532401ac16ff65f260f1f2b48acf087ce05e970f5f9"
+        "size": 6292,
+        "sha256": "51c575a5d988d404507e98ae7ed6349dc5f92f34fd461d9c53c900d9f647a8c1"
       },
       "license": "Apache-2.0"
     },
