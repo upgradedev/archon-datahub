@@ -17,12 +17,13 @@ The project is submitted and publicly testable. The authoritative evidence is:
   sealed in Actions with no local media retained;
 - [live application](https://archon-datahub.web.app),
   [public repository](https://github.com/upgradedev/archon-datahub),
-  existing valid [public 2:41 video](https://youtu.be/iB1mVoUqgRU), and submitted
+  exact-release [public 2:41 video](https://youtu.be/6iHvBr4Qr1s), and submitted
   [Devpost entry](https://devpost.com/software/archon-for-datahub).
 
-The refreshed exact-release video is prepared but is not claimed as public. Replacing the
-existing valid public video requires an explicitly owner-authorized YouTube upload. The
-original `datahub-hackathon-2026-submission` tag remains immutable historical provenance;
+The refreshed exact-release video is public and embedded in the Devpost entry. Its CI receipt
+records 161.48 seconds, 1920×1080, eight scenes and MP4 SHA-256
+`73d1cad7bf045ce459c3d2e50aa391b04ceccc903507c03129bd385b2bae0d95`.
+The original `datahub-hackathon-2026-submission` tag remains immutable historical provenance;
 later documentation or monitoring commits on the default branch do not change the deployed
 application, whose `/readyz` response reports the exact release above.
 
@@ -38,8 +39,8 @@ implemented reference architecture, not the deployed submission path and not a
 judge-readiness blocker. The active demo is Firebase Hosting, Cloud Run Direct
 VPC egress and one private OSS DataHub Core host.
 
-The remaining external obligations are operational: keep the public project
-available through judging, optionally publish the prepared refreshed video after owner
-authorization, and continue upstream maintainer follow-up for
-[PR #183](https://github.com/acryldata/mcp-server-datahub/pull/183). An optional
-public post is not a submission requirement.
+The remaining external obligations are operational: keep the public project and exact-release
+video available through judging, and continue upstream maintainer follow-up for
+[PR #183](https://github.com/acryldata/mcp-server-datahub/pull/183). All author-requested
+changes are implemented on that PR; maintainer re-review is the only external dependency. An
+optional public post is not a submission requirement.
