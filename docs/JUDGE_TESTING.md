@@ -65,20 +65,20 @@ short-lived workload identity and two GitHub protected environments.
    action catalog and plan digests all verify. No mutation occurs in this job.
 3. `governed-canary` binds exactly one reviewer event and exact approval comment
    to the run ID, attempt, `write` operation and plan digest before OIDC is issued.
-4. The official DataHub MCP `add_tags` tool changes only that field. A direct,
-   bounded read-back must match the approved post-state before the write receipt
+4. The official DataHub MCP `add_tags` tool changes only that field. A direct, bounded read-back
+   must match the approved post-state before the write receipt
    and rollback proposal can be sealed.
 5. `governed-canary-recovery` requires a fresh reviewer event bound to the same
    plan and the `rollback` operation. It removes only the canonical PII tag and
    verifies the exact pre-state digest.
-6. If the forward job cannot publish its receipt after changing state, recovery
-   uses the prepared evidence and proceeds only when current state equals exactly
+6. If the forward job cannot publish its receipt after changing state, recovery uses the prepared evidence
+   and proceeds only when current state equals exactly
    the approved pre-state or post-state. The final receipt says `restored` or
    `already-baseline`; every other state fails closed.
 
 Archon does not mutate autonomously: the write cannot start without explicit
-steward approval of the exact plan, and the inverse uses distinct, separately
-approved authority. On the public URL the only available decision is
+steward approval of the exact plan, and the inverse uses distinct, separately approved authority.
+On the public URL the only available decision is
 **Reject proposal**.
 
 ## What the recommended path demonstrates
