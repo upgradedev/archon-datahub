@@ -65,12 +65,14 @@ WORKDIR /opt/archon/companion
 RUN <<'PYTHON_RUNTIME'
 set -eu
 rm -rf /usr/local/lib/python3.11/site-packages
+rm -rf /usr/local/lib/python3.11/ensurepip
 mkdir -p /usr/local/lib/python3.11/site-packages
 rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11 /usr/local/bin/wheel
 test -x /usr/local/bin/python3.11
 /usr/local/bin/python3.11 --version
 test -z "$(ls -A /usr/local/lib/python3.11/site-packages)"
-/usr/local/bin/python3.11 -c 'import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ("pip", "setuptools", "wheel"))'
+/usr/local/bin/python3.11 -c 'import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ("ensurepip", "pip", "setuptools", "wheel"))'
+test ! -e /usr/local/lib/python3.11/ensurepip
 test ! -e /usr/local/bin/pip
 test ! -e /usr/local/bin/pip3
 test ! -e /usr/local/bin/pip3.11

@@ -1,12 +1,12 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image-setuptools/v1",
+  "@id": "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image/v2",
   "author": "https://github.com/upgradedev/archon-datahub",
   "role": "Document Creator",
-  "timestamp": "2026-08-02T00:00:00Z",
-  "last_updated": "2026-08-02T00:00:00Z",
-  "version": 1,
-  "x-archon-expires-at": "2026-09-02T23:59:59Z",
+  "timestamp": "2026-08-09T18:16:00Z",
+  "last_updated": "2026-08-09T18:16:00Z",
+  "version": 2,
+  "x-archon-expires-at": "2026-09-08T18:16:00Z",
   "statements": [
     {
       "vulnerability": {
@@ -25,6 +25,37 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The advisory affects MANIFEST.in exclusion while creating source distributions on macOS APFS/HFS+. This Linux runtime is installed exclusively from the reviewed frozen wheel graph with uv sync --no-build; source distribution creation is absent from the image execution path."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-6v7p-g79w-8964",
+        "name": "GHSA-6v7p-g79w-8964"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/msgpack@1.1.2"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but msgpack is absent from the final importable runtime package paths. Every image workflow bound to this statement proves its exact runtime paths before the VEX-backed security gate can pass."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://github.com/advisories/GHSA-5rjg-fvgr-3xxf",
+        "name": "CVE-2025-47273",
+        "aliases": [
+          "https://nvd.nist.gov/vuln/detail/CVE-2025-47273"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/setuptools@70.3.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "component_not_present",
+      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but setuptools 70.3.0 is absent from the final importable runtime package paths. Every bound image workflow verifies that the only runtime setuptools distribution is the separately reviewed 81.0.0 graph before the VEX-backed security gate can pass."
     }
   ]
 }
