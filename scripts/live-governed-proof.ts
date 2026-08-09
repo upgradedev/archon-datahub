@@ -132,8 +132,9 @@ async function verifiedApprover(
 async function prepare(store: FileEvidenceStore): Promise<void> {
   const query = required("ARCHON_DEMO_QUERY", 512);
   const executionId = `live-proof-${required("GITHUB_RUN_ID", 32)}-${required("GITHUB_RUN_ATTEMPT", 8)}`;
+  const dataHub = await createDataHubClient();
   const service = new AuditWorkerService({
-    dataHub: await createDataHubClient(),
+    dataHub,
     tagReader: reader(),
     evidence: store,
     releaseSha: required("GITHUB_SHA", 40),
@@ -153,7 +154,7 @@ async function prepare(store: FileEvidenceStore): Promise<void> {
       query,
       mode: "GOVERNED",
     },
-  });
+  }).finally(async () => dataHub.close?.());
   if (!result.requiresApproval || !result.approvalId || !result.planDigest) {
     throw new Error("Live audit did not produce one actionable G6 remediation.");
   }

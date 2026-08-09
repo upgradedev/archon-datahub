@@ -134,6 +134,14 @@ export class LiveDataHubMcpClient implements DataHubClient {
     this.client = new Client({ name: "archon-datahub", version: "0.2.0" }, { capabilities: {} });
   }
 
+  async close(): Promise<void> {
+    try {
+      await this.client.close();
+    } finally {
+      this.connected = false;
+    }
+  }
+
   private async connect(): Promise<void> {
     if (this.connected) return;
     const httpUrl = httpMcpUrl();
