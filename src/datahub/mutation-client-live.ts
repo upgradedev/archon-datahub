@@ -431,9 +431,8 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
       fail("CONNECTION_FAILED", "DataHub mutation connection is not initialized.");
     }
 
-    let result: unknown;
     try {
-      result = await client.callTool(
+      const result = await client.callTool(
         { name: tool, arguments: args },
         undefined,
         {
@@ -441,24 +440,29 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
           timeout: options?.timeoutMs ?? 120_000,
         }
       );
-    } catch {
-      await this.#invalidateConnection();
+      const successfulResponse = parseSuccessfulResponse(result);
+      // Bind the receipt to the typed port request that the control loop approved. The
+      // operation itself is bound separately by the signed remediation plan and the fact that
+      // this client exposes distinct addTags/removeTags methods (never a caller-supplied name).
+      const approvedRequest = {
+        tagUrns: [...args.tag_urns],
+        entityUrns: [...args.entity_urns],
+        ...(args.column_paths === undefined
+          ? {}
+          : { columnPaths: [...args.column_paths] }),
+      };
+      return {
+        requestDigest: digest(approvedRequest),
+        responseDigest: digest(successfulResponse),
+      };
+    } catch (error) {
+      if (error instanceof DataHubMutationError) throw error;
       fail("MCP_ERROR", "DataHub mutation failed closed during the MCP tool call.");
+    } finally {
+      // A governed action is deliberately one-shot. Releasing its privileged transport here
+      // bounds authority to that action and prevents a successful stdio MCP child from keeping
+      // a CI proof process alive after its verified read-back has completed.
+      await this.#invalidateConnection();
     }
-    const successfulResponse = parseSuccessfulResponse(result);
-    // Bind the receipt to the typed port request that the control loop approved. The
-    // operation itself is bound separately by the signed remediation plan and the fact that
-    // this client exposes distinct addTags/removeTags methods (never a caller-supplied name).
-    const approvedRequest = {
-      tagUrns: [...args.tag_urns],
-      entityUrns: [...args.entity_urns],
-      ...(args.column_paths === undefined
-        ? {}
-        : { columnPaths: [...args.column_paths] }),
-    };
-    return {
-      requestDigest: digest(approvedRequest),
-      responseDigest: digest(successfulResponse),
-    };
   }
 }
