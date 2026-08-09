@@ -38,7 +38,7 @@
       ],
       "status": "not_affected",
       "justification": "component_not_present",
-      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but msgpack is absent from the final merged global site-packages and from both sealed application virtual environments. CI proves those exact runtime paths before accepting this statement."
+      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but msgpack is absent from the final importable runtime package paths. Every image workflow bound to this statement proves its exact runtime paths before the VEX-backed security gate can pass."
     },
     {
       "vulnerability": {
@@ -55,7 +55,7 @@
       ],
       "status": "not_affected",
       "justification": "component_not_present",
-      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but setuptools 70.3.0 is absent from the final merged filesystem. Both sealed virtual environments contain the separately reviewed setuptools 81.0.0 graph, and CI verifies the exact versions and paths before accepting this statement."
+      "impact_statement": "Trivy retains package metadata from an inherited Python image layer, but setuptools 70.3.0 is absent from the final importable runtime package paths. Every bound image workflow verifies that the only runtime setuptools distribution is the separately reviewed 81.0.0 graph before the VEX-backed security gate can pass."
     }
   ]
 }

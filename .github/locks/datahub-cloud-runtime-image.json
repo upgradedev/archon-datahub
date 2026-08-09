@@ -56,7 +56,7 @@
     },
     "imageOpenVex": {
       "path": ".github/security/datahub-companion-image.openvex.json",
-      "blobSha": "14463cbc4ac498035187deae2bee7489103dee80"
+      "blobSha": "7ac34caaab633a0a5c2965711ec8790e46d75ceb"
     }
   },
   "officialSkills": {
@@ -74,7 +74,7 @@
   "sourceBlobs": [
     {
       "path": ".github/workflows/datahub-cloud-runtime-image.yml",
-      "blobSha": "a02ec2758cc6c87912ff33ddcb23aba4e997379a"
+      "blobSha": "1b9f99da431efbfac54f58781279e8f8e241185a"
     },
     {
       "path": "services/datahub-cloud-runtime/Dockerfile",
