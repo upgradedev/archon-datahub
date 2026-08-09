@@ -106,8 +106,10 @@ Devpost entry and include the UTC time of the attempt.
 ## Optional repository review
 
 The public repository link in the Devpost entry opens the maintained default
-branch. The exact submitted application snapshot remains available in the
-[datahub-hackathon-2026-submission release](https://github.com/upgradedev/archon-datahub/releases/tag/datahub-hackathon-2026-submission).
+branch. The exact final judge application snapshot remains available in the
+[datahub-hackathon-2026-final release](https://github.com/upgradedev/archon-datahub/releases/tag/datahub-hackathon-2026-final).
+The original `datahub-hackathon-2026-submission` release remains immutable
+historical provenance.
 Reviewers can inspect the architecture, tests, infrastructure as code, CI/CD
 security gates, and the clearly labelled synthetic judge-evidence pack. The
 upstream contribution to the official DataHub MCP server is in

@@ -2,17 +2,17 @@
 
 Final evidence review: 2026-08-09. This scorecard counts only evidence that a judge can
 reproduce from the public application, repository, or retained GitHub Actions runs. The
-original submitted application is frozen at `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1`;
-later default-branch commits may add reviewed judge-experience polish as well as the hourly
-availability monitor and documentation truth alignment. A later hosted release counts only
-after its exact CI, deploy, live-DataHub, browser and DAST receipts are green. Scores are readiness
-assessments against the published criteria, not predictions of judge discretion.
+original submission tag remains frozen as historical provenance. The final judge application
+release is `7cf2ab063312c2bf06fd2d65c798e802f7070a37`; later default-branch commits may update
+monitoring or documentation without changing that deployed application. This release counts
+because its exact CI, deploy, live-DataHub, browser and DAST receipts are green. Scores are
+readiness assessments against the published criteria, not predictions of judge discretion.
 
 ## Executive score
 
 | View | Final evidence-backed readiness | Decision |
 | --- | ---: | --- |
-| official six-criterion judge score | **9.35/10** | all release gates passed on one exact application SHA; this remains an internal readiness assessment |
+| official six-criterion judge score | **9.30/10** | all application gates passed on one exact SHA; the refreshed public-video replacement remains owner-gated |
 | narrow-ICP customer score | **9.0/10** | trial-ready for the stated catalog-integrity job, not a general catalog administrator |
 | active-slice architecture quality | **9.3/10** | clean authority and evidence boundaries; the single-zone demo host is the main residual risk |
 
@@ -29,10 +29,10 @@ reviewer-bound GitHub environments.
 | Technical execution | 9.3 | exact-SHA CI, measured combined coverage ≥85%, hosted deploy, DAST, live e2e and governed receipts |
 | Originality | 9.6 | ingestion-registry source identity recovers contradictions from retained aspect history |
 | Real-world usefulness | 9.3 | contradiction, lineage blast radius and governance findings become one approval-ready action |
-| Submission quality | 9.4 | public 2:42 production capture, completed Devpost entry and logged-out rehearsal |
+| Submission quality | 9.1 | valid public 2:41 capture and completed Devpost entry; refreshed exact-release capture is sealed but not yet public |
 | OSS bonus | 8.8 | focused, tested upstream PR #183 has addressed maintainer feedback; acceptance is outside entrant control |
 
-Evidence-based readiness average: **9.35/10**. This is not a prediction of a judge's
+Evidence-based readiness average: **9.30/10**. This is not a prediction of a judge's
 discretionary score.
 
 ## Multi-persona review
@@ -71,12 +71,15 @@ Archon reconciles conflicting evidence, computes impact, and prepares one govern
 3. **Governed action:** protected environment one binds one exact reviewer event to the
    plan digest; read-back proves the PII tag; protected environment two separately approves
    rollback; read-back proves exact restoration.
-4. **Submission:** the video is generated from that same release SHA by CI, is publicly
-   hosted and shorter than three minutes; Devpost copy and testing instructions are rehearsed
-   logged out.
+4. **Submission:** CI generated and sealed a 2:41 video from that same release SHA. The
+   existing public 2:41 video keeps the submission eligible; replacing it with the refreshed
+   capture remains an explicitly owner-authorized public upload. Devpost copy and testing
+   instructions are rehearsed logged out.
 5. **Judging window:** availability is monitored; the low-cost DataHub host remains available
    through judging and is stopped afterwards.
 
-Gates 1–4 are complete, and the hourly public-release monitor is active. A customer-production
-claim would additionally require deployment-specific SLOs, restore testing, rate limiting and
-data-protection review; those are intentionally outside this hackathon's narrow product scope.
+Application gates 1–3 and the exact-release video build are complete. The hourly public-release
+monitor is active; the only gate-4 improvement still open is the optional refreshed public-video
+replacement. A customer-production claim would additionally require deployment-specific SLOs,
+restore testing, rate limiting and data-protection review; those are intentionally outside this
+hackathon's narrow product scope.
