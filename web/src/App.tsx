@@ -1451,7 +1451,7 @@ export function App() {
     envelope: previewAudit,
     source: "fixture",
     fallbackReason:
-      "Deterministic showcase mode: this regression fixture is non-mutating. The live DataHub Agent Stack is shown in its dedicated panel.",
+      "Deterministic showcase mode: this non-mutating regression fixture remains visible until a bounded live audit is run.",
   });
   const [severity, setSeverity] = useState<Severity | "all">("all");
   const [type, setType] = useState<FindingType | "all">("all");
@@ -1472,6 +1472,7 @@ export function App() {
   const [readiness, setReadiness] = useState<RuntimeReadiness>();
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveError, setLiveError] = useState<string>();
+  const liveOrigin = readiness?.datahubMode === "live";
 
   useEffect(() => {
     void initializeAuthentication();
@@ -1771,30 +1772,32 @@ export function App() {
           <div className="order-1 flex w-full min-w-0 items-center justify-end gap-2 sm:order-2 sm:w-auto sm:shrink-0 sm:gap-3">
             <AuthControl auth={auth} />
             <SourceBadge source={runtimeRun ? "live" : audit.source} />
-            <button
-              aria-label={loading ? "Header Agent Stack in progress" : runtimeRun ? "Run Agent Stack again from header" : "Run Agent Stack from header"}
-              className="run-button"
-              disabled={
-                loading ||
-                runtimeRunActive ||
-                query !== AGENT_STACK_DATASET_URN ||
-                question !== AGENT_STACK_QUESTION ||
-                runtimeSession?.canRun !== true ||
-                auth.status !== "authenticated"
-              }
-              id="judge-tour-run-audit"
-              onClick={() => void runAudit()}
-              title={RUN_DISABLED_HINT}
-              type="button"
-            >
-              <Icon
-                className={loading ? "size-4 animate-spin" : "size-4"}
-                name={loading ? "refresh" : runtimeRun ? "refresh" : "play"}
-              />
-              <span className="hidden sm:inline">
-                {loading ? "Running…" : runtimeRun ? "Run again" : "Run Agent Stack"}
-              </span>
-            </button>
+            {!liveOrigin && (
+              <button
+                aria-label={loading ? "Header Agent Stack in progress" : runtimeRun ? "Run Agent Stack again from header" : "Run Agent Stack from header"}
+                className="run-button"
+                disabled={
+                  loading ||
+                  runtimeRunActive ||
+                  query !== AGENT_STACK_DATASET_URN ||
+                  question !== AGENT_STACK_QUESTION ||
+                  runtimeSession?.canRun !== true ||
+                  auth.status !== "authenticated"
+                }
+                id="judge-tour-run-audit"
+                onClick={() => void runAudit()}
+                title={RUN_DISABLED_HINT}
+                type="button"
+              >
+                <Icon
+                  className={loading ? "size-4 animate-spin" : "size-4"}
+                  name={loading ? "refresh" : runtimeRun ? "refresh" : "play"}
+                />
+                <span className="hidden sm:inline">
+                  {loading ? "Running…" : runtimeRun ? "Run again" : "Run Agent Stack"}
+                </span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -1802,19 +1805,27 @@ export function App() {
           <section aria-labelledby="overview-title" id="overview">
             <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
               <div className="max-w-3xl">
-                <p className="eyebrow">DataHub context graph integrity</p>
+                <p className="eyebrow">DataHub decision intelligence</p>
                 <h1
                   className="mt-3 text-3xl font-semibold leading-[1.1] tracking-[-0.045em] text-white sm:text-4xl"
                   id="overview-title"
                 >
-                  Know when your catalog
-                  <span className="text-gradient"> stops telling one truth.</span>
+                  Stop governance failures
+                  <span className="text-gradient"> before they become business incidents.</span>
                 </h1>
                 <p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400">
-                  Archon detects governance regressions and cross-source contradictions, traces
-                  their downstream blast radius, then prepares evidence-bound remediation for a
-                  human steward.
+                  Archon asks DataHub one bounded question, reconciles conflicting sources,
+                  traces every affected asset, and returns an approval-ready fix with evidence,
+                  human control, and rollback.
                 </p>
+                <ul
+                  aria-label="Business outcomes"
+                  className="mt-4 flex flex-wrap gap-2 text-[10px] font-medium text-slate-300"
+                >
+                  <li className="rounded-full border border-emerald-300/15 bg-emerald-300/[0.04] px-3 py-1.5">Prioritise the real risk</li>
+                  <li className="rounded-full border border-emerald-300/15 bg-emerald-300/[0.04] px-3 py-1.5">See downstream exposure</li>
+                  <li className="rounded-full border border-emerald-300/15 bg-emerald-300/[0.04] px-3 py-1.5">Approve one exact fix</li>
+                </ul>
               </div>
               <div className="score-card">
                 <div
@@ -1854,6 +1865,44 @@ export function App() {
                 </div>
               </div>
             </div>
+
+            {liveOrigin && (
+              <section
+                aria-labelledby="live-audit-title"
+                className="panel mt-6 overflow-hidden border-emerald-300/15 p-4 sm:p-5"
+                id="judge-tour-run-audit"
+              >
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-3xl">
+                    <p className="eyebrow">Live judge experience · DataHub Core v1.6</p>
+                    <h2 className="section-title" id="live-audit-title">
+                      Audit a real DataHub catalog now
+                    </h2>
+                    <p className="mt-2 text-[11px] leading-5 text-slate-400 sm:text-xs">
+                      One pinned dataset, read-only access, no sign-in, and no public mutation
+                      route. The report below is replaced only after the live source answers.
+                    </p>
+                  </div>
+                  <button
+                    aria-label="Run the live read-only audit"
+                    className="run-button shrink-0"
+                    disabled={liveRunning}
+                    id="public-live-audit"
+                    onClick={() => void runLiveAudit()}
+                    type="button"
+                  >
+                    <Icon
+                      className={liveRunning ? "size-4 animate-spin" : "size-4"}
+                      name={liveRunning ? "refresh" : "play"}
+                    />
+                    {liveRunning ? "Auditing…" : "Run live audit"}
+                  </button>
+                </div>
+                {liveError && (
+                  <p className="mt-3 text-[11px] leading-5 text-rose-300">{liveError}</p>
+                )}
+              </section>
+            )}
 
             <div aria-live="polite" className="mt-5">
               {auth.status === "error" && (
@@ -1931,14 +1980,16 @@ export function App() {
             </div>
           </section>
 
-          <RuntimeControl
-            getAccessToken={
-              auth.status === "authenticated" ? getAccessToken : undefined
-            }
-            onSessionChange={setRuntimeSession}
-          />
+          {!liveOrigin && (
+            <>
+              <RuntimeControl
+                getAccessToken={
+                  auth.status === "authenticated" ? getAccessToken : undefined
+                }
+                onSessionChange={setRuntimeSession}
+              />
 
-          <section aria-labelledby="agent-input-title" className="panel mt-6 p-4">
+              <section aria-labelledby="agent-input-title" className="panel mt-6 p-4">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-end">
               <div className="min-w-0 flex-1">
                 <p className="eyebrow">Deterministic judge inputs</p>
@@ -1994,36 +2045,9 @@ export function App() {
               executing against DataHub Core v1.6.0, and the README documents how to run it
               against your own instance.
             </p>
-            {readiness?.datahubMode === "live" && (
-              <div className="mt-4 rounded-xl border border-emerald-300/20 bg-emerald-300/[0.04] p-3">
-                <p className="text-[11px] leading-5 text-slate-300">
-                  <span className="font-semibold text-emerald-200">
-                    This origin is bound to a live DataHub.
-                  </span>{" "}
-                  Running the read-only audit replaces the fixture below with the report it
-                  produces. It needs no sign-in because the endpoint accepts one pinned query
-                  and exposes no write route.
-                </p>
-                <button
-                  aria-label="Run the live read-only audit"
-                  className="run-button mt-3"
-                  disabled={liveRunning}
-                  id="public-live-audit"
-                  onClick={() => void runLiveAudit()}
-                  type="button"
-                >
-                  <Icon
-                    className={liveRunning ? "size-4 animate-spin" : "size-4"}
-                    name={liveRunning ? "refresh" : "play"}
-                  />
-                  {liveRunning ? "Auditing…" : "Run live audit"}
-                </button>
-                {liveError && (
-                  <p className="mt-2 text-[11px] leading-5 text-rose-300">{liveError}</p>
-                )}
-              </div>
-            )}
-          </section>
+              </section>
+            </>
+          )}
 
           <AgentStackPanel
             authStatus={auth.status}

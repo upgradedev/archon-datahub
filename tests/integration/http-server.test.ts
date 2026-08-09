@@ -8,15 +8,23 @@ import {
 } from "../../src/datahub/mcp-client.js";
 import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 import { DataHubHarvestError } from "../../src/datahub/harvest-policy.js";
+import {
+  DataHubRuntimeReadinessProbe,
+  type RuntimeReadinessProbe,
+} from "../../src/application/runtime-readiness.js";
 
 async function withServer(
   run: (baseUrl: string) => Promise<void>,
   datahub: DataHubClient = new FakeDataHubMcpClient(),
-  demoQuery?: string
+  demoQuery?: string,
+  readiness: RuntimeReadinessProbe = new DataHubRuntimeReadinessProbe(datahub, {
+    mode: "fixture",
+  })
 ): Promise<void> {
   const server = createArchonHttpServer({
     datahub,
     pipeline: new AuditPipeline(),
+    readiness,
     releaseSha: "test-sha",
     ...(demoQuery === undefined ? {} : { demoQuery }),
   });
@@ -38,7 +46,68 @@ test("HTTP health contract is small, secured, and release-bound", async () => {
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
     assert.equal(response.headers.get("cache-control"), "no-store");
     assert.deepEqual(await response.json(), { status: "ok", releaseSha: "test-sha" });
+
+    const readiness = await fetch(`${baseUrl}/readyz`);
+    assert.equal(readiness.status, 200);
+    assert.deepEqual(await readiness.json(), {
+      status: "ready",
+      datahubMode: "fixture",
+      releaseSha: "test-sha",
+    });
   });
+});
+
+test("live readiness proves the exact DataHub scope and fails closed", async () => {
+  class UnreachableClient extends FakeDataHubMcpClient {
+    override async search(): Promise<never> {
+      throw new Error("secret provider detail");
+    }
+  }
+  const datahub = new UnreachableClient();
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/readyz`);
+      assert.equal(response.status, 503);
+      const body = await response.text();
+      assert.deepEqual(JSON.parse(body), {
+        status: "unavailable",
+        datahubMode: "live",
+        reason: "provider_unreachable",
+        releaseSha: "test-sha",
+      });
+      assert.doesNotMatch(body, /secret provider detail/u);
+    },
+    datahub,
+    "sales",
+    new DataHubRuntimeReadinessProbe(datahub, {
+      mode: "live",
+      demoQuery: "sales",
+      cacheTtlMs: 0,
+    })
+  );
+});
+
+test("live readiness rejects a public query that is not exactly one dataset", async () => {
+  class AmbiguousClient extends FakeDataHubMcpClient {
+    override async search(): Promise<string[]> {
+      return ["urn:one", "urn:two"];
+    }
+  }
+  const datahub = new AmbiguousClient();
+  await withServer(
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/readyz`);
+      assert.equal(response.status, 503);
+      assert.equal((await response.json() as { reason: string }).reason, "scope_not_exact");
+    },
+    datahub,
+    "sales",
+    new DataHubRuntimeReadinessProbe(datahub, {
+      mode: "live",
+      demoQuery: "sales",
+      cacheTtlMs: 0,
+    })
+  );
 });
 
 for (const code of ["SEARCH_LIMIT_EXCEEDED", "SCHEMA_LIMIT_EXCEEDED"] as const) {

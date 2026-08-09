@@ -345,6 +345,48 @@ test("live construction never falls back to read credentials and keeps the serve
   }
 });
 
+test("the unauthenticated synthetic demo profile accepts only a loopback GMS origin", async () => {
+  const saved = {
+    writeToken: process.env.DATAHUB_WRITE_GMS_TOKEN,
+    writeMcp: process.env.DATAHUB_WRITE_MCP_URL,
+    writeGms: process.env.DATAHUB_WRITE_GMS_URL,
+  };
+  delete process.env.DATAHUB_WRITE_GMS_TOKEN;
+  delete process.env.DATAHUB_WRITE_MCP_URL;
+
+  try {
+    for (const endpoint of [
+      "http://10.132.0.10:8080",
+      "http://datahub.internal:8080",
+      "https://datahub.example:8080",
+    ]) {
+      process.env.DATAHUB_WRITE_GMS_URL = endpoint;
+      const client = new LiveDataHubMutationClient(undefined, {
+        loopbackDemo: "SYNTHETIC_DEMO_ONLY",
+      });
+      await assert.rejects(
+        client.addTags({
+          tagUrns: ["urn:li:tag:PII"],
+          entityUrns: ["urn:li:dataset:test"],
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof DataHubMutationError);
+          assert.equal(error.code, "INVALID_REQUEST");
+          return true;
+        }
+      );
+    }
+  } finally {
+    const restore = (name: string, value: string | undefined): void => {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    };
+    restore("DATAHUB_WRITE_GMS_TOKEN", saved.writeToken);
+    restore("DATAHUB_WRITE_MCP_URL", saved.writeMcp);
+    restore("DATAHUB_WRITE_GMS_URL", saved.writeGms);
+  }
+});
+
 test("invalid column targeting is rejected before MCP discovery or mutation", async () => {
   const fixture = await connect(
     [mutationTool("add_tags"), mutationTool("remove_tags")],

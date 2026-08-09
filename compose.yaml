@@ -1,0 +1,60 @@
+name: archon-datahub
+
+x-archon-image: &archon-image
+  image: archon-datahub-local:${ARCHON_IMAGE_TAG:-dev}
+  build:
+    context: .
+    dockerfile: services/datahub-hosted-api/Dockerfile
+    args:
+      ARCHON_RELEASE_SHA: ${ARCHON_RELEASE_SHA:-local}
+
+x-runtime-hardening: &runtime-hardening
+  read_only: true
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
+services:
+  api:
+    <<: [*archon-image, *runtime-hardening]
+    environment:
+      ARCHON_DEMO_QUERY: ${ARCHON_DEMO_QUERY:?Set ARCHON_DEMO_QUERY to one exact dataset query in .env}
+      DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:?Set DATAHUB_GMS_URL to the HTTPS DataHub GMS origin in .env}
+      DATAHUB_GMS_TOKEN: ${DATAHUB_GMS_TOKEN:?Set DATAHUB_GMS_TOKEN to a least-privilege read token in .env}
+    ports:
+      - 127.0.0.1:${ARCHON_PORT:-8080}:8080
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8080/readyz').then(async r=>{const b=await
+          r.json();if(!r.ok||b.status!=='ready'||b.datahubMode!=='live')process.exit(1)})
+          .catch(()=>process.exit(1))
+      interval: 3s
+      timeout: 5s
+      start_period: 15s
+      retries: 20
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  doctor:
+    <<: [*archon-image, *runtime-hardening]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      ARCHON_API_URL: http://api:8080
+      ARCHON_DATAHUB_GMS_URL: ${DATAHUB_GMS_URL:?Set DATAHUB_GMS_URL to the HTTPS DataHub GMS origin in .env}
+      ARCHON_DEMO_QUERY: ${ARCHON_DEMO_QUERY:?Set ARCHON_DEMO_QUERY to one exact dataset query in .env}
+    command:
+      - node
+      - dist/onboarding/doctor.js
+    healthcheck:
+      disable: true
+    restart: "no"

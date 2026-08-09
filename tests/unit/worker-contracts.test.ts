@@ -717,6 +717,30 @@ test("direct GMS projection uses the exact one-URN two-aspect batchGet contract"
   assert.deepEqual(projection.tags, ["urn:li:tag:PII"]);
 });
 
+test("synthetic tag reads are restricted to an explicit loopback-only profile", () => {
+  for (const gmsUrl of [
+    "http://10.132.0.10:8080",
+    "http://datahub.internal:8080",
+    "https://datahub.example",
+  ]) {
+    assert.throws(
+      () =>
+        new DirectGmsTagProjectionReader({
+          gmsUrl,
+          loopbackDemo: "SYNTHETIC_DEMO_ONLY",
+        }),
+      /loopback-only/u
+    );
+  }
+  assert.doesNotThrow(
+    () =>
+      new DirectGmsTagProjectionReader({
+        gmsUrl: "http://127.0.0.1:18080",
+        loopbackDemo: "SYNTHETIC_DEMO_ONLY",
+      })
+  );
+});
+
 test("an active remediation journal lease gets a bounded recovery delay", () => {
   const leaseConflict = new RemediationError(
     "EXECUTION_IN_PROGRESS",

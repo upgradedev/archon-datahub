@@ -160,6 +160,12 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Verify every exact npm override
         run: node scripts/verify-exact-npm-overrides.mjs .
+      - name: Validate customer Compose contract
+        env:
+          DATAHUB_GMS_URL: https://datahub.example.test
+          DATAHUB_GMS_TOKEN: static-ci-placeholder
+          ARCHON_DEMO_QUERY: urn:li:dataset:(urn:li:dataPlatform:snowflake,example,PROD)
+        run: docker compose config --quiet
       - name: Typecheck
         run: npm run typecheck
       - name: Production build

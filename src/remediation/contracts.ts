@@ -222,6 +222,37 @@ export interface RollbackProposalV1 {
   digest: Sha256Digest;
 }
 
+export interface RollbackApprovalV1 {
+  schemaVersion: "archon.rollback-approval/v1";
+  proposalDigest: Sha256Digest;
+  decision: "APPROVE" | "REJECT";
+  approver: AuthenticatedApprover;
+  decidedAt: string;
+  digest: Sha256Digest;
+}
+
+export type RollbackOutcome =
+  | "VERIFIED"
+  | "REJECTED"
+  | "STALE"
+  | "INDETERMINATE"
+  | "VERIFICATION_FAILED";
+
+export interface RollbackReceiptV1 {
+  schemaVersion: "archon.rollback-receipt/v1";
+  rollbackId: string;
+  proposalDigest: Sha256Digest;
+  approvalDigest: Sha256Digest;
+  originalReceiptDigest: Sha256Digest;
+  outcome: RollbackOutcome;
+  before?: TagProjection;
+  after?: TagProjection;
+  mutation?: MutationAck;
+  startedAt: string;
+  completedAt: string;
+  digest: Sha256Digest;
+}
+
 export interface TagProjectionReader {
   readTagProjection(target: {
     entityUrn: string;
@@ -231,6 +262,14 @@ export interface TagProjectionReader {
 
 export interface DataHubTagMutationPort {
   addTags(input: {
+    tagUrns: readonly string[];
+    entityUrns: readonly string[];
+    columnPaths?: readonly (string | null)[];
+  }): Promise<MutationAck>;
+}
+
+export interface DataHubTagRollbackPort {
+  removeTags(input: {
     tagUrns: readonly string[];
     entityUrns: readonly string[];
     columnPaths?: readonly (string | null)[];

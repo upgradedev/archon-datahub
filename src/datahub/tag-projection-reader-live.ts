@@ -17,7 +17,8 @@ export class TagProjectionReadError extends Error {
 
 interface DirectTagProjectionReaderOptions {
   gmsUrl: string;
-  token: string;
+  token?: string;
+  loopbackDemo?: "SYNTHETIC_DEMO_ONLY";
   fetchFn?: typeof fetch;
   requestTimeoutMs?: number;
 }
@@ -174,14 +175,34 @@ export class DirectGmsTagProjectionReader implements TagProjectionReader {
     } catch {
       fail("INVALID_CONFIGURATION", "The read GMS URL is invalid.");
     }
-    if (parsed.protocol !== "https:") {
+    const loopbackDemo = options.loopbackDemo === "SYNTHETIC_DEMO_ONLY";
+    const isLoopback =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      parsed.hostname === "[::1]";
+    if (loopbackDemo) {
+      if (
+        parsed.protocol !== "http:" ||
+        !isLoopback ||
+        parsed.username ||
+        parsed.password ||
+        (parsed.pathname !== "/" && parsed.pathname !== "") ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        fail(
+          "INVALID_CONFIGURATION",
+          "The synthetic demo reader must use a loopback-only HTTP endpoint."
+        );
+      }
+    } else if (parsed.protocol !== "https:") {
       fail("INVALID_CONFIGURATION", "The read GMS URL must use HTTPS.");
     }
-    if (!options.token.trim()) {
+    if (!loopbackDemo && !options.token?.trim()) {
       fail("INVALID_CONFIGURATION", "A distinct read token is required.");
     }
     this.#gmsUrl = parsed.toString();
-    this.#token = options.token;
+    this.#token = options.token?.trim() ?? "";
     this.#fetch = options.fetchFn ?? fetch;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     if (
@@ -209,7 +230,7 @@ export class DirectGmsTagProjectionReader implements TagProjectionReader {
       method: "POST",
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${this.#token}`,
+        ...(this.#token ? { Authorization: `Bearer ${this.#token}` } : {}),
         "Content-Type": "application/json",
       },
       body: JSON.stringify([

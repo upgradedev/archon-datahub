@@ -134,19 +134,22 @@ Two conditions are non-negotiable:
 1. **History must actually be retained.** Archon does not assume unlimited history. A
    current-only response cannot prove a displaced value, and a truncated or malformed
    history is an error rather than “no contradiction.”
-2. **A run is not a source.** DataHub's [`SystemMetadata` schema][system-metadata]
-   defines `runId` as the original batch-ingestion run and `pipelineName` as the ingestion
-   pipeline ID. DataHub's [ingestion stamping code][source-helpers] assigns
-   `ctx.run_id` to `runId` and `ctx.pipeline_name` to `pipelineName`.
+2. **A run is not a source, and `pipelineName` is not reliable live identity.** DataHub's
+   [`SystemMetadata` schema][system-metadata] defines `runId` as the original batch-ingestion
+   run and `pipelineName` as the ingestion pipeline ID. DataHub's [ingestion stamping
+   code][source-helpers] assigns `ctx.run_id` and `ctx.pipeline_name`, but DataHub Core 1.6
+   was measured to retain the first `pipelineName` across two independent ingestion recipes.
+   The ingestion registry remains discriminating: each `dataHubExecutionRequest` ID equals
+   the aspect `runId` and belongs to its stable ingestion source.
 
 Consequently:
 
-- two different `runId` values from one `pipelineName` are successive executions of the
-  **same source**; a changed value is drift, not a cross-source contradiction;
-- two different, non-empty stable `pipelineName` values may establish independent source
-  provenance;
-- a trusted run-to-source resolution may be supplied for older history that predates
-  `pipelineName`;
+- two `runId` values resolved by the registry to the **same source** are successive
+  executions; a changed value is drift, not a cross-source contradiction;
+- two `runId` values resolved to different registry sources may establish independent
+  provenance even when their retained `pipelineName` is identical;
+- a trusted run-to-source resolution outranks `pipelineName`; the latter remains conservative
+  fallback evidence only when no mapping exists;
 - unresolved provenance collapses to `unknown-source` and cannot trigger a confirmed
   cross-source finding.
 

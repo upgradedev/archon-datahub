@@ -12,14 +12,19 @@ comparison with DataHub Analytics Agent or another vendor product.
 
 The seven DataHub-shaped cases cover:
 
-- owner and schema conflicts between distinct stable `pipelineName` identities;
-- older history whose run ids are resolved through an explicit trusted source map;
-- two runs of one stable pipeline, which must remain ordinary drift;
+- synthetic fallback cases with distinct `pipelineName` values (this tests the mapper, not
+  the live identity proof);
+- history whose run IDs are resolved through a trusted source map, matching the live
+  ingestion-registry contract;
+- two runs resolved to one stable source, which must remain ordinary drift;
 - unresolved provenance, which must fail closed;
 - two sources that agree on the value; and
 - a single write with no evidence to compare.
 
-The current-view boundary sees only the highest retained version of each aspect. Archon
+In DataHub Core 1.6, `pipelineName` was measured to remain sticky across independent
+ingestion recipes, so the hosted flagship never relies on those synthetic fallback cases:
+it resolves each `runId` through the ingestion registry first. The current-view boundary
+sees only the highest retained version of each aspect. Archon
 sees all retained versions. Both paths use the production audit engine; the only controlled
 difference is the evidence made available to it.
 
