@@ -314,6 +314,30 @@ jobs:
           sarif_file: ${{ runner.temp }}/datahub-companion-image.sarif
           category: trivy-datahub-companion-image
 
+      - name: Report exact actionable package locations
+        if: steps.image_policy.outcome != 'success'
+        run: |
+          set -euo pipefail
+          for interpreter in \
+            /opt/archon/companion/.venv/bin/python \
+            /opt/archon/mcp/.venv/bin/python
+          do
+            docker run --rm --network none "${IMAGE_REF}" "${interpreter}" - <<'PY'
+          import importlib.metadata
+
+          for package in ("msgpack", "setuptools"):
+              try:
+                  distribution = importlib.metadata.distribution(package)
+              except importlib.metadata.PackageNotFoundError:
+                  print(f"{package}: absent")
+              else:
+                  print(
+                      f"{package}: version={distribution.version} "
+                      f"path={distribution.locate_file('')}"
+                  )
+          PY
+          done
+
       - name: Generate SBOMs and immutable provenance
         env:
           BUILD_DIGEST: ${{ steps.image.outputs.digest }}
