@@ -3,8 +3,8 @@
   "@id": "https://github.com/upgradedev/archon-datahub/security/vex/datahub-mcp-v0.6.0/setuptools-81.0.0/CVE-2026-59890",
   "author": "https://github.com/upgradedev/archon-datahub",
   "role": "Document Creator",
-  "timestamp": "2026-07-23T11:30:00Z",
-  "version": 1,
+  "timestamp": "2026-08-09T09:00:00Z",
+  "version": 2,
   "statements": [
     {
       "vulnerability": {

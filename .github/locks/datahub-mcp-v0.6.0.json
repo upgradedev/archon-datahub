@@ -86,9 +86,9 @@
     "schemaVersion": "archon.openvex-policy/v1",
     "vex": {
       "path": ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json",
-      "sha256": "9432452a9fd4b602ec6509b059d7e45d5fd48cfa3ccb3fcbdfa561451d3b8dbc",
-      "issuedAt": "2026-07-23T11:30:00Z",
-      "expiresAt": "2026-08-22T11:30:00Z",
+      "sha256": "cf32a6b9b62a2a56f002acd7a0f8721c701c389855cc2626381bb2438987cc48",
+      "issuedAt": "2026-08-09T09:00:00Z",
+      "expiresAt": "2026-09-08T09:00:00Z",
       "maxValidityDays": 30
     },
     "canonicalId": "CVE-2026-59890",

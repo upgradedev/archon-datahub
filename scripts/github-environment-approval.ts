@@ -44,7 +44,7 @@ function exactObject(
 export function verifiedApproverFromReceipt(
   value: unknown,
   expected: ExpectedGitHubApproval
-): AuthenticatedApprover {
+): AuthenticatedApprover & { roles: ["DataSteward"] } {
   const receipt = exactObject(
     value,
     [

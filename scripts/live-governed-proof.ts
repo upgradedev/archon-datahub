@@ -116,7 +116,7 @@ async function verifiedApprover(
   store: FileEvidenceStore,
   operation: ApprovalOperation,
   planDigest: string
-): Promise<AuthenticatedApprover> {
+): Promise<AuthenticatedApprover & { roles: ["DataSteward"] }> {
   const receipt = await readCanonical<unknown>(store.path(`approval-${operation}.json`));
   return verifiedApproverFromReceipt(receipt, {
     repository: required("GITHUB_REPOSITORY", 128),
