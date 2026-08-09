@@ -37,8 +37,16 @@ integrity pass. The step-by-step judge route is in
 
 > ### What is deployed, and what is not
 >
-> **Deployed:** the URL above. It is a Firebase-hosted single-page app running a
-> deterministic showcase fixture. It talks to no backend and mutates nothing.
+> **Deployed:** Firebase Hosting serves the React application and proxies its
+> allowlisted read routes to `archon-datahub-api` on Cloud Run. The API has no
+> write credential and reaches one private DataHub Core 1.6 catalog through a
+> serverless VPC connector. Judges can run the bounded live audit without an
+> account; the deterministic fixture remains an explicitly labelled fallback.
+>
+> **Protected proof:** a separate GitHub OIDC identity can execute only the exact
+> synthetic G6 plan after a protected-environment approval, prove read-after-write,
+> then require a second approval for exact rollback and restoration. This is not a
+> public mutation API and no write credential is present in the browser or Cloud Run.
 >
 > **Not deployed:** the AWS design described later in this README, under
 > [Hosted AWS reference architecture](#hosted-aws-reference-architecture). Route 53,
@@ -48,8 +56,7 @@ integrity pass. The step-by-step judge route is in
 > sign in to. Wherever this README describes that stack in the present tense, read it as
 > design intent rather than a live system.
 >
-> **Real, and reproducible by you:** the live DataHub path. It is not hosted, but it works.
-> Run it on your own machine against your own instance with
+> **Reproducible:** the same read path can be run against your own DataHub with
 > [Run locally](#run-locally-without-external-services) and
 > [Connect a real DataHub](#connect-a-real-datahub).
 
@@ -142,40 +149,36 @@ catalog itself.**
 
 ## System design
 
-The diagram below is the **target AWS architecture**, not the running demo. It is not
-deployed. The live demo at https://archon-datahub.web.app is the SPA alone, hosted on
-Firebase, replaying a deterministic fixture with no backend behind it.
+The active release is deliberately small and low-cost. Public reads and governed writes
+use different identities and execution paths; neither path requires Kubernetes or EKS.
 
 ```mermaid
 flowchart LR
-  J["Judge browser"] --> CF["CloudFront + private S3 SPA"]
-  CF --> API["WAF + API Gateway"]
-  API --> AUTH["Cognito PKCE and role gates"]
-  API --> CONTROL["Lambda control plane"]
-  CONTROL --> SESSION["DynamoDB session and approval CAS"]
-  SESSION --> ROUTER{"Automatic runtime selection"}
-  ROUTER -->|"Cloud READY"| CLOUD["Three digest-pinned DataHub Cloud Lambdas"]
-  ROUTER -->|"Core launchable or visible override"| CORE["Zero-idle DataHub Core sandbox"]
-  CORE --> SFN["Step Functions lifecycle"]
-  SFN --> ASG["Single EC2 ASG, desired 0 or 1"]
-  CLOUD --> DH["DataHub metadata graph"]
-  ASG --> DH
-  CONTROL --> EVIDENCE["Evidence, approval, mutation, reset receipts"]
+  J["Judge browser"] --> FB["Firebase Hosting · immutable SPA"]
+  FB --> API["Cloud Run · read-only adapter"]
+  API --> VPC["Serverless VPC connector"]
+  VPC --> DH["Private DataHub Core 1.6"]
+  CI["GitHub Actions · exact release"] --> G1["Approval 1 · exact write digest"]
+  G1 --> WR["Dedicated writer · one G6 tag"]
+  WR --> DH
+  WR --> VERIFY["Read-after-write receipt"]
+  VERIFY --> G2["Approval 2 · exact rollback digest"]
+  G2 --> RESTORE["Rollback + restoration receipt"]
+  CI --> TESTS["Unit · integration · SAST · SCA · OWASP ZAP · e2e · coverage"]
 ```
 
-The judge application exposes both automatic selection and an explicit profile switch.
-It chooses DataHub Cloud only while its health and capability digest are current; otherwise
-it offers the launchable Core sandbox. A session binds one immutable profile generation,
-so failover never changes the evidence source underneath an approval.
+DataHub Cloud remains a supported runtime profile in the agent-stack contracts, but the
+submission does not depend on a trial staying active. The public demo uses the pinned Core
+catalog; the historical AWS runtime selector is retained only as a non-deployed reference.
 
 The same flagship flow covers all four challenge technologies:
 
 | DataHub technology | Material use |
 | --- | --- |
-| MCP Server | Search, entity, lineage, quality and narrowly approved tag mutation |
-| Agent Context Kit | Provenance-bearing context envelope consumed by the custom agent |
-| DataHub Skills | Pinned `search -> lineage -> quality -> enrich` workflow with receipts |
-| Analytics Agent | Grounded SQL, chart, context-quality and `/improve-context` proposal |
+| MCP Server | Live public bounded reads; protected exact tag write and rollback proof |
+| Agent Context Kit | Provenance-bearing envelope exercised in the governed CI journey |
+| DataHub Skills | Pinned `search -> lineage -> quality -> audit -> enrich` receipts |
+| Analytics Agent | Grounded SQL/chart/context-quality output and proposal-only `/improve-context` |
 
 ## Run locally without external services
 
@@ -365,6 +368,12 @@ Deployment is three stacks per stage:
 
 ## Pipeline-only security and CI/CD
 
+The active release reviews all six Well-Architected pillars and Agentic AI Lens concerns in
+[docs/WELL_ARCHITECTED_REVIEW.md](docs/WELL_ARCHITECTED_REVIEW.md), EU AI Act Articles
+10/13/14/15/50 in [docs/EU_AI_ACT_REVIEW.md](docs/EU_AI_ACT_REVIEW.md), and GDPR readiness
+in [docs/GDPR_REVIEW.md](docs/GDPR_REVIEW.md). These are evidence-backed engineering
+reviews, not automatic legal-compliance claims.
+
 Security evidence is produced only by GitHub-hosted CI/CD. No local build, scanner output,
 Codex Security result, or mutable image tag is accepted as release evidence.
 
@@ -405,15 +414,15 @@ artifacts.
 
 ## Current delivery status
 
-**What is actually running today:** one thing, https://archon-datahub.web.app. It is the
-React SPA built from this repository, hosted on Firebase, serving a deterministic showcase
-fixture with no backend and no login. That is the whole live footprint.
+**What is running today:** https://archon-datahub.web.app serves the exact CI-built React
+SPA from Firebase. Its public live-audit control calls a read-only Cloud Run adapter, which
+queries one private DataHub Core 1.6 dataset and returns a freshly allowlisted projection.
+The deterministic fixture is still available and visibly labelled; it is never represented
+as live evidence.
 
-**What is real but not hosted:** the live DataHub path. Archon has been run against a real
-DataHub Core v1.6.0 instance, and cross-source contradiction detection fires on a real
-catalog. Reproduce it locally with [Connect a real DataHub](#connect-a-real-datahub). It
-needs DataHub 1.6 specifically, because `mcp-server-datahub@0.6.0` is not compatible with
-1.5.
+**What is protected rather than public:** the exact G6 write, verification, rollback and
+restoration proof. GitHub environments and distinct short-lived OIDC identities keep both
+approvals and mutation authority out of the anonymous application.
 
 **What is not deployed:** the entire AWS stack. No CloudFront distribution, no Cognito user
 pool, no API Gateway, no Lambdas, no Step Functions, no EC2 sandbox, no DNS. The CDK is
@@ -421,9 +430,9 @@ built, tested and synthesised in CI, and that is as far as it has gone. DataHub 
 credentials, protected-environment variables, the AMI build and production promotion are all
 untaken operational steps.
 
-The repository contains the complete dual-runtime source contracts, CI/CD workflows,
-zero-idle Core lifecycle, DataHub Cloud image runtime, four-component agent path, judge
-identity and explicit/automatic runtime-selection UI contract.
+The repository contains the four-component agent path, the low-cost hosted read slice,
+the protected governed proof, customer Compose quickstart, and pipeline-only security and
+quality evidence. No EKS cluster or always-on managed DataHub deployment is required.
 
 ## Prior-work disclosure
 

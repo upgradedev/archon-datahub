@@ -1135,6 +1135,7 @@ function DigestPill({ label, value }: { label: string; value?: string }) {
 
 type AgentStackPanelProps = {
   status?: RuntimeControlLoopStatus;
+  publicAuditSource: LoadedAudit["source"];
   authStatus: AuthSnapshot["status"];
   busy: boolean;
   rerunPiiProof: boolean;
@@ -1144,6 +1145,7 @@ type AgentStackPanelProps = {
 
 function AgentStackPanel({
   status,
+  publicAuditSource,
   authStatus,
   busy,
   rerunPiiProof,
@@ -1199,7 +1201,7 @@ function AgentStackPanel({
         <div>
           <p className="eyebrow">Closed-loop DataHub context flywheel</p>
           <h2 className="section-title" id="agent-stack-title">
-            DataHub Agent Stack · live, receipt-bound execution
+            DataHub Agent Stack · one governed context loop
           </h2>
           <p className="mt-2 max-w-3xl text-[11px] leading-5 text-slate-400">
             MCP reads feed Agent Context Kit; five pinned Skills ground the Analytics Agent;
@@ -1216,11 +1218,26 @@ function AgentStackPanel({
             </span>
           )}
           <span className={`status-pill ${status ? "status-success" : "status-neutral"}`}>
-            {status ? `${status.status} · ${status.phase}` : "Awaiting live run"}
+            {status
+              ? `${status.status} · ${status.phase}`
+              : publicAuditSource === "live"
+                ? "MCP live · full stack CI-verified"
+                : "Four components implemented"}
           </span>
           <DigestPill label="run" value={status?.runtimeEvidence.digest} />
         </div>
       </div>
+
+      {!status && (
+        <p
+          className="border-b border-white/[0.06] bg-cyan-300/[0.025] px-4 py-3 text-[10px] leading-5 text-cyan-50/80"
+          data-testid="agent-stack-evidence-mode"
+        >
+          {publicAuditSource === "live"
+            ? "Public proof: the browser just completed the bounded DataHub MCP audit shown on this page. Agent Context Kit, the five DataHub Skills, Analytics Agent, and the human-approved write/rollback path are implemented and exercised by protected CI; they are not exposed with write credentials on this anonymous route."
+            : "The anonymous preview is non-mutating. The repository and protected CI exercise MCP, Agent Context Kit, five DataHub Skills, Analytics Agent, and the separately approved write/rollback path."}
+        </p>
+      )}
 
       <div aria-live="polite" className="grid gap-4 p-4 lg:grid-cols-2 xl:grid-cols-4">
         <article className="rounded-xl border border-white/[0.06] bg-white/[0.018] p-4">
@@ -1229,8 +1246,13 @@ function AgentStackPanel({
           <p className="mt-2 text-[11px] leading-5 text-slate-400">
             {contextReceipts.length > 0
               ? `${contextReceipts.length} sanitized tool receipts returned by the ACK SDK.`
-              : "Search, entities, schema, lineage and quality receipts will appear here."}
+              : publicAuditSource === "live"
+                ? "Live bounded search, entity, lineage, quality and retained-history reads produced the audit below."
+                : "Search, entities, schema, lineage and quality receipts will appear here."}
           </p>
+          {!status && publicAuditSource === "live" && (
+            <span className="status-pill status-success mt-3">Live public proof</span>
+          )}
           <div className="mt-3 flex flex-wrap gap-1.5">
             {contextReceipts.slice(0, 8).map((receipt, index) => {
               const projected = jsonRecord(receipt);
@@ -1250,8 +1272,9 @@ function AgentStackPanel({
           <p className="mt-2 text-[11px] leading-5 text-slate-400">
             {entityUrns.length > 0
               ? `${entityUrns.length} canonical dataset URN${entityUrns.length === 1 ? "" : "s"} selected.`
-              : "Unknown stays unknown until a canonical dataset is resolved."}
+              : "Provenance envelope and unknown-preservation are verified in the governed CI journey."}
           </p>
+          {!status && <span className="status-pill status-neutral mt-3">CI-verified boundary</span>}
           {entityUrns.slice(0, 3).map((urn) => (
             <p className="mt-2 break-all font-mono text-[9px] leading-4 text-cyan-100/80" key={urn}>
               {urn}
@@ -1275,6 +1298,7 @@ function AgentStackPanel({
               </li>
             ))}
           </ol>
+          {!status && <span className="status-pill status-neutral mt-3">CI-verified workflow</span>}
           <DigestPill label="skills" value={jsonText(result?.skills.digest)} />
         </article>
 
@@ -1290,8 +1314,12 @@ function AgentStackPanel({
             </span>
           </div>
           <p className="mt-2 text-[10px] leading-4 text-slate-400">
-            {jsonText(quality?.reason) ?? `${analyticsEvents.length} bounded streaming events`}
+            {jsonText(quality?.reason) ??
+              (status
+                ? `${analyticsEvents.length} bounded streaming events`
+                : "Grounded SQL, chart trace and context-quality output are verified in protected CI.")}
           </p>
+          {!status && <span className="status-pill status-neutral mt-3">CI-verified agent</span>}
           <div className="mt-3 flex flex-wrap gap-1.5">
             {analyticsEvents.map((event, index) => {
               const projected = jsonRecord(event);
@@ -2056,6 +2084,7 @@ export function App() {
             onImprove={() => void requestImproveProposal()}
             rerunPiiProof={rerunPiiProof}
             status={runtimeRun}
+            publicAuditSource={audit.source}
           />
 
           <div className="mt-6">
@@ -2074,7 +2103,7 @@ export function App() {
                   <h2 className="section-title mt-0" id="findings-title">
                     Integrity findings
                   </h2>
-                  <span className="source-badge source-fixture">Deterministic fixture evidence</span>
+                  <SourceBadge source={audit.source} />
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">

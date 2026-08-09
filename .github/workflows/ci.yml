@@ -289,6 +289,47 @@ jobs:
           retention-days: 90
           overwrite: true
 
+  combined-coverage:
+    name: Combined application coverage at least 85 percent
+    needs: [build-test, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download core coverage evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: ${{ runner.temp }}/coverage/core
+      - name: Download web coverage evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-coverage-${{ github.sha }}
+          path: ${{ runner.temp }}/coverage/web
+      - name: Enforce measured combined coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          const root = process.env.RUNNER_TEMP;
+          const summaries = [
+            join(root, "coverage/core/coverage-summary.json"),
+            join(root, "coverage/web/coverage-summary.json"),
+          ].map((path) => JSON.parse(readFileSync(path, "utf8")).total);
+          for (const metric of ["statements", "functions", "lines"]) {
+            const covered = summaries.reduce((sum, item) => sum + item[metric].covered, 0);
+            const total = summaries.reduce((sum, item) => sum + item[metric].total, 0);
+            const percentage = total === 0 ? 0 : (covered * 100) / total;
+            console.log(`MEASURED combined ${metric}=${percentage.toFixed(2)}% (${covered}/${total})`);
+            if (percentage < 85) {
+              throw new Error(`Combined ${metric} coverage ${percentage.toFixed(2)}% is below 85%`);
+            }
+          }
+          console.log("PASS combined application coverage is at least 85%");
+          NODE
+
   infra-lock-candidate:
     name: Generate and validate reviewed lock candidates
     if: github.event_name == 'pull_request'

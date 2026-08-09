@@ -79,16 +79,19 @@ layers. New infrastructure is rejected unless it is required by an acceptance ga
 - Prefer deletion or quarantine of dead submission machinery after the active path is green;
   do not perform a big-bang rewrite while the live proof is unavailable.
 
-## External deployment prerequisite
+## Deployed state
 
-Repository Actions policy currently blocks the hosted workflow before job creation. The
-minimal owner-approved change is to allow only these action families while retaining mandatory
-full-SHA pinning:
-
-- `google-github-actions/auth@*`
-- `google-github-actions/setup-gcloud@*`
-
-No broader `verified_allowed` or `github_owned_allowed` relaxation is required.
+- Firebase Hosting serves the immutable SPA and proxies only `/healthz`, `/readyz`, and the
+  bounded audit API to Cloud Run.
+- Cloud Run has no write credential and reaches the private DataHub Core VM through the
+  serverless VPC connector.
+- The public audit proves the DataHub MCP-backed read path. Agent Context Kit, five DataHub
+  Skills, Analytics Agent, and `/improve-context` are implemented in the protected governed
+  path; the anonymous UI labels that distinction explicitly.
+- A separate workload-identity principal runs the exact G6 canary. Write and rollback each
+  require their own digest-bound protected-environment approval.
+- The repository Actions allowlist retains full-SHA action pinning; no broad third-party
+  Actions permission was introduced.
 
 ## Architecture and compliance reviews
 

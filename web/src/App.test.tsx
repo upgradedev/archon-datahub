@@ -598,6 +598,14 @@ describe("public live audit", () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText("Live DataHub").length).toBeGreaterThan(0);
     });
+    expect(screen.getByTestId("agent-stack-evidence-mode")).toHaveTextContent(
+      "the browser just completed the bounded DataHub MCP audit",
+    );
+    expect(screen.getByText("Live public proof")).toBeInTheDocument();
+    expect(screen.getAllByText("CI-verified boundary")).toHaveLength(1);
+    expect(
+      screen.queryByText("Deterministic fixture evidence"),
+    ).not.toBeInTheDocument();
   });
 
   it("reports why a live audit failed and keeps the visible report labelled", async () => {
