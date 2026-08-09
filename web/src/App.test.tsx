@@ -108,8 +108,11 @@ describe("Archon control plane", () => {
     render(<App />);
 
     expect(
-      screen.getByRole("heading", { name: /know when your catalog/i }),
+      screen.getByRole("heading", { name: /stop governance failures/i }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Prioritise the real risk")).toBeInTheDocument();
+    expect(screen.getByText("See downstream exposure")).toBeInTheDocument();
+    expect(screen.getByText("Approve one exact fix")).toBeInTheDocument();
     expect(screen.getByText("Fixture preview")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Integrity findings" })).toBeInTheDocument();
     expect(screen.getByText("5 results")).toBeInTheDocument();
@@ -580,6 +583,13 @@ describe("public live audit", () => {
 
     const run = await screen.findByRole("button", { name: LIVE_RUN });
     expect(run).toBeEnabled();
+    expect(
+      screen.getByRole("heading", { name: "Audit a real DataHub catalog now" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Pinned Cloud runtime ready")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Run the canonical Agent Stack journey" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(run);
 
     await waitFor(() => {

@@ -1,5 +1,9 @@
 # Architecture and decision record
 
+> **Active implementation authority:** [ACTIVE_ARCHITECTURE.md](ACTIVE_ARCHITECTURE.md).
+> The AWS judge runtime below is retained as a non-deployed reference experiment and is not
+> part of the supported product, deployment, or customer path.
+
 Archon audits the DataHub metadata context graph and closes one controlled
 context-improvement loop. DataHub is not the application database: it is the
 cross-platform metadata, lineage and governance plane above warehouses,
@@ -26,19 +30,21 @@ receipt.
 A contradiction cannot be inferred from the current MCP read surface alone.
 For the differentiator path, Archon directly reads bounded DataHub GMS
 `GenericAspectV3` version 0/history records, retains their system-metadata
-provenance, and separates stable `pipelineName` source identity from per-run
-`runId` execution identity. Same-pipeline changes remain drift; only
-independent retained sources can form a contradiction. Missing, malformed,
-unauthorized, or truncated history fails closed to an unknown/manual result
-instead of becoming an actionable finding.
+provenance, and resolves each per-execution `runId` through DataHub's ingestion
+registry to the stable ingestion source. `pipelineName` is sticky across
+independent ingestion runs and therefore remains fallback evidence only. Changes
+from one resolved source remain drift; only independent retained sources can
+form a contradiction. Missing, malformed, unauthorized, truncated, or
+unresolved history fails closed to an unknown/manual result instead of becoming
+an actionable finding.
 
 ## Judge runtime
 
-The permanent path is CloudFront + private S3, API Gateway + WAF, Cognito,
-Lambda, DynamoDB, KMS, SQS and SNS. DataHub Cloud is served by three
-digest-pinned Lambda image commands. The OSS fallback is a pre-baked DataHub
-Core single-host ASG at desired capacity zero, launched through an idempotent
-Step Functions lease.
+The historical reference experiment proposes CloudFront + private S3, API
+Gateway + WAF, Cognito, Lambda, DynamoDB, KMS, SQS and SNS. Its DataHub Cloud
+path would use three digest-pinned Lambda image commands, while its OSS fallback
+would use a pre-baked DataHub Core single-host ASG at desired capacity zero.
+None of this is the active or deployed path.
 
 Automatic selection prefers a healthy Cloud profile. The UI also exposes an
 explicit Cloud/Core switch and the Core idle countdown. Sessions never change

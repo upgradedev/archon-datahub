@@ -10,6 +10,23 @@ Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 - **Live Demo**: [https://archon-datahub.web.app](https://archon-datahub.web.app) (login-free hosted showcase)
 - **Upstream Contribution**: [acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183) (OPEN)
 
+## Customer quickstart
+
+Connect the read-only API to one authenticated HTTPS DataHub instance, with one exact
+dataset query:
+
+```bash
+cp quickstart.env.example .env
+# edit the three required values, then:
+docker compose up --build --detach --wait api
+docker compose run --rm doctor
+```
+
+The first command does not report success until `/readyz` reaches exactly one live dataset.
+The second executes one scoped audit and rejects fixture mode, plaintext customer endpoints,
+and a report from a different release. The API binds only to loopback and the Compose stack
+contains no mutation route or write credential. See [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
 ## Live demo
 
 **https://archon-datahub.web.app**
@@ -309,7 +326,7 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
-> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)** (Firebase + Cloud Run live adapter). The AWS infrastructure described below in [infra/aws](infra/aws) is a production-grade reference architecture for enterprise multi-tenant deployments.
+> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. Today it serves the Firebase fixture SPA described above. This candidate adds a Cloud Run live adapter, but that becomes a deployed claim only after the exact release passes CI, `/readyz` reports `ready/live`, and a hosted audit is retained. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
 
 [infra/aws](infra/aws) contains the deployment-grade reference design. The CDK
 that creates it is in `infra/aws/` and is built, tested and synthesised in CI, but no

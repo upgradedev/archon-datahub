@@ -12,8 +12,10 @@ on:
       - .github/locks/datahub-mcp-v0.6.0.json
       - .github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json
       - .github/workflows/hosted-demo-image.yml
+      - compose.yaml
       - package-lock.json
       - package.json
+      - quickstart.env.example
       - scripts/materialize-datahub-mcp-lock.sh
       - services/datahub-hosted-api/**
       - src/**

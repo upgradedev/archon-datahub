@@ -48,7 +48,7 @@ run_gate() {
 }
 
 readonly expires_epoch="$(
-  "${real_date}" -u --date="2026-08-22T11:30:00Z" +%s
+  "${real_date}" -u --date="2026-09-08T08:30:00Z" +%s
 )"
 readonly fifteen_days_before="$((expires_epoch - 15 * 86400))"
 readonly fourteen_days_before="$((expires_epoch - 14 * 86400))"

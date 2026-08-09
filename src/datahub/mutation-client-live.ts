@@ -36,6 +36,7 @@ type MutationTransport =
 
 export interface LiveDataHubMutationClientOptions {
   initializationTimeoutMs?: number;
+  loopbackDemo?: "SYNTHETIC_DEMO_ONLY";
 }
 
 interface OfficialTagMutationArguments extends Record<string, unknown> {
@@ -176,6 +177,33 @@ function runtimeEnvironment(): Record<string, string> {
   );
 }
 
+function assertSyntheticLoopbackEndpoint(value: string): void {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    fail("INVALID_REQUEST", "The synthetic demo write endpoint is invalid.");
+  }
+  const loopback =
+    endpoint.hostname === "localhost" ||
+    endpoint.hostname === "127.0.0.1" ||
+    endpoint.hostname === "[::1]";
+  if (
+    endpoint.protocol !== "http:" ||
+    !loopback ||
+    endpoint.username ||
+    endpoint.password ||
+    (endpoint.pathname !== "/" && endpoint.pathname !== "") ||
+    endpoint.search ||
+    endpoint.hash
+  ) {
+    fail(
+      "INVALID_REQUEST",
+      "The synthetic demo write endpoint must be a loopback-only HTTP origin."
+    );
+  }
+}
+
 async function boundedOperation<T>(input: {
   operation: () => Promise<T>;
   timeoutMs: number;
@@ -233,6 +261,7 @@ async function closeConnection(
 export class LiveDataHubMutationClient implements DataHubMutationClient {
   readonly #suppliedClient?: Client;
   readonly #initializationTimeoutMs: number;
+  readonly #loopbackDemo: boolean;
   #client?: Client;
   #transport?: MutationTransport;
   #ready?: Promise<void>;
@@ -248,6 +277,7 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
       fail("INVALID_REQUEST", "initializationTimeoutMs must be a positive finite value.");
     }
     this.#initializationTimeoutMs = timeout;
+    this.#loopbackDemo = options.loopbackDemo === "SYNTHETIC_DEMO_ONLY";
     this.#suppliedClient = connectedClient;
     this.#client = connectedClient;
   }
@@ -291,7 +321,7 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
 
     if (!client) {
       const writeToken = process.env.DATAHUB_WRITE_GMS_TOKEN?.trim();
-      if (!writeToken) {
+      if (!writeToken && !this.#loopbackDemo) {
         fail(
           "WRITE_CONFIG_MISSING",
           "DATAHUB_WRITE_GMS_TOKEN is required; read credentials are never used for mutation."
@@ -305,6 +335,12 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
           { capabilities: {} }
         );
         if (httpEndpoint) {
+          if (!writeToken) {
+            fail(
+              "WRITE_CONFIG_MISSING",
+              "A hosted mutation endpoint always requires the distinct write token."
+            );
+          }
           transport = new StreamableHTTPClientTransport(new URL(httpEndpoint), {
             requestInit: { headers: { Authorization: `Bearer ${writeToken}` } },
           });
@@ -316,13 +352,14 @@ export class LiveDataHubMutationClient implements DataHubMutationClient {
               "DATAHUB_WRITE_MCP_URL or DATAHUB_WRITE_GMS_URL is required for mutation."
             );
           }
+          if (this.#loopbackDemo) assertSyntheticLoopbackEndpoint(gmsEndpoint);
           transport = new StdioClientTransport({
             command: "uvx",
             args: [PINNED_DATAHUB_MUTATION_SERVER],
             env: {
               ...runtimeEnvironment(),
               DATAHUB_GMS_URL: gmsEndpoint,
-              DATAHUB_GMS_TOKEN: writeToken,
+              ...(writeToken ? { DATAHUB_GMS_TOKEN: writeToken } : {}),
               TOOLS_IS_MUTATION_ENABLED: "true",
             },
           });

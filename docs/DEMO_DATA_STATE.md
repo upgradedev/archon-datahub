@@ -19,15 +19,14 @@ This makes the live-proof search binding unambiguous. The target otherwise has a
 domain, description, and resolved field types, so the planted G6 failure is not confused
 with basic catalog hygiene failures.
 
-## Submission blocker: renew the OpenVEX evidence
+## Reviewed OpenVEX evidence
 
-The committed OpenVEX statement expires at `2026-08-22T11:30:00Z`. The 14-day CI and
-independent daily maintenance gates begin failing at `2026-08-08T11:30:00Z`. Renew the
-statement before submission or judging, after re-evaluating the advisory against the exact
-runtime and retaining the evidence review; every renewed statement remains limited to a
-maximum of 30 days. Follow the renewal procedure in
-[`LIVE_DATAHUB_PROOF.md`](LIVE_DATAHUB_PROOF.md#openvex-renewal-runbook) and let CI perform
-the validation.
+The OpenVEX disposition was re-reviewed on `2026-08-09` against the current upstream
+advisory and the exact retained runtime. The vulnerability remains confined to the macOS
+APFS/HFS+ source-distribution path; this runtime is Linux, installs only hash-bound wheels,
+and forbids source builds and source-distribution creation. The renewed statement expires
+at `2026-09-08T08:30:00Z`, remains limited to 30 days, and is independently enforced by the
+CI SCA, SBOM, import, stdio, and daily renewal-horizon gates.
 
 ## Official baseline and reproducibility
 

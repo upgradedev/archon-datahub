@@ -28,7 +28,7 @@ jobs:
     name: Deploy audit API and hosted SPA
     if: github.repository == 'upgradedev/archon-datahub'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 55
     permissions:
       actions: read
       contents: read
@@ -52,12 +52,13 @@ jobs:
         env:
           WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
           DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
           ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
         run: |
           set -euo pipefail
           missing=0
-          for name in WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT DATAHUB_GMS_URL ARCHON_DEMO_QUERY; do
+          for name in WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT RUNTIME_SERVICE_ACCOUNT DATAHUB_GMS_URL ARCHON_DEMO_QUERY; do
             if [[ -z "${!name}" ]]; then
               echo "::error::repository variable for ${name} is not set"
               missing=1
@@ -74,6 +75,27 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
           project_id: upgradegr-challenges
+
+      - name: Prove the private DataHub prerequisite
+        env:
+          DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
+        run: |
+          set -euo pipefail
+          python3 - "${DATAHUB_GMS_URL}" <<'PY'
+          import ipaddress
+          import sys
+          from urllib.parse import urlparse
+
+          parsed = urlparse(sys.argv[1])
+          if parsed.scheme != "http" or parsed.port != 8080 or not parsed.hostname:
+              raise SystemExit("DATAHUB_GMS_URL must be an internal HTTP endpoint on port 8080")
+          try:
+              address = ipaddress.ip_address(parsed.hostname)
+          except ValueError as error:
+              raise SystemExit("DATAHUB_GMS_URL must use a literal private IP address") from error
+          if not address.is_private or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+              raise SystemExit("DATAHUB_GMS_URL must contain only a private IP origin")
+          PY
 
       - name: Ensure the container repository exists
         run: |
@@ -111,10 +133,18 @@ jobs:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           DATAHUB_GMS_URL: ${{ vars.DATAHUB_GMS_URL }}
           ARCHON_DEMO_QUERY: ${{ vars.ARCHON_DEMO_QUERY }}
+          DATAHUB_GMS_TOKEN_SECRET: ${{ vars.DATAHUB_GMS_TOKEN_SECRET }}
+          RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
           secret_flags=()
-          if [ -n "${DATAHUB_GMS_TOKEN_SECRET:-}" ]; then
+          if [ -n "${DATAHUB_GMS_TOKEN_SECRET}" ]; then
+            gcloud secrets describe "${DATAHUB_GMS_TOKEN_SECRET}" \
+              --project "${GCP_PROJECT}" >/dev/null
+            state="$(gcloud secrets versions describe latest \
+              --secret "${DATAHUB_GMS_TOKEN_SECRET}" \
+              --project "${GCP_PROJECT}" --format='value(state)')"
+            test "${state}" = "ENABLED"
             secret_flags+=(--set-secrets "DATAHUB_GMS_TOKEN=${DATAHUB_GMS_TOKEN_SECRET}:latest")
           fi
           gcloud run deploy "${SERVICE_NAME}" \
@@ -123,12 +153,13 @@ jobs:
             --image "${IMAGE_REF}" \
             --platform managed \
             --allow-unauthenticated \
+            --service-account "${RUNTIME_SERVICE_ACCOUNT}" \
             --port 8080 \
             --cpu 1 \
             --memory 1Gi \
-            --no-cpu-throttling \
-            --min-instances 1 \
-            --max-instances 3 \
+            --cpu-throttling \
+            --min-instances 0 \
+            --max-instances 1 \
             --concurrency 4 \
             --timeout 120 \
             --network "${GCP_VPC_NETWORK}" \
@@ -194,3 +225,34 @@ jobs:
           ready="$(curl -fsS --max-time 30 "https://${HOSTING_SITE}.web.app/readyz")"
           echo "${ready}"
           test "$(printf '%s' "${ready}" | jq -er '.datahubMode')" = "live"
+
+      - name: OWASP ZAP passive DAST against the deployed origin
+        env:
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/owasp-zap"
+          mkdir -p "${report_dir}"
+          chmod 777 "${report_dir}"
+          docker run --rm \
+            --volume "${report_dir}:/zap/wrk/:rw" \
+            "${ZAP_IMAGE}" zap-baseline.py \
+            -t "https://${HOSTING_SITE}.web.app" \
+            -m 2 \
+            -J zap-report.json \
+            -r zap-report.html \
+            -w zap-report.md \
+            -I
+          high_or_medium="$(jq '[.site[]?.alerts[]? | select((.riskcode | tonumber) >= 2)] | length' \
+            "${report_dir}/zap-report.json")"
+          test "${high_or_medium}" -eq 0
+
+      - name: Upload OWASP ZAP DAST evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hosted-demo-dast-${{ github.sha }}
+          path: ${{ runner.temp }}/owasp-zap/
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true

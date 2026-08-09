@@ -22,6 +22,11 @@ import {
   planG6Remediation,
 } from "../../src/remediation/planner.js";
 import { createRollbackProposal, verifyExecutionReceipt } from "../../src/remediation/receipt.js";
+import {
+  createRollbackApproval,
+  executeApprovedRollback,
+  verifyRollbackReceipt,
+} from "../../src/remediation/rollback.js";
 
 class MutableFieldTagPort implements TagProjectionReader, DataHubTagMutationPort {
   writes = 0;
@@ -41,6 +46,27 @@ class MutableFieldTagPort implements TagProjectionReader, DataHubTagMutationPort
       entityUrn: input.entityUrns[0]!,
       columnPath: input.columnPaths?.[0] ?? "",
       tags: [...this.projection.tags, input.tagUrns[0]!],
+    });
+    return {
+      requestDigest: digest({
+        tagUrns: [...input.tagUrns],
+        entityUrns: [...input.entityUrns],
+        columnPaths: [...(input.columnPaths ?? [])],
+      }),
+      responseDigest: digest({ success: true }),
+    };
+  }
+
+  async removeTags(input: {
+    tagUrns: readonly string[];
+    entityUrns: readonly string[];
+    columnPaths?: readonly (string | null)[];
+  }): Promise<MutationAck> {
+    this.writes += 1;
+    this.projection = createTagProjection({
+      entityUrn: input.entityUrns[0]!,
+      columnPath: input.columnPaths?.[0] ?? "",
+      tags: this.projection.tags.filter((tag) => !input.tagUrns.includes(tag)),
     });
     return {
       requestDigest: digest({
@@ -140,6 +166,29 @@ test("E2E: audit → G6 dossier → exact approval → add tag → verify → re
   const rollback = createRollbackProposal(receipt, port.projection);
   assert.ok(rollback);
   assert.equal(rollback.requiresFreshApproval, true);
+  const rollbackApproval = createRollbackApproval({
+    proposal: rollback,
+    decision: "APPROVE",
+    approver: {
+      subject: "steward@example.test",
+      issuer: "https://oidc.example.test",
+      roles: ["DataSteward"],
+      authenticated: true,
+    },
+    decidedAt: "2026-07-23T10:04:00.000Z",
+  });
+  const rollbackTimes = ["2026-07-23T10:05:00.000Z", "2026-07-23T10:05:01.000Z"];
+  const rollbackReceipt = await executeApprovedRollback({
+    originalReceipt: receipt,
+    proposal: rollback,
+    approval: rollbackApproval,
+    reader: port,
+    mutation: port,
+    clock: () => rollbackTimes.shift() ?? "2026-07-23T10:05:01.000Z",
+  });
+  assert.equal(rollbackReceipt.outcome, "VERIFIED");
+  assert.equal(verifyRollbackReceipt(rollbackReceipt, rollback), true);
+  assert.deepEqual(port.projection, before);
 });
 
 test("E2E: contradictions remain manual-only and cannot become a tag plan", async () => {

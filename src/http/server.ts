@@ -1,8 +1,7 @@
-// Minimal production HTTP boundary for the hosted demo.
-//
-// The long-running container owns audit execution; AWS API Gateway/WAF/Cognito provide the
-// public auth/rate-limit boundary. This server deliberately exposes no remediation/write
-// route. Governed writes run in a separate worker with a separate credential.
+// Minimal read-only HTTP boundary for the active Cloud Run and local customer paths.
+// The surrounding deployment owns ingress/auth/rate limiting. This process deliberately
+// exposes no remediation route and receives no write credential; governed writes run as a
+// separately approved command with a separate credential.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -15,6 +14,10 @@ import {
 import { AuditPipeline } from "../pipeline/pipeline.js";
 import { DataHubHarvestError } from "../datahub/harvest-policy.js";
 import { projectPublicAuditReport } from "../reporting/public-audit-report.js";
+import {
+  DataHubRuntimeReadinessProbe,
+  type RuntimeReadinessProbe,
+} from "../application/runtime-readiness.js";
 
 const MAX_BODY_BYTES = 8 * 1024;
 const MAX_QUERY_CHARS = 256;
@@ -22,6 +25,7 @@ const MAX_QUERY_CHARS = 256;
 export interface HttpServerDeps {
   datahub: DataHubClient;
   pipeline: AuditPipeline;
+  readiness: RuntimeReadinessProbe;
   releaseSha?: string;
   demoQuery?: string;
 }
@@ -145,10 +149,11 @@ export function createArchonHttpServer(deps: HttpServerDeps): Server {
         return sendJson(response, 200, { status: "ok", releaseSha }, requestId);
       }
       if (method === "GET" && pathname === "/readyz") {
+        const readiness = await deps.readiness.check();
         return sendJson(
           response,
-          200,
-          { status: "ready", releaseSha, datahubMode: hasDataHubCreds() ? "live" : "fixture" },
+          readiness.status === "ready" ? 200 : 503,
+          { ...readiness, releaseSha },
           requestId
         );
       }
@@ -221,9 +226,14 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("PORT must be an integer between 1 and 65535");
   }
+  const datahub = await createDataHubClient();
   const server = createArchonHttpServer({
-    datahub: await createDataHubClient(),
+    datahub,
     pipeline: new AuditPipeline(),
+    readiness: new DataHubRuntimeReadinessProbe(datahub, {
+      mode: hasDataHubCreds() ? "live" : "fixture",
+      demoQuery: process.env.ARCHON_DEMO_QUERY,
+    }),
   });
   server.listen(port, "0.0.0.0", () => {
     process.stderr.write(`archon-datahub HTTP ready on :${port}\n`);

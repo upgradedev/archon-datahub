@@ -20,6 +20,7 @@ declare -A seen=()
 for name in "$@"; do
   case "${name}" in
     aws-foundation | governed-canary-recovery) ;;
+    governed-canary) ;;
     *) fail "Unexpected protected environment: ${name}" ;;
   esac
   [[ -z "${seen[${name}]+x}" ]] ||
