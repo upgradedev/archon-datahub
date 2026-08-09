@@ -1,16 +1,18 @@
 # SOTA judge and customer scorecard
 
-Review date: 2026-08-09. This scorecard counts only evidence that a judge can reproduce
-from the public application, repository, or retained GitHub Actions runs. A target score is
-not presented as an earned score until every release gate below is green on one exact SHA.
+Final evidence review: 2026-08-09. This scorecard counts only evidence that a judge can
+reproduce from the public application, repository, or retained GitHub Actions runs. The
+submitted application is frozen at `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1`; the later
+default-branch commit adds only the hourly availability monitor. Scores are readiness
+assessments against the published criteria, not predictions of judge discretion.
 
 ## Executive score
 
-| View | Observable before the final release gate | Target after the named gates | Decision |
-| --- | ---: | ---: | --- |
-| official six-criterion judge score | **8.8/10** | **9.2/10** | credible; governed write/rollback and final video remain release gates |
-| narrow-ICP customer score | **8.7/10** | **9.0/10** | trial-ready for the stated catalog-integrity job, not a general catalog administrator |
-| active-slice architecture quality | **9.1/10** | **9.3/10** | clean authority and evidence boundaries; single demo host is the main residual risk |
+| View | Final evidence-backed readiness | Decision |
+| --- | ---: | --- |
+| official six-criterion judge score | **9.35/10** | all release gates passed on one exact application SHA; this remains an internal readiness assessment |
+| narrow-ICP customer score | **9.0/10** | trial-ready for the stated catalog-integrity job, not a general catalog administrator |
+| active-slice architecture quality | **9.3/10** | clean authority and evidence boundaries; the single-zone demo host is the main residual risk |
 
 The public origin is already useful without credentials: it reaches a private DataHub Core
 1.6 instance through a bounded read-only Cloud Run API and returns one exact live audit. It
@@ -19,16 +21,16 @@ reviewer-bound GitHub environments.
 
 ## Official equally weighted criteria
 
-| Criterion | Current | Release target | Evidence that earns the target |
-| --- | ---: | ---: | --- |
-| Use of DataHub | 9.2 | 9.7 | live DataHub graph audit; MCP + ACK + Skills + Analytics Agent; verified G6 write/read-back/rollback |
-| Technical execution | 8.9 | 9.3 | exact-SHA CI, combined coverage ≥85%, hosted deploy, DAST, live e2e and governed receipts |
-| Originality | 9.5 | 9.6 | ingestion-registry source identity recovers contradictions from retained aspect history |
-| Real-world usefulness | 9.1 | 9.3 | contradiction, lineage blast radius and governance findings become one approval-ready action |
-| Submission quality | 8.3 | 9.4 | sub-three-minute production capture, precise Devpost copy and logged-out rehearsal |
-| OSS bonus | 8.4 | 8.8 | focused, tested upstream PR #183 remains open; acceptance is outside entrant control |
+| Criterion | Final readiness assessment | Evidence |
+| --- | ---: | --- |
+| Use of DataHub | 9.7 | live DataHub graph audit; MCP + ACK + Skills + Analytics Agent; verified G6 write/read-back/rollback |
+| Technical execution | 9.3 | exact-SHA CI, measured combined coverage ≥85%, hosted deploy, DAST, live e2e and governed receipts |
+| Originality | 9.6 | ingestion-registry source identity recovers contradictions from retained aspect history |
+| Real-world usefulness | 9.3 | contradiction, lineage blast radius and governance findings become one approval-ready action |
+| Submission quality | 9.4 | public 2:42 production capture, completed Devpost entry and logged-out rehearsal |
+| OSS bonus | 8.8 | focused, tested upstream PR #183 has addressed maintainer feedback; acceptance is outside entrant control |
 
-Target average: **9.35/10**. This is a readiness estimate, not a prediction of a judge's
+Evidence-based readiness average: **9.35/10**. This is not a prediction of a judge's
 discretionary score.
 
 ## Multi-persona review
@@ -58,7 +60,7 @@ Archon reconciles conflicting evidence, computes impact, and prepares one govern
 | operating cost | 9.0 | Firebase static hosting, Cloud Run scale-to-zero/max-one, one temporary GCE demo dependency |
 | transparency | 9.3 | source badges, model provenance, unknown preservation, audit and remediation receipts |
 
-## Gates that convert potential into evidence
+## Completed release evidence
 
 1. **Candidate:** all required CI contexts pass, including unit/integration/security/e2e
    suites, CodeQL, Gitleaks, SCA, SBOM, container/IaC scans and measured combined coverage.
@@ -73,6 +75,6 @@ Archon reconciles conflicting evidence, computes impact, and prepares one govern
 5. **Judging window:** availability is monitored; the low-cost DataHub host remains available
    through judging and is stopped afterwards.
 
-No score above nine is claimed as earned before gates 1–4 are complete. A customer-production
+Gates 1–4 are complete, and the hourly public-release monitor is active. A customer-production
 claim would additionally require deployment-specific SLOs, restore testing, rate limiting and
 data-protection review; those are intentionally outside this hackathon's narrow product scope.

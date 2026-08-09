@@ -257,11 +257,12 @@ Synthetic packs are never presented as live DataHub or deployment proof.
 
 The primary OSS bonus candidate is a bounded, read-only
 [`get_aspect_history` tool](contrib/mcp-get-aspect-history/) for the official DataHub MCP
-server. CI applies its exact source, tests, and registration patch to a pinned upstream
-revision before running upstream lint, type, and focused test contracts. It remains
-explicitly “staged, not submitted” until a real public upstream PR exists. The
-source-complete bonus evidence workflow intentionally remains blocked until that exact
-candidate is merged by an independent upstream maintainer.
+server. It is submitted upstream as
+[acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183).
+The maintainer-requested OpenAPI seam, cross-product batch shape, version gate, retention
+semantics, response budget, and tests are implemented at head `16d53a5`; source-bound CI
+replays the exact upstream commands. Acceptance and re-review timing remain outside entrant
+control and are not claimed as completed.
 
 ## Connect a real DataHub
 
@@ -329,7 +330,7 @@ Anything ambiguous, stale, unsupported, replayed, or indeterminate fails closed.
 
 ## Hosted AWS reference architecture
 
-> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. Today it serves the Firebase fixture SPA described above. This candidate adds a Cloud Run live adapter, but that becomes a deployed claim only after the exact release passes CI, `/readyz` reports `ready/live`, and a hosted audit is retained. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
+> **Note on Architecture**: The public demo is hosted at **[https://archon-datahub.web.app](https://archon-datahub.web.app)**. The exact submitted application release `f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1` is deployed: Firebase serves the immutable SPA, the read-only Cloud Run adapter reports `ready/live`, and retained CI evidence covers the private DataHub audit, browser journey, and OWASP ZAP DAST. The AWS infrastructure described below in [infra/aws](infra/aws) remains a non-deployed reference architecture for enterprise multi-tenant deployments.
 
 [infra/aws](infra/aws) contains the deployment-grade reference design. The CDK
 that creates it is in `infra/aws/` and is built, tested and synthesised in CI, but no
