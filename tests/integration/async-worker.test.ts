@@ -237,7 +237,6 @@ test("a bounded canary can select the synchronous harvest budget explicitly", as
       schemaVersion: "archon.audit-request/v1",
       requestId: "bounded-canary-request",
       requestedAt: "2026-08-09T10:00:00.000Z",
-      query: "archon_demo",
       mode: "GOVERNED",
     },
   });
