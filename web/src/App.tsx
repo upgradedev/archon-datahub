@@ -2123,7 +2123,7 @@ export function App() {
           </div>
 
           <ModelProvenancePanel
-            auditSource={loadedAudit.source}
+            auditSource={audit.source}
             provenance={report.modelProvenance}
           />
 
