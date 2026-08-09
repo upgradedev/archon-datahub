@@ -1009,7 +1009,7 @@ def validate_contrib_verifier(verifier: str) -> None:
             'status?.state === "public-pull-request-open"',
             "status?.pullRequestNumber === 183",
             'status?.url === "https://github.com/acryldata/mcp-server-datahub/pull/183"',
-            'status?.headSha === "69b96128b59b939812def0617b03b6136e15c704"',
+            'status?.headSha === "75e5cf25a1b3d4decb8717c8b962a1bc277ed603"',
             "const mergedStatusKeys = [",
             '"pullRequestNumber"',
             '"headSha"',
@@ -1068,7 +1068,8 @@ def validate_documentation(documentation: str) -> None:
         (
             "source-complete and intentionally fail-closed",
             "acryldata/mcp-server-datahub#183",
-            "69b96128b59b939812def0617b03b6136e15c704",
+            "75e5cf25a1b3d4decb8717c8b962a1bc277ed603",
+            "the pull request is still open",
             "`public-pull-request-open`",
             "An open pull request is not sufficient evidence",
             "`merged-upstream`",

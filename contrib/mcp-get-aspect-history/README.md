@@ -248,4 +248,4 @@ also bound into the signed CI release predicate as
 
 ## Honest status
 
-**Public pull request open.** Pull request [#183](https://github.com/acryldata/mcp-server-datahub/pull/183) contains head commit `69b96128b59b939812def0617b03b6136e15c704` and is not merged. No accepted-contribution bonus is claimed. No local build, test suite, or security scan was run; all validation and security evidence is produced by CI/CD.
+**Public pull request open.** Pull request [#183](https://github.com/acryldata/mcp-server-datahub/pull/183) contains head commit `75e5cf25a1b3d4decb8717c8b962a1bc277ed603` and is not merged. No accepted-contribution bonus is claimed. No local build, test suite, or security scan was run; all validation and security evidence is produced by CI/CD.

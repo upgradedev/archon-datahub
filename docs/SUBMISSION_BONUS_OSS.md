@@ -7,7 +7,7 @@ upstream acceptance. Public pull request
 [`acryldata/mcp-server-datahub#183`](https://github.com/acryldata/mcp-server-datahub/pull/183)
 contains the exact five-path `get_aspect_history` candidate. A maintainer gave
 strong positive feedback and requested the batch/OpenAPI-seam refinements now
-present at head `69b96128b59b939812def0617b03b6136e15c704`; the pull request is still
+present at head `75e5cf25a1b3d4decb8717c8b962a1bc277ed603`; the pull request is still
 open, so no accepted-contribution bonus is claimed.
 
 `contrib/mcp-get-aspect-history/manifest.json` therefore records
