@@ -363,7 +363,7 @@ const openApiSource = await readFile(
 for (const contract of [
   "class VersionedOpenApiClient:",
   '"If-Version-Match"',
-  '"/openapi/v3/entity/{entity_name}/batchGet"',
+  "/openapi/v3/entity/{entity_name}/batchGet",
   "self._graph._session.post(",
   'params={"systemMetadata": str(with_system_metadata).lower()}',
   "response.raise_for_status()",
