@@ -186,6 +186,7 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   }
   assert.match(firebaseConfig, /frame-ancestors 'none'/u);
   assert.match(firebaseConfig, /object-src 'none'/u);
+  assert.doesNotMatch(firebaseConfig, /unsafe-inline/u);
 });
 
 test("governed proof pins one exact uv runtime without cross-job caches", async () => {
