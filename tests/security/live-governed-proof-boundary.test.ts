@@ -187,3 +187,17 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
   assert.match(firebaseConfig, /frame-ancestors 'none'/u);
   assert.match(firebaseConfig, /object-src 'none'/u);
 });
+
+test("governed proof uses the reviewed DataHub MCP lock in every phase", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  assert.equal(
+    [...workflow.matchAll(/name: Materialize the exact locked DataHub MCP runtime/gu)].length,
+    3
+  );
+  assert.equal(
+    [...workflow.matchAll(/scripts\/materialize-datahub-mcp-lock\.sh/gu)].length,
+    3
+  );
+  assert.equal([...workflow.matchAll(/DATAHUB_MCP_COMMAND=uv/gu)].length, 3);
+  assert.equal([...workflow.matchAll(/--frozen --no-sync --no-dev mcp-server-datahub/gu)].length, 3);
+});
