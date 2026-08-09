@@ -116,7 +116,7 @@ EXPECTED_VEX_PATH = (
     ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json"
 )
 EXPECTED_VEX_SHA256 = (
-    "9432452a9fd4b602ec6509b059d7e45d5fd48cfa3ccb3fcbdfa561451d3b8dbc"
+    "5c43ec5baa77a23b4cdccc6faec10f0d1ac9bd33dfaad7702e8f39498a3b187c"
 )
 EXPECTED_CONDITIONS = {
     "runnerOs": "Linux",

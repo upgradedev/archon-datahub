@@ -161,9 +161,9 @@ jq --exit-status '
       path:
         ".github/security/openvex/datahub-mcp-setuptools-81.0.0.openvex.json",
       sha256:
-        "cf32a6b9b62a2a56f002acd7a0f8721c701c389855cc2626381bb2438987cc48",
-      issuedAt: "2026-08-09T09:00:00Z",
-      expiresAt: "2026-09-08T09:00:00Z",
+        "5c43ec5baa77a23b4cdccc6faec10f0d1ac9bd33dfaad7702e8f39498a3b187c",
+      issuedAt: "2026-08-09T08:30:00Z",
+      expiresAt: "2026-09-08T08:30:00Z",
       maxValidityDays: 30
     } and
     .advisoryDisposition.canonicalId == "CVE-2026-59890" and
@@ -254,7 +254,7 @@ jq --exit-status \
       "https://github.com/upgradedev/archon-datahub/security/vex/datahub-mcp-v0.6.0/setuptools-81.0.0/CVE-2026-59890" and
     .author == "https://github.com/upgradedev/archon-datahub" and
     .role == "Document Creator" and
-    .timestamp == "2026-08-09T09:00:00Z" and
+    .timestamp == "2026-08-09T08:30:00Z" and
     .version == 2 and
     (.statements | length) == 1 and
     .statements[0].vulnerability == {

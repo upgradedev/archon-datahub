@@ -25,7 +25,7 @@ The OpenVEX disposition was re-reviewed on `2026-08-09` against the current upst
 advisory and the exact retained runtime. The vulnerability remains confined to the macOS
 APFS/HFS+ source-distribution path; this runtime is Linux, installs only hash-bound wheels,
 and forbids source builds and source-distribution creation. The renewed statement expires
-at `2026-09-08T09:00:00Z`, remains limited to 30 days, and is independently enforced by the
+at `2026-09-08T08:30:00Z`, remains limited to 30 days, and is independently enforced by the
 CI SCA, SBOM, import, stdio, and daily renewal-horizon gates.
 
 ## Official baseline and reproducibility
