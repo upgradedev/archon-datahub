@@ -17,6 +17,7 @@ class SubmissionVideoContracts(unittest.TestCase):
             "governed_run_id:",
             "GCP_VIDEO_SERVICE_ACCOUNT",
             "id-token: write",
+            'test "${GITHUB_SHA}" = "${ARCHON_RELEASE_SHA}"',
             ".github/workflows/hosted-demo.yml",
             ".github/workflows/live-governed-proof.yml",
             "durationSeconds < 179",
@@ -49,6 +50,8 @@ class SubmissionVideoContracts(unittest.TestCase):
         for identifier in identifiers:
             self.assertIn(f'holdScene("{identifier}"', capture)
         self.assertIn("Live DataHub", capture)
+        self.assertIn('getByText("Fixture preview", { exact: true })', capture)
+        self.assertNotIn("/fixture preview/iu", capture)
         self.assertIn("mcp-server-datahub/pull/183", capture)
 
     def test_media_never_enters_the_repository(self) -> None:

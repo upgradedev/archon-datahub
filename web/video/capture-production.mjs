@@ -79,7 +79,12 @@ await holdScene("live", async () => {
     .getByRole("banner")
     .getByRole("status", { name: "Live DataHub" })
     .waitFor({ timeout: 60_000 });
-  if (await page.getByText(/fixture preview/iu).isVisible().catch(() => false)) {
+  if (
+    await page
+      .getByText("Fixture preview", { exact: true })
+      .isVisible()
+      .catch(() => false)
+  ) {
     throw new Error("The production audit remained in fixture mode.");
   }
 });
