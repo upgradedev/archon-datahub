@@ -44,6 +44,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          test "${GITHUB_SHA}" = "${ARCHON_RELEASE_SHA}"
           [[ "${ARCHON_RELEASE_SHA}" =~ ^[a-f0-9]{40}$ ]]
           [[ "${ARCHON_HOSTED_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${ARCHON_GOVERNED_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
