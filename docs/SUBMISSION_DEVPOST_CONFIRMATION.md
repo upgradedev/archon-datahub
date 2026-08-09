@@ -236,6 +236,6 @@ later, the operator must supply the exact private confirmation inputs, the
 protected solo owner must approve the exact binding, and the workflow must
 persist verification of all six subjects.
 
-Only that successful workflow may cause an aggregate to include `SQ11`.
+Only after that successful run may the reporting aggregate include `SQ11`.
 The live links and submitted Devpost page are independently verifiable public
 facts; this optional procedure must not be cited as their authority.
