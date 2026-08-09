@@ -1,0 +1,106 @@
+name: Hosted submission availability
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: archon-hosted-submission-availability
+  cancel-in-progress: true
+
+env:
+  ARCHON_ORIGIN: https://archon-datahub.web.app
+  ARCHON_SUBMISSION_RELEASE: f3dc6e2499ce07ee5ffd28c3b714facaacaf5aa1
+
+jobs:
+  probe:
+    name: Prove the submitted live DataHub journey
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Probe the exact public release
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          started_ms="$(date +%s%3N)"
+          evidence_dir="${RUNNER_TEMP}/archon-hosted-availability"
+          test ! -e "${evidence_dir}"
+          mkdir -p "${evidence_dir}"
+
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --max-time 30 \
+            --dump-header "${evidence_dir}/root.headers" --output /dev/null \
+            "${ARCHON_ORIGIN}/"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --max-time 30 \
+            --output "${evidence_dir}/ready.json" "${ARCHON_ORIGIN}/readyz"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --max-time 45 --request POST \
+            --header 'Accept: application/json' \
+            --header 'Content-Type: application/json' --data '{}' \
+            --output "${evidence_dir}/audit.json" "${ARCHON_ORIGIN}/api/audits"
+
+          grep -Eiq '^content-security-policy: .*frame-ancestors .none.' \
+            "${evidence_dir}/root.headers"
+          grep -Eiq '^x-content-type-options: nosniff' "${evidence_dir}/root.headers"
+          grep -Eiq '^x-frame-options: DENY' "${evidence_dir}/root.headers"
+          grep -Eiq '^permissions-policy: .*camera=\(\).*microphone=\(\)' \
+            "${evidence_dir}/root.headers"
+
+          jq -e --arg release "${ARCHON_SUBMISSION_RELEASE}" '
+            (keys | sort) == ["datahubMode","releaseSha","status"] and
+            .status == "ready" and .datahubMode == "live" and
+            .releaseSha == $release
+          ' "${evidence_dir}/ready.json" >/dev/null
+          jq -e --arg release "${ARCHON_SUBMISSION_RELEASE}" '
+            (keys | sort) == ["releaseSha","report","requestId"] and
+            .releaseSha == $release and
+            .report.schemaVersion == "archon.audit-report/v1" and
+            (.report.findings | length) == 4 and
+            any(.report.findings[];
+              .type == "governance_violation" and
+              .severity == "high" and .detail.ruleId == "G6") and
+            any(.report.findings[]; .type == "contradiction") and
+            any(.report.findings[];
+              .type == "governance_violation" and .detail.ruleId == "G2") and
+            any(.report.findings[]; .type == "lineage_gap") and
+            .report.modelProvenance.source == "deterministic-fixture" and
+            .report.modelProvenance.modelCall == false
+          ' "${evidence_dir}/audit.json" >/dev/null
+
+          completed_ms="$(date +%s%3N)"
+          duration_ms="$((completed_ms - started_ms))"
+          jq -cnS --arg observedAt "${observed_at}" \
+            --arg releaseSha "${ARCHON_SUBMISSION_RELEASE}" \
+            --argjson durationMs "${duration_ms}" '
+            {schemaVersion:"archon.hosted-availability/v1",
+             observedAt:$observedAt,releaseSha:$releaseSha,durationMs:$durationMs,
+             checks:{publicOrigin:true,securityHeaders:true,readyLive:true,
+                     liveAudit:true,expectedFindings:true,
+                     deterministicDisclosure:true},
+             findingCount:4,rawCatalogDataRetained:false,result:"passed"}
+          ' >"${evidence_dir}/receipt.json"
+          echo "receipt=${evidence_dir}/receipt.json" >>"${GITHUB_OUTPUT}"
+
+      - name: Retain the sanitized availability receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hosted-availability-${{ env.ARCHON_SUBMISSION_RELEASE }}-${{ github.run_id }}
+          path: ${{ steps.probe.outputs.receipt }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 9
+
+      - name: Remove runner-only probe data
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/archon-hosted-availability"
+          test "${evidence_dir}" = "${RUNNER_TEMP}/archon-hosted-availability"
+          rm -rf -- "${evidence_dir}"
