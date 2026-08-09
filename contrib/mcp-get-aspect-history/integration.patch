@@ -1,23 +1,8 @@
-diff --git a/src/mcp_server_datahub/tools/__init__.py b/src/mcp_server_datahub/tools/__init__.py
---- a/src/mcp_server_datahub/tools/__init__.py
-+++ b/src/mcp_server_datahub/tools/__init__.py
-@@ -3,3 +3,4 @@
-+from .aspect_history import get_aspect_history
- from .dataset_queries import get_dataset_queries
- from .descriptions import update_description
- from .documents import grep_documents, search_documents
-@@ -18,6 +19,7 @@ __all__ = [
-     "add_structured_properties",
-     "add_tags",
-     "enhanced_search",
-+    "get_aspect_history",
-     "get_dataset_queries",
-     "get_entities",
-     "get_lineage",
 diff --git a/src/mcp_server_datahub/mcp_server.py b/src/mcp_server_datahub/mcp_server.py
+index 0d3e0dc..4c38286 100644
 --- a/src/mcp_server_datahub/mcp_server.py
 +++ b/src/mcp_server_datahub/mcp_server.py
-@@ -57,6 +57,7 @@ from .graphql_helpers import (  # noqa: F401 (re-exported for backward compat)
+@@ -65,6 +65,7 @@ from .graphql_helpers import (  # noqa: F401 (re-exported for backward compat)
  )
  from .search_filter_parser import FILTER_DOCS
  from .tools.assertions import get_dataset_assertions
@@ -25,7 +10,7 @@ diff --git a/src/mcp_server_datahub/mcp_server.py b/src/mcp_server_datahub/mcp_s
  from .tools.dataset_queries import get_dataset_queries
  from .tools.descriptions import update_description
  from .tools.documents import grep_documents, search_documents
-@@ -315,6 +316,12 @@ def register_search_tools(mcp_instance: FastMCP, is_oss: bool = False) -> None:
+@@ -365,6 +366,12 @@ def register_search_tools(mcp_instance: FastMCP, is_oss: bool = False) -> None:
      _register_tool(
          mcp_instance, "get_entities", get_entities, tags={ToolType.SEARCH.value}
      )
@@ -38,3 +23,22 @@ diff --git a/src/mcp_server_datahub/mcp_server.py b/src/mcp_server_datahub/mcp_s
      _register_tool(
          mcp_instance,
          "list_schema_fields",
+diff --git a/src/mcp_server_datahub/tools/__init__.py b/src/mcp_server_datahub/tools/__init__.py
+index 2e46149..829fbdd 100644
+--- a/src/mcp_server_datahub/tools/__init__.py
++++ b/src/mcp_server_datahub/tools/__init__.py
+@@ -1,5 +1,6 @@
+ """MCP tools for DataHub integrations."""
+ 
++from .aspect_history import get_aspect_history
+ from .dataset_queries import get_dataset_queries
+ from .descriptions import update_description
+ from .documents import grep_documents, search_documents
+@@ -25,6 +26,7 @@ __all__ = [
+     "add_structured_properties",
+     "add_tags",
+     "enhanced_search",
++    "get_aspect_history",
+     "get_dataset_queries",
+     "get_entities",
+     "get_lineage",

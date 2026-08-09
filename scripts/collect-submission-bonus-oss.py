@@ -42,17 +42,23 @@ DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 BARE_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_PATHS = (
     "src/mcp_server_datahub/mcp_server.py",
+    "src/mcp_server_datahub/openapi_client.py",
     "src/mcp_server_datahub/tools/__init__.py",
     "src/mcp_server_datahub/tools/aspect_history.py",
     "tests/test_mcp/test_get_aspect_history.py",
 )
 EXPECTED_FILE_STATUS = {
     "src/mcp_server_datahub/mcp_server.py": "modified",
+    "src/mcp_server_datahub/openapi_client.py": "added",
     "src/mcp_server_datahub/tools/__init__.py": "modified",
     "src/mcp_server_datahub/tools/aspect_history.py": "added",
     "tests/test_mcp/test_get_aspect_history.py": "added",
 }
 STAGED_SOURCE_BY_DESTINATION = {
+    "src/mcp_server_datahub/openapi_client.py": (
+        "contrib/mcp-get-aspect-history/upstream/"
+        "src/mcp_server_datahub/openapi_client.py"
+    ),
     "src/mcp_server_datahub/tools/aspect_history.py": (
         "contrib/mcp-get-aspect-history/upstream/"
         "src/mcp_server_datahub/tools/aspect_history.py"

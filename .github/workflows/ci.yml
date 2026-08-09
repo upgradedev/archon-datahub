@@ -1304,11 +1304,17 @@ jobs:
           test -z "$(git -C "${upstream}" status --short)"
 
           install -D -m 0644 \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/openapi_client.py \
+            "${upstream}/src/mcp_server_datahub/openapi_client.py"
+          install -D -m 0644 \
             contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
             "${upstream}/src/mcp_server_datahub/tools/aspect_history.py"
           install -D -m 0644 \
             contrib/mcp-get-aspect-history/upstream/tests/test_mcp/test_get_aspect_history.py \
             "${upstream}/tests/test_mcp/test_get_aspect_history.py"
+          cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/openapi_client.py \
+            "${upstream}/src/mcp_server_datahub/openapi_client.py"
           cmp --silent \
             contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
             "${upstream}/src/mcp_server_datahub/tools/aspect_history.py"
@@ -1320,12 +1326,13 @@ jobs:
           git -C "${upstream}" apply \
             "${GITHUB_WORKSPACE}/contrib/mcp-get-aspect-history/integration.patch"
           git -C "${upstream}" add --intent-to-add \
+            src/mcp_server_datahub/openapi_client.py \
             src/mcp_server_datahub/tools/aspect_history.py \
             tests/test_mcp/test_get_aspect_history.py
           git -C "${upstream}" diff --check
           test "$(
             git -C "${upstream}" status --short | wc -l
-          )" = "4"
+          )" = "5"
           echo "directory=${upstream}" >>"${GITHUB_OUTPUT}"
       - name: Install the exact pinned upstream environment
         shell: bash
@@ -1381,6 +1388,9 @@ jobs:
           mkdir -p "${receipt_directory}"
 
           cmp --silent \
+            contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/openapi_client.py \
+            "${UPSTREAM_DIRECTORY}/src/mcp_server_datahub/openapi_client.py"
+          cmp --silent \
             contrib/mcp-get-aspect-history/upstream/src/mcp_server_datahub/tools/aspect_history.py \
             "${UPSTREAM_DIRECTORY}/src/mcp_server_datahub/tools/aspect_history.py"
           cmp --silent \
@@ -1396,6 +1406,7 @@ jobs:
           expected_paths="$(
             printf '%s\n' \
               src/mcp_server_datahub/mcp_server.py \
+              src/mcp_server_datahub/openapi_client.py \
               src/mcp_server_datahub/tools/__init__.py \
               src/mcp_server_datahub/tools/aspect_history.py \
               tests/test_mcp/test_get_aspect_history.py
@@ -1410,6 +1421,7 @@ jobs:
             --dst-prefix=b/ \
             HEAD -- \
             src/mcp_server_datahub/mcp_server.py \
+            src/mcp_server_datahub/openapi_client.py \
             src/mcp_server_datahub/tools/__init__.py \
             src/mcp_server_datahub/tools/aspect_history.py \
             tests/test_mcp/test_get_aspect_history.py \
@@ -1448,7 +1460,7 @@ jobs:
               .target.baseCommit == $upstreamCommit and
               .target.repository == $upstreamRepository and
               .dataHandling.credentialsIncluded == false and
-              (.candidate.files | length) == 2 and
+              (.candidate.files | length) == 3 and
               all(.candidate.files[];
                 .sha256 | test("^[0-9a-f]{64}$")) and
               (.candidate.integrationPatch.sha256 |
