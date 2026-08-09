@@ -239,5 +239,6 @@ persist verification of all six subjects.
 Only after that successful run may the reporting aggregate include `SQ11`.
 The live links and submitted Devpost page are independently verifiable public
 facts; this optional procedure must not be cited as their authority.
-The exact-release video replacement and final Devpost edits are complete. Only an optional
-public post remains an end-of-process operator action.
+The exact-release video replacement and final Devpost edits are complete.
+Any future edits to the actual Devpost form remain end-of-process operator actions; none are
+currently required. Only an optional public post remains an end-of-process operator action.
