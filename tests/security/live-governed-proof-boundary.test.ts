@@ -179,7 +179,10 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
     "X-Content-Type-Options",
     "X-Frame-Options",
   ]) {
-    assert.match(firebaseConfig, new RegExp(`\\"key\\": \\"${header}\\"`, "u"));
+    assert.ok(
+      firebaseConfig.includes(`"key": "${header}"`),
+      `Firebase hosting must emit ${header}`
+    );
   }
   assert.match(firebaseConfig, /frame-ancestors 'none'/u);
   assert.match(firebaseConfig, /object-src 'none'/u);
