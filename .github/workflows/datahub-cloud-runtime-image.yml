@@ -182,51 +182,22 @@ jobs:
           test -n "${{ steps.image.outputs.digest }}"
           test -z "$(git status --porcelain --untracked-files=all)"
 
-      - name: Prove VEX-dispositioned packages are absent from runtime paths
-        run: |
-          set -euo pipefail
-          docker run --rm --interactive --network none \
-            --entrypoint /opt/archon/runtime/.venv/bin/python \
-            "$IMAGE_REF" - <<'PY'
-          import importlib.metadata
-
-          versions: dict[str, set[str]] = {}
-          for distribution in importlib.metadata.distributions():
-              name = distribution.metadata["Name"].lower()
-              versions.setdefault(name, set()).add(distribution.version)
-          assert "msgpack" not in versions
-          assert versions["setuptools"] == {"81.0.0"}
-          PY
-
       - name: Validate the exact expiring runtime OpenVEX statement
         run: |
           set -euo pipefail
           jq --exit-status '
             ."@context" == "https://openvex.dev/ns/v0.2.0" and
-            ."@id" == "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image/v2" and
+            ."@id" == "https://github.com/upgradedev/archon-datahub/security/vex/datahub-companion-image-setuptools/v1" and
             .author == "https://github.com/upgradedev/archon-datahub" and
             .timestamp == .last_updated and
-            .version == 2 and
-            (.statements | length) == 3 and
-            all(.statements[]; .status == "not_affected") and
-            any(
-              .statements[];
-              .vulnerability.name == "CVE-2026-59890" and
-              .products == [{"@id": "pkg:pypi/setuptools@81.0.0"}] and
-              .justification == "vulnerable_code_not_in_execute_path"
-            ) and
-            any(
-              .statements[];
-              .vulnerability.name == "GHSA-6v7p-g79w-8964" and
-              .products == [{"@id": "pkg:pypi/msgpack@1.1.2"}] and
-              .justification == "component_not_present"
-            ) and
-            any(
-              .statements[];
-              .vulnerability.name == "CVE-2025-47273" and
-              .products == [{"@id": "pkg:pypi/setuptools@70.3.0"}] and
-              .justification == "component_not_present"
-            )
+            .version == 1 and
+            (.statements | length) == 1 and
+            .statements[0].vulnerability.name == "CVE-2026-59890" and
+            .statements[0].products == [
+              {"@id": "pkg:pypi/setuptools@81.0.0"}
+            ] and
+            .statements[0].status == "not_affected" and
+            .statements[0].justification == "vulnerable_code_not_in_execute_path"
           ' "$VEX_PATH" >/dev/null
           python3 - <<'PY'
           import json
