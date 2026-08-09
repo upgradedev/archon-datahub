@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
+import {
+  FakeDataHubMcpClient,
+  type AuditHarvest,
+  type AuditHarvestOptions,
+} from "../../src/datahub/mcp-client.js";
 import { LiveDataHubMcpClient } from "../../src/datahub/mcp-client-live.js";
 import {
   DataHubHarvestError,
@@ -57,6 +61,18 @@ class MemoryEvidence implements ImmutableEvidenceStore {
     assert.ok(document);
     assert.equal(verifyAuditEvidence(document, expected), true);
     return document;
+  }
+}
+
+class ProfileRecordingDataHub extends FakeDataHubMcpClient {
+  observedProfile?: AuditHarvestOptions["profile"];
+
+  override async harvestAudit(
+    query: string | undefined,
+    options: AuditHarvestOptions,
+  ): Promise<AuditHarvest> {
+    this.observedProfile = options.profile;
+    return super.harvestAudit(query, options);
   }
 }
 
@@ -201,6 +217,31 @@ test("governed hosted audit fails closed when only the MCP read surface is confi
     if (saved.mcp === undefined) delete process.env.DATAHUB_MCP_URL;
     else process.env.DATAHUB_MCP_URL = saved.mcp;
   }
+});
+
+test("a bounded canary can select the synchronous harvest budget explicitly", async () => {
+  const dataHub = new ProfileRecordingDataHub();
+  const service = new AuditWorkerService({
+    dataHub,
+    tagReader: new MutableProjection(),
+    evidence: new MemoryEvidence(),
+    releaseSha: "a".repeat(40),
+    executionProfile: "synchronous-preview",
+  });
+
+  await service.audit({
+    type: "AUDIT_REQUESTED",
+    taskToken: "opaque-bounded-canary-token",
+    executionId: "bounded-canary-execution",
+    request: {
+      schemaVersion: "archon.audit-request/v1",
+      requestId: "bounded-canary-request",
+      requestedAt: "2026-08-09T10:00:00.000Z",
+      mode: "GOVERNED",
+    },
+  });
+
+  assert.equal(dataHub.observedProfile, "synchronous-preview");
 });
 
 test("hosted async path binds audit evidence, durable approval handoff, write, verification, and receipt", async () => {

@@ -137,6 +137,10 @@ async function prepare(store: FileEvidenceStore): Promise<void> {
     tagReader: reader(),
     evidence: store,
     releaseSha: required("GITHUB_SHA", 40),
+    // This proof is deliberately scoped to one exact dataset. Reusing the
+    // broad durable-worker budget would turn a 25-second canary into a
+    // 90-minute execution window without increasing evidence quality.
+    executionProfile: "synchronous-preview",
   });
   const result = await service.audit({
     type: "AUDIT_REQUESTED",
