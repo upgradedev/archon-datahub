@@ -14,6 +14,7 @@ import {
   type McpDeps,
 } from "../../src/mcp/server.js";
 import { FakeDataHubMcpClient } from "../../src/datahub/mcp-client.js";
+import { LiveDataHubMcpClient } from "../../src/datahub/mcp-client-live.js";
 import { AuditPipeline } from "../../src/pipeline/pipeline.js";
 
 delete process.env.LLM_API_KEY;
@@ -22,6 +23,12 @@ delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 delete process.env.DATAHUB_MCP_URL;
 delete process.env.DATAHUB_GMS_URL;
 delete process.env.ARCHON_DEMO_QUERY;
+
+test("the live MCP adapter exposes an idempotent lifecycle close", async () => {
+  const client = new LiveDataHubMcpClient();
+  await client.close();
+  await client.close();
+});
 
 async function connect(
   overrides: Partial<McpDeps> = {}

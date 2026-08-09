@@ -49,6 +49,10 @@ export interface SnapshotTopologyContext {
 // The read surface the agent needs. Mirrors the DataHub MCP server's read tools, but
 // in OUR provider-neutral vocabulary so the agent never depends on acryldata shapes.
 export interface DataHubClient {
+  // Long-lived services may retain a transport. Short-lived commands must close it so an
+  // MCP stdio child cannot outlive the audited operation. Optional keeps pure in-memory
+  // adapters free of transport lifecycle concerns.
+  close?(): Promise<void>;
   // `search` — dataset URNs matching a query (all catalogued datasets when omitted).
   search(query?: string): Promise<Urn[]>;
   // `get_entities` — full metadata (aspects) for the given URNs (current view).
