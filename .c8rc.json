@@ -15,7 +15,7 @@
     "src/worker/configuration.ts",
     "src/worker/aws-adapters.ts"
   ],
-  "reporter": ["text", "lcov"],
+  "reporter": ["text", "lcov", "json-summary"],
   "report-dir": "coverage",
   "check-coverage": true,
   "lines": 80,
