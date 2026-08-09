@@ -16,7 +16,11 @@ import {
   verifyDigest,
   withoutDigest,
 } from "../src/remediation/integrity.js";
-import { createRollbackProposal, verifyExecutionReceipt } from "../src/remediation/receipt.js";
+import {
+  createRollbackProposal,
+  verifyExecutionReceipt,
+  verifyRollbackProposal,
+} from "../src/remediation/receipt.js";
 import {
   createRollbackApproval,
   executeApprovedRollback,
@@ -266,7 +270,7 @@ async function rollback(store: FileEvidenceStore): Promise<void> {
     if (
       !verifyDigest(withoutDigest(execution), execution.digest) ||
       !verifyExecutionReceipt(execution.receipt).valid ||
-      !verifyDigest(withoutDigest(proposal), proposal.digest)
+      !verifyRollbackProposal(proposal)
     ) {
       throw new Error("Rollback inputs failed local verification.");
     }

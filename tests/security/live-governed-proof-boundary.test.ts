@@ -64,15 +64,19 @@ test("privileged jobs fail closed on protection, reviewer evidence, and proof id
   ]);
   const executeStart = workflow.indexOf("\n  execute:");
   const rollbackStart = workflow.indexOf("\n  rollback:");
-  assert.ok(executeStart > 0 && rollbackStart > executeStart);
+  const recoverStart = workflow.indexOf("\n  recover:");
+  assert.ok(
+    executeStart > 0 && rollbackStart > executeStart && recoverStart > rollbackStart
+  );
   const execute = workflow.slice(executeStart, rollbackStart);
-  const rollback = workflow.slice(rollbackStart);
+  const rollback = workflow.slice(rollbackStart, recoverStart);
+  const recover = workflow.slice(recoverStart);
 
-  assert.equal(workflow.match(/service_account: \$\{\{ vars\.GCP_PROOF_SERVICE_ACCOUNT \}\}/gu)?.length, 4);
-  assert.equal(workflow.match(/name: Require a dedicated proof identity/gu)?.length, 4);
+  assert.equal(workflow.match(/service_account: \$\{\{ vars\.GCP_PROOF_SERVICE_ACCOUNT \}\}/gu)?.length, 5);
+  assert.equal(workflow.match(/name: Require a dedicated proof identity/gu)?.length, 5);
   assert.match(proof, /executionProfile: "synchronous-preview"/u);
   assert.doesNotMatch(workflow, /service_account: \$\{\{ vars\.GCP_DEPLOY_SERVICE_ACCOUNT \}\}/u);
-  for (const job of [execute, rollback]) {
+  for (const job of [execute, rollback, recover]) {
     assert.match(job, /^      deployments: read$/mu);
     const protection = job.indexOf("bash scripts/verify-github-environment-protection.sh");
     const reviewer = job.indexOf("bash scripts/capture-github-environment-approval.sh");
@@ -101,6 +105,15 @@ test("privileged jobs fail closed on protection, reviewer evidence, and proof id
     deployRunbook,
     /job_workflow_ref=='upgradedev\/archon-datahub\/\.github\/workflows\/live-governed-proof\.yml@refs\/heads\/master'/u
   );
+  assert.match(recover, /inputs\.mode == 'recover'/u);
+  assert.match(recover, /\.conclusion == "failure"/u);
+  assert.match(recover, /\.path == "\.github\/workflows\/live-governed-proof\.yml"/u);
+  assert.match(recover, /\.head_repository\.full_name == \$repository/u);
+  assert.match(recover, /live-proof-prepared-\$\{\{ inputs\.source_run_id \}\}-\$\{\{ inputs\.source_run_attempt \}\}/u);
+  assert.match(recover, /live-proof-executed-\$\{\{ inputs\.source_run_id \}\}-\$\{\{ inputs\.source_run_attempt \}\}/u);
+  assert.match(recover, /test "\$\{actual_plan_digest\}" = "\$\{EXPECTED_PLAN_DIGEST\}"/u);
+  assert.doesNotMatch(recover, /continue-on-error: true/u);
+  assert.match(proof, /verifyRollbackProposal\(proposal\)/u);
 });
 
 test("approval parsing binds the exact run, operation, plan, environment, and reviewer", () => {
@@ -197,20 +210,20 @@ test("hosted release is cost bounded and sealed by post-deploy DAST", async () =
 test("governed proof pins one exact uv runtime without cross-job caches", async () => {
   const workflow = await readFile(workflowPath, "utf8");
 
-  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 4);
-  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 4);
+  assert.equal((workflow.match(/version: "0\.11\.31"/gu) ?? []).length, 5);
+  assert.equal((workflow.match(/enable-cache: false/gu) ?? []).length, 5);
 });
 
 test("governed proof uses the reviewed DataHub MCP lock in every phase", async () => {
   const workflow = await readFile(workflowPath, "utf8");
   assert.equal(
     [...workflow.matchAll(/name: Materialize the exact locked DataHub MCP runtime/gu)].length,
-    3
+    4
   );
   assert.equal(
     [...workflow.matchAll(/scripts\/materialize-datahub-mcp-lock\.sh/gu)].length,
-    4
+    5
   );
-  assert.equal([...workflow.matchAll(/DATAHUB_MCP_COMMAND=uv/gu)].length, 3);
-  assert.equal([...workflow.matchAll(/--frozen --no-sync --no-dev mcp-server-datahub/gu)].length, 3);
+  assert.equal([...workflow.matchAll(/DATAHUB_MCP_COMMAND=uv/gu)].length, 4);
+  assert.equal([...workflow.matchAll(/--frozen --no-sync --no-dev mcp-server-datahub/gu)].length, 4);
 });
