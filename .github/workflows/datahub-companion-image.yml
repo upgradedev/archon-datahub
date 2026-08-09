@@ -322,7 +322,8 @@ jobs:
             /opt/archon/companion/.venv/bin/python \
             /opt/archon/mcp/.venv/bin/python
           do
-            docker run --rm --network none "${IMAGE_REF}" "${interpreter}" - <<'PY'
+            docker run --rm --interactive --network none \
+              "${IMAGE_REF}" "${interpreter}" - <<'PY'
           import importlib.metadata
 
           for package in ("msgpack", "setuptools"):
