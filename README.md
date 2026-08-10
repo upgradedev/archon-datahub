@@ -49,6 +49,11 @@ there in Markdown, JSON and SARIF, followed by the remediation plan, the approva
 request, the approval decision, the execution receipt with its read-back check, and the
 rollback proposal. Twelve files. Verify the bytes with one command and no toolchain:
 
+The finding counts differ by route, on purpose. This pack carries 7 findings across 3
+entities, because the deterministic fixture is built to exercise every rule. The hosted
+preview shows 5. A live audit against the demo catalog returns 4. Each
+number is the honest count for that route, not a restatement of the same run.
+
 ```bash
 cd examples/judge-pack && sha256sum --check SHA256SUMS
 ```
