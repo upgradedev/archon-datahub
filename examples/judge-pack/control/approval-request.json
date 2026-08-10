@@ -1,0 +1,12 @@
+{
+  "actionCatalogDigest": "sha256:bb50a3e44afd72042d034ae2fc738c588aaa4abb06adc4648aedc7769b03ae81",
+  "approvalId": "approval-7cd8cb60b95618fe63fbd61d",
+  "digest": "sha256:7cd8cb60b95618fe63fbd61d319957bcecc28aecf0e9ef96716ecc4793657a9b",
+  "dossierDigest": "sha256:e0bf01a7ab4aa49f956862d1b3a06a3d1173b088d244ac556594fafc0c838d97",
+  "expectedBeforeDigest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b",
+  "expiresAt": "2026-07-23T10:11:00.000Z",
+  "nonce": "archon-judge-evidence-nonce-v1",
+  "planDigest": "sha256:1ea5bca61c3a41c6b2bcff53d7b5a5d960c641810f2116f902472debdb57f419",
+  "requestedAt": "2026-07-23T10:01:00.000Z",
+  "schemaVersion": "archon.approval-request/v1"
+}

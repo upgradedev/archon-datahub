@@ -1,0 +1,42 @@
+{
+  "before": {
+    "columnPath": "email",
+    "digest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "tags": []
+  },
+  "blastRadius": {
+    "downstreamUrns": [],
+    "maxHops": 3,
+    "truncated": false
+  },
+  "createdAt": "2026-07-23T10:00:00.000Z",
+  "digest": "sha256:e0bf01a7ab4aa49f956862d1b3a06a3d1173b088d244ac556594fafc0c838d97",
+  "dossierId": "dossier-e0bf01a7ab4aa49f956862d1",
+  "finding": {
+    "ruleId": "G6",
+    "severity": "high",
+    "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "type": "governance_violation",
+    "unclassifiedFields": [
+      "email"
+    ]
+  },
+  "findingDigest": "sha256:569bdcf4edf4824784aa837e34d762cc4e33af90325d06e66f1c7f8bffdbeacb",
+  "policyDigest": "sha256:635225e974b97188b7d94f0d4d6e10188ff8b96eb17976c22429760b70b74b77",
+  "provenance": [
+    {
+      "aspect": "schemaMetadata",
+      "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+      "observedAt": "2026-07-23T10:00:00.000Z",
+      "sourceKind": "current_view",
+      "valueDigest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b"
+    }
+  ],
+  "scanId": "scan-2026-07-01",
+  "schemaVersion": "archon.evidence-dossier/v1",
+  "target": {
+    "columnPath": "email",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+  }
+}

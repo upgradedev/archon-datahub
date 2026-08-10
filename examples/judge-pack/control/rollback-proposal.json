@@ -1,0 +1,23 @@
+{
+  "digest": "sha256:009927da7e94bd5a51b347791252456e60862ee00a93be68ad746488e84d5a89",
+  "expectedCurrentDigest": "sha256:7303369cb56e4cb6086ddaf81f94ed1caa84c00b4539c86b44a0bad70b4df5b7",
+  "inverseAction": {
+    "arguments": {
+      "column_paths": [
+        "email"
+      ],
+      "entity_urns": [
+        "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+      ],
+      "tag_urns": [
+        "urn:li:tag:PII"
+      ]
+    },
+    "tool": "remove_tags"
+  },
+  "originalReceiptDigest": "sha256:b665b5ba03c10be607c1ac463099e7a2350aa8809dfee825463c6bca62b7c0f4",
+  "requiresFreshApproval": true,
+  "restoreStateDigest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b",
+  "rollbackId": "rollback-009927da7e94bd5a51b34779",
+  "schemaVersion": "archon.rollback-proposal/v1"
+}

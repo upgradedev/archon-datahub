@@ -3,3 +3,8 @@
 # Windows checkout never carries CRLF into CI.
 *.sh text eol=lf
 .github/security/openvex/*.json text eol=lf
+
+# The committed judge pack is digest-pinned by its own SHA256SUMS and manifest.json.
+# Any line-ending rewrite on checkout would break `sha256sum --check`, so these files
+# are handled as exact bytes on every platform.
+examples/judge-pack/** -text

@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "properties": {
+        "modelProvenance": {
+          "latencyMs": null,
+          "modelCall": false,
+          "provider": "fixture",
+          "providerResponseId": null,
+          "requestedModel": "archon-deterministic-fixture-narrator-v1",
+          "returnedModel": null,
+          "schemaVersion": "archon.model-runtime-provenance/v1",
+          "source": "deterministic-fixture",
+          "tokenUsage": null
+        }
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Csales_orders%2CPROD)%23amount"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Sources disagree on 'fieldType' for urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount: \"number\" (snowflake-ingest) vs \"string\" (dbt-ingest)."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "34331f01e036d46e439afb2cd67e92621cfd79440f2f167c29bb6e6f31f7750b"
+          },
+          "properties": {
+            "detail": {
+              "attribute": "fieldType",
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+                "truncated": false
+              },
+              "resolution": {
+                "confidence": 0.85,
+                "rationale": "Later harvest (2026-07-01) supersedes the earlier value \"number\" (2026-06-01); recency is the default tie-breaker.",
+                "recommendedFactId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+                "recommendedValue": "string",
+                "rule": "recency"
+              },
+              "values": [
+                {
+                  "createdAt": "2026-06-01T09:00:00.000Z",
+                  "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+                  "source": "snowflake-ingest",
+                  "value": "number"
+                },
+                {
+                  "createdAt": "2026-07-01T09:00:00.000Z",
+                  "factId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+                  "source": "dbt-ingest",
+                  "value": "string"
+                }
+              ]
+            },
+            "findingType": "contradiction",
+            "severity": "high",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount"
+          },
+          "ruleId": "ARCHON-CONTRADICTION"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Ccustomer_pii%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "G1: No owner assigned — ungoverned asset (ownership aspect empty)."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "27512840057e0f0ab40d4b774203b88ac23049dabbe471741988ebbf5918dc12"
+          },
+          "properties": {
+            "detail": {
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+                "truncated": false
+              },
+              "rule": "G1: dataset has an owner",
+              "ruleId": "G1"
+            },
+            "findingType": "governance_violation",
+            "severity": "high",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+          },
+          "ruleId": "ARCHON-G1"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Ccustomer_pii%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "G6: 1 sensitive field lacks an accepted classification tag/term: email."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "129efab838896a9868a5649786d220d621cb2ea3846303117140e36f5609dfd5"
+          },
+          "properties": {
+            "detail": {
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+                "truncated": false
+              },
+              "rule": "G6: sensitive fields carry a governance classification",
+              "ruleId": "G6",
+              "sensitiveFields": [
+                "email"
+              ],
+              "unclassifiedFields": [
+                "email"
+              ]
+            },
+            "findingType": "governance_violation",
+            "severity": "high",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+          },
+          "ruleId": "ARCHON-G6"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Csales_orders%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Sources disagree on 'owner' for urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD): \"urn:li:corpGroup:team-finance\" (snowflake-ingest) vs \"urn:li:corpGroup:team-ops\" (dbt-ingest)."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "a1b093313c1ddb35c0d4053c63e98ea2682179a27d4508df9cd98429fd9a47d2"
+          },
+          "properties": {
+            "detail": {
+              "attribute": "owner",
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+                "truncated": false
+              },
+              "resolution": {
+                "confidence": 0.85,
+                "rationale": "Later harvest (2026-07-01) supersedes the earlier value \"urn:li:corpGroup:team-finance\" (2026-06-01); recency is the default tie-breaker.",
+                "recommendedFactId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+                "recommendedValue": "urn:li:corpGroup:team-ops",
+                "rule": "recency"
+              },
+              "values": [
+                {
+                  "createdAt": "2026-06-01T09:00:00.000Z",
+                  "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+                  "source": "snowflake-ingest",
+                  "value": "urn:li:corpGroup:team-finance"
+                },
+                {
+                  "createdAt": "2026-07-01T09:00:00.000Z",
+                  "factId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+                  "source": "dbt-ingest",
+                  "value": "urn:li:corpGroup:team-ops"
+                }
+              ]
+            },
+            "findingType": "contradiction",
+            "severity": "medium",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)"
+          },
+          "ruleId": "ARCHON-CONTRADICTION"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Ccustomer_pii%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "G2: No domain assigned (domains aspect empty)."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "b6c23afb24e2b9d2f40846579d90df712231ed96a52fcd2d9835b0bacff2010a"
+          },
+          "properties": {
+            "detail": {
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+                "truncated": false
+              },
+              "rule": "G2: dataset is assigned to a domain",
+              "ruleId": "G2"
+            },
+            "findingType": "governance_violation",
+            "severity": "medium",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+          },
+          "ruleId": "ARCHON-G2"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Asnowflake%2Ccustomer_pii%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "G3: No description — undocumented asset."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "d9ce8e502bf878ef2a3306a92ef3a0330733eb3fa5b79bbcb6f4ec86489422f1"
+          },
+          "properties": {
+            "detail": {
+              "blastRadius": {
+                "downstream": [],
+                "impact": "none",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+                "truncated": false
+              },
+              "rule": "G3: dataset has a description",
+              "ruleId": "G3"
+            },
+            "findingType": "governance_violation",
+            "severity": "medium",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+          },
+          "ruleId": "ARCHON-G3"
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "datahub://entity/urn%3Ali%3Adataset%3A(urn%3Ali%3AdataPlatform%3Aexternal%2Cexternal_feed%2CPROD)"
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Declared upstream urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD) is not catalogued — a dangling lineage edge (schema-break risk to 1 downstream consumer)."
+          },
+          "partialFingerprints": {
+            "archonFindingDigest": "b26d7998121cae50aa85c8091687b1254ee6d72e31ddf6b093fd0abdc64b4d7f"
+          },
+          "properties": {
+            "detail": {
+              "blastRadius": {
+                "downstream": [
+                  {
+                    "minHops": 1,
+                    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD)"
+                  },
+                  {
+                    "minHops": 2,
+                    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)"
+                  }
+                ],
+                "impact": "low",
+                "maxHops": 3,
+                "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD)",
+                "truncated": false
+              },
+              "referencedBy": [
+                {
+                  "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD):lineage",
+                  "source": "snowflake-ingest"
+                }
+              ]
+            },
+            "findingType": "lineage_gap",
+            "severity": "medium",
+            "subject": "urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD)"
+          },
+          "ruleId": "ARCHON-LINEAGE-GAP"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/upgradedev/archon-datahub",
+          "name": "Archon-DataHub",
+          "rules": [
+            {
+              "id": "ARCHON-CONTRADICTION",
+              "name": "contradiction",
+              "shortDescription": {
+                "text": "Sources disagree on 'owner' for urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD): \"urn:li:corpGroup:team-finance\" (snowflake-ingest) vs \"urn:li:corpGroup:team-ops\" (dbt-ingest)."
+              }
+            },
+            {
+              "id": "ARCHON-G1",
+              "name": "governance_violation",
+              "shortDescription": {
+                "text": "G1: No owner assigned — ungoverned asset (ownership aspect empty)."
+              }
+            },
+            {
+              "id": "ARCHON-G2",
+              "name": "governance_violation",
+              "shortDescription": {
+                "text": "G2: No domain assigned (domains aspect empty)."
+              }
+            },
+            {
+              "id": "ARCHON-G3",
+              "name": "governance_violation",
+              "shortDescription": {
+                "text": "G3: No description — undocumented asset."
+              }
+            },
+            {
+              "id": "ARCHON-G6",
+              "name": "governance_violation",
+              "shortDescription": {
+                "text": "G6: 1 sensitive field lacks an accepted classification tag/term: email."
+              }
+            },
+            {
+              "id": "ARCHON-LINEAGE-GAP",
+              "name": "lineage_gap",
+              "shortDescription": {
+                "text": "Declared upstream urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD) is not catalogued — a dangling lineage edge (schema-break risk to 1 downstream consumer)."
+              }
+            }
+          ],
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

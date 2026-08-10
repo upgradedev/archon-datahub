@@ -1,5 +1,9 @@
 # Archon for DataHub
 
+[![CI](https://github.com/upgradedev/archon-datahub/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/upgradedev/archon-datahub/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/upgradedev/archon-datahub/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/upgradedev/archon-datahub/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 > **Audit the catalog itself.** Archon is an evidence-first governance agent that finds
 > contradictions, lineage gaps, and control violations inside DataHub, explains their
 > downstream impact, and permits one narrowly governed remediation only after an exact,
@@ -9,8 +13,86 @@ Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 
 - **Live Demo**: [https://archon-datahub.web.app](https://archon-datahub.web.app) (login-free hosted showcase)
 - **Upstream Contribution**: [acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183) (OPEN)
-- **Examples & evidence**: [examples/](examples/) (committed evaluation cases and exact reproduction routes)
+- **Sample outputs**: [examples/](examples/) (12 committed artifacts from one deterministic fixture run, digest-checkable, nothing to install)
 - **Demo video**: [2:41 walkthrough](https://youtu.be/6iHvBr4Qr1s) (bound to deployed SHA `7cf2ab06`)
+
+## Contents
+
+- [See it work without a DataHub](#see-it-work-without-a-datahub)
+- [Customer quickstart](#customer-quickstart)
+- [Live demo](#live-demo)
+- [What Archon does](#what-archon-does)
+  - [Bounded version-history recovery](#bounded-version-history-recovery)
+- [Why DataHub](#why-datahub)
+- [System design](#system-design)
+- [Run locally without external services](#run-locally-without-external-services)
+  - [CI Offline SLO](#ci-offline-slo)
+- [Judge-ready evidence without hand-authored outputs](#judge-ready-evidence-without-hand-authored-outputs)
+- [Connect a real DataHub](#connect-a-real-datahub)
+- [Governed remediation contract](#governed-remediation-contract)
+- [Hosted AWS reference architecture](#hosted-aws-reference-architecture)
+- [Pipeline-only security and CI/CD](#pipeline-only-security-and-cicd)
+- [Current delivery status](#current-delivery-status)
+- [Prior-work disclosure](#prior-work-disclosure)
+- [License](#license)
+
+## See it work without a DataHub
+
+Three routes, cheapest first. None of them needs a DataHub account, a credential, or a
+network connection.
+
+**1. Read a finished run. No install, no commands, about a minute.**
+
+[`examples/judge-pack/`](examples/judge-pack/) holds one complete audit and the whole
+governed-write chain, exactly as CI produced it for commit `d7b80c8`. The audit is
+there in Markdown, JSON and SARIF, followed by the remediation plan, the approval
+request, the approval decision, the execution receipt with its read-back check, and the
+rollback proposal. Twelve files. Verify the bytes with one command and no toolchain:
+
+```bash
+cd examples/judge-pack && sha256sum --check SHA256SUMS
+```
+
+Eleven `OK` lines. `manifest.json` records the same digests again, and it labels the run
+`"evidenceClass": "SYNTHETIC_OFFLINE_FIXTURE"` with `"liveDataHub": false`. Read
+[examples/README.md](examples/README.md) for the file-by-file map.
+
+**2. Run the agent yourself, offline. One install, one command.**
+
+```bash
+git clone https://github.com/upgradedev/archon-datahub.git
+cd archon-datahub
+npm ci --ignore-scripts
+npm run audit:demo
+```
+
+Node.js 22.15 or newer. With `DATAHUB_MCP_URL` and `LLM_API_KEY` unset, the pipeline
+runs against committed fixtures and a fake model, so it makes no catalog or provider
+call. The first line printed says `DataHub: Fake, LLM: Fake`, so you always know which
+mode you are in.
+After that you get the classification, the agent trace, every finding, and the executive
+summary. Nothing is mutated. The whole entry point is 36 lines:
+[`scripts/demo-audit.ts`](scripts/demo-audit.ts).
+
+`npm test` then runs the same offline suite CI runs, and `npm run coverage` applies the
+floors listed under [Run locally](#run-locally-without-external-services).
+
+**3. Point it at your own DataHub.** This route costs the most: Docker has to be
+running, and you need an authenticated DataHub URL plus a read token. See
+[Customer quickstart](#customer-quickstart) below and
+[docs/QUICKSTART.md](docs/QUICKSTART.md).
+
+**On regenerating the pack.** It is built only by GitHub Actions.
+[`scripts/generate-judge-evidence.ts`](scripts/generate-judge-evidence.ts) refuses to
+write to disk outside CI, so `npm run evidence:judge:generate` is not a local command.
+The required **Reproducible judge evidence** check in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is where it runs, with the
+network denied by `scripts/deny-network.mjs`: it generates the pack twice, diffs the two
+directories recursively, verifies the result, and runs
+`sha256sum --check --strict SHA256SUMS`. That is what makes the bytes reproducible at a
+given commit. The manifest records the release SHA, so a pack built at a different
+commit will not match this one byte for byte. Treat the committed copy as the artifact
+for `d7b80c8`, and the checksum command above as the way to confirm it.
 
 ## Customer quickstart
 
@@ -68,25 +150,49 @@ integrity pass. The step-by-step judge route is in
 Most catalog assistants retrieve metadata. Archon tests whether the catalog is internally
 consistent:
 
-- **Cross-source contradictions** — retained aspect versions disagree about ownership,
+- **Cross-source contradictions.** Retained aspect versions disagree about ownership,
   schema, domain, or deprecation. Archon resolves stable ingestion-source identity from
   DataHub's own ingestion registry and separates it from execution identity (`runId`), so
   two runs of one pipeline never become a fabricated conflict.
-- **Lineage gaps and blast radius** — declared current `upstreamLineage` is reconciled
+- **Lineage gaps and blast radius.** Declared current `upstreamLineage` is reconciled
   against resolved MCP topology, and a missing upstream or risky asset is expanded into a
   bounded, cycle-safe downstream impact graph without treating query scope as absence.
-- **Governance controls G1–G6** — deterministic checks find missing ownership, domains,
+- **Governance controls G1–G6.** Deterministic checks find missing ownership, domains,
   descriptions, typing, and sensitive-field classification. G6 accepts only exact
   policy identifiers; an unrelated tag or glossary term never passes the control.
-- **Evidence, not opaque advice** — every result can be exported as JSON, Markdown, or
+- **Evidence, not opaque advice.** Every result can be exported as JSON, Markdown, or
   SARIF and carries provenance, policy, and content digests. Model-runtime provenance is
   a strict union: deterministic fixture runs state that no provider model call occurred;
   live runs retain only bounded provider/model/response-ID, token-usage, and client-latency
   metadata. Prompts, credentials, endpoints, raw errors, and provider payloads are never
   admitted to that contract.
-- **Governed G6 remediation** — only a missing classification tag can become an action.
+- **Governed G6 remediation.** Only a missing classification tag can become an action.
   Contradictions and G1–G5 remain manual-only. The browser sends only a decision and
   optional comment; it never sends a tool name, entity URN, or mutation arguments.
+
+How one question becomes at most one governed write:
+
+```mermaid
+flowchart TD
+  Q["Question: is this catalog internally consistent?"]
+  Q --> READS["Bounded MCP reads: search, entity, schema, lineage"]
+  Q --> HIST["Bounded GMS aspect history: v0 plus retained versions"]
+  READS --> FIND["Findings, each carrying its evidence: contradictions, lineage gaps, G1 to G6"]
+  HIST --> FIND
+  FIND --> DIG["Digests sealed: dossier, policy, action catalog, before-state, plan"]
+  DIG --> GATE{"Exactly G6, one target, allowed dataset prefix and tag?"}
+  GATE -->|no| MANUAL["Manual only. No action is offered."]
+  GATE -->|yes| APP1["Human approval 1: the exact plan, and it expires"]
+  APP1 --> WRITE["One write: the official add_tags tool, one entity, one column, one tag"]
+  WRITE --> BACK["Read-back: prove the intended tag is there and nothing else changed"]
+  BACK --> RCPT["Content-addressed receipt of the whole chain"]
+  RCPT --> APP2["Human approval 2: the exact rollback digest"]
+  APP2 --> UNDO["Rollback and restoration receipt"]
+```
+
+Anything ambiguous, stale, replayed, or unresolved leaves the diagram at `MANUAL`.
+A worked example of the same chain, file by file, is in
+[examples/judge-pack](examples/judge-pack/).
 
 ### Bounded version-history recovery
 
@@ -143,9 +249,9 @@ and governance control plane across databases, warehouses, BI, ML, and pipelines
 | --- | --- | --- |
 | DataHub | Cross-platform metadata graph, lineage, governance, MCP context | Archon audits and safely acts on this control plane |
 | AWS Glue / DataZone, Microsoft Purview, Google Dataplex, Alibaba metadata services | Cloud-vendor catalog/governance planes | Alternatives when the estate is concentrated in one cloud |
-| CockroachDB | Transactional SQL data | A governed data source, not a catalog substitute |
-| Backblaze B2 / S3 | Object storage | Evidence or dataset storage, not a metadata graph |
-| Qwen / OpenAI / Gemini | Model inference | Optional narration/reasoning providers, not catalog systems |
+| Warehouses and transactional databases | The rows, and the engine that queries them | Governed sources DataHub catalogs, not a catalog substitute |
+| Object stores | Files, including exported evidence | Somewhere a report can land, not a metadata graph |
+| Hosted model providers | Inference | Optional narration only; a finding never depends on a model call |
 
 The concise positioning is: **DataHub catalogs the data estate; Archon audits the
 catalog itself.**
@@ -198,6 +304,19 @@ npm run load
 npm run audit:demo
 npm start
 ```
+
+The suite is 96 test files: 17 unit, 5 integration, 14 security and 4 end-to-end specs
+under `tests/`, 33 pipeline contract tests that read the workflows themselves, 12 web
+specs under `web/`, 10 CDK tests under `infra/aws/test/`, and one in
+`contrib/mcp-get-aspect-history/tests/`.
+
+Coverage is a gate, not a report. `npm run coverage` fails below 85% statements, 75%
+branches, 90% functions and 85% lines; the exact `c8` flags are on one line in
+[package.json](package.json). The React application is held to 75% statements, 65%
+branches, 75% functions and 75% lines in
+[web/vite.config.ts](web/vite.config.ts). A separate CI job, `Combined application
+coverage at least 85 percent`, merges both `coverage-summary.json` files and fails if
+measured statements, functions or lines fall under 85% across the whole application.
 
 ### CI Offline SLO
 
@@ -283,9 +402,9 @@ one dataset. It is the only query admitted by the public HTTP and Archon MCP cat
 
 Archon supports two MCP transports:
 
-- **Hosted Streamable HTTP** — set `DATAHUB_MCP_URL`. This is required by the hardened AWS
+- **Hosted Streamable HTTP.** Set `DATAHUB_MCP_URL`. This is required by the hardened AWS
   container because it intentionally contains no Python/`uvx` runtime.
-- **Pinned stdio development path** — leave `DATAHUB_MCP_URL` unset and install `uv`.
+- **Pinned stdio development path.** Leave `DATAHUB_MCP_URL` unset and install `uv`.
   Archon launches the pinned `mcp-server-datahub@0.6.0`, never `@latest`.
 
 Aspect-version contradiction proof additionally requires:
