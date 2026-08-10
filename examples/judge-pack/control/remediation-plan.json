@@ -1,0 +1,54 @@
+{
+  "action": {
+    "actionId": "datahub.add-classification-tag.v1",
+    "arguments": {
+      "column_paths": [
+        "email"
+      ],
+      "entity_urns": [
+        "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+      ],
+      "tag_urns": [
+        "urn:li:tag:PII"
+      ]
+    },
+    "digest": "sha256:1440e03524627431f7a0f9a4c7e65f9466b3c0e5856514f6dfa7ccaa5cfff2eb",
+    "inverse": {
+      "arguments": {
+        "column_paths": [
+          "email"
+        ],
+        "entity_urns": [
+          "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+        ],
+        "tag_urns": [
+          "urn:li:tag:PII"
+        ]
+      },
+      "tool": "remove_tags"
+    },
+    "tool": "add_tags"
+  },
+  "actionCatalogDigest": "sha256:bb50a3e44afd72042d034ae2fc738c588aaa4abb06adc4648aedc7769b03ae81",
+  "digest": "sha256:1ea5bca61c3a41c6b2bcff53d7b5a5d960c641810f2116f902472debdb57f419",
+  "dossierDigest": "sha256:e0bf01a7ab4aa49f956862d1b3a06a3d1173b088d244ac556594fafc0c838d97",
+  "expectedAfter": {
+    "columnPath": "email",
+    "digest": "sha256:7303369cb56e4cb6086ddaf81f94ed1caa84c00b4539c86b44a0bad70b4df5b7",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "tags": [
+      "urn:li:tag:PII"
+    ]
+  },
+  "expectedBefore": {
+    "columnPath": "email",
+    "digest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "tags": []
+  },
+  "planId": "plan-1ea5bca61c3a41c6b2bcff53",
+  "policyDigest": "sha256:635225e974b97188b7d94f0d4d6e10188ff8b96eb17976c22429760b70b74b77",
+  "requiresHumanApproval": true,
+  "risk": "low",
+  "schemaVersion": "archon.remediation-plan/v1"
+}

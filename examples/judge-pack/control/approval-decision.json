@@ -1,0 +1,17 @@
+{
+  "approvalId": "approval-7cd8cb60b95618fe63fbd61d",
+  "approver": {
+    "authenticated": true,
+    "issuer": "https://oidc.example.test",
+    "roles": [
+      "DataSteward"
+    ],
+    "subject": "steward@example.test"
+  },
+  "decidedAt": "2026-07-23T10:02:00.000Z",
+  "decision": "APPROVE",
+  "digest": "sha256:fd86f08729e85745224d2ea9eee70a7ee5278a497e0540f9bd74e31187b360d8",
+  "planDigest": "sha256:1ea5bca61c3a41c6b2bcff53d7b5a5d960c641810f2116f902472debdb57f419",
+  "requestDigest": "sha256:7cd8cb60b95618fe63fbd61d319957bcecc28aecf0e9ef96716ecc4793657a9b",
+  "schemaVersion": "archon.approval-decision/v1"
+}

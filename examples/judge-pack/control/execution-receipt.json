@@ -1,0 +1,151 @@
+{
+  "action": {
+    "actionId": "datahub.add-classification-tag.v1",
+    "arguments": {
+      "column_paths": [
+        "email"
+      ],
+      "entity_urns": [
+        "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+      ],
+      "tag_urns": [
+        "urn:li:tag:PII"
+      ]
+    },
+    "digest": "sha256:1440e03524627431f7a0f9a4c7e65f9466b3c0e5856514f6dfa7ccaa5cfff2eb",
+    "inverse": {
+      "arguments": {
+        "column_paths": [
+          "email"
+        ],
+        "entity_urns": [
+          "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)"
+        ],
+        "tag_urns": [
+          "urn:li:tag:PII"
+        ]
+      },
+      "tool": "remove_tags"
+    },
+    "tool": "add_tags"
+  },
+  "after": {
+    "columnPath": "email",
+    "digest": "sha256:7303369cb56e4cb6086ddaf81f94ed1caa84c00b4539c86b44a0bad70b4df5b7",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "tags": [
+      "urn:li:tag:PII"
+    ]
+  },
+  "approvalDecisionDigest": "sha256:fd86f08729e85745224d2ea9eee70a7ee5278a497e0540f9bd74e31187b360d8",
+  "before": {
+    "columnPath": "email",
+    "digest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+    "tags": []
+  },
+  "checks": [
+    {
+      "checkId": "TARGET_UNCHANGED",
+      "evidence": "Observed target \"urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)#email\".",
+      "passed": true
+    },
+    {
+      "checkId": "PREEXISTING_TAGS_PRESERVED",
+      "evidence": "0 pre-existing tags remain present.",
+      "passed": true
+    },
+    {
+      "checkId": "POLICY_TAG_PRESENT",
+      "evidence": "Policy tag urn:li:tag:PII is present.",
+      "passed": true
+    },
+    {
+      "checkId": "NO_UNEXPECTED_TAGS",
+      "evidence": "After-state digest sha256:7303369cb56e4cb6086ddaf81f94ed1caa84c00b4539c86b44a0bad70b4df5b7; expected sha256:7303369cb56e4cb6086ddaf81f94ed1caa84c00b4539c86b44a0bad70b4df5b7.",
+      "passed": true
+    },
+    {
+      "checkId": "APPROVAL_BINDING_VALID",
+      "evidence": "Mutation request digest sha256:1a1d55c125416db00e91cfb1f247079776797f4bdee3cf8bf529c71ee8e5d3bb.",
+      "passed": true
+    }
+  ],
+  "completedAt": "2026-07-23T10:03:01.000Z",
+  "digest": "sha256:b665b5ba03c10be607c1ac463099e7a2350aa8809dfee825463c6bca62b7c0f4",
+  "dossierDigest": "sha256:e0bf01a7ab4aa49f956862d1b3a06a3d1173b088d244ac556594fafc0c838d97",
+  "events": [
+    {
+      "eventHash": "sha256:e8075e74d559765b6aa28c09b3299dccb25b2e1192f8e680c33f3122a9b2727d",
+      "kind": "DOSSIER_BOUND",
+      "occurredAt": "2026-07-23T10:03:00.000Z",
+      "payloadDigest": "sha256:b8b22b2de88f02e89ed7ca5a9a13a6ee4cc70fb99ca0dfa6d651b65eb22616eb",
+      "previousHash": "sha256:26e771caf604d9855a6c1a9b8c096c56b0c4a8558937bf297154154e2655e509",
+      "sequence": 0
+    },
+    {
+      "eventHash": "sha256:b58715585bed0d5a274fb24081f5bb32e7a30da19c798df0aed96a47b2bcc08c",
+      "kind": "PLAN_BOUND",
+      "occurredAt": "2026-07-23T10:03:00.000Z",
+      "payloadDigest": "sha256:348972f58d631d752f7a84c061e5065263fb7aedaff9a4e9f09cae0c53b3da3b",
+      "previousHash": "sha256:e8075e74d559765b6aa28c09b3299dccb25b2e1192f8e680c33f3122a9b2727d",
+      "sequence": 1
+    },
+    {
+      "eventHash": "sha256:4e7694c24a5825bd966095cd9b42e28af0d1ef1714c1b8bc1aed4091b98e4f2c",
+      "kind": "APPROVAL_BOUND",
+      "occurredAt": "2026-07-23T10:03:00.000Z",
+      "payloadDigest": "sha256:d3c2477c8d466a34c9c9e8b0bbbe11fc1349049e2cb063c9100a47a3724a9d6a",
+      "previousHash": "sha256:b58715585bed0d5a274fb24081f5bb32e7a30da19c798df0aed96a47b2bcc08c",
+      "sequence": 2
+    },
+    {
+      "eventHash": "sha256:cce7f535ab7e887a707be0f1fb0986ab9de99a8d956ff7c4acac44bb7125d7a6",
+      "kind": "PRECONDITION_CHECKED",
+      "occurredAt": "2026-07-23T10:03:00.000Z",
+      "payloadDigest": "sha256:c1766de970b77f40cecaf88b95b376a1440519c7c721d33761bea5abb49dcf0c",
+      "previousHash": "sha256:4e7694c24a5825bd966095cd9b42e28af0d1ef1714c1b8bc1aed4091b98e4f2c",
+      "sequence": 3
+    },
+    {
+      "eventHash": "sha256:568ee7793aec068b017bf730212e58e16e23739960235c33ea2e9848f80516ce",
+      "kind": "MUTATION_INVOKED",
+      "occurredAt": "2026-07-23T10:03:01.000Z",
+      "payloadDigest": "sha256:77ef55462f46b3d09f0021e117ac4f8ca7378568ee53d0898a0de2371190dec1",
+      "previousHash": "sha256:cce7f535ab7e887a707be0f1fb0986ab9de99a8d956ff7c4acac44bb7125d7a6",
+      "sequence": 4
+    },
+    {
+      "eventHash": "sha256:6c5a4107d028e793777eec3b7baf98340beddb7ede0f9a3a905319cd5fdfbe34",
+      "kind": "POSTCONDITION_CHECKED",
+      "occurredAt": "2026-07-23T10:03:01.000Z",
+      "payloadDigest": "sha256:60fbd3750870f834d21ac1fc66428bcb8daaddedde56ed8e24b92c4838213594",
+      "previousHash": "sha256:568ee7793aec068b017bf730212e58e16e23739960235c33ea2e9848f80516ce",
+      "sequence": 5
+    },
+    {
+      "eventHash": "sha256:b4e7dfd28bc9b7c7a9260975fd3b453093363623c6d6e5df69fb3b9b72a4b687",
+      "kind": "ROLLBACK_ANCHORED",
+      "occurredAt": "2026-07-23T10:03:01.000Z",
+      "payloadDigest": "sha256:3bff382d242ecf4fe26ab1ea6a33596ad050993123c1b3c127d0a711ae820228",
+      "previousHash": "sha256:6c5a4107d028e793777eec3b7baf98340beddb7ede0f9a3a905319cd5fdfbe34",
+      "sequence": 6
+    }
+  ],
+  "executionId": "execution-8883932acfc84740a7e8800f",
+  "idempotencyKey": "archon-judge-evidence-g6-v1",
+  "mutation": {
+    "requestDigest": "sha256:1a1d55c125416db00e91cfb1f247079776797f4bdee3cf8bf529c71ee8e5d3bb",
+    "responseDigest": "sha256:d1550855e9fd98cc2f045e7620852e554272249b560bfc16e3024bd8ff4593f3"
+  },
+  "outcome": "VERIFIED",
+  "planDigest": "sha256:1ea5bca61c3a41c6b2bcff53d7b5a5d960c641810f2116f902472debdb57f419",
+  "receiptId": "receipt-b665b5ba03c10be607c1ac46",
+  "rollback": {
+    "availability": "ELIGIBLE",
+    "inverseActionDigest": "sha256:4f977bda7e1bd74548b21ee6e7c30e75e234bbd81c9e0a61e2de88b3f8a29fc3",
+    "restoreStateDigest": "sha256:303662c4bcc09802ab7888d9ac17f12f3abeb1b67976cdf9a163376b0d006a7b"
+  },
+  "schemaVersion": "archon.execution-receipt/v1",
+  "startedAt": "2026-07-23T10:03:00.000Z"
+}

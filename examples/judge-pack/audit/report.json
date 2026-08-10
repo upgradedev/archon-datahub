@@ -1,0 +1,233 @@
+{
+  "schemaVersion": "archon.audit-report/v1",
+  "scanId": "scan-2026-07-01",
+  "classification": {
+    "totalEntities": 3,
+    "withLineage": 2,
+    "sensitiveEntities": 2,
+    "domains": {
+      "(none)": 1,
+      "urn:li:domain:sales": 2
+    },
+    "platforms": {
+      "snowflake": 3
+    }
+  },
+  "findings": [
+    {
+      "type": "contradiction",
+      "severity": "high",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount",
+      "summary": "Sources disagree on 'fieldType' for urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount: \"number\" (snowflake-ingest) vs \"string\" (dbt-ingest).",
+      "detail": {
+        "attribute": "fieldType",
+        "values": [
+          {
+            "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+            "source": "snowflake-ingest",
+            "value": "number",
+            "createdAt": "2026-06-01T09:00:00.000Z"
+          },
+          {
+            "factId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+            "source": "dbt-ingest",
+            "value": "string",
+            "createdAt": "2026-07-01T09:00:00.000Z"
+          }
+        ],
+        "resolution": {
+          "recommendedFactId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)#amount:schema",
+          "recommendedValue": "string",
+          "rule": "recency",
+          "confidence": 0.85,
+          "rationale": "Later harvest (2026-07-01) supersedes the earlier value \"number\" (2026-06-01); recency is the default tie-breaker."
+        },
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Later harvest (2026-07-01) supersedes the earlier value \"number\" (2026-06-01); recency is the default tie-breaker. (recommended: \"string\", confidence 0.85). Read-only — a steward decides."
+    },
+    {
+      "type": "governance_violation",
+      "severity": "high",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+      "summary": "G1: No owner assigned — ungoverned asset (ownership aspect empty).",
+      "detail": {
+        "rule": "G1: dataset has an owner",
+        "ruleId": "G1",
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Remediate G1 (G1: dataset has an owner). Read-only — a steward decides."
+    },
+    {
+      "type": "governance_violation",
+      "severity": "high",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+      "summary": "G6: 1 sensitive field lacks an accepted classification tag/term: email.",
+      "detail": {
+        "rule": "G6: sensitive fields carry a governance classification",
+        "ruleId": "G6",
+        "sensitiveFields": [
+          "email"
+        ],
+        "unclassifiedFields": [
+          "email"
+        ],
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Remediate G6 (G6: sensitive fields carry a governance classification). Read-only — a steward decides."
+    },
+    {
+      "type": "contradiction",
+      "severity": "medium",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+      "summary": "Sources disagree on 'owner' for urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD): \"urn:li:corpGroup:team-finance\" (snowflake-ingest) vs \"urn:li:corpGroup:team-ops\" (dbt-ingest).",
+      "detail": {
+        "attribute": "owner",
+        "values": [
+          {
+            "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+            "source": "snowflake-ingest",
+            "value": "urn:li:corpGroup:team-finance",
+            "createdAt": "2026-06-01T09:00:00.000Z"
+          },
+          {
+            "factId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+            "source": "dbt-ingest",
+            "value": "urn:li:corpGroup:team-ops",
+            "createdAt": "2026-07-01T09:00:00.000Z"
+          }
+        ],
+        "resolution": {
+          "recommendedFactId": "scan-2026-07-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD):ownership",
+          "recommendedValue": "urn:li:corpGroup:team-ops",
+          "rule": "recency",
+          "confidence": 0.85,
+          "rationale": "Later harvest (2026-07-01) supersedes the earlier value \"urn:li:corpGroup:team-finance\" (2026-06-01); recency is the default tie-breaker."
+        },
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Later harvest (2026-07-01) supersedes the earlier value \"urn:li:corpGroup:team-finance\" (2026-06-01); recency is the default tie-breaker. (recommended: \"urn:li:corpGroup:team-ops\", confidence 0.85). Read-only — a steward decides."
+    },
+    {
+      "type": "governance_violation",
+      "severity": "medium",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+      "summary": "G2: No domain assigned (domains aspect empty).",
+      "detail": {
+        "rule": "G2: dataset is assigned to a domain",
+        "ruleId": "G2",
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Remediate G2 (G2: dataset is assigned to a domain). Read-only — a steward decides."
+    },
+    {
+      "type": "governance_violation",
+      "severity": "medium",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+      "summary": "G3: No description — undocumented asset.",
+      "detail": {
+        "rule": "G3: dataset has a description",
+        "ruleId": "G3",
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_pii,PROD)",
+          "downstream": [],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "none"
+        }
+      },
+      "recommendation": "Remediate G3 (G3: dataset has a description). Read-only — a steward decides."
+    },
+    {
+      "type": "lineage_gap",
+      "severity": "medium",
+      "subject": "urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD)",
+      "summary": "Declared upstream urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD) is not catalogued — a dangling lineage edge (schema-break risk to 1 downstream consumer).",
+      "detail": {
+        "referencedBy": [
+          {
+            "factId": "scan-2026-06-01:urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD):lineage",
+            "source": "snowflake-ingest"
+          }
+        ],
+        "blastRadius": {
+          "rootUrn": "urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD)",
+          "downstream": [
+            {
+              "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,raw_orders,PROD)",
+              "minHops": 1
+            },
+            {
+              "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales_orders,PROD)",
+              "minHops": 2
+            }
+          ],
+          "maxHops": 3,
+          "truncated": false,
+          "impact": "low"
+        }
+      },
+      "recommendation": "Ingest urn:li:dataset:(urn:li:dataPlatform:external,external_feed,PROD) or correct the lineage declaration. Read-only — a steward decides."
+    }
+  ],
+  "narrative": "Metadata governance summary: the self-audit surfaced 7 findings for steward review — 2 cross-source contradictions, 1 lineage gap, and 4 governance-policy violations. Contradictions indicate two metadata sources disagree on the same entity and should be reconciled at the system of record; lineage gaps are declared upstreams that are not catalogued and risk silent schema breaks downstream; governance violations are ungoverned or unclassified assets. All findings are read-only recommendations — a steward decides.",
+  "modelProvenance": {
+    "schemaVersion": "archon.model-runtime-provenance/v1",
+    "source": "deterministic-fixture",
+    "modelCall": false,
+    "provider": "fixture",
+    "requestedModel": "archon-deterministic-fixture-narrator-v1",
+    "returnedModel": null,
+    "providerResponseId": null,
+    "tokenUsage": null,
+    "latencyMs": null
+  },
+  "trace": [
+    {
+      "agent": "classifier",
+      "produced": "3 entitys classified"
+    },
+    {
+      "agent": "lineage-analyzer",
+      "produced": "3 contradiction/lineage findings (2 recovered from aspect version history)"
+    },
+    {
+      "agent": "governance-auditor",
+      "produced": "4 governance findings"
+    },
+    {
+      "agent": "narrator",
+      "produced": "executive summary"
+    }
+  ]
+}
