@@ -10,6 +10,7 @@ Built for [DataHub: The Agent Hackathon](https://datahub.devpost.com/).
 - **Live Demo**: [https://archon-datahub.web.app](https://archon-datahub.web.app) (login-free hosted showcase)
 - **Upstream Contribution**: [acryldata/mcp-server-datahub#183](https://github.com/acryldata/mcp-server-datahub/pull/183) (OPEN)
 - **Examples & evidence**: [examples/](examples/) (committed evaluation cases and exact reproduction routes)
+- **Demo video**: [2:41 walkthrough](https://youtu.be/6iHvBr4Qr1s) (bound to deployed SHA `7cf2ab06`)
 
 ## Customer quickstart
 

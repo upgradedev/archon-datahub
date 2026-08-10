@@ -44,7 +44,15 @@ This pack is a deterministic synthetic projection. It is a reproducible
 regression aid. It is not offered as proof of a live deployment or of live
 DataHub access.
 
-## Why two controls are disabled here
+## Why some controls are disabled here
+
+**Generate proposal** is the greyed-out control you meet on the recommended
+path. It dispatches a profile-bound `/improve-context` job, and it only
+unlocks inside a running governed workflow that has reached the improvement
+step (the `canImprove` gate in `web/src/App.tsx`). The anonymous public URL
+runs no such workflow, so that operation is exercised in protected CI. The
+caption next to the button says what it does in a governed deployment, not
+what the anonymous button does.
 
 **Run Agent Stack** and **Launch pinned session** stay disabled on the public
 URL, by design. The public live audit already exercises the real read-only
@@ -78,8 +86,11 @@ short-lived workload identity and two GitHub protected environments.
 
 Archon does not mutate autonomously: the write cannot start without explicit
 steward approval of the exact plan, and the inverse uses distinct, separately approved authority.
-In fixture preview on the public URL, the only available decision is
-**Reject proposal**. The live result remains strictly read-only and offers an
+In fixture preview on the public URL both **Reject proposal** and **Approve
+exact plan** are shown, so you can see the whole steward decision experience.
+Neither calls an approval or a DataHub write endpoint, and the page says so in
+the note above the buttons. **Reject proposal** is the recommended path.
+The live result remains strictly read-only and offers an
 explicit **Return to fixture preview** control.
 
 ## What the recommended path demonstrates
