@@ -195,7 +195,7 @@ jobs:
           ' "${RUNNER_TEMP}/datahub-agent-stack.cdx.json" >/dev/null
       - name: Upload VEX-dispositioned Python SARIF
         if: always() && steps.lock.outputs.adopted == 'true' && steps.disposition.outcome != 'skipped'
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/datahub-agent-stack.code-scanning.sarif
           category: uv-datahub-agent-stack

@@ -1480,11 +1480,11 @@ jobs:
         with:
           artifact-ids: ${{ needs.scan.outputs.evidence_artifact_id }}
           path: ${{ runner.temp }}/evidence
-      - uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/evidence/grype-web-report.sarif
           category: grype-deployed-spa
-      - uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/evidence/grype-lambda-report.sarif
           category: grype-deployed-lambdas
@@ -1630,20 +1630,20 @@ jobs:
           ' "${evidence}/signed-predicate.json" >/dev/null
 
       - name: Sign verified exact-subject provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/evidence/release-subjects.sha256
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/verified-ci-artifact/v4
           predicate-path: ${{ runner.temp }}/evidence/signed-predicate.json
 
       - name: Sign deployed SPA SPDX SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/evidence/web-subject.sha256
           sbom-path: ${{ runner.temp }}/evidence/archon-web.spdx.json
 
       - name: Sign deployed Lambda SPDX SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/evidence/lambda-subject.sha256
           sbom-path: ${{ runner.temp }}/evidence/archon-lambda.spdx.json

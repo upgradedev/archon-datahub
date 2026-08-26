@@ -146,7 +146,7 @@ jobs:
       - uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # v3.4.0
         with:
           version: ${{ env.PACKER_VERSION }}
-      - uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: ${{ env.TRIVY_VERSION }}
           cache: false
@@ -460,7 +460,7 @@ jobs:
             echo "actionable_total=${actionable_total}"
           } >>"${GITHUB_OUTPUT}"
       - name: Upload Core image SARIF
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/core-supply-chain/images
           category: datahub-core-images
@@ -1334,7 +1334,7 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
       - name: Attest AMI evidence projection
         if: steps.packer.outcome == 'success'
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.evidence.outputs.path }}
       - name: Upload sealed AMI evidence
