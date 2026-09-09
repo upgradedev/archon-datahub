@@ -123,7 +123,7 @@ jobs:
           done
           rm -f "$archive"
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build the CI-only test target
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -550,7 +550,7 @@ jobs:
           steps.security_evidence.outcome == 'success' &&
           (github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: ${{ runner.temp }}/cloud-runtime-image.sarif
           category: trivy-datahub-cloud-runtime-v2
@@ -684,7 +684,7 @@ jobs:
           echo "::add-mask::${AWS_ACCOUNT_ID}"
           echo "::add-mask::${AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN}"
       - name: Acquire short-lived image publisher credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ vars.AWS_CLOUD_RUNTIME_IMAGE_ROLE_ARN }}
           role-session-name: archon-cloud-runtime-${{ github.run_id }}
@@ -748,7 +748,7 @@ jobs:
 
       - name: Sign provenance with GitHub Artifact Attestations
         id: provenance_attestation
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/candidate/image-subject.sha256
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-cloud-runtime/v1
@@ -756,7 +756,7 @@ jobs:
 
       - name: Sign SPDX SBOM with GitHub Artifact Attestations
         id: sbom_attestation
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/candidate/image-subject.sha256
           sbom-path: ${{ runner.temp }}/candidate/runtime.spdx.json

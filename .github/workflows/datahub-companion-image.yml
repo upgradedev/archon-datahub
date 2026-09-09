@@ -75,7 +75,7 @@ jobs:
             test ! -L "${destination}/skills/${skill}/SKILL.md"
           done
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build once and load the exact companion candidate
         id: image
@@ -335,7 +335,7 @@ jobs:
         if: >-
           github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: ${{ runner.temp }}/datahub-companion-image.sarif
           category: trivy-datahub-companion-image
@@ -541,13 +541,13 @@ jobs:
           )
           test "$(jq --raw-output .sourceSha "${evidence}/provenance.json")" = "${SOURCE_SHA}"
       - name: Sign companion provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/candidate/evidence/image-subject.sha256
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-companion-image/v1
           predicate-path: ${{ runner.temp }}/candidate/evidence/provenance.json
       - name: Sign companion SPDX SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/candidate/evidence/image-subject.sha256
           sbom-path: ${{ runner.temp }}/candidate/evidence/companion.spdx.json
