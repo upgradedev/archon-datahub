@@ -178,7 +178,7 @@ jobs:
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-governed-canary-prepare"
       - name: Configure step-scoped canary prepare AWS credentials
         id: canary-prepare-aws
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: ${{ vars.AWS_CANARY_REGION }}
           role-to-assume: ${{ vars.AWS_CANARY_PREPARE_ROLE_ARN }}
@@ -287,7 +287,7 @@ jobs:
           bash scripts/verify-github-control-plane.sh
       - name: Configure step-scoped canary approval AWS credentials
         id: canary-approval-aws
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: ${{ vars.AWS_REGION }}
           role-to-assume: ${{ vars.AWS_CANARY_APPROVAL_ROLE_ARN }}
@@ -421,7 +421,7 @@ jobs:
             "arn:aws:iam::${AWS_ACCOUNT_ID}:role/archon-datahub-github-governed-canary-recovery"
       - name: Configure step-scoped canary recovery AWS credentials
         id: canary-recovery-aws
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ vars.AWS_CANARY_RECOVERY_ROLE_ARN }}
           role-session-name: archon-canary-rollback-${{ github.run_id }}
@@ -458,7 +458,7 @@ jobs:
           cp "${RUNNER_TEMP}/governed-canary/recovery/recovery.json" "${RUNNER_TEMP}/governed-canary/rollback/recovery.json"
           cp "${CANARY_RECOVERY_EVIDENCE_PATH}" "${RUNNER_TEMP}/governed-canary/rollback/attestation-predicate.json"
           (cd "$(dirname "${CANARY_RECOVERY_EVIDENCE_PATH}")" && sha256sum recovery-evidence.json >recovery-evidence.sha256)
-      - uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/governed-canary/rollback/recovery-evidence.sha256
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/governed-canary-cloud-v2

@@ -339,7 +339,7 @@ jobs:
       - name: Configure read-only step-scoped Cloud proof AWS credentials
         if: inputs.profile == 'cloud'
         id: cloud-proof-aws
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
           role-session-name: archon-live-proof-${{ github.run_id }}
@@ -785,7 +785,7 @@ jobs:
           echo "path=${subjects}/live-proof.json" >>"${GITHUB_OUTPUT}"
 
       - name: Attest exact live proof
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.evidence.outputs.path }}
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-dual-runtime-proof/v2
@@ -945,7 +945,7 @@ jobs:
 
       - name: Attest submission-native live proof subjects
         if: inputs.profile == 'cloud' && inputs.stage == 'production'
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ steps.submission_evidence.outputs.inventory }}
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/live-datahub-proof/v4

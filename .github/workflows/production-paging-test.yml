@@ -58,7 +58,7 @@ jobs:
           test "${PAGING_ROLE}" = \
             "arn:aws:iam::${ACCOUNT_ID}:role/archon-production-paging-test"
 
-      - uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ vars.AWS_PAGING_TEST_ROLE_ARN }}
@@ -195,7 +195,7 @@ jobs:
           echo "evidence=${RUNNER_TEMP}/alarm-proof/evidence.json" >>"${GITHUB_OUTPUT}"
 
       - name: Attest sanitized delivery evidence
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.proof.outputs.evidence }}
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/production-alarm-delivery/v2

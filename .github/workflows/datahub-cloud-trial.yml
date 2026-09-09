@@ -287,7 +287,7 @@ jobs:
       - name: Configure step-scoped Cloud trial AWS credentials
         id: cloud-trial-aws
         if: inputs.action != 'plan'
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ vars.AWS_DATAHUB_CLOUD_TRIAL_ROLE_ARN }}
           role-session-name: archon-cloud-trial-${{ github.run_id }}
@@ -358,7 +358,7 @@ jobs:
           retention-days: 90
 
       - name: Attest the sanitized trial receipt
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/datahub-cloud-trial-receipt/receipt.json
           predicate-type: https://github.com/upgradedev/archon-datahub/attestations/datahub-cloud-trial/v1
